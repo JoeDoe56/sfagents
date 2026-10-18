@@ -1,0 +1,28 @@
+{
+  "name": "sfagents-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SF Agents: JSON-defined agent runtime and CLI",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "core",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "build": "tsc -b cli tests",
+    "clean": "tsc -b cli tests --clean",
+    "typecheck": "tsc -b cli tests",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "test:live": "npm run build && node scripts/run-tests.mjs --live",
+    "audit:imports": "node scripts/audit-imports.mjs",
+    "sfagents": "node cli/dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.1",
+    "typescript": "~5.9.3"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["dist", "fixtures/**/*.mjs"],
+  "references": [{ "path": "../core" }, { "path": "../cli" }]
+}
