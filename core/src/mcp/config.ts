@@ -7,9 +7,9 @@
  *
  * The server shape is adapted from qwen-code
  * packages/core/src/config/mcp-server-config.ts (command/args/env/cwd for
- * stdio, httpUrl for Streamable HTTP, url for legacy SSE, headers, timeout,
- * trust, includeTools/excludeTools). OAuth, Google credential and
- * service-account auth, TCP and extension fields are removed. Environment
+ * stdio, httpUrl for Streamable HTTP, headers, timeout, trust,
+ * includeTools/excludeTools). OAuth, Google credential and service-account
+ * auth, legacy SSE (`url`), TCP and extension fields are removed. Environment
  * expansion is adapted from utils/envVarResolver.ts; unlike upstream, an
  * undefined `${VAR}` is an error instead of being sent literally.
  */
@@ -26,8 +26,6 @@ export interface McpServerConfig {
   cwd?: string;
   /** Streamable HTTP transport */
   httpUrl?: string;
-  /** Legacy SSE transport */
-  url?: string;
   headers?: Record<string, string>;
   /** Connection and per-request timeout in milliseconds. */
   timeout?: number;
@@ -39,7 +37,7 @@ export interface McpServerConfig {
   excludeTools?: string[];
 }
 
-export type McpTransportKind = 'stdio' | 'http' | 'sse';
+export type McpTransportKind = 'stdio' | 'http';
 
 export interface McpConfigFile {
   file: string | undefined;
@@ -54,7 +52,6 @@ const SERVER_KEYS = [
   'env',
   'cwd',
   'httpUrl',
-  'url',
   'headers',
   'timeout',
   'trust',
@@ -64,9 +61,7 @@ const SERVER_KEYS = [
 ];
 
 export function transportKind(cfg: McpServerConfig): McpTransportKind {
-  if (cfg.httpUrl) return 'http';
-  if (cfg.url) return 'sse';
-  return 'stdio';
+  return cfg.httpUrl ? 'http' : 'stdio';
 }
 
 function fail(file: string, field: string | undefined, message: string): never {
@@ -107,12 +102,15 @@ export function parseMcpConfig(raw: unknown, file: string): McpConfigFile {
     }
     if (typeof value !== 'object' || value === null || Array.isArray(value)) fail(file, f, 'must be an object');
     const v = value as Record<string, unknown>;
+    if (v['url'] !== undefined) {
+      fail(file, `${f}.url`, 'legacy SSE servers are not supported; use "httpUrl" for a Streamable HTTP endpoint');
+    }
     for (const key of Object.keys(v)) {
       if (!SERVER_KEYS.includes(key)) fail(file, `${f}.${key}`, `unknown field. Allowed fields: ${SERVER_KEYS.join(', ')}`);
     }
-    const transports = ['command', 'httpUrl', 'url'].filter((k) => v[k] !== undefined);
+    const transports = ['command', 'httpUrl'].filter((k) => v[k] !== undefined);
     if (transports.length !== 1) {
-      fail(file, f, 'must define exactly one of "command" (stdio), "httpUrl" (Streamable HTTP) or "url" (legacy SSE)');
+      fail(file, f, 'must define exactly one of "command" (stdio) or "httpUrl" (Streamable HTTP)');
     }
     const cfg: McpServerConfig = {};
     if (v['command'] !== undefined) {
@@ -128,23 +126,21 @@ export function parseMcpConfig(raw: unknown, file: string): McpConfigFile {
       for (const k of ['args', 'env', 'cwd']) {
         if (v[k] !== undefined) fail(file, `${f}.${k}`, 'is only valid for stdio servers ("command")');
       }
-      const urlField = v['httpUrl'] !== undefined ? 'httpUrl' : 'url';
-      const urlValue = v[urlField];
-      if (typeof urlValue !== 'string') fail(file, `${f}.${urlField}`, 'must be a string');
+      const urlValue = v['httpUrl'];
+      if (typeof urlValue !== 'string') fail(file, `${f}.httpUrl`, 'must be a string');
       // ${VAR} placeholders are resolved at connect time; validate the shape otherwise.
       if (!urlValue.includes('${')) {
         try {
           const u = new URL(urlValue);
           if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error();
         } catch {
-          fail(file, `${f}.${urlField}`, 'must be an http(s) URL');
+          fail(file, `${f}.httpUrl`, 'must be an http(s) URL');
         }
       }
-      if (urlField === 'httpUrl') cfg.httpUrl = urlValue;
-      else cfg.url = urlValue;
+      cfg.httpUrl = urlValue;
     }
     cfg.headers = stringRecord(v['headers'], file, `${f}.headers`);
-    if (cfg.headers && cfg.command) fail(file, `${f}.headers`, 'is only valid for HTTP and SSE servers');
+    if (cfg.headers && cfg.command) fail(file, `${f}.headers`, 'is only valid for HTTP servers');
     if (v['timeout'] !== undefined) {
       if (typeof v['timeout'] !== 'number' || !Number.isInteger(v['timeout']) || v['timeout'] < 100 || v['timeout'] > 3_600_000) {
         fail(file, `${f}.timeout`, 'must be an integer number of milliseconds between 100 and 3600000');
@@ -205,7 +201,6 @@ export function resolveServerConfig(cfg: McpServerConfig, env: NodeJS.ProcessEnv
     args: cfg.args?.map((a) => resolveEnvVarsInString(a, env)),
     env: mapRecord(cfg.env),
     httpUrl: cfg.httpUrl !== undefined ? resolveEnvVarsInString(cfg.httpUrl, env) : undefined,
-    url: cfg.url !== undefined ? resolveEnvVarsInString(cfg.url, env) : undefined,
     headers: mapRecord(cfg.headers),
   };
 }

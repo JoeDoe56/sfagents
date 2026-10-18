@@ -230,6 +230,8 @@ describe('agent JSON tree', () => {
     expectConfigError(dir, /exactly one of/);
     dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { x: { httpUrl: 'ftp://x' } } });
     expectConfigError(dir, /must be an http\(s\) URL/);
+    dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { x: { url: 'http://x/sse' } } });
+    expectConfigError(dir, /legacy SSE servers are not supported/);
     dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { x: { command: 'a', oauth: {} } } });
     expectConfigError(dir, /\[mcpServers.x.oauth\]: unknown field/);
   });

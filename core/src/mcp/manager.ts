@@ -7,10 +7,10 @@
  *
  * Transport creation is adapted from qwen-code
  * packages/core/src/tools/mcp-client.ts `createTransport` (stdio with a
- * sanitized inherited environment, Streamable HTTP via `httpUrl`, legacy SSE
- * via `url`, configured headers) and `isEnabled` (server-level
- * includeTools/excludeTools). OAuth, Google credentials, SDK control
- * transports, prompts, resources and MCP apps are removed. The connection
+ * sanitized inherited environment, Streamable HTTP via `httpUrl`,
+ * configured headers) and `isEnabled` (server-level
+ * includeTools/excludeTools). OAuth, Google credentials, legacy SSE, SDK
+ * control transports, prompts, resources and MCP apps are removed. The connection
  * pool (`mcp-client-manager.ts`) is replaced by this small manager:
  * lazy connect with a bounded timeout, cached discovery, reconnect on the
  * next use after a transport closes, and no automatic replay of tool calls.
@@ -19,7 +19,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import fs from 'node:fs';
 import {
@@ -107,6 +106,11 @@ export class McpManager {
     return Object.keys(this.config.servers);
   }
 
+  /** True once a connection to the server has been started (and not closed). */
+  isStarted(name: string): boolean {
+    return this.connections.has(name);
+  }
+
   serverConfig(name: string): Readonly<McpServerConfig> | undefined {
     return this.config.servers[name];
   }
@@ -116,17 +120,6 @@ export class McpManager {
     if (cfg.httpUrl) {
       return new StreamableHTTPClientTransport(new URL(cfg.httpUrl), {
         requestInit: cfg.headers ? { headers: cfg.headers } : undefined,
-      });
-    }
-    if (cfg.url) {
-      return new SSEClientTransport(new URL(cfg.url), {
-        requestInit: cfg.headers ? { headers: cfg.headers } : undefined,
-        eventSourceInit: cfg.headers
-          ? {
-              fetch: (url, init) =>
-                fetch(url, { ...init, headers: { ...(init?.headers as Record<string, string>), ...cfg.headers } }),
-            }
-          : undefined,
       });
     }
     if (cfg.command) {
@@ -153,7 +146,7 @@ export class McpManager {
       });
       return transport;
     }
-    throw new Error('missing httpUrl (Streamable HTTP), url (SSE) or command (stdio)');
+    throw new Error('missing httpUrl (Streamable HTTP) or command (stdio)');
   }
 
   private async open(name: string): Promise<Connection> {

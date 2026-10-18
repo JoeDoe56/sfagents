@@ -317,7 +317,8 @@ class GrepToolInvocation extends BaseToolInvocation<GrepToolParams, ToolResult> 
     glob: string | undefined,
     signal: AbortSignal,
   ): Promise<GrepMatch[]> {
-    const allowExternalCommands = process.platform !== 'win32';
+    // SFAGENTS_GREP_JS=1 forces the JavaScript strategy (the only one used on Windows).
+    const allowExternalCommands = process.platform !== 'win32' && process.env['SFAGENTS_GREP_JS'] !== '1';
 
     if (allowExternalCommands && isGitRepository(absolutePath) && isCommandAvailable('git')) {
       const gitArgs = [...NO_EXEC_CONFIG, 'grep', '--untracked', '-n', '-z', '-E', '--ignore-case', '-e', pattern];
