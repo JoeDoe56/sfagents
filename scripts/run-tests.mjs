@@ -16,6 +16,8 @@ const filters = args.filter((a) => !a.startsWith('--'));
 const files = fs
   .readdirSync(dist)
   .filter((f) => f.endsWith('.test.js'))
+  // Skip stale outputs whose TypeScript source was deleted.
+  .filter((f) => fs.existsSync(path.join(root, 'tests', f.replace(/\.js$/, '.ts'))))
   .filter((f) => (live ? f.startsWith('live') : !f.startsWith('live')))
   .filter((f) => filters.length === 0 || filters.some((x) => f.includes(x)))
   .map((f) => path.join(dist, f));
@@ -24,5 +26,5 @@ if (files.length === 0) {
   console.error('No test files matched.');
   process.exit(1);
 }
-const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', '--test-concurrency=1', ...files], { stdio: 'inherit', cwd: root });
+const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', '--test-concurrency=1', `--test-timeout=${live ? 180000 : 60000}`, ...files], { stdio: 'inherit', cwd: root });
 process.exit(result.status ?? 1);

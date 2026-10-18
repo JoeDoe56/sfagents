@@ -45,10 +45,18 @@ export function createTerminalConfirm(
   renderer?: EventRenderer,
 ): ConfirmationHandler {
   const color = createStyle(output as NodeJS.WriteStream);
+  let inputClosed = false;
+  rl.once('close', () => {
+    inputClosed = true;
+  });
   let chain: Promise<unknown> = Promise.resolve();
   return (request, signal) => {
     const ask = async (): Promise<ConfirmationDecision> => {
       if (signal.aborted) return 'deny';
+      if (inputClosed) {
+        output.write(color.yellow(`Denied ${request.toolName}: input is closed, so it cannot be approved.\n`));
+        return 'deny';
+      }
       renderer?.breakLine();
       const who = request.agentPath.join(' > ');
       const lines = [
@@ -61,8 +69,10 @@ export function createTerminalConfirm(
         const answer = await new Promise<string | null>((resolve) => {
           const onAbort = () => resolve(null);
           signal.addEventListener('abort', onAbort, { once: true });
+          rl.once('close', onAbort);
           rl.question(color.bold('  Allow? [y]es once / [a]lways for this tool / [n]o: '), (value) => {
             signal.removeEventListener('abort', onAbort);
+            rl.removeListener('close', onAbort);
             resolve(value);
           });
         });

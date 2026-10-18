@@ -31,11 +31,8 @@ export async function startRepl(options: ReplOptions): Promise<number> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const style = createStyle(output as NodeJS.WriteStream);
-  const rl = readline.createInterface({
-    input,
-    output,
-    terminal: (input as NodeJS.ReadStream).isTTY === true && (output as NodeJS.WriteStream).isTTY === true,
-  });
+  const interactive = (input as NodeJS.ReadStream).isTTY === true && (output as NodeJS.WriteStream).isTTY === true;
+  const rl = readline.createInterface({ input, output, terminal: interactive });
   const renderer = new EventRenderer({ out: output, activity: output, showReasoning: options.showReasoning });
   options.bindConfirm?.(createTerminalConfirm(rl, output, renderer));
 
@@ -51,9 +48,22 @@ export async function startRepl(options: ReplOptions): Promise<number> {
 
   return new Promise<number>((resolve) => {
     const prompt = () => {
-      if (closed) return;
+      if (closed || inputEnded) return;
       rl.setPrompt(style.cyan('you> '));
       rl.prompt();
+    };
+
+    let inputEnded = false;
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      resolve(0);
+    };
+    const quitNow = () => {
+      current?.abort(new Error('quit'));
+      queue.length = 0;
+      finish();
+      rl.close();
     };
 
     rl.on('SIGINT', () => {
@@ -61,7 +71,7 @@ export async function startRepl(options: ReplOptions): Promise<number> {
         const now = Date.now();
         if (now - lastInterrupt < 1500) {
           output.write('\nForce quit.\n');
-          rl.close();
+          quitNow();
           return;
         }
         lastInterrupt = now;
@@ -70,14 +80,14 @@ export async function startRepl(options: ReplOptions): Promise<number> {
         current.abort(new Error('cancelled by user'));
       } else {
         output.write('\n');
-        rl.close();
+        quitNow();
       }
     });
 
+    // End of input (Ctrl+D or the end of piped stdin): finish queued work, then exit.
     rl.on('close', () => {
-      closed = true;
-      current?.abort(new Error('input closed'));
-      resolve(0);
+      inputEnded = true;
+      if (!current && !draining) finish();
     });
 
     const queue: string[] = [];
@@ -92,6 +102,8 @@ export async function startRepl(options: ReplOptions): Promise<number> {
           continue;
         }
         if (line === '/exit' || line === '/quit') {
+          queue.length = 0;
+          finish();
           rl.close();
           break;
         }
@@ -111,6 +123,7 @@ export async function startRepl(options: ReplOptions): Promise<number> {
           prompt();
           continue;
         }
+        if (!interactive) output.write(`${line}\n`);
         current = new AbortController();
         try {
           const result = await session.run(line, { signal: current.signal, onEvent: (e) => renderer.handle(e) });
@@ -129,14 +142,13 @@ export async function startRepl(options: ReplOptions): Promise<number> {
         prompt();
       }
       draining = false;
+      if (inputEnded) finish();
     };
 
     rl.on('line', (line) => {
-      if (current) {
-        output.write(style.dim('(still working — press Ctrl+C to cancel the current turn)\n'));
-        return;
-      }
+      if (closed) return;
       queue.push(line);
+      if (current && interactive) output.write(style.dim('(queued — it will be sent after the current turn; Ctrl+C cancels the turn)\n'));
       void drain();
     });
 
