@@ -8,13 +8,16 @@
  * when invalidated; function geometry reads no DOM at all.
  * @module
  */
-import {clamp, finiteNumber, normalizeMaterial, resolveMaterial, mixNumber, easings, LIVE_NUMERIC_OPTIONS} from './material.js';
+import {clamp, finiteNumber, normalizeMaterial, resolveMaterial, applyOpticsOverrides, mixNumber, easings, LIVE_NUMERIC_OPTIONS} from './material.js';
 
 /**
  * @typedef {object} LensOptions
  * @property {number} [material]            signed material −1..1 (null: legacy optics below)
  * @property {number} [refraction] @property {number} [frost] @property {number} [magnify]
  * @property {boolean} [specular]
+ * @property {{color: string|number[], amount?: number}} [tint]  body colour (CSS hex or display RGB 0..1) and how much of it, overriding the material's tone
+ * @property {number} [rim]         hairline edge highlight strength (default 0.26)
+ * @property {number} [dispersion]  0..1 scale of the rim's spectral split (default 1)
  * @property {'live'|'dom'|((el: Element, lens: Lens) => Rect|null)} [geometry]  how the rect is measured (default 'live')
  * @property {boolean} [liveGeometry]  false: measure like 'dom' (legacy switch)
  * @property {(el: Element, lens: Lens) => Rect|null} [geometryRect]  legacy alias for function geometry
@@ -343,7 +346,8 @@ export class Lens {
   /** @param {number} [quality] */
   resolveOptics(quality) {
     if (this.options.material !== null && this.options.material !== undefined) {
-      return resolveMaterial(this.options.material, this.rect ? {width: this.rect.width, height: this.rect.height} : {width: 0, height: 0}, quality);
+      const base = resolveMaterial(this.options.material, this.rect ? {width: this.rect.width, height: this.rect.height} : {width: 0, height: 0}, quality);
+      return applyOpticsOverrides(base, this.options);
     }
     const o = this.options;
     return {
@@ -356,6 +360,7 @@ export class Lens {
       magnify: clamp(finiteNumber(o.magnify, 1), 0.001, 3),
       specularPrimary: 0.1675, specularSecondary: 0.08, shadowStrength: 0.1,
       specular: o.specular !== false,
+      toneSpace: 'linear', toneAmount: 0, rim: 0.26, dispersionAmount: 1,
     };
   }
 
@@ -447,7 +452,7 @@ export class Lens {
     const shown = this.el.isConnected && this._value('visible', true);
     const strength = shown ? this.opacity() * (this.revealType === 1 ? this.revealProgress : 1) : 0;
     const srgb = (v) => Math.round(255 * Math.pow(clamp(finiteNumber(v, 1), 0, 1), 1 / 2.2));
-    let rgb = optics.tone.map(srgb);
+    let rgb = optics.toneSpace === 'display' ? optics.tone.map((v) => Math.round(255 * clamp(v, 0, 1))) : optics.tone.map(srgb);
     let alpha;
     let filter = 'none';
     if (!strength) {
@@ -459,6 +464,8 @@ export class Lens {
     } else {
       // Dark glass reads mostly through its tint, so it carries more of it.
       alpha = optics.side < 0 ? 0.12 + 0.7 * optics.density : 0.06 + 0.5 * optics.density;
+      // An explicit tint says how much body colour it wants.
+      if (optics.toneSpace === 'display') alpha = Math.max(alpha, 0.1 + 0.85 * finiteNumber(optics.toneAmount, 0));
       const blur = Math.max(2, Math.round(finiteNumber(optics.frostSigmaPx, 0)));
       filter = `blur(${blur}px) saturate(1.4)`;
     }

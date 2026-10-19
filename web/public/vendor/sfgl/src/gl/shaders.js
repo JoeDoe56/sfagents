@@ -161,6 +161,9 @@ uniform float u_materialSign;
 uniform vec3  u_materialTone;
 uniform float u_specularPrimary;
 uniform float u_specularSecondary;
+uniform float u_toneAmount;         // how much of u_materialTone replaces the body
+uniform float u_rim;                // hairline edge highlight strength
+uniform float u_dispersionAmount;   // 0..1 scale of the spectral split
 uniform vec2  u_globalLight;
 uniform float u_globalLightIntensity;
 uniform vec4  u_contact;
@@ -331,7 +334,7 @@ void main() {
 #if SF_DISPERSION > 0
   if (insideCss < rimBand) {
     // Opposing spectral taps concentrate dispersion at the bevel.
-    float dispersion = refractLobe(d, 3.0 * scale, 14.0 * scale) * dRefract;
+    float dispersion = refractLobe(d, 3.0 * scale, 14.0 * scale) * dRefract * u_dispersionAmount;
     if (dispersion > 0.02) {
       vec2 chroma = direction * dispersion * cssToUV;
 #if SF_DISPERSION >= 7
@@ -382,8 +385,7 @@ void main() {
     rgb += (0.5 - chameleon) * 0.04 * min(1.0, u_materialDensity / 0.52);
   }
   // Preserve the signed slider's endpoints and its clear zero.
-  float opaque = clamp((u_materialDensity - 0.52) / 0.48, 0.0, 1.0);
-  rgb = mix(rgb, u_materialTone, opaque * dBody);
+  rgb = mix(rgb, u_materialTone, u_toneAmount * dBody);
   if (u_specular) {
     // 3D light response: the positive Z components stay defined as a planar
     // light crosses zero, so opposite rims fade through neutral.
@@ -398,9 +400,20 @@ void main() {
     vec3 secondaryLight = normalize(vec3(-globalLight, 0.46));
     float primaryFacing = max(dot(N, primaryLight), 0.0);
     float secondaryFacing = max(dot(N, secondaryLight), 0.0);
-    float sharp = outerPeak * pow(primaryFacing, 7.0) * u_specularPrimary;
+    // Hairline rim, as on Apple's Liquid Glass: under half a CSS pixel wide,
+    // measured in backing pixels so it stays crisp at any render scale.
+    // Brightest where the edge faces the light, with a weaker reflection on
+    // the opposite edge and a faint line all round.
+    float insideBacking = max(0.0, -opticalDistance);
+    float hairWidth = max(1.0, 0.4 * u_devicePixelRatio);
+    float hairline = 1.0 - smoothstep(0.0, hairWidth, insideBacking);
+    vec2 edgeNormal = normal / max(length(normal), 0.0001);
+    vec2 lightDir2 = normalize(primaryLight.xy + vec2(0.0001));
+    float litEdge = max(dot(edgeNormal, lightDir2), 0.0);
+    float backEdge = max(dot(edgeNormal, -lightDir2), 0.0);
+    float sharp = hairline * u_rim * (0.16 + 0.84 * pow(litEdge, 1.6) + 0.6 * pow(backEdge, 1.6));
     float soft = innerRim * pow(primaryFacing, 2.2) * u_specularPrimary * 0.62;
-    float opposite = (outerPeak * 0.65 + innerRim * 0.42) * pow(secondaryFacing, 2.8) * u_specularSecondary;
+    float opposite = innerRim * 0.42 * pow(secondaryFacing, 2.8) * u_specularSecondary;
     vec3 softRimColor = mix(vec3(1.0), face.rgb, 0.08);
     float heightMask = 1.0 - smoothstep(0.0, 70.0 * scale, insideCss);
     // A radial face normal avoids the panel's medial diagonals; the 3D

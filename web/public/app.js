@@ -100,17 +100,26 @@ const settings = {
 
 const glassApi = setupGlass({ stage, chat, thread, quality: settings.quality });
 const { surface } = glassApi;
-const barLens = surface.lens(bar, { material: -0.42, layer: 0 });
-surface.lens(field, { material: 0.14, layer: 1 });
-surface.lens(send, { material: 0.14, layer: 1 });
-surface.lens($('monitor'), { material: 0.1, layer: 1, clip: sheetScroll });
-surface.lens($('settingsBtn'), { material: 0.14, layer: 1, clip: sheetScroll });
-surface.lens($('spareBtn'), { material: 0.14, layer: 1, clip: sheetScroll });
+// Glass values modelled on ChatGPT's iOS composer: a dark neutral body that
+// mostly hides what is behind it (a heavy blur shows only soft shapes),
+// almost no refraction or colour split, and a crisp hairline rim. Controls
+// inside the bar are a slightly lighter layer of the same glass.
+const GLASS = {
+  bar: { material: -0.5, tint: { color: '#1d1d1d', amount: 0.58 }, frost: 8, refraction: 0.012, dispersion: 0, rim: 0.45, layer: 0 },
+  control: { material: -0.3, tint: { color: '#262628', amount: 0.35 }, frost: 3, refraction: 0.01, dispersion: 0, rim: 0.26, layer: 1 },
+  tile: { material: -0.3, tint: { color: '#262628', amount: 0.6 }, frost: 6, refraction: 0.01, dispersion: 0, rim: 0.2, layer: 1 },
+};
+const barLens = surface.lens(bar, GLASS.bar);
+surface.lens(field, GLASS.control);
+surface.lens(send, GLASS.control);
+surface.lens($('monitor'), { ...GLASS.tile, clip: sheetScroll });
+surface.lens($('settingsBtn'), { ...GLASS.control, clip: sheetScroll });
+surface.lens($('spareBtn'), { ...GLASS.control, clip: sheetScroll });
 window.sfagents = { glass: glassApi.glass, surface, barLens };
 
 function syncTileLenses() {
   const tiles = [...document.querySelectorAll('.tiles .tile')];
-  surface.syncGroup('tiles', tiles, { material: 0.1, layer: 1, clip: sheetScroll });
+  surface.syncGroup('tiles', tiles, { ...GLASS.tile, clip: sheetScroll });
   glassApi.glass.requestRender();
 }
 

@@ -462,6 +462,9 @@ export class Surface {
     set('u_materialTone', optics.tone);
     set('u_specularPrimary', optics.specularPrimary);
     set('u_specularSecondary', optics.specularSecondary);
+    set('u_toneAmount', clamp(finiteNumber(optics.toneAmount, 0), 0, 1));
+    set('u_rim', Math.max(0, finiteNumber(optics.rim, 0.26)));
+    set('u_dispersionAmount', clamp(finiteNumber(optics.dispersionAmount, 1), 0, 1));
     set('u_globalLight', [context.light.x, context.light.y]);
     set('u_globalLightIntensity', context.light.intensity);
     const contactRect = {left: rect.left + this.origin.left, top: rect.top + this.origin.top, width: rect.width, height: rect.height};

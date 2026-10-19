@@ -153,6 +153,10 @@ export function createLighting(options = {}, env = {}) {
   // when the pointer leaves the window.
   function pointerMove(event) {
     if (orientationActive || !event) return;
+    // Only a hovering pointer stands in for tilt. A finger is not a light
+    // source: following it would move the highlights (and repaint every lens
+    // shadow) on each touch move while the page scrolls.
+    if (event.pointerType === "touch") return;
     const width = Math.max(1, win.innerWidth || 1);
     const height = Math.max(1, win.innerHeight || 1);
     const clientX = Number.isFinite(Number(event.clientX)) ? Number(event.clientX) : width / 2;

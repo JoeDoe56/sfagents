@@ -33,7 +33,7 @@ export const TIERS = Object.freeze({
   frost: Object.freeze({name: 'frost', webgl: false, backdropCap: 0, backdropRate: 0, dispersion: 0, layers: false, underlay: false, maxRenderScale: 0, minRenderScale: 0}),
   lite: Object.freeze({name: 'lite', webgl: true, backdropCap: 512, backdropRate: 30, dispersion: 0, layers: false, underlay: false, maxRenderScale: 1, minRenderScale: 0.5}),
   glass: Object.freeze({name: 'glass', webgl: true, backdropCap: 1024, backdropRate: 60, dispersion: 3, layers: true, underlay: true, maxRenderScale: 2, minRenderScale: 0.75}),
-  superfluid: Object.freeze({name: 'superfluid', webgl: true, backdropCap: 1024, backdropRate: 0, dispersion: 7, layers: true, underlay: true, maxRenderScale: 2, minRenderScale: 1}),
+  superfluid: Object.freeze({name: 'superfluid', webgl: true, backdropCap: 1024, backdropRate: 0, dispersion: 7, layers: true, underlay: true, maxRenderScale: 3, minRenderScale: 1}),
 });
 
 export const TIER_ORDER = Object.freeze(['static', 'frost', 'lite', 'glass', 'superfluid']);

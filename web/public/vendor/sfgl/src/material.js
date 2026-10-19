@@ -38,7 +38,11 @@ export function normalizeMaterial(value, fallback = 0) {
  * @property {number} material      signed material value
  * @property {number} density       |material|
  * @property {number} side          −1 dark, 0 clear, +1 light
- * @property {number[]} tone        opaque endpoint colour (linear RGB 0..1)
+ * @property {number[]} tone        opaque endpoint colour (linear RGB 0..1, or display RGB with toneSpace 'display')
+ * @property {'linear'|'display'} [toneSpace]  how `tone` is encoded (a `tint` option gives display RGB)
+ * @property {number} toneAmount    how much of `tone` replaces the glass body, 0..1
+ * @property {number} rim           strength of the hairline edge highlight
+ * @property {number} dispersionAmount  0..1 scale of the rim's spectral split
  * @property {number} materialAlpha
  * @property {number} frostSigmaPx  blur radius in CSS px
  * @property {number} frostSampleScale
@@ -74,6 +78,10 @@ export function resolveMaterial(material, geometry, quality) {
     density,
     side,
     tone,
+    toneSpace: 'linear',
+    toneAmount: beyondApple,
+    rim: 0.26,
+    dispersionAmount: 1,
     materialAlpha: density,
     frostSigmaPx: 24 * density,
     frostSampleScale: qualityScale,
@@ -88,6 +96,51 @@ export function resolveMaterial(material, geometry, quality) {
     specular: true,
     geometry: geometry || null,
   };
+}
+
+/**
+ * Parse a tint colour: a CSS hex string (#rgb or #rrggbb) or an [r, g, b]
+ * array of 0..1 display values. Returns display RGB 0..1, or null.
+ * @param {unknown} color
+ * @returns {number[]|null}
+ */
+export function parseTintColor(color) {
+  if (Array.isArray(color) && color.length >= 3) return color.slice(0, 3).map((v) => clamp(finiteNumber(v, 0), 0, 1));
+  if (typeof color !== 'string') return null;
+  let hex = color.trim().replace(/^#/, '');
+  if (/^[0-9a-f]{3}$/i.test(hex)) hex = hex.split('').map((c) => c + c).join('');
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
+  return [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+}
+
+/**
+ * Apply per-lens overrides on top of a resolved material, so a host can keep
+ * the material's character and adjust single values:
+ *   frost (blur radius, CSS px), refraction, magnify, specular (boolean),
+ *   tint {color, amount} (a body colour in display RGB and how much of it),
+ *   rim (hairline highlight strength), dispersion (0..1 spectral split).
+ * @param {ResolvedMaterial} optics
+ * @param {Record<string, any>} options
+ * @returns {ResolvedMaterial}
+ */
+export function applyOpticsOverrides(optics, options) {
+  const o = options || {};
+  const out = Object.assign({}, optics);
+  if (o.frost !== undefined && o.frost !== null && typeof o.frost !== 'function') out.frostSigmaPx = Math.max(0, finiteNumber(o.frost, out.frostSigmaPx));
+  if (o.refraction !== undefined && o.refraction !== null && typeof o.refraction !== 'function') out.refraction = Math.max(0, finiteNumber(o.refraction, out.refraction));
+  if (o.magnify !== undefined && o.magnify !== null && typeof o.magnify !== 'function') out.magnify = clamp(finiteNumber(o.magnify, out.magnify), 0.001, 3);
+  if (o.specular === false) out.specular = false;
+  if (o.rim !== undefined && o.rim !== null) out.rim = clamp(finiteNumber(o.rim, out.rim), 0, 2);
+  if (o.dispersion !== undefined && o.dispersion !== null) out.dispersionAmount = clamp(finiteNumber(o.dispersion, 1), 0, 1);
+  if (o.tint && typeof o.tint === 'object') {
+    const color = parseTintColor(o.tint.color);
+    if (color) {
+      out.tone = color;
+      out.toneSpace = 'display';
+      out.toneAmount = clamp(finiteNumber(o.tint.amount, 0.8), 0, 1);
+    }
+  }
+  return out;
 }
 
 /** Easing curves for option transitions. */

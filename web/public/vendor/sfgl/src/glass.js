@@ -26,7 +26,7 @@ const NEUTRAL_LIGHT = Object.freeze({x: -0.16, y: -0.22, intensity: 0.22, source
 /**
  * @typedef {object} GlassOptions
  * @property {'auto'|import('./core/quality.js').TierName|(() => string)} [quality]
- * @property {number|(() => number)} [renderScale]     backing scale; default 1.5 capped by the tier
+ * @property {number|(() => number)} [renderScale]     backing scale; default the device pixel ratio, capped by the tier
  * @property {boolean|number|(() => boolean|number)} [frost]  frost on/off (a number: 0 disables)
  * @property {any} [scheduler]          host scheduler with mark/register (default: built-in)
  * @property {boolean|object|(() => object)} [lighting]  true: built-in pointer/tilt light; a function: host light state
@@ -72,7 +72,17 @@ export class Glass {
     if (this._reducedTransparency && this._reducedTransparency.addEventListener) this._reducedTransparency.addEventListener('change', this._onTransparencyChange);
     this._onVisibility = () => { if (!doc.hidden) this.requestRender(); };
     doc.addEventListener('visibilitychange', this._onVisibility);
-    this._onScroll = () => this._invalidateDom();
+    // A scroll-linked backdrop (one that draws scrolled content) is redrawn in
+    // the frame of the scroll itself: asking for the frame from inside the
+    // scroll event lands it in this vsync, with the provider's update() run
+    // just before the backdrop is prepared. Asking from a separate
+    // requestAnimationFrame instead makes the glass trail the page by one
+    // frame, which reads as stutter while scrolling.
+    this._onScroll = () => {
+      this._invalidateDom();
+      const p = this._backdropProvider;
+      if (p && p.scrollLinked) this.requestRender();
+    };
     this._onResize = () => this.invalidate(true);
     doc.addEventListener('scroll', this._onScroll, {capture: true, passive: true});
     win.addEventListener('resize', this._onResize, {passive: true});
@@ -122,7 +132,10 @@ export class Glass {
   renderScale() {
     const t = this.tier();
     const raw = typeof this.options.renderScale === 'function' ? this.options.renderScale() : this.options.renderScale;
-    const value = finiteNumber(raw, 1.5);
+    // Default to the display's pixel density so hairline rims stay crisp; the
+    // tier caps it (superfluid 3, glass 2, lite 1).
+    const dpr = finiteNumber(this.env.window && this.env.window.devicePixelRatio, 1);
+    const value = finiteNumber(raw, Math.max(1, dpr));
     // The adaptive scale applies only while quality is automatic.
     const dynamic = this._automatic() ? (this._dynamicScale || 1) : 1;
     return clamp(value * dynamic, t.minRenderScale || 0.5, t.maxRenderScale || 2);
@@ -227,6 +240,13 @@ export class Glass {
     const started = this.now();
     const now = Number.isFinite(frame.timestamp) ? frame.timestamp : started;
     const tier = this.tier();
+    // Let the backdrop redraw its source in this frame, before it is read.
+    if (tier.webgl) {
+      const p = this._backdropProvider;
+      if (p && typeof p.update === 'function') {
+        try { p.update({timestamp: now}); } catch (e) { /* a failing host update must not stop the glass */ }
+      }
+    }
 
     // Read phase. CSS tiers (and surfaces without a usable WebGL context)
     // need no geometry: the lens elements draw themselves.

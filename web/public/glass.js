@@ -8,6 +8,12 @@
  * repaints with a new offset. When the sheet turns opaque, its fill is
  * painted into the backdrop under the sheet, so the glass reads as a solid
  * sheet while keeping its rim.
+ *
+ * The canvas is repainted inside sfgl's own frame (the backdrop's update()
+ * hook, with scrollLinked so a scroll asks for that frame immediately), so
+ * the glass and the scrolled page change in the same vsync. Only the band
+ * around the bar or sheet is painted, at reduced resolution: the glass
+ * blurs it heavily anyway.
  */
 
 import { createGlass, imageBackdrop } from './vendor/sfgl/src/index.js';
@@ -24,22 +30,35 @@ export function setupGlass({ stage, chat, thread, quality }) {
   let scale = 1;
   let cache = null; // { width, placed: [...] } in content coordinates
   let sheet = null; // { left, top, width, height, radius, opaque }
-  let pending = false;
+  let dirty = true;
+  let painted = { scrollTop: -1, chatTop: NaN, width: 0, height: 0 };
 
-  glass.setBackdrop(imageBackdrop(canvas, { fit: 'stretch', key: () => String(revision) }));
+  function needsPaint() {
+    if (dirty) return true;
+    const r = chat.getBoundingClientRect();
+    return chat.scrollTop !== painted.scrollTop || r.top !== painted.chatTop || innerWidth !== painted.width || innerHeight !== painted.height;
+  }
+
+  glass.setBackdrop(
+    imageBackdrop(canvas, {
+      fit: 'stretch',
+      key: () => String(revision),
+      scrollLinked: true,
+      update: () => {
+        if (needsPaint()) paint();
+      },
+    }),
+  );
 
   function invalidateLayout() {
     cache = null;
     schedule();
   }
 
+  /** Marks the backdrop stale; it is repainted in the next glass frame. */
   function schedule() {
-    if (pending) return;
-    pending = true;
-    requestAnimationFrame(() => {
-      pending = false;
-      paint();
-    });
+    dirty = true;
+    glass.requestRender();
   }
 
   /** Per element: paint items relative to the element's own top-left, reused while its signature and size are unchanged. */
@@ -159,7 +178,8 @@ export function setupGlass({ stage, chat, thread, quality }) {
   function paint() {
     const W = innerWidth;
     const H = innerHeight;
-    scale = Math.min(1, 1024 / Math.max(W, H, 1));
+    // Reduced resolution: the bar and sheet blur what is behind them.
+    scale = Math.min(0.75, 1024 / Math.max(W, H, 1));
     const cw = Math.max(1, Math.round(W * scale));
     const ch = Math.max(1, Math.round(H * scale));
     if (canvas.width !== cw || canvas.height !== ch) {
@@ -175,10 +195,15 @@ export function setupGlass({ stage, chat, thread, quality }) {
     ctx.fillRect(0, 0, cw, ch);
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     ctx.textBaseline = 'middle';
+    // Only content near the glass can show through it (refraction and blur
+    // reach a few dozen pixels past the edge).
+    const reach = 64;
+    const bandTop = sheet ? sheet.top - reach : -40;
+    const bandBottom = sheet ? sheet.top + sheet.height + reach : H + 40;
     for (const p of cache.placed) {
       const ox = p.x + dx;
       const oy = p.y + dy;
-      if (oy > H + 40 || oy + p.h < -40) continue;
+      if (oy > Math.min(H + 40, bandBottom) || oy + p.h < Math.max(-40, bandTop)) continue;
       for (const it of p.items) {
         const top = oy + it.y;
         if (it.kind === 'bubble') {
@@ -203,7 +228,7 @@ export function setupGlass({ stage, chat, thread, quality }) {
         }
         for (const w of it.words || []) {
           const wy = oy + w.y;
-          if (wy < -20 || wy > H + 20) continue;
+          if (wy < bandTop - 20 || wy > bandBottom + 20) continue;
           ctx.font = w.font;
           ctx.fillStyle = w.color;
           ctx.fillText(w.t, ox + w.x, wy);
@@ -217,10 +242,10 @@ export function setupGlass({ stage, chat, thread, quality }) {
       ctx.fill();
     }
     revision++;
-    glass.requestRender();
+    dirty = false;
+    painted = { scrollTop: chat.scrollTop, chatTop: chatRect.top, width: W, height: H };
   }
 
-  chat.addEventListener('scroll', schedule, { passive: true });
   addEventListener('resize', invalidateLayout);
   new ResizeObserver(invalidateLayout).observe(thread);
   new MutationObserver(invalidateLayout).observe(thread, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'src'] });
@@ -235,8 +260,9 @@ export function setupGlass({ stage, chat, thread, quality }) {
     setSheet(next) {
       const was = sheet;
       sheet = next;
-      if ((next && next.opaque > 0) || (was && was.opaque > 0)) schedule();
-      glass.requestRender();
+      // The painted band follows the sheet; the opaque fill depends on it too.
+      if (!was || !next || was.top !== next.top || was.height !== next.height || was.opaque !== next.opaque) schedule();
+      else glass.requestRender();
     },
     repaint: invalidateLayout,
     tier: () => glass.tier().name,

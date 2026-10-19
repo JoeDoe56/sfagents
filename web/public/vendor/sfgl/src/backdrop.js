@@ -11,7 +11,14 @@
  *
  *   image provider (built-in, see imageBackdrop()):
  *     {kind: 'image', source(): TexImageSource, fit: 'cover'|'contain'|'stretch',
- *      key(): string, rect(): Rect, opaque: boolean}
+ *      key(): string, rect(): Rect, opaque: boolean,
+ *      update(frame): void,       // optional: redraw the source; called in the glass frame, before prepare
+ *      scrollLinked: boolean}     // optional: the source shows scrolled content; scrolling asks for a frame
+ *
+ *   Any provider may have update() and scrollLinked. A host that repaints a
+ *   canvas from scroll events should do it in update(), not in its own
+ *   requestAnimationFrame: the glass then reads the new canvas in the same
+ *   frame instead of the next one.
  *
  *   program provider (host GLSL):
  *     {kind: 'program',
@@ -32,7 +39,8 @@ import {FULLSCREEN_VERTEX, IMAGE_BACKDROP, prepareFragment, prelude} from './gl/
 /**
  * A static or changing image/canvas/video behind the glass.
  * @param {TexImageSource|(() => TexImageSource|null)} source
- * @param {{fit?: 'cover'|'contain'|'stretch', key?: () => string, rect?: () => any, opaque?: boolean, dynamic?: () => boolean}} [options]
+ * @param {{fit?: 'cover'|'contain'|'stretch', key?: () => string, rect?: () => any, opaque?: boolean, dynamic?: () => boolean,
+ *   update?: (frame: {timestamp: number}) => void, scrollLinked?: boolean}} [options]
  */
 export function imageBackdrop(source, options = {}) {
   const resolve = typeof source === 'function' ? source : () => source;
@@ -45,6 +53,8 @@ export function imageBackdrop(source, options = {}) {
     source: resolve,
     rect: options.rect,
     dynamic: options.dynamic,
+    update: options.update,
+    scrollLinked: !!options.scrollLinked,
     key() {
       if (options.key) return String(options.key());
       const current = resolve();
@@ -226,7 +236,12 @@ export class BackdropTarget {
     let unit = 0;
     if (provider.kind === 'image') {
       const source = provider.source();
-      const input = this._input('sf_image', {source, key: provider.key ? provider.key(frame) : null, live: !!dynamic});
+      // Mip levels of the source only help when it is much larger than the
+      // prepared texture; a canvas redrawn every frame would otherwise pay
+      // for a full mip chain on each upload.
+      const srcSize = sourceSize(source);
+      const mipmap = srcSize.width > width * 1.5 || srcSize.height > height * 1.5;
+      const input = this._input('sf_image', {source, key: provider.key ? provider.key(frame) : null, live: !!dynamic, mipmap});
       if (!input) { this.ready = false; return false; }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, input.texture);
