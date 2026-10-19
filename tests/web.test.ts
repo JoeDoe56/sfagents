@@ -362,6 +362,37 @@ describe('web server', () => {
     }
   });
 
+  test('the topic index follows the sections the model creates', async () => {
+    const s = await startServer((req, call) => {
+      if (call === 0) return { toolCalls: [{ name: 'add_section', args: { title: 'Kiln schedule', messages: ['current_exchange'] } }] };
+      if (call === 1) return { text: 'Filed under Kiln schedule.' };
+      if (call === 2) return { toolCalls: [{ name: 'add_section', args: { title: 'Cone 6 glazes', parent: 's1', messages: ['current_exchange'] } }] };
+      return { text: 'ok' };
+    });
+    const ev = events(s.base);
+    try {
+      const first = await ev.wait((e) => e.event === 'state');
+      assert.deepEqual(first.data['sections'], []);
+      await postJson(s.base, '/api/messages', { text: 'When should I fire the kiln?' });
+      const sec = await ev.wait((e) => e.event === 'sections');
+      const list = sec.data['sections'] as Array<{ id: string; title: string; depth: number; first: { id: string } }>;
+      assert.equal(list.length, 1);
+      assert.equal(list[0]!.title, 'Kiln schedule');
+      const userId = (await ev.wait((e) => e.event === 'user')).data['item'] as { id: string };
+      assert.equal(list[0]!.first.id, userId.id, 'a jump lands on the first message of the section');
+      await ev.wait((e) => e.event === 'run_end');
+      await postJson(s.base, '/api/messages', { text: 'Which glazes at cone 6?' });
+      const end = await ev.wait((e) => e.event === 'run_end' && (e.data['sections'] as unknown[]).length === 2);
+      const after = end.data['sections'] as Array<{ title: string; depth: number }>;
+      assert.deepEqual(after.map((x) => [x.title, x.depth]), [['Kiln schedule', 0], ['Cone 6 glazes', 1]]);
+      const state = JSON.parse((await request(s.base, '/api/state')).body.toString()) as { sections: unknown[] };
+      assert.equal(state.sections.length, 2);
+    } finally {
+      ev.close();
+      await s.stop();
+    }
+  });
+
   test('tool calls are described for people', () => {
     assert.equal(describeCall('read_file', JSON.stringify({ file_path: 'src/app.ts' })), 'Read src/app.ts');
     assert.equal(describeCall('shell', JSON.stringify({ command: 'npm test' })), 'Ran `npm test`');

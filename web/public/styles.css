@@ -269,6 +269,97 @@ button { -webkit-tap-highlight-color: transparent; }
   cursor: pointer;
 }
 
+/* ------------------------------------------------------------------ topic rail
+ * Small dots on the right edge, one per section (newest at the bottom).
+ * Press and hold to expand them into titles; release to jump. Not glass, on
+ * purpose: plain elements keep the rail cheap. */
+
+:root { --rail-dot: rgba(118, 118, 128, 0.42); }
+.rail {
+  position: absolute;
+  right: max(2px, env(safe-area-inset-right, 0px));
+  top: calc(var(--safe-top) + 14px);
+  bottom: 110px;
+  width: 22px;
+  z-index: 6;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  cursor: pointer;
+  outline: none;
+}
+.rail.covered { visibility: hidden; pointer-events: none; }
+.rail-dots {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  transition: opacity 0.15s ease;
+}
+.rail.overflowing .rail-dots { -webkit-mask-image: linear-gradient(transparent, #000 40px); mask-image: linear-gradient(transparent, #000 40px); }
+.rail-dot { flex: none; width: 5px; height: 5px; margin: 3.5px 0; border-radius: 50%; background: var(--rail-dot); transition: background 0.2s ease, transform 0.2s ease; }
+.rail-dot.sub { width: 3px; height: 3px; margin: 4.5px 0; }
+.rail-dot.active { background: rgba(235, 235, 245, 0.55); }
+.rail:hover .rail-dot { transform: scale(1.25); }
+.rail:focus-visible .rail-dots { outline: 2px solid rgba(68, 153, 248, 0.7); outline-offset: 3px; border-radius: 11px; }
+
+.rail-list {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: min(74vw, 340px);
+  overflow: hidden;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.12s ease, visibility 0s linear 0.12s;
+}
+.rail.open .rail-dots { opacity: 0; }
+.rail.open .rail-list { visibility: visible; opacity: 1; transition: opacity 0.12s ease; }
+.rail.open::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(100vw, 560px);
+  background: linear-gradient(to left, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.6) 50%, transparent 88%);
+  pointer-events: none;
+}
+.rail-inner {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-end;
+  padding: 10px 2px;
+}
+.rail-row { flex: none; height: 34px; max-width: 100%; display: flex; align-items: center; justify-content: flex-end; }
+.rail-row span {
+  max-width: 100%;
+  padding: 5px 12px;
+  border-radius: 14px;
+  background: rgba(44, 44, 48, 0.94);
+  color: rgba(235, 235, 245, 0.88);
+  font-size: 14px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transform-origin: right center;
+  animation: rail-in 0.18s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.12s ease;
+}
+.rail-row.depth-1 span { margin-right: 12px; font-size: 13px; background: rgba(36, 36, 40, 0.94); color: rgba(235, 235, 245, 0.7); }
+.rail-row.depth-2 span, .rail-row.depth-3 span { margin-right: 24px; font-size: 12px; background: rgba(36, 36, 40, 0.94); color: rgba(235, 235, 245, 0.6); }
+.rail-row.active span { box-shadow: inset 0 0 0 1px rgba(235, 235, 245, 0.35); }
+.rail-row.highlighted span { background: #fff; color: #000; font-weight: 600; transform: scale(1.08); }
+@keyframes rail-in { from { opacity: 0; transform: scaleX(0.2); } }
+
 /* ------------------------------------------------------------------ bar / sheet */
 
 .bar {
@@ -737,6 +828,7 @@ button { -webkit-tap-highlight-color: transparent; }
 
 @media (prefers-reduced-motion: reduce) {
   .settings-card { animation: none; }
+  .rail-row span { animation: none; }
   .send-disc, .stop-disc, .tile-pin { transition: none; }
   .viewer { animation: none; }
   .typing span, .activity.running::after { animation: none; }

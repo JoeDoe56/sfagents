@@ -33,7 +33,7 @@ import {
   type RuntimeEvent,
 } from '@sfagents/core';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
-import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, type DisplayApproval, type DisplayItem } from './display.js';
+import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
 export const DEFAULT_PORT = 8093;
 export const DEFAULT_HOST = '127.0.0.1';
@@ -403,6 +403,7 @@ export class WebServer {
       items,
       more,
       artifacts: this.conversation.artifacts().filter((a) => a.type !== 'agent_transcript').map(displayArtifact),
+      sections: displaySections(this.conversation.state),
       live: this.live ? { id: this.live.id, segments: this.live.segments } : null,
       approvals: [...this.approvals.values()].map((a) => a.display),
       notices: this.conversation.notices.filter((n) => n.kind === 'interrupted' || n.kind === 'recovered').map((n) => n.message),
@@ -435,6 +436,21 @@ export class WebServer {
       .artifacts()
       .map((a) => `${a.id}:${a.rev}:${a.pinned ? 1 : 0}`)
       .join(',');
+  }
+
+  private sectionSignature = '';
+
+  private sectionsKey(): string {
+    const state = this.conversation.state;
+    return `${state.structureRevision}:${state.sections.size}`;
+  }
+
+  /** Sends the section index when the model changed the structure. */
+  private publishSections(): void {
+    const key = this.sectionsKey();
+    if (key === this.sectionSignature) return;
+    this.sectionSignature = key;
+    this.broadcast('sections', { sections: displaySections(this.conversation.state) });
   }
 
   private publishArtifacts(force = false): void {
@@ -500,7 +516,9 @@ export class WebServer {
         error: failure ? getErrorMessage(failure) : result?.error,
         items,
         more,
+        sections: displaySections(this.conversation.state),
       });
+      this.sectionSignature = this.sectionsKey();
     })();
     return id;
   }
@@ -530,6 +548,7 @@ export class WebServer {
         if (seg) seg.status = status;
         this.broadcast('activity_end', { run: live.id, id, status });
         this.publishArtifacts();
+        this.publishSections();
         return;
       }
       case 'warning':

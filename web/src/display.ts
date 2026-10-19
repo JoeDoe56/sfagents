@@ -185,3 +185,64 @@ export function describeApproval(id: string, request: ConfirmationRequest): Disp
   }
   return { id, agent: request.agentPath.join(' › '), tool: request.toolName, title: d.title, detail };
 }
+
+export interface DisplaySection {
+  id: string;
+  title: string;
+  parent: string | null;
+  depth: number;
+  /** First message of the section or its subsections: where a jump lands. */
+  first: { id: string; seq: number };
+  /** Messages in the section and its subsections (excluding tool results). */
+  messages: number;
+  current: boolean;
+}
+
+/**
+ * The semantic index for the scroll rail: every section that has messages
+ * (directly or through subsections), in the order its first message
+ * appears in the thread, so the newest topic is last. Parents come before
+ * their subsections when they start at the same message.
+ */
+export function displaySections(state: ConversationState): DisplaySection[] {
+  const own = new Map<string, MessageRecord[]>();
+  for (const m of state.messages) {
+    if (m.role === 'tool') continue;
+    const s = state.sectionOf(m.id);
+    if (!s) continue;
+    const list = own.get(s) ?? [];
+    list.push(m);
+    own.set(s, list);
+  }
+  const depthOf = (id: string): number => {
+    let d = 0;
+    let cur = state.sections.get(id)?.parent ?? null;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      d++;
+      cur = state.sections.get(cur)?.parent ?? null;
+    }
+    return d;
+  };
+  const out: DisplaySection[] = [];
+  for (const s of state.sections.values()) {
+    let first: MessageRecord | undefined;
+    let count = 0;
+    for (const [sid, msgs] of own) {
+      // Is sid s itself or below it?
+      let cur: string | null = sid;
+      const seen = new Set<string>();
+      while (cur && cur !== s.id && !seen.has(cur)) {
+        seen.add(cur);
+        cur = state.sections.get(cur)?.parent ?? null;
+      }
+      if (cur !== s.id) continue;
+      count += msgs.length;
+      if (!first || msgs[0]!.seq < first.seq) first = msgs[0];
+    }
+    if (!first) continue;
+    out.push({ id: s.id, title: s.title, parent: s.parent, depth: depthOf(s.id), first: { id: first.id, seq: first.seq }, messages: count, current: state.currentSection === s.id });
+  }
+  return out.sort((a, b) => a.first.seq - b.first.seq || a.depth - b.depth);
+}

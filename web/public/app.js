@@ -11,6 +11,7 @@ import { setupGlass } from './glass.js';
 import { createSheet } from './sheet.js';
 import { renderTiles, createViewer } from './artifacts.js';
 import { UploadJob } from './up2k.js';
+import { createRail } from './rail.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -116,13 +117,18 @@ function syncTileLenses() {
 // ------------------------------------------------------------------ sheet
 
 let clearance = 100;
+let rail = null; // created below; the sheet lays out first
+const railEl = $('rail');
 const sheet = createSheet({
   bar,
   row,
   grabber: $('grabber'),
   scroller: sheetScroll,
-  onLayout: ({ opaque, rect, collapsedClearance }) => {
+  onLayout: ({ t, opaque, rect, collapsedClearance }) => {
     glassApi.setSheet({ ...rect, opaque });
+    // The topic rail sits above the collapsed bar and hides while the sheet is up.
+    railEl.style.bottom = `${Math.round(collapsedClearance + 12)}px`;
+    railEl.classList.toggle('covered', t > 0.03);
     if (Math.abs(collapsedClearance - clearance) > 0.5) {
       const atBottom = nearBottom();
       clearance = collapsedClearance;
@@ -350,6 +356,7 @@ function render() {
 async function loadEarlier() {
   const first = state.items[0];
   if (!first) return;
+  stick = false;
   const res = await fetch(`/api/messages?before=${first.seq}`);
   if (!res.ok) return;
   const data = await res.json();
@@ -361,6 +368,68 @@ async function loadEarlier() {
   requestAnimationFrame(() => {
     chat.scrollTop += chat.scrollHeight - prevHeight;
   });
+}
+
+// ------------------------------------------------------------------ topic rail
+
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+function anchorFor(section) {
+  return thread.querySelector(`[data-key="${CSS.escape(section.first.id)}"]`);
+}
+
+/** Scrolls the conversation to a section's first message, loading older messages if needed. */
+async function jumpToSection(section) {
+  let el = anchorFor(section);
+  for (let i = 0; !el && state.more && i < 100; i++) {
+    await loadEarlier();
+    await nextFrame();
+    await nextFrame();
+    el = anchorFor(section);
+  }
+  if (!el) {
+    notice(`“${section.title}” starts in a message that is not shown yet.`);
+    return;
+  }
+  // Include the time stamp right above, if there is one.
+  const prev = el.previousElementSibling;
+  const target = prev?.classList.contains('stamp') ? prev : el;
+  const safeTop = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--safe-top')) || 0;
+  stick = false;
+  chat.scrollTo({ top: Math.max(0, target.offsetTop - 12 - safeTop), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  rail.setActive(section.id);
+}
+
+rail = createRail({
+  root: railEl,
+  dots: $('railDots'),
+  list: $('railList'),
+  onJump: (s) => jumpToSection(s),
+});
+
+/** The section whose first message is the last one above a line a third of the way down. */
+let activeQueued = false;
+function updateActiveSection() {
+  if (activeQueued) return;
+  activeQueued = true;
+  requestAnimationFrame(() => {
+    activeQueued = false;
+    const line = chat.getBoundingClientRect().top + chat.clientHeight * 0.35;
+    let current = null;
+    for (const s of rail.sections) {
+      const el = anchorFor(s);
+      if (!el) continue;
+      if (el.getBoundingClientRect().top <= line) current = s.id;
+      else break;
+    }
+    rail.setActive(current);
+  });
+}
+chat.addEventListener('scroll', updateActiveSection, { passive: true });
+
+function setSections(list) {
+  rail.setSections(list || []);
+  updateActiveSection();
 }
 
 // ------------------------------------------------------------------ approvals
@@ -435,6 +504,7 @@ function applySnapshot(s) {
   state.approvals = s.approvals;
   state.limits = s.limits || state.limits;
   setArtifacts(s.artifacts);
+  setSections(s.sections);
   if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
   for (const text of s.notices || []) notice(text);
   render();
@@ -501,12 +571,14 @@ function connect() {
     notice(text, level === 'error' ? 'error' : '');
   });
   es.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
+  es.addEventListener('sections', (e) => setSections(JSON.parse(e.data).sections));
   es.addEventListener('run_end', (e) => {
     const data = JSON.parse(e.data);
     state.live = null;
     state.items = data.items;
     state.more = data.more;
     state.approvals = [];
+    if (data.sections) setSections(data.sections);
     if (data.error && data.status !== 'ERROR') notice(data.error);
     render();
     updateComposer();
