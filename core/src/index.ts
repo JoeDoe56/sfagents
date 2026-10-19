@@ -32,3 +32,13 @@ export * from './conversation/types.js';
 export { parseConversation, serializeConversation, serializeRecord, decorationFor } from './conversation/format.js';
 export { ConversationState, SemanticError } from './conversation/state.js';
 export type { SectionState, RunState } from './conversation/state.js';
+export {
+  FileConversationStore,
+  MemoryConversationStore,
+  ConversationStorageError,
+  InvalidOperationError,
+  readConversation,
+} from './conversation/store.js';
+export type { ConversationStore, HeaderInfo, OpenReport, StoreIO } from './conversation/store.js';
+export { ConversationLock, ConversationLockedError, forceUnlock, readLock } from './conversation/lock.js';
+export type { LockInfo } from './conversation/lock.js';
