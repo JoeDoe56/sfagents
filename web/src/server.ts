@@ -35,6 +35,7 @@ import {
 } from '@sfagents/core';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
+import { DEFAULT_LHM_URL, LhmClient } from './lhm.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
 export const DEFAULT_PORT = 8093;
@@ -60,6 +61,8 @@ export interface WebServerOptions {
   log?: (line: string) => void;
   /** Tests replace what the resource monitor reads from the machine. */
   systemSource?: SystemSource;
+  /** Libre Hardware Monitor's web server for the resource monitor (default http://127.0.0.1:8085); null: do not use it. */
+  lhmUrl?: string | null;
 }
 
 interface LiveSegment {
@@ -174,7 +177,7 @@ export class WebServer {
       confirm: (request, signal) => this.confirm(request, signal),
     });
     this.session = this.runtime.createSession();
-    this.system = new SystemMonitor(options.systemSource);
+    this.system = new SystemMonitor(options.systemSource, { lhm: options.lhmUrl === null ? null : new LhmClient(options.lhmUrl ?? DEFAULT_LHM_URL) });
     this.up2k = new Up2kStore(options.conversation.dir, options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES);
     this.artifactSignature = this.signature();
     this.server = http.createServer((req, res) => {

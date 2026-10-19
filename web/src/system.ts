@@ -2,17 +2,20 @@
  * System resources for the web client's monitor: CPU, GPU, memory, disk and
  * network activity, uptimes and how full each drive is.
  *
- * Everything is read from what the operating system already exposes to an
- * ordinary user, without extra packages: Node's os module and statfs
- * everywhere; /proc and /sys on Linux; vm_stat, netstat and ioreg on macOS;
- * nvidia-smi wherever it is installed. Anything a platform does not offer
- * (CPU temperature on macOS, disk and network activity on Windows, …) is
- * reported as null and the client shows a dash.
+ * Readings come from Libre Hardware Monitor's web server when it is running
+ * (see lhm.ts): CPU load, temperature and core count, GPU load, temperature
+ * and VRAM, memory, each drive's read and write activity and the network.
+ * Without it, the monitor falls back to what the operating system exposes
+ * to an ordinary user, without extra packages: Node's os module everywhere;
+ * /proc and /sys on Linux; vm_stat, netstat and ioreg on macOS; nvidia-smi
+ * wherever it is installed. Anything unavailable is null and the client
+ * shows a dash. Drive capacity always comes from statfs (per volume, as the
+ * file manager shows it) and uptimes from the OS and this process.
  *
- * Rates (CPU use, disk and network throughput) come from the difference
- * between two samples. The monitor only samples when asked: the first
- * request (or one after a long gap) takes two samples a moment apart, later
- * requests compare with the previous one.
+ * Without Libre Hardware Monitor, rates (CPU use, disk and network activity)
+ * come from the difference between two samples. The monitor only samples
+ * when asked: the first request (or one after a long gap) takes two samples
+ * a moment apart, later requests compare with the previous one.
  *
  * The parsers are pure functions over the text the system gives, exported
  * for tests.
@@ -22,17 +25,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { LhmClient, lhmReadings, type LhmReadings } from './lhm.js';
 
 export interface SystemSnapshot {
   host: string;
   platform: NodeJS.Platform;
   /** When this snapshot was taken (ms since the epoch). */
   at: number;
-  cpu: { usage: number | null; temperature: number | null; cores: number; model: string };
-  gpu: { usage: number | null; temperature: number | null; name: string } | null;
+  /** Where the readings came from: Libre Hardware Monitor, or the operating system. */
+  source: 'lhm' | 'os';
+  /** A note for the reader when readings are missing that Libre Hardware Monitor would add. */
+  hint: string | null;
+  /** cores: physical cores when known; threads: logical processors. */
+  cpu: { usage: number | null; temperature: number | null; cores: number | null; threads: number; model: string };
+  gpu: { usage: number | null; temperature: number | null; name: string; memory: { used: number; total: number } | null } | null;
   memory: { used: number; total: number };
-  /** busy: fraction of time the busiest disk was working (Linux); read/write in bytes per second. */
-  disk: { busy: number | null; read: number; write: number } | null;
+  /** read and write: fraction of time the busiest drive spent reading or writing; rates in bytes per second. */
+  disk: { read: number | null; write: number | null; readRate: number; writeRate: number } | null;
   /** Bytes per second over all physical interfaces. */
   network: { down: number; up: number } | null;
   uptime: { system: number; sfagents: number };
@@ -60,8 +69,9 @@ interface Sample {
 export interface DiskCounters {
   read: number;
   write: number;
-  /** Milliseconds each disk spent doing I/O, by device (Linux only). */
-  busyMs?: Record<string, number>;
+  /** Milliseconds each disk spent reading and writing, by device (Linux only). */
+  readMs?: Record<string, number>;
+  writeMs?: Record<string, number>;
 }
 
 /** What the monitor reads from the machine; tests replace it. */
@@ -157,7 +167,8 @@ const VIRTUAL_DISK = /^(?:loop|ram|zram|dm-|sr|fd|md)\d*/;
 export function parseDiskstats(text: string): DiskCounters {
   let read = 0;
   let write = 0;
-  const busyMs: Record<string, number> = {};
+  const readMs: Record<string, number> = {};
+  const writeMs: Record<string, number> = {};
   for (const line of text.split('\n')) {
     const f = line.trim().split(/\s+/);
     if (f.length < 14) continue;
@@ -166,9 +177,10 @@ export function parseDiskstats(text: string): DiskCounters {
     // Fields after the name: reads, merged, sectors read, ms, writes, merged, sectors written, ms, in flight, io ms, …
     read += Number(f[5]) * 512;
     write += Number(f[9]) * 512;
-    busyMs[name] = Number(f[12]);
+    readMs[name] = Number(f[6]);
+    writeMs[name] = Number(f[10]);
   }
-  return { read, write, busyMs };
+  return { read, write, readMs, writeMs };
 }
 
 const VIRTUAL_INTERFACE = /^(?:lo|ifb\d*|docker\d*|br-|veth|virbr|vnet|tun|tap|utun|awdl|llw|gif|stf|anpi|bridge|ap\d|p2p|dummy|sit|ip6tnl|tailscale|wg|zt)/;
@@ -231,15 +243,24 @@ export function parseVmStat(text: string): number | null {
   return Math.max(0, (app + wired + compressed) * size);
 }
 
-/** `nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,name --format=csv,noheader,nounits`: the busiest GPU. */
+export const NVIDIA_SMI_ARGS = ['--query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total,name', '--format=csv,noheader,nounits'];
+
+/** `nvidia-smi` with NVIDIA_SMI_ARGS: the busiest GPU (memory in MiB). */
 export function parseNvidiaSmi(text: string): SystemSnapshot['gpu'] {
   let best: SystemSnapshot['gpu'] = null;
   for (const line of text.split('\n')) {
-    const [u, t, ...name] = line.split(',').map((s) => s.trim());
+    const [u, t, mu, mt, ...name] = line.split(',').map((s) => s.trim());
     if (!u || name.length === 0) continue;
     const usage = Number(u);
     const temperature = Number(t);
-    const gpu = { usage: Number.isFinite(usage) ? usage / 100 : null, temperature: Number.isFinite(temperature) ? temperature : null, name: name.join(', ') };
+    const used = Number(mu);
+    const total = Number(mt);
+    const gpu = {
+      usage: Number.isFinite(usage) ? usage / 100 : null,
+      temperature: Number.isFinite(temperature) ? temperature : null,
+      name: name.join(', '),
+      memory: Number.isFinite(used) && total > 0 ? { used: used * 1024 ** 2, total: total * 1024 ** 2 } : null,
+    };
     if (!best || (gpu.usage ?? 0) > (best.usage ?? 0)) best = gpu;
   }
   return best;
@@ -250,7 +271,7 @@ export function parseIoregGpu(text: string): SystemSnapshot['gpu'] {
   const usage = /"Device Utilization %"\s*=\s*(\d+)/.exec(text);
   if (!usage) return null;
   const model = /"model"\s*=\s*"([^"]+)"/.exec(text)?.[1] ?? /"IOClass"\s*=\s*"([^"]+)"/.exec(text)?.[1] ?? 'GPU';
-  return { usage: Number(usage[1]) / 100, temperature: null, name: model };
+  return { usage: Number(usage[1]) / 100, temperature: null, name: model, memory: null };
 }
 
 /** macOS `ioreg -c IOBlockStorageDriver -r -w 0`: total bytes read and written. */
@@ -288,18 +309,42 @@ export function parseMounts(text: string): { device: string; mount: string }[] {
 
 // ------------------------------------------------------------------ monitor
 
+/** /proc/cpuinfo: physical cores (distinct core ids per physical package). */
+export function parseCpuinfo(text: string): number | null {
+  const cores = new Set<string>();
+  for (const block of text.split(/\n\s*\n/)) {
+    const pkg = /^physical id\s*:\s*(\d+)/m.exec(block)?.[1];
+    const core = /^core id\s*:\s*(\d+)/m.exec(block)?.[1];
+    if (core !== undefined) cores.add(`${pkg ?? 0}:${core}`);
+  }
+  return cores.size || null;
+}
+
 const SAMPLE_GAP_MS = 400;
 const STALE_MS = 15_000;
 const DRIVE_TTL_MS = 10_000;
+const WINDOWS_HINT = 'Start Libre Hardware Monitor with its web server (Options → Remote Web Server → Run) for temperatures, the GPU, and disk and network activity.';
+
+export interface SystemMonitorOptions {
+  /** Libre Hardware Monitor's web server; null to read only the operating system. */
+  lhm?: LhmClient | null;
+}
 
 export class SystemMonitor {
   private previous: Sample | undefined;
   private pending: Promise<SystemSnapshot> | undefined;
   private last: SystemSnapshot | undefined;
   private drives: { at: number; list: DriveUsage[] } | undefined;
+  private physicalCores: Promise<number | null> | undefined;
   private readonly startedAt = Date.now();
+  private readonly lhm: LhmClient | null;
 
-  constructor(private readonly source: SystemSource = nodeSystemSource()) {}
+  constructor(
+    private readonly source: SystemSource = nodeSystemSource(),
+    options: SystemMonitorOptions = {},
+  ) {
+    this.lhm = options.lhm === undefined ? new LhmClient() : options.lhm;
+  }
 
   /** A fresh snapshot (at most one per second; concurrent callers share one). */
   read(): Promise<SystemSnapshot> {
@@ -312,6 +357,13 @@ export class SystemMonitor {
   }
 
   private async take(): Promise<SystemSnapshot> {
+    const sensors = this.lhm ? await this.lhm.read() : null;
+    if (sensors) {
+      // Libre Hardware Monitor keeps its own rates; the OS samples restart if it goes away.
+      this.previous = undefined;
+      this.last = await this.fromLhm(lhmReadings(sensors));
+      return this.last;
+    }
     let before = this.previous;
     if (!before || Date.now() - before.at > STALE_MS) {
       before = await this.sample();
@@ -319,40 +371,99 @@ export class SystemMonitor {
     }
     const now = await this.sample();
     this.previous = now;
-    this.last = this.snapshot(before, now);
+    this.last = await this.snapshot(before, now);
     return this.last;
   }
 
-  private snapshot(a: Sample, b: Sample): SystemSnapshot {
-    const seconds = Math.max(0.001, (b.at - a.at) / 1000);
-    const rate = (x: number, y: number) => Math.max(0, (y - x) / seconds);
-    const cpuTotal = b.cpu.total - a.cpu.total;
+  private async common(at: number) {
     const cpus = this.source.cpus();
-    let busy: number | null = null;
-    if (a.disk?.busyMs && b.disk?.busyMs) {
-      busy = 0;
-      for (const [name, ms] of Object.entries(b.disk.busyMs)) {
-        const was = a.disk.busyMs[name];
-        if (was !== undefined) busy = Math.max(busy, Math.min(1, (ms - was) / (seconds * 1000)));
-      }
-    }
     return {
       host: this.source.hostname(),
       platform: this.source.platform,
+      at,
+      threads: cpus.length,
+      model: cpus[0]?.model.trim() ?? '',
+      cores: await this.cores(),
+      uptime: { system: Math.round(this.source.uptime()), sfagents: Math.round((at - this.startedAt) / 1000) },
+      drives: this.driveList(),
+    };
+  }
+
+  private async fromLhm(r: LhmReadings): Promise<SystemSnapshot> {
+    const c = await this.common(Date.now());
+    return {
+      host: c.host,
+      platform: c.platform,
+      at: c.at,
+      source: 'lhm',
+      hint: null,
+      cpu: { usage: r.cpu?.usage ?? null, temperature: r.cpu?.temperature ?? null, cores: r.cpu?.cores ?? c.cores, threads: c.threads, model: r.cpu?.name || c.model },
+      gpu: r.gpu,
+      memory: r.memory ?? { used: this.source.totalmem() - this.source.freemem(), total: this.source.totalmem() },
+      disk: r.disk,
+      network: r.network,
+      uptime: c.uptime,
+      drives: c.drives,
+    };
+  }
+
+  private async snapshot(a: Sample, b: Sample): Promise<SystemSnapshot> {
+    const seconds = Math.max(0.001, (b.at - a.at) / 1000);
+    const rate = (x: number, y: number) => Math.max(0, (y - x) / seconds);
+    const cpuTotal = b.cpu.total - a.cpu.total;
+    // The busiest disk's share of the interval spent reading, and writing.
+    const busiest = (x?: Record<string, number>, y?: Record<string, number>) => {
+      if (!x || !y) return null;
+      let most = 0;
+      for (const [name, ms] of Object.entries(y)) {
+        const was = x[name];
+        if (was !== undefined) most = Math.max(most, Math.min(1, (ms - was) / (seconds * 1000)));
+      }
+      return most;
+    };
+    const c = await this.common(b.at);
+    return {
+      host: c.host,
+      platform: c.platform,
       at: b.at,
+      source: 'os',
+      hint: this.source.platform === 'win32' ? WINDOWS_HINT : null,
       cpu: {
         usage: cpuTotal > 0 ? Math.min(1, Math.max(0, 1 - (b.cpu.idle - a.cpu.idle) / cpuTotal)) : null,
         temperature: b.cpuTemperature,
-        cores: cpus.length,
-        model: cpus[0]?.model.trim() ?? '',
+        cores: c.cores,
+        threads: c.threads,
+        model: c.model,
       },
       gpu: b.gpu,
       memory: b.memory,
-      disk: a.disk && b.disk ? { busy, read: rate(a.disk.read, b.disk.read), write: rate(a.disk.write, b.disk.write) } : null,
+      disk:
+        a.disk && b.disk
+          ? {
+              read: busiest(a.disk.readMs, b.disk.readMs),
+              write: busiest(a.disk.writeMs, b.disk.writeMs),
+              readRate: rate(a.disk.read, b.disk.read),
+              writeRate: rate(a.disk.write, b.disk.write),
+            }
+          : null,
       network: a.network && b.network ? { down: rate(a.network.rx, b.network.rx), up: rate(a.network.tx, b.network.tx) } : null,
-      uptime: { system: Math.round(this.source.uptime()), sfagents: Math.round((b.at - this.startedAt) / 1000) },
-      drives: this.driveList(),
+      uptime: c.uptime,
+      drives: c.drives,
     };
+  }
+
+  /** Physical cores, looked up once (Libre Hardware Monitor counts them itself). */
+  private cores(): Promise<number | null> {
+    this.physicalCores ??= (async () => {
+      const src = this.source;
+      if (src.platform === 'linux') return parseCpuinfo(src.readFile('/proc/cpuinfo') ?? '');
+      if (src.platform === 'darwin') {
+        const n = Number((await src.run('sysctl', ['-n', 'hw.physicalcpu']))?.trim());
+        return n > 0 ? n : null;
+      }
+      return null;
+    })();
+    return this.physicalCores;
   }
 
   private async sample(): Promise<Sample> {
@@ -397,7 +508,7 @@ export class SystemMonitor {
 
   private async gpu(): Promise<SystemSnapshot['gpu']> {
     const src = this.source;
-    const nvidia = await src.run('nvidia-smi', ['--query-gpu=utilization.gpu,temperature.gpu,name', '--format=csv,noheader,nounits']);
+    const nvidia = await src.run('nvidia-smi', NVIDIA_SMI_ARGS);
     if (nvidia) {
       const gpu = parseNvidiaSmi(nvidia);
       if (gpu) return gpu;
@@ -423,7 +534,9 @@ export class SystemMonitor {
         if (t > 0) temperature = t / 1000;
       }
       const name = src.readFile(`${base}/product_name`)?.trim() || 'GPU';
-      return { usage: Number(busy) / 100, temperature, name };
+      const used = Number(src.readFile(`${base}/mem_info_vram_used`));
+      const total = Number(src.readFile(`${base}/mem_info_vram_total`));
+      return { usage: Number(busy) / 100, temperature, name, memory: total > 0 && Number.isFinite(used) ? { used, total } : null };
     }
     return null;
   }

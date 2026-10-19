@@ -71,11 +71,14 @@ Options:
       --port <n>            (web) Port to listen on (default ${DEFAULT_PORT})
       --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
                             the agent and its tools to your network)
+      --lhm <url|off>       (web) Libre Hardware Monitor's web server for the resource monitor
+                            (default http://127.0.0.1:8085; user:password@ for its sign-in)
   -v, --version             Print the version
   -h, --help                Show this help
 
 Environment:
   OPENROUTER_API_KEY        API key for provider "openrouter" (may be set in <config dir>/.env)
+  SFAGENTS_LHM_URL          Same as --lhm
   SFAGENTS_DEBUG=1          Debug logging to stderr`;
 
 interface Streams {
@@ -115,6 +118,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         page: { type: 'string' },
         port: { type: 'string' },
         host: { type: 'string' },
+        lhm: { type: 'string' },
         version: { type: 'boolean', short: 'v', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -233,6 +237,24 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         streams.stderr.write(`--port must be a number from 0 to 65535, got "${values.port}".\n`);
         return EXIT_CONFIG;
       }
+      const lhmSetting = values.lhm ?? process.env.SFAGENTS_LHM_URL;
+      let lhmUrl: string | null | undefined;
+      if (lhmSetting !== undefined && lhmSetting !== '') {
+        if (lhmSetting === 'off') lhmUrl = null;
+        else {
+          let parsed: URL | undefined;
+          try {
+            parsed = new URL(lhmSetting);
+          } catch {
+            parsed = undefined;
+          }
+          if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+            streams.stderr.write(`--lhm must be an http:// address or "off", got "${lhmSetting}".\n`);
+            return EXIT_CONFIG;
+          }
+          lhmUrl = parsed.href;
+        }
+      }
       try {
         checkCredentials(tree, process.env);
       } catch (error) {
@@ -240,7 +262,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       }
       const conversation = openSelected('start', values, tree, streams);
       if (conversation instanceof Error || !conversation) return EXIT_CONFIG;
-      return serveWeb(tree, conversation, { port, host: values.host ?? DEFAULT_HOST, yes: values.yes }, streams);
+      return serveWeb(tree, conversation, { port, host: values.host ?? DEFAULT_HOST, yes: values.yes, lhmUrl }, streams);
     }
     default:
       streams.stderr.write(`Unknown command "${command}".\n\n${USAGE}\n`);
@@ -331,7 +353,7 @@ async function runOnce(
 async function serveWeb(
   tree: AgentTree,
   conversation: ConversationService,
-  opts: { port: number; host: string; yes: boolean },
+  opts: { port: number; host: string; yes: boolean; lhmUrl?: string | null },
   streams: Streams,
 ): Promise<number> {
   const style = createStyle(streams.stderr as NodeJS.WriteStream);
@@ -341,6 +363,7 @@ async function serveWeb(
     port: opts.port,
     host: opts.host,
     approveAll: opts.yes,
+    lhmUrl: opts.lhmUrl,
     log: (line) => streams.stderr.write(`${line}\n`),
   });
   // Cleanups run in reverse: stop the server (and any run) before closing the conversation.

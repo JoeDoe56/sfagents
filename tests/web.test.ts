@@ -449,7 +449,7 @@ describe('sfagents web (CLI)', () => {
     assert.equal(fs.existsSync(path.join(dir, '.sfagents', 'conversation.lock')), false, 'lock released');
   });
 
-  test('rejects a bad port and --ephemeral', async () => {
+  test('rejects a bad port, a bad --lhm address and --ephemeral', async () => {
     const dir = project();
     const { runCli } = await import('./helpers.js');
     const bad = await runCli(['web', '--port', 'abc', '--config', dir], { env: { OPENROUTER_API_KEY: 'k' } });
@@ -457,6 +457,9 @@ describe('sfagents web (CLI)', () => {
     assert.match(bad.stderr, /--port must be a number/);
     const eph = await runCli(['web', '--ephemeral', '--config', dir], { env: { OPENROUTER_API_KEY: 'k' } });
     assert.equal(eph.code, 2);
+    const lhm = await runCli(['web', '--lhm', 'ftp://example', '--config', dir], { env: { OPENROUTER_API_KEY: 'k' } });
+    assert.equal(lhm.code, 2);
+    assert.match(lhm.stderr, /--lhm must be an http/);
   });
 });
 
