@@ -417,24 +417,24 @@ void main() {
     float secondaryFacing = max(dot(N, secondaryLight), 0.0);
     // Hairline rim, as on Apple's Liquid Glass (measured against iOS at 3x):
     // about one CSS pixel wide, brightest on the outermost backing pixel and
-    // fading linearly inward, so it reads as a crisp line. It is brightest
-    // where the edge faces the light and toward the middle of that edge,
-    // falls off steeply around the corners, and all but vanishes on edges
-    // side-on to the light, with a weaker reflection on the opposite edge.
+    // fading linearly inward, so it reads as a crisp line. Its strength comes
+    // from the same 3D light as the rest of the rim lighting: the edge's 3D
+    // normal (with the lens tilt) against the primary light, and a weaker
+    // reflection from the secondary light on the opposite side. A light
+    // low across the glass lights the edge facing it, toward that edge's
+    // middle (from a 3D normal of the face position), falls off steeply
+    // around the corners and leaves side-on edges dark; a light overhead
+    // lights the rim more evenly.
     float insideBacking = max(0.0, -opticalDistance);
     float hairWidth = max(1.0, 0.95 * u_devicePixelRatio);
     float hairline = clamp(1.0 - (insideBacking - 0.5) / hairWidth, 0.0, 1.0);
-    vec2 edgeNormal = normal / max(length(normal), 0.0001);
-    vec2 lightDir2 = normalize(primaryLight.xy + vec2(0.0001));
-    float litEdge = max(dot(edgeNormal, lightDir2), 0.0);
-    float backEdge = max(dot(edgeNormal, -lightDir2), 0.0);
+    vec3 edgeN = normalize(vec3(normal * 1.35 + tiltNormal, 0.62));
     vec2 facePosition = p_px / max(b_px, vec2(1.0));
     facePosition /= max(length(facePosition), 0.0001);
-    float along = max(dot(facePosition, lightDir2), 0.0);
-    float alongBack = max(dot(facePosition, -lightDir2), 0.0);
-    float sharp = hairline * u_rim * (0.04 +
-      pow(litEdge, 3.0) * (0.25 + 0.75 * pow(along, 2.5)) +
-      0.5 * pow(backEdge, 3.0) * (0.25 + 0.75 * pow(alongBack, 2.5)));
+    vec3 faceN = normalize(vec3(facePosition + tiltNormal, 0.62));
+    float litEdge = pow(max(dot(edgeN, primaryLight), 0.0), 5.0) * (0.3 + 0.7 * pow(max(dot(faceN, primaryLight), 0.0), 3.0));
+    float backEdge = pow(max(dot(edgeN, secondaryLight), 0.0), 5.0) * (0.3 + 0.7 * pow(max(dot(faceN, secondaryLight), 0.0), 3.0));
+    float sharp = hairline * u_rim * (0.04 + litEdge + 0.5 * backEdge);
     float soft = innerRim * pow(primaryFacing, 2.2) * u_specularPrimary * 0.35;
     float opposite = innerRim * 0.3 * pow(secondaryFacing, 2.8) * u_specularSecondary;
     // Light from the content around this stretch of the edge, a few pixels
