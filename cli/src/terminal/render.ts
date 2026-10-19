@@ -14,6 +14,8 @@ export interface RenderOptions {
   /** Where activity lines go (stderr for `run`, stdout for `start`). */
   activity: NodeJS.WritableStream;
   showReasoning?: boolean;
+  /** Print one line per turn describing the working context (estimates). */
+  showContext?: boolean;
 }
 
 function oneLine(text: string, max = 160): string {
@@ -99,6 +101,15 @@ export class EventRenderer {
         this.activityLine(depth - 1, `${s.magenta('↳')} ${s.bold(event.agentPath[depth]!)} ${ok ? s.green(summary) : s.red(summary)}${r.error ? s.dim(` (${oneLine(r.error, 120)})`) : ''}`);
         return;
       }
+      case 'context':
+        if (!this.options.showContext || depth > 0) return;
+        this.activityLine(
+          depth,
+          s.dim(
+            `context: ~${event.estimatedTokens.toLocaleString('en-US')} of ${event.budget.toLocaleString('en-US')} est. tokens · ${event.includedExchanges} recent exchange(s)${event.omittedExchanges ? `, ${event.omittedExchanges} older not sent` : ''} · section index ${event.indexEntries}/${event.indexTotal}`,
+          ),
+        );
+        return;
       case 'warning':
         this.activityLine(depth, `${who}${s.yellow('warning:')} ${oneLine(event.message, 400)}`);
         return;

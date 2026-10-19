@@ -40,6 +40,7 @@ import {
 import { Semaphore } from '../utils/semaphore.js';
 import { PersistenceFailure, type RunRecorder } from './recorder.js';
 import { ConversationService, type ReplayTarget } from '../conversation/service.js';
+import { buildWorkingContext, type ContextReport } from '../conversation/context.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 export const DEFAULT_MAX_TURNS = 40;
@@ -75,8 +76,11 @@ interface RunParams {
   recorder?: RunRecorder;
   /** The main conversation, for agents granted conversation access. */
   conversation?: ConversationService;
-  /** Extra system-prompt text (conversation guidance and section index). */
-  systemExtra?: string;
+  /**
+   * Builds the turn's working context once the system prompt and tools are
+   * known (root sessions). Replaces `messages` and adds system-prompt text.
+   */
+  prepareContext?: (fixedText: string) => { messages: ChatMessage[]; systemExtra?: string; report?: ContextReport };
 }
 
 /** Identity of the provider/model an agent uses, as recorded in run_start. */
@@ -300,10 +304,24 @@ export class AgentRuntime implements ChildRunner {
       throw e;
     }
 
-    const systemPrompt = buildSystemPrompt(node, [...tools.keys()], params.systemExtra);
+    const declarations = [...tools.values()].map((t) => t.schema);
+    let systemExtra: string | undefined;
+    if (params.prepareContext) {
+      try {
+        const base = buildSystemPrompt(node, [...tools.keys()]);
+        const prepared = params.prepareContext(base + JSON.stringify(declarations));
+        messages.splice(0, messages.length, ...prepared.messages);
+        systemExtra = prepared.systemExtra;
+        if (prepared.report) emit({ type: 'context', agentPath, ...prepared.report });
+      } catch (error) {
+        const message = getErrorMessage(error);
+        emit({ type: 'error', agentPath, message });
+        return finish(AgentTerminateMode.ERROR, message);
+      }
+    }
+    const systemPrompt = buildSystemPrompt(node, [...tools.keys()], systemExtra);
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
-    const declarations = [...tools.values()].map((t) => t.schema);
     const maxTurns = d.limits?.maxTurns ?? DEFAULT_MAX_TURNS;
     const approvals = this.sessionApprovals.get(node.id) ?? new Set<string>();
     this.sessionApprovals.set(node.id, approvals);
@@ -508,8 +526,13 @@ export class AgentSession {
     try {
       const recorder = this.conversation.beginRootRun(this.node);
       recorder.user(input);
-      const messages: ChatMessage[] = this.conversation.history(replayTarget(this.node.definition));
+      const messages: ChatMessage[] = [];
       this.lastMessages = messages;
+      const definition = this.node.definition;
+      const conversation = this.conversation;
+      const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
+      const prepareContext = (fixedText: string) =>
+        buildWorkingContext(conversation.state, replayTarget(definition), definition.context ?? {}, fixedText, { retrievable });
       const queue: RuntimeEvent[] = [];
       let wake: (() => void) | undefined;
       const emit = (event: RuntimeEvent) => {
@@ -528,6 +551,7 @@ export class AgentSession {
           emit,
           recorder,
           conversation: this.conversation,
+          prepareContext,
         })
         .then(
           (r) => {

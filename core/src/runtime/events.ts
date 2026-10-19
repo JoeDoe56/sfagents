@@ -73,6 +73,16 @@ export type RuntimeEvent =
       display: string;
       errorType?: ToolErrorType;
     })
+  | (EventBase & {
+      type: 'context';
+      /** Estimated tokens (characters / 4) of the first request of the turn. */
+      estimatedTokens: number;
+      budget: number;
+      includedExchanges: number;
+      omittedExchanges: number;
+      indexEntries: number;
+      indexTotal: number;
+    })
   | (EventBase & { type: 'warning'; message: string })
   | (EventBase & { type: 'error'; message: string })
   | (EventBase & { type: 'agent_end'; result: AgentRunResult });

@@ -60,6 +60,7 @@ Options:
       --mcp <file>          MCP server definitions (default: <config dir>/mcp.json)
   -y, --yes                 Approve every tool call that would ask for confirmation
       --show-reasoning      Print model reasoning text when the provider returns it
+      --show-context        Print the size and makeup of each turn's working context (estimates)
       --json                (run) Print the structured result as JSON instead of streaming
       --conversation <file> Use this conversation file (default: <config dir>/.sfagents/conversation.md)
       --ephemeral           (start) Keep this session in memory only; nothing is stored
@@ -100,6 +101,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         mcp: { type: 'string' },
         yes: { type: 'boolean', short: 'y', default: false },
         'show-reasoning': { type: 'boolean', default: false },
+        'show-context': { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },
         conversation: { type: 'string' },
         ephemeral: { type: 'boolean', default: false },
@@ -172,7 +174,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       }
       const conv = openSelected('run', values, tree, streams);
       if (conv instanceof Error) return EXIT_CONFIG;
-      return runOnce(tree, task, { yes: values.yes, json: values.json, showReasoning: values['show-reasoning'], conversation: conv }, streams);
+      return runOnce(tree, task, { yes: values.yes, json: values.json, showReasoning: values['show-reasoning'], showContext: values['show-context'], conversation: conv }, streams);
     }
     case 'start': {
       if (sub !== undefined) {
@@ -199,6 +201,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         return await startRepl({
           runtime,
           showReasoning: values['show-reasoning'],
+          showContext: values['show-context'],
           notices: conversation ? conversation.notices.map((n) => n.message) : ['Ephemeral session: nothing is stored.'],
           bindConfirm: (handler) => {
             bound = handler;
@@ -238,7 +241,7 @@ function openSelected(mode: 'start' | 'run', flags: ConversationFlags, tree: Age
 async function runOnce(
   tree: AgentTree,
   task: string,
-  opts: { yes: boolean; json: boolean; showReasoning: boolean; conversation?: ConversationService },
+  opts: { yes: boolean; json: boolean; showReasoning: boolean; showContext?: boolean; conversation?: ConversationService },
   streams: Streams,
 ): Promise<number> {
   const interactive = process.stdin.isTTY === true && (streams.stderr as NodeJS.WriteStream).isTTY === true;
@@ -247,6 +250,7 @@ async function runOnce(
     out: opts.json ? (new NullStream() as unknown as NodeJS.WritableStream) : streams.stdout,
     activity: streams.stderr,
     showReasoning: opts.showReasoning,
+    showContext: opts.showContext,
   });
   const runtime = new AgentRuntime({
     tree,

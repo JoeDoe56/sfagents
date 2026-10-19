@@ -73,3 +73,12 @@ export {
 export type { SectionEntry, SectionPage, SearchHit, SearchResult, FetchResult } from './conversation/sections.js';
 export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE } from './conversation/tools.js';
 export type { ConversationAccess } from './conversation/tools.js';
+export {
+  buildWorkingContext,
+  ContextBudgetError,
+  DEFAULT_MAX_INPUT_TOKENS,
+  DEFAULT_RECENT_EXCHANGES,
+  estimateTokens,
+  TURN_RESERVE,
+} from './conversation/context.js';
+export type { ContextPolicy, ContextReport, WorkingContext } from './conversation/context.js';

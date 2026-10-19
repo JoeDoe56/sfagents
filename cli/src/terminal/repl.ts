@@ -14,6 +14,7 @@ import { createStyle } from './style.js';
 export interface ReplOptions {
   runtime: AgentRuntime;
   showReasoning: boolean;
+  showContext?: boolean;
   /** Receives the terminal confirmation handler once readline exists. */
   bindConfirm?: (handler: ConfirmationHandler) => void;
   /** Lines shown at startup (conversation path, recovery notes). */
@@ -36,7 +37,7 @@ export async function startRepl(options: ReplOptions): Promise<number> {
   const style = createStyle(output as NodeJS.WriteStream);
   const interactive = (input as NodeJS.ReadStream).isTTY === true && (output as NodeJS.WriteStream).isTTY === true;
   const rl = readline.createInterface({ input, output, terminal: interactive });
-  const renderer = new EventRenderer({ out: output, activity: output, showReasoning: options.showReasoning });
+  const renderer = new EventRenderer({ out: output, activity: output, showReasoning: options.showReasoning, showContext: options.showContext });
   options.bindConfirm?.(createTerminalConfirm(rl, output, renderer));
 
   const session = options.runtime.createSession();
