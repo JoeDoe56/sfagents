@@ -25,6 +25,16 @@ Step 'CLI: version' { npx sfagents --version }
 Step 'CLI: agents validate' { npx sfagents agents validate }
 Step 'CLI: mcp list' { npx sfagents mcp list }
 
+# Persistent conversation smoke checks in a temporary project (no model calls).
+$tmp = Join-Path $env:TEMP ("sfagents-smoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $tmp | Out-Null
+Set-Content -Path (Join-Path $tmp 'agent.json') -Value '{ "id": "main", "provider": "openrouter", "model": "test/model", "systemPrompt": "smoke" }'
+Step 'Conversation: info on a missing conversation reports it' { npx sfagents conversation info --config $tmp; if ($LASTEXITCODE -eq 1) { $global:LASTEXITCODE = 0 } }
+Step 'Conversation: unlock with no lock' { npx sfagents conversation unlock --config $tmp }
+Remove-Item -Recurse -Force $tmp
+
+Write-Host "`nManual check (needs a real console): run 'npx sfagents start', ask for a long shell command such as 'ping -n 30 127.0.0.1', approve it, press Ctrl+C once (the turn is cancelled and the prompt returns), then /exit and run 'npx sfagents conversation info' (lock: free)." -ForegroundColor Yellow
+
 if ($env:OPENROUTER_API_KEY) {
   Step 'Live: one request' { npx sfagents run "Reply with exactly: windows smoke OK" }
   Step 'Live: test suite' { npm run test:live }

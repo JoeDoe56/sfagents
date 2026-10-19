@@ -1,6 +1,6 @@
 # Plan: persistent conversation and semantic memory
 
-Status: implementation plan; the features below are not implemented yet.
+Status: implemented (2026-10-18). Results, deviations and remaining limitations are in [MILESTONE-REPORT.md](MILESTONE-REPORT.md#milestone-2-persistent-conversation-and-semantic-memory); the format is specified in [CONVERSATION-FORMAT.md](CONVERSATION-FORMAT.md).
 
 Scope: parts 1–3 of the proposed next steps: define the conversation format,
 add persistence and resume, then add semantic organization and retrieval.

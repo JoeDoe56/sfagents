@@ -50,7 +50,8 @@ The upstream code is not merged continuously. To take a later upstream fix, comp
 | `runtime/tool-executor.ts` | Design-derived | `core/coreToolScheduler.ts` (check order) |
 | `agents/invoke-child.ts` | Design-derived | `tools/agent/agent.ts` |
 | `utils/debug.ts` | Design-derived | `utils/debugLogger.ts` (call shape only) |
-| `agents/definition.ts`, `agents/loader.ts`, `providers/types.ts`, `providers/factory.ts`, `tools/tool-context.ts`, `tools/file-io.ts`, `utils/semaphore.ts`, `index.ts` | SF Agents | none |
+| `agents/definition.ts`, `agents/loader.ts`, `providers/types.ts`, `providers/factory.ts`, `tools/tool-context.ts`, `tools/file-io.ts`, `utils/semaphore.ts`, `runtime/recorder.ts`, `index.ts` | SF Agents | none |
+| `conversation/*` (format, state, store, lock, service, sections, tools, context) | SF Agents | none. The persistent conversation and semantic memory are new; upstream's session recording and memory subsystems were not used. |
 
 ## cli (`@sfagents/cli`)
 
@@ -58,7 +59,7 @@ The upstream code is not merged continuously. To take a later upstream fix, comp
 | --- | --- | --- |
 | `utils/read-stdin.ts` | Adapted | `utils/readStdin.ts` |
 | `utils/cleanup.ts` | Adapted | `utils/cleanup.ts` |
-| `entry/main.ts`, `config/load.ts`, `terminal/*.ts`, `index.ts`, `bin/sfagents.js` | SF Agents | none (replace `cli.ts`, `gemini.tsx`, `nonInteractiveCli.ts`, `config/*` and the Ink UI) |
+| `entry/main.ts`, `entry/conversation.ts`, `config/load.ts`, `terminal/*.ts`, `index.ts`, `bin/sfagents.js` | SF Agents | none (replace `cli.ts`, `gemini.tsx`, `nonInteractiveCli.ts`, `config/*` and the Ink UI) |
 
 ## Not taken from upstream
 

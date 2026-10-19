@@ -34,12 +34,13 @@ Keys never go in agent JSON. `.env` is git-ignored. Variables already set in the
 
 | Command | What it does |
 | --- | --- |
-| `sfagents start` | Interactive conversation with the root agent. Streams answers, shows tool and child activity, asks before risky calls. Ctrl+C cancels the running turn; `/exit` or Ctrl+D quits; `/clear` starts over; `/tree` shows the agents. |
-| `sfagents run "<task>"` | One request. The answer goes to stdout and activity to stderr. `-` reads the task from stdin. `--json` prints the structured result. Exit code: 0 done, 1 failed, 2 configuration error, 130 cancelled. |
+| `sfagents start` | Opens (or creates) this project's persistent conversation and talks to the root agent. Streams answers, shows tool and child activity, asks before risky calls. Ctrl+C cancels the running turn; `/exit` or Ctrl+D quits; `/clear` resets the working context (history is kept); `/sections` shows the topic tree; `/tree` shows the agents. `--ephemeral` keeps the session in memory only. |
+| `sfagents run "<task>"` | One request, ephemeral unless `--persist` (or `--conversation <file>`) records it in the conversation. The answer goes to stdout and activity to stderr. `-` reads the task from stdin. `--json` prints the structured result. Exit code: 0 done, 1 failed, 2 configuration error, 130 cancelled. |
+| `sfagents conversation …` | Inspects the stored conversation without opening it for writing: `info`, `sections`, `show <section\|unassigned\|message id>`, `search <words>`, `artifacts`. `unlock` removes a stale lock after confirmation. |
 | `sfagents agents validate` | Validates every agent file and prints the tree with each agent's tools, auto-approvals and roots. |
 | `sfagents mcp list` | Connects to each server in `mcp.json` and shows its status, tools and which agents may use it. |
 
-Common options: `--config <dir|file>` (defaults to the current directory), `--mcp <file>`, `--yes` (approve every call that would ask), `--show-reasoning`.
+Common options: `--config <dir|file>` (defaults to the current directory), `--mcp <file>`, `--yes` (approve every call that would ask), `--show-reasoning`, `--show-context` (one line per turn: estimated context size, recent exchanges sent, older ones left out), `--conversation <file>`, `--page N` (for `conversation` listings).
 
 ## Files
 
@@ -48,6 +49,9 @@ agent.json                    root agent
 agents/1-Subagent-Worker.json a child agent (name and number are for sorting only)
 mcp.json                      named MCP servers (optional)
 .env                          secrets (optional, untracked)
+.sfagents/                    local conversation state (created by start; never committed)
+  conversation.md             the persistent conversation: messages, sections, artifact references
+  transcripts/<run>.md        one per child agent run
 ```
 
 This repository ships a working example: a root agent with file tools and shell, a read-only `worker` child, and a demo MCP server. Run `npx sfagents agents validate` to see it.
@@ -75,6 +79,8 @@ This repository ships a working example: a root agent with file tools and shell,
     "maxDepth": 4,
     "children": ["agents/1-Subagent-Worker.json"]
   },
+  "conversation": { "access": "organize" },
+  "context": { "maxInputTokens": 48000, "recentExchanges": 12 },
   "limits": {
     "maxTurns": 40,
     "timeoutSeconds": 1800,
@@ -97,6 +103,8 @@ This repository ships a working example: a root agent with file tools and shell,
 | `tools.autoApprove` | Tools that skip the confirmation prompt. Built-in IDs, `mcp__<server>__<tool>` or `mcp__<server>__*`. |
 | `spawn.children` | Child definition files, relative to this file, inside the configuration directory. Children use the same format and may have their own children. |
 | `spawn.maxDepth` | Root only. Maximum tree depth (default 4). |
+| `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Root defaults to `organize`; children default to `none` and may never exceed their parent. |
+| `context` | Root only. Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
 | `limits` | Turn budget and timeouts. Defaults are shown above. |
 
 Unknown fields are errors, so a typo cannot silently change permissions. Every error names the file and field.
@@ -112,6 +120,18 @@ An agent with children gets one extra tool, `invoke_child`. It lists only that a
 
 `status` is `completed`, `error`, `max_turns`, `timeout` or `cancelled`. Children run one at a time in this version; `maxConcurrentChildren` is still enforced, so parallel execution can be added later without changing the semantics. Cancelling the root cancels the whole chain.
 
+## Persistent conversation
+
+`sfagents start` continues one ongoing conversation per project, stored in `.sfagents/conversation.md` next to `agent.json`. Close the CLI, come back tomorrow, and the agent still has the thread. The file is plain Markdown: opened in an editor or on GitHub it reads as a transcript, with metadata hidden in HTML comments. [docs/CONVERSATION-FORMAT.md](docs/CONVERSATION-FORMAT.md) specifies it.
+
+- **Sections.** The root agent organizes the conversation into topics and subtopics with its section tools. New messages are filed under the current section automatically. Renaming or moving a section never changes the stored messages.
+- **Working context.** Each request carries the system prompt, a bounded index of section titles, and the most recent complete exchanges that fit the budget. Older material stays stored; the agent fetches it with `search_conversation` or `fetch_section` when it becomes relevant. `--show-context` prints what each turn sent.
+- **Children** run in fresh contexts. Each child run is stored in `transcripts/<run>.md` and linked from the parent conversation as an `agent_transcript` artifact. Children cannot see the main conversation unless their definition grants `conversation.access`.
+- **One writer.** A second `start` on the same conversation gets an error naming the process that holds it. A lock left by a crashed process is replaced automatically when that process is provably gone; `sfagents conversation unlock` handles anything else.
+- **Durability and crashes.** Every message, tool start and tool result is flushed to disk before the next step. After a crash, the next start reports interrupted runs and marks each unfinished tool call as either "never started" or "outcome unknown". Nothing is retried automatically, and the model is told which is which. A damaged ending is moved to `.sfagents/recovered/` and recorded, never silently dropped.
+- **What is not restored.** "Always allow" approvals and `--yes` apply to the running process only. On resume, tools and permissions come from the current `agent.json`.
+- **Privacy.** `.sfagents/` contains a `.gitignore` that excludes everything in it, and agent file tools cannot read or write it. Conversations can still contain anything you or your tools put in them, so treat the folder as private.
+
 ## Permissions (enforced in code, not in prompts)
 
 - **Tool allowlists** are checked when each call is executed. A model asking for a tool it was not given gets an error back; nothing runs.
@@ -120,6 +140,7 @@ An agent with children gets one extra tool, `invoke_child`. It lists only that a
 - **Shell is root-only.** A path allowlist cannot confine arbitrary commands, and this version has no OS sandbox, so `shell` on any child is a configuration error. Shell commands run with your user's full permissions. Every command asks for approval unless you auto-approve `shell`.
 - **Writes, edits, shell and MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag. In `run` mode without a terminal, calls that need approval are denied and the model is told why.
 - **MCP servers are not workspace-confined.** A server can reach anything its own process can. Grant servers per agent, preferably limited to specific tools.
+- **Conversation state** (`.sfagents/`) is invisible to all file tools; it changes only through the conversation service.
 - **Secrets:** the configuration directory's `.env` cannot be read, searched or written by any file tool (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model. The root agent's approved shell commands could still read `.env`, so approve shell commands with care.
 
 ## MCP servers
@@ -154,6 +175,7 @@ core/src/
   tools/        built-in tools
   mcp/          mcp.json, connections, MCP tool wrapper
   permissions/  workspace containment
+  conversation/ format, store, lock, sections, context builder
 cli/src/
   entry/        commands and options
   config/       config location and .env
@@ -166,11 +188,14 @@ Core has no terminal code; the CLI uses only Core's public exports.
 ## Known limitations
 
 - Children run sequentially; no live parent/child messaging.
-- Conversation context lives in memory for the process only.
+- Search is lexical (all query words must appear); there is no semantic or embedding search yet, and no section summaries.
+- Section deletion and merging are not supported yet.
+- Token counts for the context budget are estimates (characters ÷ 4).
+- If SF Agents itself is force-killed, a shell command it started keeps running; the next start reports that call's outcome as unknown.
 - No OS sandbox, which is why `shell` is limited to the root agent.
 - Model output is text only; MCP image and audio results are summarized, not shown to the model.
 - No MCP OAuth flow; use headers with environment variables.
-- Not yet verified on Windows.
+- Windows: the first milestone was verified on Windows; the conversation features were developed and tested on Linux, and run their deterministic tests on Windows through `scripts/windows-smoke.ps1`.
 
 ## License
 
