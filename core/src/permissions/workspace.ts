@@ -29,12 +29,14 @@ export interface PathCheck {
 export class WorkspaceContext {
   private readonly directories: readonly string[];
   private readonly protectedPaths: ReadonlySet<string>;
-  private readonly secretPaths: ReadonlySet<string>;
+  private readonly secretPaths: readonly string[];
 
   /**
    * @param directories Absolute or relative root directories. Each must exist.
    * @param protectedPaths Files that may be read but never written by file tools.
-   * @param secretPaths Files file tools may neither read nor write (credentials).
+   * @param secretPaths Files or directories file tools may neither read nor
+   *   write (credentials, SF Agents conversation state). A directory covers
+   *   everything inside it.
    */
   constructor(
     directories: readonly string[],
@@ -50,9 +52,7 @@ export class WorkspaceContext {
     this.protectedPaths = new Set(
       protectedPaths.map((p) => normalizeForCompare(resolveWorkspacePath(path.resolve(p)))),
     );
-    this.secretPaths = new Set(
-      secretPaths.map((p) => normalizeForCompare(resolveWorkspacePath(path.resolve(p)))),
-    );
+    this.secretPaths = secretPaths.map((p) => resolveWorkspacePath(path.resolve(p)));
   }
 
   static resolveAndValidateDir(directory: string): string {
@@ -111,11 +111,11 @@ export class WorkspaceContext {
         reason: `Path is outside this agent's permitted workspace roots: ${pathToCheck}. Permitted roots: ${this.directories.join(', ')}`,
       };
     }
-    if (this.secretPaths.has(normalizeForCompare(resolved))) {
+    if (this.secretPaths.some((secret) => isPathWithinRoot(resolved, secret))) {
       return {
         ok: false,
         resolvedPath: resolved,
-        reason: `Path holds SF Agents credentials and is not accessible to agent file tools: ${pathToCheck}`,
+        reason: `Path holds SF Agents credentials or conversation state and is not accessible to agent file tools: ${pathToCheck}`,
       };
     }
     if (access === 'write' && this.protectedPaths.has(normalizeForCompare(resolved))) {

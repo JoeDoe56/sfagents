@@ -16,6 +16,8 @@ import { ToolNames } from '../tools/tool-names.js';
 import type { ParsedToolCall, ToolMessage } from '../providers/types.js';
 import { DiscoveredMcpTool } from '../mcp/mcp-tool.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
+import { PersistenceFailure } from './recorder.js';
+import type { ToolMessageStatus } from '../conversation/types.js';
 import { truncateForModel } from '../utils/text-utils.js';
 import type {
   ConfirmationDecision,
@@ -36,11 +38,24 @@ export interface ToolExecutionContext {
   toolTimeoutMs: number;
   maxOutputChars: number;
   emit: (event: RuntimeEvent) => void;
+  /**
+   * Called after approval, immediately before execution (records the
+   * execution start). Throwing PersistenceFailure stops the run.
+   */
+  beforeExecute?: (callId: string, tool: string) => void;
 }
 
 export interface ToolExecutionOutcome {
   message: ToolMessage;
   activity: ToolActivity;
+  status: ToolMessageStatus;
+}
+
+function statusOf(result: ToolResult): ToolMessageStatus {
+  if (!result.error) return 'ok';
+  if (result.error.type === ToolErrorType.EXECUTION_DENIED) return 'denied';
+  if (result.error.type === ToolErrorType.EXECUTION_CANCELLED) return 'cancelled';
+  return 'error';
 }
 
 function isAutoApproved(tool: AnyDeclarativeTool, ctx: ToolExecutionContext): boolean {
@@ -61,6 +76,7 @@ async function runWithTimeout(
   invocation: AnyToolInvocation,
   parentSignal: AbortSignal,
   timeoutMs: number | undefined,
+  callId: string,
 ): Promise<ToolResult> {
   const controller = new AbortController();
   const onAbort = () => controller.abort(parentSignal.reason);
@@ -68,7 +84,7 @@ async function runWithTimeout(
   if (parentSignal.aborted) controller.abort(parentSignal.reason);
   let timer: NodeJS.Timeout | undefined;
   try {
-    const execution = invocation.execute(controller.signal);
+    const execution = invocation.execute(controller.signal, undefined, { callId });
     if (timeoutMs === undefined) return await execution;
     return await Promise.race([
       execution,
@@ -110,6 +126,7 @@ export async function executeToolCall(
       content: truncateForModel(result.llmContent || (ok ? '(no output)' : 'Error'), ctx.maxOutputChars),
     },
     activity: { name: call.name, ok, errorType: result.error?.type },
+    status: statusOf(result),
   };
 }
 
@@ -180,9 +197,11 @@ async function executeInner(
     }
     // Child agents have their own turn budget and timeout.
     const timeout = call.name === ToolNames.INVOKE_CHILD ? undefined : ctx.toolTimeoutMs;
-    const result = await runWithTimeout(invocation, signal, timeout);
+    ctx.beforeExecute?.(call.id, call.name);
+    const result = await runWithTimeout(invocation, signal, timeout, call.id);
     return { callId: call.id, name: call.name, result };
   } catch (error) {
+    if (error instanceof PersistenceFailure) throw error;
     if (isAbortError(error) || signal.aborted) {
       return failure(call.id, call.name, 'Tool call cancelled.', ToolErrorType.EXECUTION_CANCELLED);
     }

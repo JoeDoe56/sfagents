@@ -8,12 +8,13 @@
  * child up among those same children, so naming any other agent fails.
  */
 
-import type { ToolInvocation, ToolResult } from '../tools/tools.js';
+import type { ToolCallContext, ToolInvocation, ToolResult } from '../tools/tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import type { AgentNode } from './loader.js';
 import { AgentTerminateMode, type AgentRunResult, type RuntimeEvent } from '../runtime/events.js';
+import type { RunRecorder } from '../runtime/recorder.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 /** Upper bound on task + context passed to a child. */
@@ -28,6 +29,9 @@ export interface ChildRunner {
     context?: string;
     signal: AbortSignal;
     emit: (event: RuntimeEvent) => void;
+    /** The parent's tool call ID and recorder, when the conversation is recorded. */
+    callId?: string;
+    parentRecorder?: RunRecorder;
   }): Promise<AgentRunResult>;
 }
 
@@ -87,7 +91,7 @@ class InvokeChildInvocation extends BaseToolInvocation<InvokeChildParams, ToolRe
     return `${this.params.agent}: ${task.length > 100 ? `${task.slice(0, 100)}…` : task}`;
   }
 
-  async execute(signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal, _updateOutput?: (output: string) => void, context?: ToolCallContext): Promise<ToolResult> {
     const child = this.tool.parent.children.find((c) => c.id === this.params.agent);
     if (!child) {
       const message = `Agent "${this.params.agent}" is not a declared child of "${this.tool.parent.id}". Declared children: ${this.tool.parent.children.map((c) => c.id).join(', ') || '(none)'}.`;
@@ -103,6 +107,8 @@ class InvokeChildInvocation extends BaseToolInvocation<InvokeChildParams, ToolRe
         context: this.params.context,
         signal,
         emit: this.tool.emit,
+        callId: context?.callId,
+        parentRecorder: this.tool.recorder,
       });
     } catch (error) {
       if (isAbortError(error) || signal.aborted) {
@@ -134,6 +140,7 @@ export class InvokeChildTool extends BaseDeclarativeTool<InvokeChildParams, Tool
     readonly parent: AgentNode,
     readonly parentPath: readonly string[],
     readonly emit: (event: RuntimeEvent) => void,
+    readonly recorder?: RunRecorder,
   ) {
     const children = parent.children;
     const list = children

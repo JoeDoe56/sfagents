@@ -29,6 +29,8 @@ export interface ScriptStep {
   reasoning?: string;
   toolCalls?: Array<{ name: string; args?: Record<string, unknown>; id?: string }>;
   error?: Error;
+  /** Opaque reasoning continuation blocks returned with the message. */
+  reasoningDetails?: Array<Record<string, unknown>>;
   /** Wait before responding (honours abort). */
   delayMs?: number;
   finishReason?: string;
@@ -82,6 +84,7 @@ export class ScriptedProvider implements ModelProvider {
       rawArguments: JSON.stringify(c.args ?? {}),
     }));
     const message: AssistantMessage = { role: 'assistant', content: step.text ?? null };
+    if (step.reasoningDetails) message.reasoning_details = step.reasoningDetails;
     if (toolCalls.length) {
       message.tool_calls = toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.rawArguments } }));
     }

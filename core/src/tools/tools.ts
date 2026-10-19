@@ -31,6 +31,12 @@ export interface FunctionDeclaration {
  */
 export type PermissionDecision = 'allow' | 'ask' | 'deny';
 
+/** Per-call information the executor passes to an invocation. */
+export interface ToolCallContext {
+  /** The provider's tool call ID. */
+  callId: string;
+}
+
 /**
  * Represents a validated and ready-to-execute tool call.
  * An instance of this is created by a `ToolBuilder`.
@@ -67,10 +73,12 @@ export interface ToolInvocation<
    * Executes the tool with the validated parameters.
    * @param signal AbortSignal for tool cancellation.
    * @param updateOutput Optional callback to stream output.
+   * @param context The tool call this execution answers.
    */
   execute(
     signal: AbortSignal,
     updateOutput?: (output: string) => void,
+    context?: ToolCallContext,
   ): Promise<TResult>;
 }
 
@@ -118,6 +126,7 @@ export abstract class BaseToolInvocation<
   abstract execute(
     signal: AbortSignal,
     updateOutput?: (output: string) => void,
+    context?: ToolCallContext,
   ): Promise<TResult>;
 }
 

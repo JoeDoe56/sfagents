@@ -42,3 +42,17 @@ export {
 export type { ConversationStore, HeaderInfo, OpenReport, StoreIO } from './conversation/store.js';
 export { ConversationLock, ConversationLockedError, forceUnlock, readLock } from './conversation/lock.js';
 export type { LockInfo } from './conversation/lock.js';
+export {
+  ConversationService,
+  defaultConversationFile,
+  STATE_DIR_NAME,
+  CONVERSATION_FILE_NAME,
+  toChatMessages,
+  INTERRUPTED_NOT_STARTED,
+  INTERRUPTED_UNKNOWN,
+} from './conversation/service.js';
+export type { OpenNotice, ReplayTarget, ServiceOptions } from './conversation/service.js';
+export { replayTarget } from './runtime/runtime.js';
+export { PersistenceFailure } from './runtime/recorder.js';
+export type { RunRecorder } from './runtime/recorder.js';
+export type { ToolCallContext } from './tools/tools.js';

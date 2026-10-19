@@ -29,6 +29,14 @@ import { startRepl } from '../terminal/repl.js';
 import { createStyle } from '../terminal/style.js';
 import { readStdin } from '../utils/read-stdin.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import {
+  ConversationSelectionError,
+  conversationCommand,
+  openConversation,
+  selectConversationFile,
+  type ConversationFlags,
+} from './conversation.js';
+import type { ConversationService } from '@sfagents/core';
 
 export const VERSION = '0.1.0';
 
@@ -44,6 +52,8 @@ Usage:
   sfagents run [options] "<task>"       Run one request and print the final answer ("-" reads stdin)
   sfagents agents validate [options]    Validate agent definitions and print the agent tree
   sfagents mcp list [options]           Show configured MCP servers, status and tools
+  sfagents conversation [info|sections|artifacts|unlock]
+                                        Inspect the stored conversation (or remove a stale lock)
 
 Options:
   -c, --config <dir|file>   Directory containing agent.json, or an agent JSON file (default: .)
@@ -51,6 +61,9 @@ Options:
   -y, --yes                 Approve every tool call that would ask for confirmation
       --show-reasoning      Print model reasoning text when the provider returns it
       --json                (run) Print the structured result as JSON instead of streaming
+      --conversation <file> Use this conversation file (default: <config dir>/.sfagents/conversation.md)
+      --ephemeral           (start) Keep this session in memory only; nothing is stored
+      --persist             (run) Record the request in the persistent conversation
   -v, --version             Print the version
   -h, --help                Show this help
 
@@ -88,6 +101,9 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         yes: { type: 'boolean', short: 'y', default: false },
         'show-reasoning': { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },
+        conversation: { type: 'string' },
+        ephemeral: { type: 'boolean', default: false },
+        persist: { type: 'boolean', default: false },
         version: { type: 'boolean', short: 'v', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -138,6 +154,8 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       }
       return listMcp(tree, streams);
     }
+    case 'conversation':
+      return conversationCommand(sub, rest, tree, values, streams);
     case 'run': {
       const taskWords = [sub, ...rest].filter((w): w is string => w !== undefined);
       let task = taskWords.join(' ');
@@ -151,7 +169,9 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       } catch (error) {
         return printConfigError(error, streams);
       }
-      return runOnce(tree, task, { yes: values.yes, json: values.json, showReasoning: values['show-reasoning'] }, streams);
+      const conv = openSelected('run', values, tree, streams);
+      if (conv instanceof Error) return EXIT_CONFIG;
+      return runOnce(tree, task, { yes: values.yes, json: values.json, showReasoning: values['show-reasoning'], conversation: conv }, streams);
     }
     case 'start': {
       if (sub !== undefined) {
@@ -163,17 +183,22 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       } catch (error) {
         return printConfigError(error, streams);
       }
+      const conversation = openSelected('start', values, tree, streams);
+      if (conversation instanceof Error) return EXIT_CONFIG;
       let bound: ConfirmationHandler | undefined;
       const runtime = new AgentRuntime({
         tree,
         approveAll: values.yes,
         confirm: (request, signal) => (bound ? bound(request, signal) : Promise.resolve('deny')),
+        conversation,
       });
       registerCleanup(() => runtime.dispose());
+      if (conversation) registerCleanup(() => conversation.close());
       try {
         return await startRepl({
           runtime,
           showReasoning: values['show-reasoning'],
+          notices: conversation ? conversation.notices.map((n) => n.message) : ['Ephemeral session: nothing is stored.'],
           bindConfirm: (handler) => {
             bound = handler;
           },
@@ -188,10 +213,31 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
   }
 }
 
+/** Opens the conversation a command should use; prints and returns an Error on failure. */
+function openSelected(mode: 'start' | 'run', flags: ConversationFlags, tree: AgentTree, streams: Streams): ConversationService | undefined | Error {
+  let file: string | undefined;
+  try {
+    file = selectConversationFile(mode, flags, tree.configDir);
+  } catch (error) {
+    if (error instanceof ConversationSelectionError) {
+      streams.stderr.write(`${error.message}\n`);
+      return error;
+    }
+    throw error;
+  }
+  if (!file) return undefined;
+  const opened = openConversation(file, tree);
+  if (opened instanceof Error) {
+    const style = createStyle(streams.stderr as NodeJS.WriteStream);
+    streams.stderr.write(`${style.red('Conversation error:')} ${opened.message}\n`);
+  }
+  return opened;
+}
+
 async function runOnce(
   tree: AgentTree,
   task: string,
-  opts: { yes: boolean; json: boolean; showReasoning: boolean },
+  opts: { yes: boolean; json: boolean; showReasoning: boolean; conversation?: ConversationService },
   streams: Streams,
 ): Promise<number> {
   const interactive = process.stdin.isTTY === true && (streams.stderr as NodeJS.WriteStream).isTTY === true;
@@ -205,8 +251,14 @@ async function runOnce(
     tree,
     approveAll: opts.yes,
     confirm: rl ? createTerminalConfirm(rl, streams.stderr, renderer) : undefined,
+    conversation: opts.conversation,
   });
   registerCleanup(() => runtime.dispose());
+  if (opts.conversation) {
+    const conversation = opts.conversation;
+    registerCleanup(() => conversation.close());
+    for (const n of conversation.notices) if (n.kind !== 'resumed' && n.kind !== 'created') streams.stderr.write(`${n.message}\n`);
+  }
   const controller = new AbortController();
   let interrupts = 0;
   const onSigint = () => {

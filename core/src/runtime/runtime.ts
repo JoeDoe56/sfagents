@@ -37,6 +37,8 @@ import {
   type ToolActivity,
 } from './events.js';
 import { Semaphore } from '../utils/semaphore.js';
+import { PersistenceFailure, type RunRecorder } from './recorder.js';
+import { ConversationService, type ReplayTarget } from '../conversation/service.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 export const DEFAULT_MAX_TURNS = 40;
@@ -53,6 +55,11 @@ export interface RuntimeOptions {
   env?: NodeJS.ProcessEnv;
   /** Inject an MCP manager (tests); defaults to one built from tree.mcp. */
   mcpManager?: McpManager;
+  /**
+   * Persistent conversation for root sessions. Without one, each session
+   * keeps an ephemeral in-memory conversation.
+   */
+  conversation?: ConversationService;
 }
 
 interface RunParams {
@@ -63,6 +70,16 @@ interface RunParams {
   task: string;
   signal: AbortSignal;
   emit: (event: RuntimeEvent) => void;
+  /** Records the run at its message boundaries (persistent or ephemeral conversation). */
+  recorder?: RunRecorder;
+}
+
+/** Identity of the provider/model an agent uses, as recorded in run_start. */
+export function replayTarget(definition: Readonly<AgentDefinition>): ReplayTarget {
+  return {
+    provider: definition.provider === 'openai-compatible' ? `openai-compatible:${definition.providerOptions?.baseUrl}` : definition.provider,
+    model: definition.model,
+  };
 }
 
 function addUsage(total: TokenUsage, add?: TokenUsage): void {
@@ -101,6 +118,7 @@ export class AgentRuntime implements ChildRunner {
   /** Active-children semaphores, per parent agent id. */
   private readonly childSlots = new Map<string, Semaphore>();
   private disposed = false;
+  readonly conversation?: ConversationService;
 
   constructor(options: RuntimeOptions) {
     this.tree = options.tree;
@@ -110,11 +128,15 @@ export class AgentRuntime implements ChildRunner {
     this.providerFactory = options.providerFactory ?? createDefaultProviderFactory(env);
     this.confirm = options.confirm;
     this.approveAll = options.approveAll ?? false;
+    this.conversation = options.conversation;
   }
 
-  /** Starts an interactive conversation with the root agent. */
+  /**
+   * Starts a conversation with the root agent: the runtime's persistent
+   * conversation when one was given, otherwise a fresh in-memory one.
+   */
   createSession(): AgentSession {
-    return new AgentSession(this, this.tree.root);
+    return new AgentSession(this, this.tree.root, this.conversation ?? ConversationService.memory(this.tree.configDir));
   }
 
   /** Builds the tool registry one agent may use, from its definition only. */
@@ -122,13 +144,14 @@ export class AgentRuntime implements ChildRunner {
     node: AgentNode,
     agentPath: readonly string[],
     emit: (event: RuntimeEvent) => void,
+    recorder?: RunRecorder,
   ): Promise<Map<string, AnyDeclarativeTool>> {
     const d = node.definition;
     const tools = new Map<string, AnyDeclarativeTool>();
     const allow = d.tools?.allow ?? [];
     if (allow.length > 0 && node.roots.length > 0) {
       const ctx: ToolContext = {
-        workspace: new WorkspaceContext(node.roots, this.tree.protectedFiles, this.tree.secretFiles),
+        workspace: new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])]),
         maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
         secretEnvNames: this.secretEnvNames,
         shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
@@ -174,7 +197,7 @@ export class AgentRuntime implements ChildRunner {
     }
 
     if (node.children.length > 0) {
-      tools.set(ToolNames.INVOKE_CHILD, new InvokeChildTool(this, node, agentPath, emit));
+      tools.set(ToolNames.INVOKE_CHILD, new InvokeChildTool(this, node, agentPath, emit, recorder));
     }
     return tools;
   }
@@ -185,7 +208,15 @@ export class AgentRuntime implements ChildRunner {
 
   /** Runs one agent until it answers, fails, times out, runs out of turns or is cancelled. */
   async run(params: RunParams): Promise<AgentRunResult> {
-    const { node, agentPath, messages, emit } = params;
+    const { node, agentPath, messages, emit, recorder } = params;
+    const record = (write: (r: RunRecorder) => void) => {
+      if (!recorder) return;
+      try {
+        write(recorder);
+      } catch (error) {
+        throw new PersistenceFailure(getErrorMessage(error));
+      }
+    };
     const d = node.definition;
     const started = Date.now();
     const usage: TokenUsage = {};
@@ -208,7 +239,7 @@ export class AgentRuntime implements ChildRunner {
     const finish = (status: AgentTerminateMode, error?: string): AgentRunResult => {
       clearTimeout(timer);
       params.signal.removeEventListener('abort', onParentAbort);
-      const result: AgentRunResult = {
+      let result: AgentRunResult = {
         agentId: node.id,
         status,
         text: lastText,
@@ -218,9 +249,20 @@ export class AgentRuntime implements ChildRunner {
         usage,
         durationMs: Date.now() - started,
       };
+      if (recorder && startRecorded) {
+        try {
+          recorder.end(result);
+        } catch (e) {
+          const note = `The end of this run could not be recorded: ${getErrorMessage(e)}`;
+          result = { ...result, status: AgentTerminateMode.ERROR, error: result.error ? `${result.error} ${note}` : note };
+        }
+      }
       emit({ type: 'agent_end', agentPath, result });
       return result;
     };
+    let startRecorded = false;
+    const storageStop = (e: PersistenceFailure) =>
+      finish(AgentTerminateMode.ERROR, `Conversation storage failed: ${e.message}. Stopped before any further action.`);
     const stopReason = (): [AgentTerminateMode, string] =>
       timedOut
         ? [AgentTerminateMode.TIMEOUT, `Agent "${node.id}" exceeded its ${Math.round(timeoutMs / 1000)}s time limit.`]
@@ -232,11 +274,19 @@ export class AgentRuntime implements ChildRunner {
     let tools: Map<string, AnyDeclarativeTool>;
     try {
       provider = this.provider(d);
-      tools = await this.buildTools(node, agentPath, emit);
+      tools = await this.buildTools(node, agentPath, emit, recorder);
     } catch (error) {
       const message = getErrorMessage(error);
       emit({ type: 'error', agentPath, message });
       return finish(AgentTerminateMode.ERROR, message);
+    }
+
+    try {
+      record((r) => r.start(node));
+      startRecorded = true;
+    } catch (e) {
+      if (e instanceof PersistenceFailure) return storageStop(e);
+      throw e;
     }
 
     const systemPrompt = buildSystemPrompt(node, [...tools.keys()]);
@@ -247,6 +297,7 @@ export class AgentRuntime implements ChildRunner {
     const approvals = this.sessionApprovals.get(node.id) ?? new Set<string>();
     this.sessionApprovals.set(node.id, approvals);
 
+    try {
     while (turns < maxTurns) {
       if (signal.aborted) return finish(...stopReason());
       turns++;
@@ -284,6 +335,9 @@ export class AgentRuntime implements ChildRunner {
         return finish(AgentTerminateMode.ERROR, message);
       }
       addUsage(usage, done.usage);
+      const assistantMessage = done.message;
+      const finishReason = done.finishReason;
+      record((r) => r.assistant(assistantMessage, finishReason));
       messages.push(done.message);
       if (done.message.content) lastText = done.message.content;
 
@@ -300,7 +354,9 @@ export class AgentRuntime implements ChildRunner {
         if (signal.aborted) {
           // Keep the conversation valid: every tool call gets a response.
           for (const c of [call, ...pending]) {
-            messages.push({ role: 'tool', tool_call_id: c.id, content: 'Cancelled before execution.' });
+            const cancelled = { role: 'tool' as const, tool_call_id: c.id, content: 'Cancelled before execution.' };
+            record((r) => r.toolResult(cancelled, c.name, 'not_started'));
+            messages.push(cancelled);
           }
           return finish(...stopReason());
         }
@@ -317,12 +373,18 @@ export class AgentRuntime implements ChildRunner {
             toolTimeoutMs: (d.limits?.toolTimeoutSeconds ?? DEFAULT_TOOL_TIMEOUT_MS / 1000) * 1000,
             maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
             emit,
+            beforeExecute: (callId, tool) => record((r) => r.toolStart(callId, tool)),
           },
           signal,
         );
+        record((r) => r.toolResult(outcome.message, call.name, outcome.status));
         messages.push(outcome.message);
         activity.push(outcome.activity);
       }
+    }
+    } catch (e) {
+      if (e instanceof PersistenceFailure) return storageStop(e);
+      throw e;
     }
     return finish(AgentTerminateMode.MAX_TURNS, `Agent "${node.id}" reached its limit of ${maxTurns} model turns before finishing.`);
   }
@@ -336,6 +398,8 @@ export class AgentRuntime implements ChildRunner {
     context?: string;
     signal: AbortSignal;
     emit: (event: RuntimeEvent) => void;
+    callId?: string;
+    parentRecorder?: RunRecorder;
   }): Promise<AgentRunResult> {
     const { parent, parentPath, child, signal } = params;
     // Runtime guards, independent of the schema enum.
@@ -361,14 +425,22 @@ export class AgentRuntime implements ChildRunner {
         params.task.trim(),
         ...(params.context?.trim() ? ['', 'Context provided by the parent:', params.context.trim()] : []),
       ].join('\n');
+      const agentPath = [...parentPath, child.id];
+      let recorder: RunRecorder | undefined;
+      if (params.parentRecorder) {
+        // Child transcript and its artifact reference are written before the child runs.
+        recorder = params.parentRecorder.child(child, agentPath, params.callId ?? 'unknown', `${child.id}: ${params.task.replace(/\s+/g, ' ').trim()}`);
+        recorder.user(input);
+      }
       const messages: ChatMessage[] = [{ role: 'user', content: input }];
       return await this.run({
         node: child,
-        agentPath: [...parentPath, child.id],
+        agentPath,
         messages,
         task: params.task,
         signal,
         emit,
+        recorder,
       });
     } finally {
       release();
@@ -387,53 +459,71 @@ export class AgentRuntime implements ChildRunner {
 }
 
 /**
- * An in-process conversation with the root agent. Keeps ordinary context so
- * follow-up messages work; persistence is a later milestone.
+ * A conversation with the root agent, backed by a ConversationService
+ * (persistent or in-memory). Each turn's provider context is rebuilt from
+ * stored history rather than kept in a growing in-memory array.
  */
 export class AgentSession {
-  readonly messages: ChatMessage[] = [];
   private busy = false;
+  private lastMessages: ChatMessage[] = [];
 
   constructor(
     private readonly runtime: AgentRuntime,
     readonly node: AgentNode,
+    readonly conversation: ConversationService,
   ) {}
 
+  /** The provider messages of the most recent turn (for inspection and tests). */
+  get messages(): ChatMessage[] {
+    return this.lastMessages;
+  }
+
+  /** /clear: later turns start from a fresh working context; history is kept. */
+  resetContext(): void {
+    if (this.busy) throw new Error('Cannot reset the context while a turn is running');
+    this.conversation.resetContext();
+  }
+
   /**
-   * Sends one user message. Yields events as they happen and returns the
-   * structured result of the root agent's turn.
+   * Sends one user message. The message is stored before the model request
+   * starts. Yields events as they happen and returns the structured result
+   * of the root agent's turn.
    */
   async *send(input: string, options: { signal?: AbortSignal } = {}): AsyncGenerator<RuntimeEvent, AgentRunResult> {
     if (this.busy) throw new Error('A turn is already running in this session');
     this.busy = true;
-    const queue: RuntimeEvent[] = [];
-    let wake: (() => void) | undefined;
-    const emit = (event: RuntimeEvent) => {
-      queue.push(event);
-      wake?.();
-    };
-    this.messages.push({ role: 'user', content: input });
-    let result: AgentRunResult | undefined;
-    let failure: unknown;
-    const running = this.runtime
-      .run({
-        node: this.node,
-        agentPath: [this.node.id],
-        messages: this.messages,
-        task: input,
-        signal: options.signal ?? new AbortController().signal,
-        emit,
-      })
-      .then(
-        (r) => {
-          result = r;
-        },
-        (e) => {
-          failure = e;
-        },
-      )
-      .finally(() => wake?.());
     try {
+      const recorder = this.conversation.beginRootRun(this.node);
+      recorder.user(input);
+      const messages: ChatMessage[] = this.conversation.history(replayTarget(this.node.definition));
+      this.lastMessages = messages;
+      const queue: RuntimeEvent[] = [];
+      let wake: (() => void) | undefined;
+      const emit = (event: RuntimeEvent) => {
+        queue.push(event);
+        wake?.();
+      };
+      let result: AgentRunResult | undefined;
+      let failure: unknown;
+      const running = this.runtime
+        .run({
+          node: this.node,
+          agentPath: [this.node.id],
+          messages,
+          task: input,
+          signal: options.signal ?? new AbortController().signal,
+          emit,
+          recorder,
+        })
+        .then(
+          (r) => {
+            result = r;
+          },
+          (e) => {
+            failure = e;
+          },
+        )
+        .finally(() => wake?.());
       while (true) {
         while (queue.length > 0) yield queue.shift()!;
         if (result || failure) break;

@@ -16,6 +16,8 @@ export interface ReplOptions {
   showReasoning: boolean;
   /** Receives the terminal confirmation handler once readline exists. */
   bindConfirm?: (handler: ConfirmationHandler) => void;
+  /** Lines shown at startup (conversation path, recovery notes). */
+  notices?: string[];
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
 }
@@ -23,7 +25,7 @@ export interface ReplOptions {
 const HELP = `Commands:
   /help    show this help
   /tree    show the agent tree
-  /clear   start a new conversation (forget context)
+  /clear   reset the working context (history is kept and stays searchable)
   /exit    quit (or Ctrl+D)
 Press Ctrl+C while the agent is working to cancel the current turn.`;
 
@@ -36,11 +38,12 @@ export async function startRepl(options: ReplOptions): Promise<number> {
   const renderer = new EventRenderer({ out: output, activity: output, showReasoning: options.showReasoning });
   options.bindConfirm?.(createTerminalConfirm(rl, output, renderer));
 
-  let session = options.runtime.createSession();
+  const session = options.runtime.createSession();
   const root = options.runtime.tree.root;
   output.write(
     `${style.bold('SF Agents')} ${style.dim(`— root agent "${root.id}" (${root.definition.provider}:${root.definition.model})`)}\n${style.dim('Type /help for commands.')}\n`,
   );
+  for (const notice of options.notices ?? []) output.write(`${style.dim(notice)}\n`);
 
   let current: AbortController | undefined;
   let lastInterrupt = 0;
@@ -57,6 +60,9 @@ export async function startRepl(options: ReplOptions): Promise<number> {
     const finish = () => {
       if (closed) return;
       closed = true;
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onTerminate);
+      process.off('SIGHUP', onTerminate);
       resolve(0);
     };
     const quitNow = () => {
@@ -66,7 +72,7 @@ export async function startRepl(options: ReplOptions): Promise<number> {
       rl.close();
     };
 
-    rl.on('SIGINT', () => {
+    const onInterrupt = () => {
       if (current) {
         const now = Date.now();
         if (now - lastInterrupt < 1500) {
@@ -82,7 +88,15 @@ export async function startRepl(options: ReplOptions): Promise<number> {
         output.write('\n');
         quitNow();
       }
-    });
+    };
+    rl.on('SIGINT', onInterrupt);
+    // Without a terminal, readline does not see Ctrl+C; handle the signal so
+    // the running turn is recorded as cancelled and the store is closed.
+    const onSignal = () => onInterrupt();
+    const onTerminate = () => quitNow();
+    if (!interactive) process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onTerminate);
+    process.on('SIGHUP', onTerminate);
 
     // End of input (Ctrl+D or the end of piped stdin): finish queued work, then exit.
     rl.on('close', () => {
@@ -118,8 +132,12 @@ export async function startRepl(options: ReplOptions): Promise<number> {
           continue;
         }
         if (line === '/clear') {
-          session = options.runtime.createSession();
-          output.write(style.dim('Started a new conversation.\n'));
+          try {
+            session.resetContext();
+            output.write(style.dim('Working context reset. Earlier messages stay in the conversation and can still be retrieved.\n'));
+          } catch (error) {
+            output.write(style.red(`error: ${error instanceof Error ? error.message : String(error)}\n`));
+          }
           prompt();
           continue;
         }
