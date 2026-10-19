@@ -43,6 +43,7 @@ export function normalizeMaterial(value, fallback = 0) {
  * @property {number} toneAmount    how much of `tone` replaces the glass body, 0..1
  * @property {number} rim           strength of the hairline edge highlight
  * @property {number} dispersionAmount  0..1 scale of the rim's spectral split
+ * @property {number} rimTint       0..1: how much the rim takes the colour of what is around it
  * @property {number} materialAlpha
  * @property {number} frostSigmaPx  blur radius in CSS px
  * @property {number} frostSampleScale
@@ -80,7 +81,8 @@ export function resolveMaterial(material, geometry, quality) {
     tone,
     toneSpace: 'linear',
     toneAmount: beyondApple,
-    rim: 0.4,
+    rim: 0.25,
+    rimTint: 1,
     dispersionAmount: 1,
     materialAlpha: density,
     frostSigmaPx: 24 * density,
@@ -118,7 +120,8 @@ export function parseTintColor(color) {
  * the material's character and adjust single values:
  *   frost (blur radius, CSS px), refraction, magnify, specular (boolean),
  *   tint {color, amount} (a body colour in display RGB and how much of it),
- *   rim (hairline highlight strength), dispersion (0..1 spectral split).
+ *   rim (hairline highlight strength), rimTint (0..1: how much the rim takes
+ *   the colour of the content around the edge), dispersion (0..1 spectral split).
  * @param {ResolvedMaterial} optics
  * @param {Record<string, any>} options
  * @returns {ResolvedMaterial}
@@ -131,6 +134,7 @@ export function applyOpticsOverrides(optics, options) {
   if (o.magnify !== undefined && o.magnify !== null && typeof o.magnify !== 'function') out.magnify = clamp(finiteNumber(o.magnify, out.magnify), 0.001, 3);
   if (o.specular === false) out.specular = false;
   if (o.rim !== undefined && o.rim !== null) out.rim = clamp(finiteNumber(o.rim, out.rim), 0, 2);
+  if (o.rimTint !== undefined && o.rimTint !== null && typeof o.rimTint !== 'function') out.rimTint = clamp(finiteNumber(o.rimTint, 1), 0, 1);
   if (o.dispersion !== undefined && o.dispersion !== null) out.dispersionAmount = clamp(finiteNumber(o.dispersion, 1), 0, 1);
   if (o.tint && typeof o.tint === 'object') {
     const color = parseTintColor(o.tint.color);
@@ -162,6 +166,7 @@ export const LIVE_NUMERIC_OPTIONS = Object.freeze({
   magnify: [0.001, 3],
   opacity: [0, 1],
   rim: [0, 2],
+  rimTint: [0, 1],
   dispersion: [0, 1],
 });
 

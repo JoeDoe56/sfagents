@@ -16,7 +16,8 @@ import {clamp, finiteNumber, normalizeMaterial, resolveMaterial, applyOpticsOver
  * @property {number} [refraction] @property {number} [frost] @property {number} [magnify]
  * @property {boolean} [specular]
  * @property {{color: string|number[], amount?: number}} [tint]  body colour (CSS hex or display RGB 0..1) and how much of it, overriding the material's tone
- * @property {number} [rim]         hairline edge highlight strength (default 0.4)
+ * @property {number} [rim]         hairline edge highlight strength (default 0.25)
+ * @property {number} [rimTint]     0..1: how much the rim takes the colour of the content around the edge (default 1)
  * @property {number} [dispersion]  0..1 scale of the rim's spectral split (default 1)
  * @property {'live'|'dom'|((el: Element, lens: Lens) => Rect|null)} [geometry]  how the rect is measured (default 'live')
  * @property {boolean} [liveGeometry]  false: measure like 'dom' (legacy switch)
@@ -339,9 +340,9 @@ export class Lens {
   _currentNumber(key) {
     const value = this.options[key];
     if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (key === 'rim' || key === 'dispersion') {
+    if (key === 'rim' || key === 'dispersion' || key === 'rimTint') {
       const optics = this.resolveOptics(1);
-      return key === 'rim' ? optics.rim : optics.dispersionAmount;
+      return key === 'rim' ? optics.rim : key === 'rimTint' ? finiteNumber(optics.rimTint, 1) : optics.dispersionAmount;
     }
     return key === 'magnify' || key === 'opacity' ? 1 : 0;
   }
@@ -393,7 +394,7 @@ export class Lens {
       magnify: clamp(finiteNumber(o.magnify, 1), 0.001, 3),
       specularPrimary: 0.1675, specularSecondary: 0.08, shadowStrength: 0.1,
       specular: o.specular !== false,
-      toneSpace: 'linear', toneAmount: 0, rim: 0.4, dispersionAmount: 1,
+      toneSpace: 'linear', toneAmount: 0, rim: 0.25, rimTint: 1, dispersionAmount: 1,
     };
   }
 

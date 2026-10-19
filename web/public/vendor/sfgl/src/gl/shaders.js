@@ -163,6 +163,7 @@ uniform float u_specularPrimary;
 uniform float u_specularSecondary;
 uniform float u_toneAmount;         // how much of u_materialTone replaces the body
 uniform float u_rim;                // hairline edge highlight strength
+uniform float u_rimTint;            // how much the rim takes the colour around the edge
 uniform float u_dispersionAmount;   // 0..1 scale of the spectral split
 uniform vec2  u_globalLight;
 uniform float u_globalLightIntensity;
@@ -255,6 +256,20 @@ vec4 opticalSample(vec2 uv, float radiusCss) {
   float lod = max(0.0, log2(max(1.0, radius < 2.0 ? radius * 0.5 + 1.0 : radius)));
   vec4 base = SF_LOD(u_backdrop, clamp(vec2(uv.x, 1.0 - uv.y), 0.0, 1.0), lod);
   return compositeOpticalLayers(base, uv);
+}
+// The colour a rim takes from the content around it. Liquid Glass rims are
+// lit by what is near the edge: a vivid colour next to the glass adds its
+// hue to that stretch of the rim (measured on iOS: a dark blue bubble beside
+// the edge leaves the rim's red where it was and nearly doubles its blue),
+// while dark, grey or white surroundings leave it white. Dim colours add
+// less.
+vec3 rimLight(vec3 around) {
+  float hi = max(around.r, max(around.g, around.b));
+  float lo = min(around.r, min(around.g, around.b));
+  float saturation = (hi - lo) / max(hi, 0.0001);
+  vec3 hue = around / max(hi, 0.0001);
+  float amount = 1.3 * u_rimTint * saturation * (1.0 - exp(-hi / 0.3));
+  return vec3(1.0) + amount * hue;
 }
 vec3 gradeGlass(vec3 rgb) {
   // GLASS_RECIPE / GLASS_RECIPE_DARK from upstream glass.ts, interpolated
@@ -390,7 +405,7 @@ void main() {
     // 3D light response: the positive Z components stay defined as a planar
     // light crosses zero, so opposite rims fade through neutral.
     float outerPeak = 1.0 - smoothstep(0.0, 1.15, insideCss);
-    float innerRim = 1.0 - smoothstep(0.5, 3.5, insideCss);
+    float innerRim = 1.0 - smoothstep(0.5, 4.5, insideCss);
     float rimSlope = mix(0.58, 1.35, outerPeak);
     vec3 N = normalize(vec3(normal * rimSlope, 0.62));
     vec2 tiltNormal = vec2(sin(radians(u_tiltY)), -sin(radians(u_tiltX))) * 0.34;
@@ -400,23 +415,36 @@ void main() {
     vec3 secondaryLight = normalize(vec3(-globalLight, 0.46));
     float primaryFacing = max(dot(N, primaryLight), 0.0);
     float secondaryFacing = max(dot(N, secondaryLight), 0.0);
-    // Hairline rim, as on Apple's Liquid Glass: under half a CSS pixel wide,
-    // measured in backing pixels so it stays crisp at any render scale. A
-    // box profile (full strength across the line, a one-pixel antialiased
-    // falloff) keeps it a bright line rather than a soft glow. Brightest
-    // where the edge faces the light, with a weaker reflection on the
-    // opposite edge and a faint line all round.
+    // Hairline rim, as on Apple's Liquid Glass (measured against iOS at 3x):
+    // about one CSS pixel wide, brightest on the outermost backing pixel and
+    // fading linearly inward, so it reads as a crisp line. It is brightest
+    // where the edge faces the light and toward the middle of that edge,
+    // falls off steeply around the corners, and all but vanishes on edges
+    // side-on to the light, with a weaker reflection on the opposite edge.
     float insideBacking = max(0.0, -opticalDistance);
-    float hairWidth = max(1.0, 0.4 * u_devicePixelRatio);
-    float hairline = clamp(hairWidth + 0.5 - insideBacking, 0.0, 1.0);
+    float hairWidth = max(1.0, 0.95 * u_devicePixelRatio);
+    float hairline = clamp(1.0 - (insideBacking - 0.5) / hairWidth, 0.0, 1.0);
     vec2 edgeNormal = normal / max(length(normal), 0.0001);
     vec2 lightDir2 = normalize(primaryLight.xy + vec2(0.0001));
     float litEdge = max(dot(edgeNormal, lightDir2), 0.0);
     float backEdge = max(dot(edgeNormal, -lightDir2), 0.0);
-    float sharp = hairline * u_rim * (0.2 + 1.1 * pow(litEdge, 2.0) + 0.7 * pow(backEdge, 2.0));
-    float soft = innerRim * pow(primaryFacing, 2.2) * u_specularPrimary * 0.62;
-    float opposite = innerRim * 0.42 * pow(secondaryFacing, 2.8) * u_specularSecondary;
-    vec3 softRimColor = mix(vec3(1.0), face.rgb, 0.08);
+    vec2 facePosition = p_px / max(b_px, vec2(1.0));
+    facePosition /= max(length(facePosition), 0.0001);
+    float along = max(dot(facePosition, lightDir2), 0.0);
+    float alongBack = max(dot(facePosition, -lightDir2), 0.0);
+    float sharp = hairline * u_rim * (0.04 +
+      pow(litEdge, 3.0) * (0.25 + 0.75 * pow(along, 2.5)) +
+      0.5 * pow(backEdge, 3.0) * (0.25 + 0.75 * pow(alongBack, 2.5)));
+    float soft = innerRim * pow(primaryFacing, 2.2) * u_specularPrimary * 0.35;
+    float opposite = innerRim * 0.3 * pow(secondaryFacing, 2.8) * u_specularSecondary;
+    // Light from the content around this stretch of the edge, a few pixels
+    // outside it, blurred so the colour moves smoothly along the rim.
+    vec3 rimColor = vec3(1.0);
+    if (insideCss < 6.0 && u_rimTint > 0.001) {
+      vec2 aroundUV = projectBackdrop(localMapped + direction * 6.0 * cssToUV);
+      rimColor = rimLight(opticalSample(aroundUV, 8.0).rgb);
+    }
+    vec3 softRimColor = rimColor * mix(vec3(1.0), face.rgb, 0.08);
     float heightMask = 1.0 - smoothstep(0.0, 70.0 * scale, insideCss);
     // A radial face normal avoids the panel's medial diagonals; the 3D
     // light's XY projection fades smoothly through neutral.
@@ -427,7 +455,7 @@ void main() {
     vec2 key = lobes / (0.7 * (1.0 - lobes) + 1.0);
     vec2 contactPx = (v_uv - u_contact.xy) * u_lensCssSize;
     float contactLight = exp(-dot(contactPx, contactPx) / 3200.0) * press * 0.065;
-    rgb += (sharp * vec3(1.0) + (soft + opposite) * softRimColor) * (1.0 + 0.45 * press) +
+    rgb += (sharp * rimColor + (soft + opposite) * softRimColor) * (1.0 + 0.45 * press) +
       vec3((key.x + key.y) * 0.035 + contactLight);
   }
   // SDR holding tone preserves hue at luminous rims.

@@ -472,7 +472,8 @@ export class Surface {
     set('u_specularPrimary', optics.specularPrimary);
     set('u_specularSecondary', optics.specularSecondary);
     set('u_toneAmount', clamp(finiteNumber(optics.toneAmount, 0), 0, 1));
-    set('u_rim', Math.max(0, finiteNumber(optics.rim, 0.4)));
+    set('u_rim', Math.max(0, finiteNumber(optics.rim, 0.25)));
+    set('u_rimTint', clamp(finiteNumber(optics.rimTint, 1), 0, 1));
     set('u_dispersionAmount', clamp(finiteNumber(optics.dispersionAmount, 1), 0, 1));
     set('u_globalLight', [context.light.x, context.light.y]);
     set('u_globalLightIntensity', context.light.intensity);
