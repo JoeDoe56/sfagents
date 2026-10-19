@@ -1,0 +1,8 @@
+/* sfgl base styles. Lens elements are placeholders; the glass is drawn by a
+ * surface canvas. In the CSS tiers ('static', 'frost', and while WebGL is
+ * unavailable or its context is lost) each lens element is styled inline
+ * with a tint, backdrop-filter and rim, and carries data-sf-tier so pages
+ * can adjust it, e.g.
+ *   [data-sf-tier="static"] { color: CanvasText; }
+ */
+[data-sf-surface] { pointer-events: none; }

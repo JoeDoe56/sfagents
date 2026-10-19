@@ -51,7 +51,7 @@ The upstream code is not merged continuously. To take a later upstream fix, comp
 | `agents/invoke-child.ts` | Design-derived | `tools/agent/agent.ts` |
 | `utils/debug.ts` | Design-derived | `utils/debugLogger.ts` (call shape only) |
 | `agents/definition.ts`, `agents/loader.ts`, `providers/types.ts`, `providers/factory.ts`, `tools/tool-context.ts`, `tools/file-io.ts`, `utils/semaphore.ts`, `runtime/recorder.ts`, `index.ts` | SF Agents | none |
-| `conversation/*` (format, state, store, lock, service, sections, tools, context) | SF Agents | none. The persistent conversation and semantic memory are new; upstream's session recording and memory subsystems were not used. |
+| `conversation/*` (format, state, store, lock, service, sections, tools, context, artifacts, attachments) | SF Agents | none. The persistent conversation, semantic memory, artifacts and attachments are new; upstream's session recording and memory subsystems were not used. |
 
 ## cli (`@sfagents/cli`)
 
@@ -59,7 +59,17 @@ The upstream code is not merged continuously. To take a later upstream fix, comp
 | --- | --- | --- |
 | `utils/read-stdin.ts` | Adapted | `utils/readStdin.ts` |
 | `utils/cleanup.ts` | Adapted | `utils/cleanup.ts` |
-| `entry/main.ts`, `entry/conversation.ts`, `config/load.ts`, `terminal/*.ts`, `index.ts`, `bin/sfagents.js` | SF Agents | none (replace `cli.ts`, `gemini.tsx`, `nonInteractiveCli.ts`, `config/*` and the Ink UI) |
+| `entry/main.ts`, `entry/conversation.ts`, `config/load.ts`, `terminal/*.ts`, `index.ts`, `bin/sfagents.js` | SF Agents | none (replace `cli.ts`, `gemini.tsx`, `nonInteractiveCli.ts`, `config/*` and the Ink UI). Upstream's web UI packages were not used. |
+
+## web (`@sfagents/web`)
+
+| File | Status | Source |
+| --- | --- | --- |
+| `src/server.ts`, `src/display.ts`, `src/index.ts` | SF Agents | none |
+| `src/up2k.ts`, `public/up2k.js` | SF Agents | An independent implementation of the upload protocol of copyparty's up2k (https://github.com/9001/copyparty, MIT): per-chunk SHA-512 hashes truncated to 33 bytes in base64url, a handshake that returns the chunks still needed, an upload identity ("wark") derived from a salt, the size and the hashes, and the chunk-size rule. No copyparty code was used. |
+| `public/sha512.js` | SF Agents | FIPS 180-4 SHA-512, written for this project as a fallback where `crypto.subtle` is unavailable. |
+| `public/*.html`, `public/*.css`, other `public/*.js` | SF Agents | none. The bubble shapes and colours were traced from iMessage screenshots and the sheet geometry from an Apple Maps screen recording supplied by the project owner; no Apple code or assets other than the SF Symbols below. |
+| `public/vendor/sfgl/` | Vendored | sfgl (https://github.com/JoeDoe56/sfgl, MIT) at the commit named in its `VENDOR.md`, copied by `scripts/vendor-sfgl.mjs`. Includes Host Grotesk (SIL OFL 1.1) and 33 SF Symbols glyphs, which are Apple's artwork and not covered by any license in this repository (see `vendor/sfgl/symbols/PROVENANCE.md`). |
 
 ## Not taken from upstream
 

@@ -4,8 +4,9 @@
  *  1. No import specifier, manifest dependency or lockfile entry refers to
  *     @qwen-code/* or a path into another upstream package.
  *  2. Relative imports never leave their own package's src directory.
- *  3. The CLI reaches Core only through "@sfagents/core"; Core never imports
- *     the CLI or terminal modules (node:readline).
+ *  3. The CLI and the web server reach Core only through "@sfagents/core";
+ *     Core never imports the CLI, the web server or terminal modules
+ *     (node:readline), and the web server never imports the CLI.
  *  4. Every declared dependency is imported somewhere in that package, and
  *     every bare import is declared (or is a Node builtin / the sibling package).
  * Exits non-zero and prints each violation.
@@ -42,7 +43,7 @@ function stripComments(src) {
 
 const FORBIDDEN = /@qwen-code\/|qwen-code-core|packages\/(acp-bridge|browser-use|sdk-typescript|web-shell|web-templates|audio-capture|channels)/;
 
-for (const pkg of ['core', 'cli']) {
+for (const pkg of ['core', 'web', 'cli']) {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, pkg, 'package.json'), 'utf8'));
   const declared = new Set([...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.devDependencies ?? {})]);
   for (const dep of declared) if (FORBIDDEN.test(dep)) problems.push(`${pkg}/package.json declares forbidden dependency ${dep}`);
@@ -64,11 +65,13 @@ for (const pkg of ['core', 'cli']) {
       }
       if (builtins.has(spec) || builtins.has(spec.split('/')[0])) {
         if (pkg === 'core' && (spec === 'node:readline' || spec === 'readline')) problems.push(`${rel}: Core must not import terminal modules ("${spec}")`);
+        if (pkg === 'web' && (spec === 'node:readline' || spec === 'readline')) problems.push(`${rel}: the web server must not import terminal modules ("${spec}")`);
         continue;
       }
       const name = packageName(spec);
       used.add(name);
-      if (pkg === 'core' && name === '@sfagents/cli') problems.push(`${rel}: Core must not import the CLI`);
+      if (pkg === 'core' && (name === '@sfagents/cli' || name === '@sfagents/web')) problems.push(`${rel}: Core must not import the CLI or the web server`);
+      if (pkg === 'web' && name === '@sfagents/cli') problems.push(`${rel}: the web server must not import the CLI`);
       if (!declared.has(name)) problems.push(`${rel}: imports "${name}", which ${pkg}/package.json does not declare`);
     }
   }

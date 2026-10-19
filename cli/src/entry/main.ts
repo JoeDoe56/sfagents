@@ -5,6 +5,7 @@
  *   sfagents run "<task>"          one request, prints the answer, exits
  *   sfagents agents validate       validate agent JSON and print the tree
  *   sfagents mcp list              connect to configured MCP servers and list tools
+ *   sfagents web                   serve the web interface (default http://127.0.0.1:8093)
  */
 
 import readline from 'node:readline';
@@ -37,6 +38,7 @@ import {
   type ConversationFlags,
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
+import { DEFAULT_HOST, DEFAULT_PORT, WebServer } from '@sfagents/web';
 
 export const VERSION = '0.1.0';
 
@@ -52,6 +54,7 @@ Usage:
   sfagents run [options] "<task>"       Run one request and print the final answer ("-" reads stdin)
   sfagents agents validate [options]    Validate agent definitions and print the agent tree
   sfagents mcp list [options]           Show configured MCP servers, status and tools
+  sfagents web [options]                Serve the web interface (default http://127.0.0.1:${DEFAULT_PORT})
   sfagents conversation [info|sections|show <id>|search <words>|artifacts|unlock]
                                         Inspect the stored conversation (or remove a stale lock)
 
@@ -65,6 +68,9 @@ Options:
       --conversation <file> Use this conversation file (default: <config dir>/.sfagents/conversation.md)
       --ephemeral           (start) Keep this session in memory only; nothing is stored
       --persist             (run) Record the request in the persistent conversation
+      --port <n>            (web) Port to listen on (default ${DEFAULT_PORT})
+      --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
+                            the agent and its tools to your network)
   -v, --version             Print the version
   -h, --help                Show this help
 
@@ -107,6 +113,8 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         ephemeral: { type: 'boolean', default: false },
         persist: { type: 'boolean', default: false },
         page: { type: 'string' },
+        port: { type: 'string' },
+        host: { type: 'string' },
         version: { type: 'boolean', short: 'v', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -211,6 +219,29 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         await runExitCleanup();
       }
     }
+    case 'web': {
+      if (sub !== undefined) {
+        streams.stderr.write('"sfagents web" takes no arguments.\n');
+        return EXIT_CONFIG;
+      }
+      if (values.ephemeral) {
+        streams.stderr.write('The web interface always uses a persistent conversation; --ephemeral is not available.\n');
+        return EXIT_CONFIG;
+      }
+      const port = values.port === undefined ? DEFAULT_PORT : Number(values.port);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        streams.stderr.write(`--port must be a number from 0 to 65535, got "${values.port}".\n`);
+        return EXIT_CONFIG;
+      }
+      try {
+        checkCredentials(tree, process.env);
+      } catch (error) {
+        return printConfigError(error, streams);
+      }
+      const conversation = openSelected('start', values, tree, streams);
+      if (conversation instanceof Error || !conversation) return EXIT_CONFIG;
+      return serveWeb(tree, conversation, { port, host: values.host ?? DEFAULT_HOST, yes: values.yes }, streams);
+    }
     default:
       streams.stderr.write(`Unknown command "${command}".\n\n${USAGE}\n`);
       return EXIT_CONFIG;
@@ -295,6 +326,55 @@ async function runOnce(
     rl?.close();
     await runExitCleanup();
   }
+}
+
+async function serveWeb(
+  tree: AgentTree,
+  conversation: ConversationService,
+  opts: { port: number; host: string; yes: boolean },
+  streams: Streams,
+): Promise<number> {
+  const style = createStyle(streams.stderr as NodeJS.WriteStream);
+  const server = new WebServer({
+    tree,
+    conversation,
+    port: opts.port,
+    host: opts.host,
+    approveAll: opts.yes,
+    log: (line) => streams.stderr.write(`${line}\n`),
+  });
+  // Cleanups run in reverse: stop the server (and any run) before closing the conversation.
+  registerCleanup(() => conversation.close());
+  registerCleanup(() => server.close());
+  let url: string;
+  try {
+    url = await server.start();
+  } catch (error) {
+    streams.stderr.write(`${style.red('Could not start the web interface:')} ${getErrorMessage(error)}\n`);
+    await runExitCleanup();
+    return EXIT_FAILURE;
+  }
+  for (const n of conversation.notices) streams.stderr.write(`${n.message}\n`);
+  streams.stdout.write(`SF Agents web interface: ${url}\n`);
+  if (opts.host !== DEFAULT_HOST && opts.host !== 'localhost' && opts.host !== '::1') {
+    streams.stderr.write(
+      `${style.yellow('warning:')} listening on ${opts.host}. Anyone who can reach this address can talk to the agent and run its tools with your permissions.\n`,
+    );
+  }
+  if (opts.yes) streams.stderr.write(`${style.yellow('note:')} --yes: tool calls that would ask for approval run without asking.\n`);
+  streams.stderr.write(style.dim('Press Ctrl+C to stop.\n'));
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+      resolve();
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+  streams.stderr.write('\nStopping…\n');
+  await runExitCleanup();
+  return EXIT_OK;
 }
 
 async function listMcp(tree: AgentTree, streams: Streams): Promise<number> {

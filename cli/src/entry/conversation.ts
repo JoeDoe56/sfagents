@@ -118,7 +118,7 @@ export async function conversationCommand(
     case 'info': {
       const userMsgs = state.messages.filter((m) => m.role === 'user').length;
       const runs = [...state.runs.values()];
-      const missing = state.artifacts.filter((a) => a.path && !fs.existsSync(path.resolve(path.dirname(file), a.path)));
+      const missing = [...state.artifactViews.values()].filter((a) => a.path && !fs.existsSync(path.resolve(path.dirname(file), a.path)));
       const holder = readLock(lockPathFor(file));
       const lines = [
         `${style.bold('Conversation')} ${file}`,
@@ -176,9 +176,10 @@ export async function conversationCommand(
         streams.stdout.write('No artifacts.\n');
         return 0;
       }
-      for (const a of state.artifacts) {
+      for (const a of state.artifactViews.values()) {
         const exists = a.path ? fs.existsSync(path.resolve(path.dirname(file), a.path)) : true;
-        streams.stdout.write(`${a.id}  ${a.type}  ${stripAnsiAndControl(a.title)}${a.path ? `  ${a.path}${exists ? '' : style.yellow(' (missing)')}` : ''}\n`);
+        const extra = `${a.rev > 1 ? `  rev ${a.rev}` : ''}${a.pinned ? '  pinned' : ''}`;
+        streams.stdout.write(`${a.id}  ${a.type}  ${stripAnsiAndControl(a.title)}${extra}${a.path ? `  ${a.path}${exists ? '' : style.yellow(' (missing)')}` : ''}\n`);
       }
       return 0;
     }

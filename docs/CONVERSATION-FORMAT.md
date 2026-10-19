@@ -16,6 +16,8 @@ Design goals, in priority order:
   conversation.md          main conversation (this format, kind "main")
   transcripts/<run>.md     one child agent run each (this format, kind "transcript")
   recovered/               damaged tails moved aside during recovery
+  artifacts/<id>/r<rev>/   content of each artifact revision
+  uploads/<id>/<name>      attached files (uploads/.up2k/ holds partial uploads)
   conversation.lock        present while a writer has the conversation open
   .gitignore               "*" so the folder is never committed by accident
 ```
@@ -64,7 +66,9 @@ All records have `seq` (integer, strictly increasing by 1 from 1 within a file) 
 | `tool_start` | no | `run`, `callId`, `tool` | Execution of a requested tool call is about to begin. |
 | `run_end` | no | `run`, `status` (`GOAL`, `ERROR`, `MAX_TURNS`, `TIMEOUT`, `CANCELLED`), optional `error`, `turns`, `usage` | A run finished. |
 | `section` | no | `op` (`add` or `edit`), `section`, `rev`, `expected`, plus operation fields | A change to the section hierarchy. |
-| `artifact` | no | `id` (`a<seq>`), `type`, `title`, optional `path`, `run`, `message`, `callId` | Something displayable produced in the conversation. |
+| `artifact` | no | `id` (`a<seq>`), `type`, `title`, optional `path`, `run`, `message`, `callId`, `mime` | Something displayable produced in the conversation (revision 1). |
+| `artifact_update` | no | `artifact` (an artifact ID), `rev` (exactly one more than the current revision), optional `path`, `title`, `mime`, `run`, `callId` | A new revision of an artifact. |
+| `artifact_pin` | no | `artifact`, `pinned` (boolean) | The user pinned or unpinned an artifact. |
 | `context_reset` | no | none | `/clear`: the working context starts fresh after this point. History stays searchable. |
 | `interrupted` | no | `run`, `notStarted` (call IDs), `unknown` (call IDs) | Written on reopen for runs that never ended. |
 | `recovery` | no | `reason`, `savedTo` (relative path), `bytes` | A damaged trailing record was moved aside. |
@@ -73,7 +77,7 @@ All records have `seq` (integer, strictly increasing by 1 from 1 within a file) 
 
 | Role | Body | Extra fields |
 | --- | --- | --- |
-| `user` | The user's text, exactly as entered. | none |
+| `user` | The user's text, exactly as entered. | `attachments`: `[{"id","name","mime","path","size"}]`, files the user attached; `path` is relative to the `.sfagents` directory (`uploads/<id>/<name>`) |
 | `assistant` | The model's visible text (may be empty). | `toolCalls`: `[{"id","name","arguments"}]` with `arguments` as the exact JSON string sent to the provider; `reasoning` (text) or `reasoningDetails` (array), opaque provider continuation data stored unmodified; `finish` (provider finish reason) |
 | `tool` | The full text returned to the model, fenced. | `callId`, `tool`, `status` (`ok`, `error`, `denied`, `cancelled`, `not_started`) |
 
@@ -111,7 +115,15 @@ An `artifact` record references displayable content; it does not contain it. `pa
 - A missing backing file is reported as a missing artifact. The conversation still loads.
 - Artifact records grant no filesystem or execution permissions.
 
-Version 1 writes `agent_transcript` artifacts. Readers accept any `type` string, so later document, media and component types need no format change.
+The runtime writes `agent_transcript` artifacts for child runs. Model-created artifacts (`create_artifact`) store their content under `artifacts/<id>/r1/<file name>` and use a display `type` derived from the file extension: `document` (Markdown), `html`, `image` (SVG and raster images), `code`, `data` or `text`. Readers accept any `type` string.
+
+`update_artifact` writes the next revision to `artifacts/<id>/r<rev>/<file name>` and appends an `artifact_update`; earlier revision files are kept. `artifact_pin` records are written by clients when the user pins or unpins. The current view of an artifact (latest path, title, revision, pin state) is the `artifact` record with every later `artifact_update` and `artifact_pin` for it applied in order. An update that skips a revision, or an update or pin naming an unknown artifact, is a semantic error.
+
+`artifact_update` and `artifact_pin` were added after the first release of version 1. Older SF Agents builds report them as unknown record kinds.
+
+### Attachments
+
+A user message's `attachments` reference files under `uploads/`. The body stays exactly what the user typed. When the message is sent to a model, images (PNG, JPEG, GIF, WebP up to 20 MB) become image parts, readable text files up to 200 KB are appended inside `<attachment name="…" type="…">` tags, and other files are named with a note. A missing file is reported to the model as no longer available; the conversation still loads.
 
 ## Locking, durability and recovery
 

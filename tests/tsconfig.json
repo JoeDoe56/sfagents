@@ -8,5 +8,5 @@
   },
   "include": ["**/*.ts"],
   "exclude": ["dist", "fixtures/**/*.mjs"],
-  "references": [{ "path": "../core" }, { "path": "../cli" }]
+  "references": [{ "path": "../core" }, { "path": "../web" }, { "path": "../cli" }]
 }

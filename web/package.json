@@ -1,0 +1,22 @@
+{
+  "name": "@sfagents/web",
+  "version": "0.1.0",
+  "description": "SF Agents web interface: HTTP server and browser client",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "public"],
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "@sfagents/core": "0.1.0"
+  }
+}

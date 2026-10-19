@@ -2,7 +2,7 @@
 
 A small agent runtime and CLI. You define agents in JSON. Each agent talks to a model through OpenRouter (or any OpenAI-compatible endpoint), uses the built-in file, search and shell tools and the MCP tools it is allowed, and can delegate to the child agents it declares.
 
-SF Agents started as an extraction of the minimal runtime from Qwen Code's `packages/core` and `packages/cli` (see [PROVENANCE.md](PROVENANCE.md)). This is the first functional milestone. There is no GUI, no persistent conversation store and no background services.
+SF Agents started as an extraction of the minimal runtime from Qwen Code's `packages/core` and `packages/cli` (see [PROVENANCE.md](PROVENANCE.md)). It has a terminal interface and a web interface (`sfagents web`), one persistent conversation per project, and artifacts the agent creates for you to keep.
 
 ## Requirements
 
@@ -36,6 +36,7 @@ Keys never go in agent JSON. `.env` is git-ignored. Variables already set in the
 | --- | --- |
 | `sfagents start` | Opens (or creates) this project's persistent conversation and talks to the root agent. Streams answers, shows tool and child activity, asks before risky calls. Ctrl+C cancels the running turn; `/exit` or Ctrl+D quits; `/clear` resets the working context (history is kept); `/sections` shows the topic tree; `/tree` shows the agents. `--ephemeral` keeps the session in memory only. |
 | `sfagents run "<task>"` | One request, ephemeral unless `--persist` (or `--conversation <file>`) records it in the conversation. The answer goes to stdout and activity to stderr. `-` reads the task from stdin. `--json` prints the structured result. Exit code: 0 done, 1 failed, 2 configuration error, 130 cancelled. |
+| `sfagents web` | Serves the web interface at http://127.0.0.1:8093 (`--port`, `--host`). The same persistent conversation as `start`, with attachments, approvals in the page and the artifacts sheet. Ctrl+C stops it. See [Web interface](#web-interface). |
 | `sfagents conversation …` | Inspects the stored conversation without opening it for writing: `info`, `sections`, `show <section\|unassigned\|message id>`, `search <words>`, `artifacts`. `unlock` removes a stale lock after confirmation. |
 | `sfagents agents validate` | Validates every agent file and prints the tree with each agent's tools, auto-approvals and roots. |
 | `sfagents mcp list` | Connects to each server in `mcp.json` and shows its status, tools and which agents may use it. |
@@ -52,6 +53,8 @@ mcp.json                      named MCP servers (optional)
 .sfagents/                    local conversation state (created by start; never committed)
   conversation.md             the persistent conversation: messages, sections, artifact references
   transcripts/<run>.md        one per child agent run
+  artifacts/<id>/r<rev>/      every revision of each artifact the agent created
+  uploads/                    files attached in the web interface (and partial uploads)
 ```
 
 This repository ships a working example: a root agent with file tools and shell, a read-only `worker` child, and a demo MCP server. Run `npx sfagents agents validate` to see it.
@@ -80,6 +83,7 @@ This repository ships a working example: a root agent with file tools and shell,
     "children": ["agents/1-Subagent-Worker.json"]
   },
   "conversation": { "access": "organize" },
+  "artifacts": { "access": "create" },
   "context": { "maxInputTokens": 48000, "recentExchanges": 12 },
   "limits": {
     "maxTurns": 40,
@@ -104,6 +108,7 @@ This repository ships a working example: a root agent with file tools and shell,
 | `spawn.children` | Child definition files, relative to this file, inside the configuration directory. Children use the same format and may have their own children. |
 | `spawn.maxDepth` | Root only. Maximum tree depth (default 4). |
 | `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Root defaults to `organize`; children default to `none` and may never exceed their parent. |
+| `artifacts.access` | Artifacts: `create` (create, update, list and read), `read` (list and read) or `none`. Root defaults to `create`; children default to `none` and may never exceed their parent. |
 | `context` | Root only. Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
 | `limits` | Turn budget and timeouts. Defaults are shown above. |
 
@@ -132,6 +137,31 @@ An agent with children gets one extra tool, `invoke_child`. It lists only that a
 - **What is not restored.** "Always allow" approvals and `--yes` apply to the running process only. On resume, tools and permissions come from the current `agent.json`.
 - **Privacy.** `.sfagents/` contains a `.gitignore` that excludes everything in it, and agent file tools cannot read or write it. Conversations can still contain anything you or your tools put in them, so treat the folder as private.
 
+## Artifacts
+
+Artifacts are things the agent makes for you to keep rather than say in a message: a document (`.md`), a self-contained web page (`.html`), an SVG drawing, a code or data file. The agent creates one with `create_artifact` (title, file name, content) and changes it with `update_artifact`, which writes a new revision and keeps the old ones. The file extension decides how it is shown. The agent sees an index of recent artifacts in its system prompt, and can `list_artifacts` and `read_artifact`.
+
+Artifact content is stored under `.sfagents/artifacts/` and recorded in the conversation (`artifact`, `artifact_update` and `artifact_pin` records), so the list survives restarts. You pin artifacts in the web interface; `sfagents conversation artifacts` lists them with their latest revision and pins.
+
+## Web interface
+
+```sh
+npx sfagents web            # http://127.0.0.1:8093
+npx sfagents web --port 9000
+```
+
+The page is one conversation in the style of iMessage, with a bottom bar in the style of Apple Maps:
+
+- **Messages** use iMessage's dark-mode bubble shapes and colours. Assistant replies render Markdown. Tool use appears as small grey lines ("Read src/app.ts"), and a typing bubble shows while the agent works.
+- **The bar** holds the message field. **+** opens the file and photo picker (you can also drop or paste files), the microphone dictates where the browser supports it, and the circle on the right sends (or stops a running turn). The field grows with the text and then scrolls, as in iMessage. Enter sends on a desktop; Shift+Enter adds a line.
+- **Pull the handle up** (or tap it, or use the arrow keys on it) and the bar becomes a glass sheet; pull further and it becomes an opaque sheet. Below the field: a placeholder for the system monitor, **Pinned** artifacts, a divider, then all artifacts, newest first, as glass tiles. Tap a tile to open it; the pin button pins or unpins it.
+- **Approvals** appear as a card in the conversation (Allow Once, Always Allow, Don't Allow). `--yes` skips them.
+- **Attachments** upload with an up2k-style protocol (after [copyparty](https://github.com/9001/copyparty)'s up2k): the browser hashes each chunk, the server asks only for chunks it does not have, chunks upload in parallel and are verified on arrival, an interrupted upload resumes (choose the same file again), and a file the server already has is not uploaded at all. Images are shown to the model; text files are included in the message; other files are named.
+
+The glass is [sfgl](https://github.com/JoeDoe56/sfgl) (vendored in `web/public/vendor/sfgl`; refresh it with `npm run vendor:sfgl -- <path to sfgl>`), and the font is Host Grotesk. Add `?quality=superfluid|glass|lite|frost|static` to the URL to force a glass quality tier.
+
+Security: the server listens on 127.0.0.1 only, accepts only requests addressed to this host and port, and refuses cross-site writes. Artifacts and uploads are served in a sandbox, so a page the agent wrote cannot call the API. `--host 0.0.0.0` exposes the agent and its tools (with your permissions) to your network; there is no login.
+
 ## Permissions (enforced in code, not in prompts)
 
 - **Tool allowlists** are checked when each call is executed. A model asking for a tool it was not given gets an error back; nothing runs.
@@ -140,7 +170,7 @@ An agent with children gets one extra tool, `invoke_child`. It lists only that a
 - **Shell is root-only.** A path allowlist cannot confine arbitrary commands, and this version has no OS sandbox, so `shell` on any child is a configuration error. Shell commands run with your user's full permissions. Every command asks for approval unless you auto-approve `shell`.
 - **Writes, edits, shell and MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag. In `run` mode without a terminal, calls that need approval are denied and the model is told why.
 - **MCP servers are not workspace-confined.** A server can reach anything its own process can. Grant servers per agent, preferably limited to specific tools.
-- **Conversation state** (`.sfagents/`) is invisible to all file tools; it changes only through the conversation service.
+- **Conversation state** (`.sfagents/`, including artifacts and uploads) is invisible to all file tools; it changes only through the conversation service and the web server.
 - **Secrets:** the configuration directory's `.env` cannot be read, searched or written by any file tool (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model. The root agent's approved shell commands could still read `.env`, so approve shell commands with care.
 
 ## MCP servers
@@ -159,7 +189,7 @@ Transports: **stdio** (`command`) and **Streamable HTTP** (`httpUrl`). Legacy SS
 ## Development
 
 ```sh
-npm run build            # tsc project build (core, cli, tests)
+npm run build            # tsc project build (core, web, cli, tests)
 npm test                 # build + deterministic tests (mock provider, local MCP servers)
 npm run test:live        # live OpenRouter tests; needs OPENROUTER_API_KEY
 npm run audit:imports    # static import / dependency audit
@@ -175,7 +205,9 @@ core/src/
   tools/        built-in tools
   mcp/          mcp.json, connections, MCP tool wrapper
   permissions/  workspace containment
-  conversation/ format, store, lock, sections, context builder
+  conversation/ format, store, lock, sections, context builder, artifacts, attachments
+web/src/        HTTP server, Server-Sent Events, up2k uploads, display model
+web/public/     browser client (plain ES modules, no build step) and vendored sfgl
 cli/src/
   entry/        commands and options
   config/       config location and .env
@@ -183,7 +215,7 @@ cli/src/
 tests/          node:test suites and fixtures
 ```
 
-Core has no terminal code; the CLI uses only Core's public exports.
+Core has no terminal or web code; the CLI and the web server use only Core's public exports.
 
 ## Known limitations
 
@@ -193,7 +225,8 @@ Core has no terminal code; the CLI uses only Core's public exports.
 - Token counts for the context budget are estimates (characters ÷ 4).
 - If SF Agents itself is force-killed, a shell command it started keeps running; the next start reports that call's outcome as unknown.
 - No OS sandbox, which is why `shell` is limited to the root agent.
-- Model output is text only; MCP image and audio results are summarized, not shown to the model.
+- Model output is text only; MCP image and audio results are summarized, not shown to the model. Attached images are shown to the model (if it supports images); other binary attachments are only named.
+- The web interface has one conversation, no login and no multi-user support. The system monitor and file manager in the sheet are placeholders.
 - No MCP OAuth flow; use headers with environment variables.
 - Windows: the first milestone was verified on Windows; the conversation features were developed and tested on Linux, and run their deterministic tests on Windows through `scripts/windows-smoke.ps1`.
 

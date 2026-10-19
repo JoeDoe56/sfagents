@@ -7,20 +7,22 @@
   "type": "module",
   "workspaces": [
     "core",
+    "web",
     "cli"
   ],
   "engines": {
     "node": ">=20.12"
   },
   "scripts": {
-    "prepare": "tsc -b cli tests",
-    "build": "tsc -b cli tests",
-    "clean": "tsc -b cli tests --clean",
-    "typecheck": "tsc -b cli tests",
+    "prepare": "tsc -b web cli tests",
+    "build": "tsc -b web cli tests",
+    "clean": "tsc -b web cli tests --clean",
+    "typecheck": "tsc -b web cli tests",
     "test": "npm run build && node scripts/run-tests.mjs",
     "test:live": "npm run build && node scripts/run-tests.mjs --live",
     "audit:imports": "node scripts/audit-imports.mjs",
-    "sfagents": "node cli/dist/index.js"
+    "sfagents": "node cli/dist/index.js",
+    "vendor:sfgl": "node scripts/vendor-sfgl.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.19.1",

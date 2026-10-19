@@ -13,3 +13,19 @@ Files derived from those projects keep their original copyright and license
 headers. PROVENANCE.md lists every derived file, its upstream source and
 whether it was copied unchanged, adapted, or re-implemented from the
 upstream design.
+
+The web interface (web/public/vendor/sfgl) includes sfgl
+(https://github.com/JoeDoe56/sfgl), Copyright 2026 JoeDoe56, licensed under
+the MIT License, which itself includes code adapted from liquidGL and
+liquid-glass-react (MIT); see web/public/vendor/sfgl/NOTICE.md and
+web/public/vendor/sfgl/licenses/. It also includes the Host Grotesk
+typeface, licensed under the SIL Open Font License 1.1
+(web/public/vendor/sfgl/fonts/host-grotesk/OFL.txt).
+
+web/public/vendor/sfgl/symbols/glyphs contains SF Symbols, which are Apple
+Inc.'s artwork and are not licensed by this project; see
+web/public/vendor/sfgl/symbols/PROVENANCE.md before redistributing them.
+
+The upload protocol in web/src/up2k.ts and web/public/up2k.js follows the
+design of copyparty's up2k (https://github.com/9001/copyparty, MIT License).
+It is an independent implementation; no copyparty code is included.

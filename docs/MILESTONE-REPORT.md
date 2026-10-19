@@ -147,3 +147,54 @@ Core 9,632 lines (the conversation layer is 2,626 of them), CLI 1,152, tests 3,0
 - Only `agent_transcript` artifacts are written by the runtime; there is no model tool to register document or media artifacts yet (the format already supports them).
 - A force-killed SF Agents process cannot stop a shell command it started; the next start reports that call's outcome as unknown.
 - PID reuse on the same host could make a stale lock look live; `conversation unlock` resolves it.
+
+---
+
+# Milestone 3: web interface, artifacts and uploads
+
+**Date:** 2026-10-19
+
+## Result
+
+`sfagents web` serves a browser interface on http://127.0.0.1:8093 for the same persistent conversation as `sfagents start`. The conversation looks like iMessage. The bottom bar is an Apple Maps-style pill: it pulls up into a glass sheet and then an opaque sheet that holds the artifacts. Agents can now create and revise artifacts, and users can attach files, which upload through an up2k-style resumable, deduplicating protocol.
+
+## What was built
+
+| Area | Delivered |
+| --- | --- |
+| Artifacts (Core) | `create_artifact`, `update_artifact`, `list_artifacts`, `read_artifact`, granted by the new `artifacts.access` field (root `create`, children `none`, no escalation). Every revision is kept under `.sfagents/artifacts/<id>/r<rev>/`. New `artifact_update` and `artifact_pin` records; an index of recent artifacts and short guidance go into the system prompt. `conversation artifacts` shows revisions and pins. |
+| Attachments (Core) | User messages reference uploaded files. Images go to the model as image parts, text files are inlined, other files are named. Image parts are budgeted at a fixed estimate. |
+| Web server (`web/`) | Node `http` only, no new dependencies. Serves the client, streams runs over Server-Sent Events (user message, text deltas, tool activity, approvals, artifact changes, run end), and handles cancel, approvals in the page, pins and sandboxed artifact and upload serving. Host-header and same-origin checks, JSON-only writes, and a CSP sandbox on everything the agent or the user supplied. Listens on 127.0.0.1 by default. |
+| Uploads | An independent implementation of copyparty's up2k ideas: chunk size rule, SHA-512/33-byte base64url chunk hashes, salted "wark" identity, handshake returning needed chunks, parallel and stitched chunk posts verified on arrival and written straight into a sparse file, resume across reloads and server restarts, instant deduplication, size limit, stale partial cleanup. The browser hashes with `crypto.subtle` (or a bundled SHA-512 where that is unavailable), uploads four requests at a time with retries and shows progress rings. |
+| Client | Plain ES modules, no build step. iMessage bubbles (colours sampled and the tail traced from the supplied screenshots, compared side by side at 3×), grouping with tails on the last bubble, time stamps, typing bubble, Markdown in replies, image and file attachments. The field grows like iMessage's and then scrolls. The bar has the sfgl plus icon (file and media picker, plus drop and paste), the mic (dictation where supported) and the right circle (blank, send when there is text, stop while running). A grabber drives a continuous three-detent sheet: collapsed pill, medium glass sheet, full opaque sheet, with drag, flick, tap and keyboard control. Below the field: the monitor placeholder (a glass rectangle about the height of Maps' Places row), Pinned with a pin icon, a divider, then all artifacts newest first as equal glass squares with previews; a viewer opens documents, code, images and sandboxed pages. |
+| Glass | sfgl, vendored by `scripts/vendor-sfgl.mjs` (sources, Host Grotesk, licenses and only the 33 SF Symbols used). sfgl refracts a texture, so the visible chat is repainted into a backdrop canvas (bubbles, words, images; cached per element, so scrolling only repaints). The opaque sheet is painted into that backdrop so the glass keeps its rim. CSS tiers get a real fill. |
+
+## Verification
+
+| Check | Evidence |
+| --- | --- |
+| Artifact storage, revisions, pins, reopen, malformed records, file-name sanitizing, tool grants and escalation, file tools cannot reach artifacts | `artifacts` tests (9) |
+| Attachments to the model (image part, inlined text, named binary), replay after reopen, image token estimate | `artifacts` tests |
+| up2k: chunk rule, parallel out-of-order chunks, hash mismatch, wrong length, unknown upload, non-consecutive stitching, resume after a server restart, byte-identical reassembly, deduplication, zero-byte file, size limit; client SHA-512 and chunk size identical to the server's | `web` tests |
+| Server: CSP, foreign Host, cross-origin and non-JSON writes refused; SSE stream of a run that creates an artifact; busy rejection; sandboxed artifact serving; pins; attachments reach the model and are served back; approvals allow and deny; cancel | `web` tests |
+| `sfagents web --port 0` serves, holds the conversation lock, stops on SIGINT with exit 0 and releases the lock; bad port and `--ephemeral` rejected | `web` CLI tests |
+| Layout and behaviour | Headless Chromium at phone (430×932) and desktop (1280×800) sizes, in the `superfluid` and `frost` tiers: bubbles against the reference screenshot, growing field, drag and snap between detents, approvals, uploads with progress and instant dedupe, pinning, viewer |
+| Live | `sfagents web` with Haiku 5.5 through the browser: described an attached image correctly, created a Markdown checklist and an SVG artifact (both shown as tiles with previews), streamed a Markdown reply |
+
+Totals: **147 deterministic tests** passing; import audit and `npm audit` clean.
+
+## Found and fixed while testing
+
+- Focusing an element made the fixed stage scroll programmatically, which shifted the glass against the page; the stage and sheet now use `overflow: clip`.
+- Reconnecting during a run showed a tool call twice; snapshots now hide the live run's stored messages.
+- Replaced thread and tile nodes were left in the page during streaming; reconciliation now removes them.
+- The tail's top edge left a hairline notch; the mask now starts above the corner.
+
+## Known limitations
+
+- Not yet tried on a real iPhone, iPad or Windows browser; the on-screen-keyboard handling (visual viewport) is untested on iOS.
+- Headless testing used SwiftShader, so glass performance on real GPUs is unmeasured. sfgl lowers its tier automatically when frames are slow.
+- One conversation, no login. `--host` other than localhost exposes the agent to the network.
+- The system monitor and file manager are placeholders; the model-slug gradient is not started.
+- Dictation uses the browser's Web Speech API (Chrome, Safari); Firefox shows the mic as unavailable.
+- SF Symbols are Apple's artwork (see `web/public/vendor/sfgl/symbols/PROVENANCE.md`).

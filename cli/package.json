@@ -16,6 +16,7 @@
     "node": ">=20.12"
   },
   "dependencies": {
-    "@sfagents/core": "0.1.0"
+    "@sfagents/core": "0.1.0",
+    "@sfagents/web": "0.1.0"
   }
 }

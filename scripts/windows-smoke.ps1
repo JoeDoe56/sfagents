@@ -33,6 +33,7 @@ Step 'Conversation: info on a missing conversation reports it' { npx sfagents co
 Step 'Conversation: unlock with no lock' { npx sfagents conversation unlock --config $tmp }
 Remove-Item -Recurse -Force $tmp
 
+Write-Host "`nManual check (web): run 'npx sfagents web', open http://127.0.0.1:8093, send a message, attach a file with +, pull the handle up to the full sheet, then press Ctrl+C in the console (it should print 'Stopping...' and exit)." -ForegroundColor Yellow
 Write-Host "`nManual check (needs a real console): run 'npx sfagents start', ask for a long shell command such as 'ping -n 30 127.0.0.1', approve it, press Ctrl+C once (the turn is cancelled and the prompt returns), then /exit and run 'npx sfagents conversation info' (lock: free)." -ForegroundColor Yellow
 
 if ($env:OPENROUTER_API_KEY) {

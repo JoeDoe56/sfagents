@@ -17,7 +17,7 @@ import {
   type ChatMessage,
   type FunctionDeclaration,
 } from '@sfagents/core';
-import { baseAgent, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script } from './helpers.js';
+import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script } from './helpers.js';
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
   const dir = makeTempDir();
@@ -61,6 +61,18 @@ describe('artifacts: storage and records', () => {
     assert.throws(() => conversation.updateArtifact('a999', { content: 'x' }), ArtifactError);
     assert.throws(() => conversation.artifactContent(a.id, 3), /revisions 1 to 2/);
     conversation.close();
+  });
+
+  test('conversation artifacts lists the latest revision and pins', async () => {
+    const dir = project();
+    const { conversation } = open(dir);
+    const a = conversation.createArtifact({ title: 'Plan', filename: 'plan.md', content: 'v1' });
+    conversation.updateArtifact(a.id, { content: 'v2' });
+    conversation.setArtifactPinned(a.id, true);
+    conversation.close();
+    const r = await runCli(['conversation', 'artifacts'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`${a.id}  document  Plan  rev 2  pinned  artifacts/${a.id}/r2/plan.md`));
   });
 
   test('records round-trip and invalid revisions or pins are rejected', () => {

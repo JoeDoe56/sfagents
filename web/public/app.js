@@ -1,0 +1,798 @@
+/**
+ * SF Agents web client: iMessage-style conversation, an Apple Maps-style
+ * bottom bar that pulls up into a sheet of artifacts, up2k uploads and
+ * sfgl glass.
+ */
+
+import { applySymbol } from './vendor/sfgl/src/symbols.js';
+import { renderMarkdown, looksLikeMarkdown, escapeHtml } from './markdown.js';
+import { setupGlass } from './glass.js';
+import { createSheet } from './sheet.js';
+import { renderTiles, createViewer } from './artifacts.js';
+import { UploadJob } from './up2k.js';
+
+const $ = (id) => document.getElementById(id);
+const stage = $('stage');
+const chat = $('chat');
+const thread = $('thread');
+const bar = $('bar');
+const row = $('row');
+const field = $('field');
+const input = $('input');
+const send = $('send');
+const attachBtn = $('attach');
+const mic = $('mic');
+const picker = $('picker');
+const attachmentsEl = $('attachments');
+const sheetScroll = $('sheetScroll');
+
+for (const el of document.querySelectorAll('i[data-symbol]')) applySymbol(el, el.dataset.symbol);
+
+const coarse = matchMedia('(pointer: coarse)').matches;
+const params = new URLSearchParams(location.search);
+
+// ------------------------------------------------------------------ state
+
+const state = {
+  agent: null,
+  items: [],
+  more: false,
+  artifacts: [],
+  live: null, // { id, segments: [{kind, id, text, status}] }
+  approvals: [],
+  notices: [],
+  limits: { maxUploadBytes: Infinity, maxAttachments: 20, maxMessageChars: 400000 },
+  connected: false,
+};
+const answered = new Map(); // approval id → decision (kept briefly so the card shows the answer)
+let queued = null; // a message typed while the agent was working
+
+// ------------------------------------------------------------------ scrolling
+
+function nearBottom() {
+  return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80;
+}
+
+// Follow new content (streaming text, images finishing loading) while the reader is at the bottom.
+let stick = true;
+let programmaticScroll = false;
+function scrollToBottom() {
+  programmaticScroll = true;
+  chat.scrollTop = chat.scrollHeight;
+  stick = true;
+}
+chat.addEventListener('scroll', () => {
+  if (programmaticScroll) {
+    programmaticScroll = false;
+    return;
+  }
+  stick = nearBottom();
+}, { passive: true });
+new ResizeObserver(() => {
+  if (stick) scrollToBottom();
+}).observe(thread);
+
+// ------------------------------------------------------------------ glass
+
+const glassApi = setupGlass({ stage, chat, thread, quality: params.get('quality') });
+const { surface } = glassApi;
+const barLens = surface.lens(bar, { material: -0.42, layer: 0 });
+surface.lens(field, { material: 0.14, layer: 1 });
+surface.lens(send, { material: 0.14, layer: 1 });
+surface.lens($('monitor'), { material: 0.1, layer: 1, clip: sheetScroll });
+window.sfagents = { glass: glassApi.glass, surface, barLens };
+
+function syncTileLenses() {
+  const tiles = [...document.querySelectorAll('.tiles .tile')];
+  surface.syncGroup('tiles', tiles, { material: 0.1, layer: 1, clip: sheetScroll });
+  glassApi.glass.requestRender();
+}
+
+// ------------------------------------------------------------------ sheet
+
+let clearance = 100;
+const sheet = createSheet({
+  bar,
+  row,
+  grabber: $('grabber'),
+  scroller: sheetScroll,
+  onLayout: ({ opaque, rect, collapsedClearance }) => {
+    glassApi.setSheet({ ...rect, opaque });
+    if (Math.abs(collapsedClearance - clearance) > 0.5) {
+      const atBottom = nearBottom();
+      clearance = collapsedClearance;
+      thread.style.setProperty('--chat-bottom', `${Math.round(clearance + 18)}px`);
+      if (atBottom) scrollToBottom();
+    }
+  },
+  onDetent: (name) => {
+    if (name !== 'collapsed') syncTileLenses();
+  },
+});
+sheetScroll.addEventListener('scroll', () => glassApi.glass.requestRender(), { passive: true });
+
+// ------------------------------------------------------------------ time stamps
+
+function sameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function stampHtml(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  let day;
+  if (sameDay(d, now)) day = 'Today';
+  else if (sameDay(d, yesterday)) day = 'Yesterday';
+  else if (now - d < 6 * 864e5) day = d.toLocaleDateString(undefined, { weekday: 'long' });
+  else day = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+  return `<b>${escapeHtml(day)}</b> ${escapeHtml(time)}`;
+}
+
+// ------------------------------------------------------------------ thread rendering
+
+function hashText(text) {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+  return `${text.length}:${h}`;
+}
+
+/** Flattens items, the live run and approvals into keyed render entries. */
+function entries() {
+  const out = [];
+  let lastTime = 0;
+  const push = (e) => out.push(e);
+  if (state.more) push({ key: 'more', type: 'more' });
+  for (const it of state.items) {
+    const t = new Date(it.time).getTime();
+    if (Number.isFinite(t) && (it.kind === 'user' || it.kind === 'assistant') && (!lastTime || t - lastTime > 60 * 60 * 1000)) {
+      push({ key: `stamp:${it.id}`, type: 'stamp', time: it.time });
+    }
+    if (Number.isFinite(t) && (it.kind === 'user' || it.kind === 'assistant')) lastTime = t;
+    if (it.kind === 'user') push({ key: it.id, type: 'msg', side: 'out', text: it.text, attachments: it.attachments });
+    else if (it.kind === 'assistant') push({ key: it.id, type: 'msg', side: 'in', text: it.text, rich: true });
+    else if (it.kind === 'activity') push({ key: it.id, type: 'activity', text: it.text, status: it.status });
+    else push({ key: it.id, type: 'notice', text: it.text, level: /^Error/.test(it.text) ? 'error' : '' });
+  }
+  if (state.live) {
+    for (const seg of state.live.segments) {
+      if (seg.kind === 'text') push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true });
+      else push({ key: `live:${state.live.id}:${seg.id}`, type: 'activity', text: seg.text, status: seg.status });
+    }
+    const last = state.live.segments[state.live.segments.length - 1];
+    const waiting = !last || last.kind !== 'text' || state.live.stalled;
+    if (waiting && !state.approvals.length) push({ key: `typing:${state.live.id}`, type: 'typing' });
+  }
+  for (const a of state.approvals) push({ key: `approval:${a.id}`, type: 'approval', approval: a, decision: answered.get(a.id) });
+  for (const n of state.notices) push({ key: `notice:${n.id}`, type: 'notice', text: n.text, level: n.level });
+  // Group bubbles: first of a run gets spacing, last gets the tail.
+  for (let i = 0; i < out.length; i++) {
+    const e = out[i];
+    if (e.type !== 'msg' && e.type !== 'typing') continue;
+    const side = e.type === 'typing' ? 'in' : e.side;
+    const prev = out[i - 1];
+    const next = out[i + 1];
+    const sideOf = (x) => (x && x.type === 'msg' ? x.side : x && x.type === 'typing' ? 'in' : null);
+    e.first = sideOf(prev) !== side;
+    e.tail = sideOf(next) !== side;
+  }
+  return out;
+}
+
+function bubbleHtml(e) {
+  if (e.rich && looksLikeMarkdown(e.text)) return { html: renderMarkdown(e.text), rich: true };
+  return { html: escapeHtml(e.text), rich: false };
+}
+
+function buildEntry(e) {
+  let el;
+  switch (e.type) {
+    case 'more': {
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'load-more';
+      el.textContent = 'Show earlier messages';
+      el.addEventListener('click', loadEarlier);
+      break;
+    }
+    case 'stamp':
+      el = document.createElement('div');
+      el.className = 'stamp';
+      el.innerHTML = stampHtml(e.time);
+      break;
+    case 'msg': {
+      el = document.createElement('div');
+      el.className = `msg ${e.side}${e.first ? ' first' : ''}${e.tail ? ' tail-room' : ''}`;
+      if (e.attachments?.length) {
+        const media = document.createElement('div');
+        media.className = 'media';
+        for (const a of e.attachments) {
+          if (/^image\/(png|jpeg|gif|webp|avif|svg\+xml)$/.test(a.mime)) {
+            const img = document.createElement('img');
+            img.src = a.url;
+            img.alt = a.name;
+            img.loading = 'lazy';
+            img.decoding = 'async';
+            const link = document.createElement('a');
+            link.href = a.url;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.append(img);
+            media.append(link);
+          } else {
+            const chip = document.createElement('a');
+            chip.className = 'file-chip';
+            chip.href = a.url;
+            chip.target = '_blank';
+            chip.rel = 'noopener';
+            const icon = document.createElement('i');
+            applySymbol(icon, 'doc', { size: 16 });
+            const name = document.createElement('span');
+            name.textContent = a.name;
+            chip.append(icon, name);
+            media.append(chip);
+          }
+        }
+        el.append(media);
+      }
+      if (e.text && e.text.trim()) {
+        const b = document.createElement('div');
+        const { html, rich } = bubbleHtml(e);
+        b.className = `bubble${rich ? ' rich' : ''}${e.tail ? ' tail' : ''}`;
+        b.innerHTML = html;
+        el.append(b);
+      }
+      break;
+    }
+    case 'typing': {
+      el = document.createElement('div');
+      el.className = `msg in${e.first ? ' first' : ''} tail-room`;
+      const t = document.createElement('div');
+      t.className = 'typing';
+      t.setAttribute('aria-label', 'The agent is working');
+      t.innerHTML = '<span></span><span></span><span></span>';
+      el.append(t);
+      break;
+    }
+    case 'activity':
+      el = document.createElement('div');
+      el.className = `activity ${e.status || ''}`;
+      el.textContent = e.text;
+      break;
+    case 'notice':
+      el = document.createElement('div');
+      el.className = `notice ${e.level || ''}`;
+      el.textContent = e.text;
+      break;
+    case 'approval':
+      el = buildApproval(e.approval, e.decision);
+      break;
+  }
+  return el;
+}
+
+function signature(e) {
+  switch (e.type) {
+    case 'msg':
+      return `msg|${e.side}|${e.first}|${e.tail}|${hashText(e.text || '')}|${(e.attachments || []).length}`;
+    case 'activity':
+      return `act|${e.status}|${e.text}`;
+    case 'typing':
+      return `typing|${e.first}`;
+    case 'approval':
+      return `approval|${e.decision || ''}`;
+    case 'stamp':
+      return `stamp|${e.time}`;
+    default:
+      return `${e.type}|${e.text || ''}`;
+  }
+}
+
+let renderQueued = false;
+function render() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    const follow = stick || nearBottom();
+    const wanted = entries();
+    const existing = new Map([...thread.children].map((el) => [el.dataset.key, el]));
+    const nodes = wanted.map((e) => {
+      const sig = signature(e);
+      let el = existing.get(e.key);
+      if (!el || el.dataset.sig !== sig) {
+        el?.remove();
+        el = buildEntry(e);
+        el.dataset.key = e.key;
+        el.dataset.sig = sig;
+      }
+      existing.delete(e.key);
+      return el;
+    });
+    for (const stale of existing.values()) stale.remove();
+    nodes.forEach((el, i) => {
+      if (thread.children[i] !== el) thread.insertBefore(el, thread.children[i] ?? null);
+    });
+    if (follow) scrollToBottom();
+  });
+}
+
+
+
+
+async function loadEarlier() {
+  const first = state.items[0];
+  if (!first) return;
+  const res = await fetch(`/api/messages?before=${first.seq}`);
+  if (!res.ok) return;
+  const data = await res.json();
+  const known = new Set(state.items.map((i) => i.id));
+  const prevHeight = chat.scrollHeight;
+  state.items = [...data.items.filter((i) => !known.has(i.id)), ...state.items];
+  state.more = data.more;
+  render();
+  requestAnimationFrame(() => {
+    chat.scrollTop += chat.scrollHeight - prevHeight;
+  });
+}
+
+// ------------------------------------------------------------------ approvals
+
+function buildApproval(a, decision) {
+  const card = document.createElement('div');
+  card.className = `approval${decision ? ' done' : ''}`;
+  const h = document.createElement('h3');
+  h.textContent = decision ? `${a.title} — ${decision === 'deny' ? 'not allowed' : 'allowed'}` : a.title;
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.textContent = `${a.agent} wants to use ${a.tool}`;
+  card.append(h, who);
+  if (a.detail) {
+    const pre = document.createElement('pre');
+    pre.textContent = a.detail;
+    card.append(pre);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  for (const [label, value, primary] of [
+    ["Don't Allow", 'deny', false],
+    ['Always Allow', 'allow_always', false],
+    ['Allow Once', 'allow_once', true],
+  ]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    if (primary) b.className = 'primary';
+    b.addEventListener('click', () => answerApproval(a.id, value));
+    actions.append(b);
+  }
+  card.append(actions);
+  return card;
+}
+
+async function answerApproval(id, decision) {
+  answered.set(id, decision);
+  render();
+  await postJson(`/api/approvals/${encodeURIComponent(id)}`, { decision }).catch((error) => notice(error.message, 'error'));
+}
+
+// ------------------------------------------------------------------ server
+
+async function postJson(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+let noticeSeq = 0;
+const recentNotices = new Map(); // text → time shown, to avoid repeating the same warning every turn
+function notice(text, level = '') {
+  const now = Date.now();
+  if (now - (recentNotices.get(text) ?? 0) < 10 * 60 * 1000) return;
+  recentNotices.set(text, now);
+  const n = { id: ++noticeSeq, text: text.length > 240 ? `${text.slice(0, 239)}…` : text, level };
+  state.notices.push(n);
+  render();
+  setTimeout(() => {
+    state.notices = state.notices.filter((x) => x !== n);
+    render();
+  }, 8000);
+}
+
+function applySnapshot(s) {
+  state.agent = s.agent;
+  state.items = s.items;
+  state.more = s.more;
+  state.live = s.live;
+  state.approvals = s.approvals;
+  state.limits = s.limits || state.limits;
+  setArtifacts(s.artifacts);
+  if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
+  for (const text of s.notices || []) notice(text);
+  render();
+  updateComposer();
+  requestAnimationFrame(scrollToBottom);
+}
+
+function connect() {
+  const es = new EventSource('/api/events');
+  es.addEventListener('state', (e) => {
+    state.connected = true;
+    applySnapshot(JSON.parse(e.data));
+  });
+  es.addEventListener('user', (e) => {
+    const { item } = JSON.parse(e.data);
+    if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
+    render();
+    requestAnimationFrame(scrollToBottom);
+  });
+  es.addEventListener('run_start', (e) => {
+    const { run } = JSON.parse(e.data);
+    state.live = { id: run, segments: [] };
+    render();
+    updateComposer();
+  });
+  es.addEventListener('delta', (e) => {
+    const { run, text } = JSON.parse(e.data);
+    if (!state.live || state.live.id !== run) return;
+    const segs = state.live.segments;
+    const last = segs[segs.length - 1];
+    if (last && last.kind === 'text') last.text += text;
+    else segs.push({ kind: 'text', id: `t${segs.length}`, text });
+    render();
+  });
+  es.addEventListener('activity', (e) => {
+    const { run, segment } = JSON.parse(e.data);
+    if (!state.live || state.live.id !== run) return;
+    state.live.segments.push(segment);
+    render();
+  });
+  es.addEventListener('activity_end', (e) => {
+    const { run, id, status } = JSON.parse(e.data);
+    const seg = state.live?.id === run ? state.live.segments.find((s) => s.id === id) : null;
+    if (seg) seg.status = status;
+    render();
+  });
+  es.addEventListener('approval', (e) => {
+    const { approval } = JSON.parse(e.data);
+    if (!state.approvals.some((a) => a.id === approval.id)) state.approvals.push(approval);
+    render();
+  });
+  es.addEventListener('approval_done', (e) => {
+    const { id, decision } = JSON.parse(e.data);
+    answered.set(id, decision);
+    render();
+    setTimeout(() => {
+      state.approvals = state.approvals.filter((a) => a.id !== id);
+      answered.delete(id);
+      render();
+    }, 1200);
+  });
+  es.addEventListener('notice', (e) => {
+    const { text, level } = JSON.parse(e.data);
+    notice(text, level === 'error' ? 'error' : '');
+  });
+  es.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
+  es.addEventListener('run_end', (e) => {
+    const data = JSON.parse(e.data);
+    state.live = null;
+    state.items = data.items;
+    state.more = data.more;
+    state.approvals = [];
+    if (data.error && data.status !== 'ERROR') notice(data.error);
+    render();
+    updateComposer();
+    if (queued) {
+      const next = queued;
+      queued = null;
+      submit(next);
+    }
+  });
+  es.onerror = () => {
+    state.connected = false;
+  };
+}
+
+// ------------------------------------------------------------------ artifacts
+
+const viewer = createViewer({
+  root: $('viewer'),
+  title: $('viewerTitle'),
+  meta: $('viewerMeta'),
+  body: $('viewerBody'),
+  close: $('viewerClose'),
+  pin: $('viewerPin'),
+  open: $('viewerOpen'),
+  download: $('viewerDownload'),
+  onPin: (a, pinned) => pinArtifact(a, pinned),
+});
+
+async function pinArtifact(a, pinned) {
+  try {
+    await postJson(`/api/artifacts/${encodeURIComponent(a.id)}/pin`, { pinned });
+  } catch (error) {
+    notice(`Could not ${pinned ? 'pin' : 'unpin'} “${a.title}”: ${error.message}`, 'error');
+  }
+}
+
+function setArtifacts(list) {
+  state.artifacts = list || [];
+  const handlers = { onOpen: (a) => viewer.show(a), onPin: pinArtifact };
+  renderTiles($('pinned'), state.artifacts.filter((a) => a.pinned), handlers);
+  renderTiles($('allArtifacts'), state.artifacts, handlers);
+  viewer.refresh(state.artifacts);
+  syncTileLenses();
+}
+
+// ------------------------------------------------------------------ composer
+
+const pending = []; // { job, el, url }
+
+function inputMax() {
+  return Math.max(66, Math.min(innerHeight * (sheet.detent === 'collapsed' ? 0.45 : 0.3), 440));
+}
+
+function autosize() {
+  input.style.height = '0px';
+  const max = inputMax();
+  const h = Math.max(22, Math.min(input.scrollHeight, max));
+  input.style.height = `${h}px`;
+  input.classList.toggle('scrolling', input.scrollHeight > max + 1);
+}
+
+function canSend() {
+  return input.value.trim().length > 0 || pending.some((p) => p.job.state !== 'failed' && p.job.state !== 'cancelled');
+}
+
+function updateComposer() {
+  const running = !!state.live;
+  const sendable = canSend();
+  send.classList.toggle('can-send', sendable);
+  send.classList.toggle('can-stop', running && !sendable);
+  send.disabled = !sendable && !running;
+  send.setAttribute('aria-label', sendable ? (running ? 'Send when the agent finishes' : 'Send') : running ? 'Stop' : 'Send');
+  attachmentsEl.hidden = pending.length === 0;
+}
+
+input.addEventListener('input', () => {
+  autosize();
+  updateComposer();
+});
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.isComposing && !coarse) {
+    e.preventDefault();
+    if (canSend()) submitFromComposer();
+  }
+});
+send.addEventListener('click', () => {
+  if (canSend()) submitFromComposer();
+  else if (state.live) postJson('/api/cancel').catch((error) => notice(error.message, 'error'));
+});
+field.addEventListener('click', (e) => {
+  if (e.target === field || e.target.classList.contains('field-line')) input.focus();
+});
+
+function submitFromComposer() {
+  const text = input.value;
+  const jobs = pending.filter((p) => p.job.state !== 'failed' && p.job.state !== 'cancelled').map((p) => p.job);
+  if (text.length > state.limits.maxMessageChars) {
+    notice(`Messages are limited to ${state.limits.maxMessageChars.toLocaleString()} characters.`, 'error');
+    return;
+  }
+  input.value = '';
+  for (const p of pending.splice(0)) {
+    p.el.remove();
+    if (p.job.state === 'failed') URL.revokeObjectURL(p.url);
+  }
+  autosize();
+  updateComposer();
+  const message = { text, jobs };
+  if (state.live) {
+    queued = message;
+    notice('Your message will be sent when the agent finishes.');
+    return;
+  }
+  submit(message);
+}
+
+async function submit({ text, jobs }) {
+  try {
+    if (jobs.length) {
+      if (jobs.some((j) => j.state !== 'done')) notice(`Uploading ${jobs.length === 1 ? 'the attachment' : `${jobs.length} attachments`}…`);
+      await Promise.all(jobs.map((j) => j.promise));
+    }
+    await postJson('/api/messages', { text, attachments: jobs.map((j) => j.attachment.id) });
+  } catch (error) {
+    notice(`Not sent: ${error.message}`, 'error');
+    if (!input.value) {
+      input.value = text;
+      autosize();
+      updateComposer();
+    }
+  }
+}
+
+// Attachments ----------------------------------------------------------
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function addFiles(files) {
+  for (const file of files) {
+    if (pending.length >= state.limits.maxAttachments) {
+      notice(`At most ${state.limits.maxAttachments} attachments per message.`, 'error');
+      break;
+    }
+    if (file.size > state.limits.maxUploadBytes) {
+      notice(`“${file.name}” is larger than the upload limit (${formatBytes(state.limits.maxUploadBytes)}).`, 'error');
+      continue;
+    }
+    const el = document.createElement('div');
+    el.className = 'pending';
+    const url = /^image\//.test(file.type) ? URL.createObjectURL(file) : '';
+    if (url) {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = file.name;
+      el.append(img);
+    } else {
+      const f = document.createElement('div');
+      f.className = 'file';
+      const icon = document.createElement('i');
+      applySymbol(icon, /^video\//.test(file.type) ? 'film' : /^audio\//.test(file.type) ? 'music.note' : 'doc', { size: 22 });
+      const name = document.createElement('span');
+      name.textContent = file.name;
+      f.append(icon, name);
+      el.append(f);
+    }
+    const progress = document.createElement('div');
+    progress.className = 'progress';
+    progress.innerHTML = '<svg viewBox="0 0 36 36"><circle class="track" cx="18" cy="18" r="15"/><circle class="value" cx="18" cy="18" r="15" stroke-dasharray="94.25" stroke-dashoffset="94.25"/></svg>';
+    const label = document.createElement('div');
+    label.className = 'label';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'remove';
+    remove.setAttribute('aria-label', `Remove ${file.name}`);
+    const x = document.createElement('i');
+    applySymbol(x, 'xmark', { size: 10 });
+    remove.append(x);
+    el.append(progress, label, remove);
+    const entry = { el, url, job: null };
+    const ring = progress.querySelector('.value');
+    entry.job = new UploadJob(file, (job) => {
+      ring.setAttribute('stroke-dashoffset', String(94.25 * (1 - job.progress)));
+      if (job.state === 'done') {
+        progress.remove();
+        label.textContent = url ? '' : formatBytes(job.size);
+      } else if (job.state === 'failed') {
+        el.classList.add('failed');
+        label.textContent = 'Failed';
+        el.title = job.error;
+      } else if (job.state === 'hashing') {
+        label.textContent = 'Preparing';
+      } else if (job.state === 'uploading') {
+        label.textContent = job.speed ? `${formatBytes(job.speed)}/s` : '';
+      }
+      updateComposer();
+    });
+    remove.addEventListener('click', () => {
+      entry.job.cancel();
+      const i = pending.indexOf(entry);
+      if (i >= 0) pending.splice(i, 1);
+      el.remove();
+      if (url) URL.revokeObjectURL(url);
+      updateComposer();
+    });
+    pending.push(entry);
+    attachmentsEl.append(el);
+  }
+  updateComposer();
+  input.focus();
+}
+
+attachBtn.addEventListener('click', () => picker.click());
+picker.addEventListener('change', () => {
+  addFiles([...picker.files]);
+  picker.value = '';
+});
+input.addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) {
+    e.preventDefault();
+    addFiles(files);
+  }
+});
+let dragDepth = 0;
+addEventListener('dragenter', (e) => {
+  if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  dragDepth++;
+  $('dropHint').hidden = false;
+});
+addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $('dropHint').hidden = true;
+});
+addEventListener('dragover', (e) => {
+  if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
+});
+addEventListener('drop', (e) => {
+  dragDepth = 0;
+  $('dropHint').hidden = true;
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  addFiles([...e.dataTransfer.files]);
+});
+
+// Dictation -------------------------------------------------------------
+
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+if (!Recognition) {
+  mic.classList.add('unavailable');
+  mic.title = 'Dictation is not available in this browser';
+}
+mic.addEventListener('click', () => {
+  if (!Recognition) {
+    notice('Dictation is not available in this browser.');
+    return;
+  }
+  if (recognition) {
+    recognition.stop();
+    return;
+  }
+  recognition = new Recognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  const base = input.value ? `${input.value.replace(/\s+$/, '')} ` : '';
+  recognition.onresult = (e) => {
+    let text = '';
+    for (const r of e.results) text += r[0].transcript;
+    input.value = base + text;
+    autosize();
+    updateComposer();
+  };
+  recognition.onerror = (e) => {
+    if (e.error !== 'aborted' && e.error !== 'no-speech') notice(`Dictation stopped: ${e.error}`, 'error');
+  };
+  recognition.onend = () => {
+    recognition = null;
+    mic.classList.remove('listening');
+    mic.setAttribute('aria-label', 'Dictate');
+  };
+  mic.classList.add('listening');
+  mic.setAttribute('aria-label', 'Stop dictation');
+  recognition.start();
+});
+
+// Keys --------------------------------------------------------------------
+
+addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !viewer.open && sheet.detent !== 'collapsed') sheet.set('collapsed');
+});
+
+addEventListener('resize', autosize);
+
+// Keep the bar above on-screen keyboards that overlay the page (iOS Safari):
+// size the stage to the visual viewport.
+const vv = window.visualViewport;
+if (vv) {
+  const fit = () => {
+    const covered = Math.max(0, innerHeight - vv.height - vv.offsetTop);
+    stage.style.bottom = covered > 1 ? `${covered}px` : '';
+    sheet.relayout();
+    glassApi.repaint();
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+}
+autosize();
+updateComposer();
+connect();
