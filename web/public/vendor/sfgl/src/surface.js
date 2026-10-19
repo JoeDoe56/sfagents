@@ -228,15 +228,12 @@ export class Surface {
   _place() {
     const win = this.glass.env.window;
     const host = this.options.host;
-    const vv = win.visualViewport;
     let width = win.innerWidth || 1;
     let height = win.innerHeight || 1;
-    let origin = {left: -(vv ? vv.offsetLeft : 0), top: -(vv ? vv.offsetTop : 0)};
     if (host && this.options.bounds === 'host') {
       const r = host.getBoundingClientRect();
       width = Math.max(1, r.width);
       height = Math.max(1, r.height);
-      origin = {left: r.left, top: r.top};
       this.canvas.style.left = '0px';
       this.canvas.style.top = '0px';
     } else if (host) {
@@ -245,7 +242,6 @@ export class Surface {
       this.canvas.style.left = (-r.left).toFixed(3) + 'px';
       this.canvas.style.top = (-r.top).toFixed(3) + 'px';
     }
-    this.origin = origin;
     const scale = this.glass.renderScale();
     if (width !== this.cssWidth || height !== this.cssHeight || scale !== this.renderScale) {
       this.cssWidth = width;
@@ -260,6 +256,18 @@ export class Surface {
   }
 
   /**
+   * Where the canvas actually is, in the same client coordinates lenses are
+   * measured in. Lens positions are taken relative to it, so they line up
+   * with their elements wherever the canvas ends up: under an iOS keyboard
+   * the visual viewport pans and client coordinates shift with it, and a
+   * host that moves carries the canvas along until the next placement.
+   */
+  _readOrigin() {
+    const r = this.canvas.getBoundingClientRect();
+    this.origin = {left: r.left, top: r.top};
+  }
+
+  /**
    * Read phase: placement and lens geometry.
    * @returns {Array<{lens: Lens, i: number, layer: number}>} lenses to draw, in layer order
    */
@@ -267,6 +275,7 @@ export class Surface {
     if (this.lost) return [];
     this._leaveCss();
     if (this._placementDirty || !this.cssWidth) this._place();
+    this._readOrigin();
     const drawable = [];
     this.lenses.forEach((lens) => { if (lens.measure(this.origin)) drawable.push(lens); });
     // Stable sort by layer: lower layers draw first.
@@ -463,7 +472,7 @@ export class Surface {
     set('u_specularPrimary', optics.specularPrimary);
     set('u_specularSecondary', optics.specularSecondary);
     set('u_toneAmount', clamp(finiteNumber(optics.toneAmount, 0), 0, 1));
-    set('u_rim', Math.max(0, finiteNumber(optics.rim, 0.26)));
+    set('u_rim', Math.max(0, finiteNumber(optics.rim, 0.4)));
     set('u_dispersionAmount', clamp(finiteNumber(optics.dispersionAmount, 1), 0, 1));
     set('u_globalLight', [context.light.x, context.light.y]);
     set('u_globalLightIntensity', context.light.intensity);

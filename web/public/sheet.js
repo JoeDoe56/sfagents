@@ -9,6 +9,11 @@
  */
 
 const DETENTS = ['collapsed', 'medium', 'full'];
+// The message row's distance from the bar's top and bottom edges when
+// collapsed. The top leaves room for the handle (5 px down, 4 px tall, as in
+// Apple Maps) with a gap before the field.
+const ROW_TOP = 14;
+const ROW_BOTTOM = 10;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const lerp = (a, b, k) => a + (b - a) * k;
 const smooth = (a, b, v) => {
@@ -33,6 +38,7 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
   let anim = null;
   let safe = safeBottom();
   let safeT = safeTop();
+  let keyboard = false; // an on-screen keyboard is up: it covers the bottom inset
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 
   function geometry(rowH) {
@@ -40,12 +46,13 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     const W = bar.parentElement.clientWidth || innerWidth;
     const H = bar.parentElement.clientHeight || innerHeight;
     const phone = W < 640;
+    const bottomInset = keyboard ? 0 : safe;
     const collapsedW = Math.min(W - (phone ? 40 : 48), 640);
-    const collapsedH = rowH + 20;
-    const C = { width: collapsedW, left: (W - collapsedW) / 2, bottom: (phone ? 18 : 24) + safe, height: collapsedH, radius: 32 };
+    const collapsedH = rowH + ROW_TOP + ROW_BOTTOM;
+    const C = { width: collapsedW, left: (W - collapsedW) / 2, bottom: keyboard ? 8 : (phone ? 18 : 24) + bottomInset, height: collapsedH, radius: 32 };
     const mediumW = Math.min(W - 16, 720);
     const mediumH = clamp(Math.round(H * 0.46), Math.min(collapsedH + 260, H - 40), Math.max(collapsedH + 260, 560));
-    const M = { width: mediumW, left: (W - mediumW) / 2, bottom: 8 + safe * 0.5, height: Math.min(mediumH, H - 24), radius: 40 };
+    const M = { width: mediumW, left: (W - mediumW) / 2, bottom: 8 + bottomInset * 0.5, height: Math.min(mediumH, H - 24), radius: 40 };
     const fullW = phone ? W : Math.min(W - 32, 720);
     // Below the status bar when installed as an app (black-translucent status bar).
     const top = (phone ? 10 : 16) + safeT;
@@ -75,7 +82,7 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     const rowH = row.offsetHeight;
     const g = geometry(rowH);
     const p = at(g, clamp(t, 0, 2));
-    const pad = lerp(10, 22, smooth(0, 1, t));
+    const pad = lerp(ROW_TOP, 22, smooth(0, 1, t));
     const opaque = smooth(1.15, 1.6, t);
     bar.style.left = `${p.left}px`;
     bar.style.width = `${p.width}px`;
@@ -341,5 +348,11 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     },
     set: (name) => animateTo(DETENTS.indexOf(name)),
     relayout: apply,
+    /** An on-screen keyboard took the bottom of the screen (or went away). */
+    setKeyboard(open) {
+      if (keyboard === !!open) return;
+      keyboard = !!open;
+      apply();
+    },
   };
 }

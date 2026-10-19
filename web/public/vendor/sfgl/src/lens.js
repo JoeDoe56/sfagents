@@ -8,7 +8,7 @@
  * when invalidated; function geometry reads no DOM at all.
  * @module
  */
-import {clamp, finiteNumber, normalizeMaterial, resolveMaterial, applyOpticsOverrides, mixNumber, easings, LIVE_NUMERIC_OPTIONS} from './material.js';
+import {clamp, finiteNumber, normalizeMaterial, resolveMaterial, applyOpticsOverrides, mixNumber, mixTint, parseTintColor, easings, LIVE_NUMERIC_OPTIONS} from './material.js';
 
 /**
  * @typedef {object} LensOptions
@@ -16,7 +16,7 @@ import {clamp, finiteNumber, normalizeMaterial, resolveMaterial, applyOpticsOver
  * @property {number} [refraction] @property {number} [frost] @property {number} [magnify]
  * @property {boolean} [specular]
  * @property {{color: string|number[], amount?: number}} [tint]  body colour (CSS hex or display RGB 0..1) and how much of it, overriding the material's tone
- * @property {number} [rim]         hairline edge highlight strength (default 0.26)
+ * @property {number} [rim]         hairline edge highlight strength (default 0.4)
  * @property {number} [dispersion]  0..1 scale of the rim's spectral split (default 1)
  * @property {'live'|'dom'|((el: Element, lens: Lens) => Rect|null)} [geometry]  how the rect is measured (default 'live')
  * @property {boolean} [liveGeometry]  false: measure like 'dom' (legacy switch)
@@ -297,7 +297,9 @@ export class Lens {
   }
 
   /**
-   * Animate numeric options (material, frost, refraction, magnify, opacity…).
+   * Animate numeric options (material, frost, refraction, magnify, opacity,
+   * rim, dispersion…) and the tint, whose colour and amount are mixed
+   * together. Other options apply at once.
    * @param {object} patch
    * @param {{duration?: number, easing?: string|((t:number)=>number)}} [transition]
    */
@@ -310,21 +312,48 @@ export class Lens {
     const from = {};
     const to = {};
     const immediate = {};
+    const final = {};
     Object.keys(normalized).forEach((key) => {
-      if (LIVE_NUMERIC_OPTIONS[key] && normalized[key] !== null && typeof normalized[key] !== 'function') {
-        from[key] = finiteNumber(this.options[key], key === 'magnify' || key === 'opacity' ? 1 : 0);
-        to[key] = normalized[key];
+      const value = normalized[key];
+      if (LIVE_NUMERIC_OPTIONS[key] && value !== null && typeof value !== 'function') {
+        from[key] = this._currentNumber(key);
+        to[key] = value;
+      } else if (key === 'tint' && value && typeof value === 'object' && parseTintColor(value.color)) {
+        from.tint = this._currentTint();
+        to.tint = {color: parseTintColor(value.color), amount: clamp(finiteNumber(value.amount, 0.8), 0, 1)};
+        final.tint = value;
       } else {
-        immediate[key] = normalized[key];
+        immediate[key] = value;
       }
     });
     if (Object.keys(immediate).length) this._applyPatch(immediate, false);
     if (Object.keys(to).length) {
       const easing = typeof transition.easing === 'function' ? transition.easing : (easings[transition.easing] || easings.easeOut);
-      this._transition = {startTime: now, duration, easing, from, to};
+      this._transition = {startTime: now, duration, easing, from, to, final};
     }
     this.surface.glass.requestRender();
     return this;
+  }
+
+  /** The value a numeric option has now, falling back to what the material resolves to. */
+  _currentNumber(key) {
+    const value = this.options[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (key === 'rim' || key === 'dispersion') {
+      const optics = this.resolveOptics(1);
+      return key === 'rim' ? optics.rim : optics.dispersionAmount;
+    }
+    return key === 'magnify' || key === 'opacity' ? 1 : 0;
+  }
+
+  /** The body colour now: the tint option, or the material's own tone. */
+  _currentTint() {
+    const tint = this.options.tint;
+    const color = tint && typeof tint === 'object' ? parseTintColor(tint.color) : null;
+    if (color) return {color, amount: clamp(finiteNumber(tint.amount, 0.8), 0, 1)};
+    const optics = this.resolveOptics(1);
+    const display = optics.toneSpace === 'display' ? optics.tone : optics.tone.map((v) => Math.pow(clamp(finiteNumber(v, 1), 0, 1), 1 / 2.2));
+    return {color: display.slice(0, 3), amount: clamp(finiteNumber(optics.toneAmount, 0), 0, 1)};
   }
 
   /** Legacy name for transition(). */
@@ -337,7 +366,11 @@ export class Lens {
     const progress = clamp((now - transition.startTime) / transition.duration, 0, 1);
     const eased = clamp(finiteNumber(transition.easing(progress), progress), 0, 1);
     const next = {};
-    Object.keys(transition.to).forEach((key) => { next[key] = mixNumber(transition.from[key], transition.to[key], eased); });
+    Object.keys(transition.to).forEach((key) => {
+      next[key] = key === 'tint' ? mixTint(transition.from.tint, transition.to.tint, eased) : mixNumber(transition.from[key], transition.to[key], eased);
+    });
+    // Land on the values exactly as given (a tint keeps its CSS colour string).
+    if (progress >= 1) Object.assign(next, transition.final || {});
     this._applyPatch(next, false);
     if (progress >= 1) { this._transition = null; return false; }
     return true;
@@ -360,7 +393,7 @@ export class Lens {
       magnify: clamp(finiteNumber(o.magnify, 1), 0.001, 3),
       specularPrimary: 0.1675, specularSecondary: 0.08, shadowStrength: 0.1,
       specular: o.specular !== false,
-      toneSpace: 'linear', toneAmount: 0, rim: 0.26, dispersionAmount: 1,
+      toneSpace: 'linear', toneAmount: 0, rim: 0.4, dispersionAmount: 1,
     };
   }
 

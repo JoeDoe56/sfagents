@@ -86,6 +86,13 @@ export class Glass {
     this._onResize = () => this.invalidate(true);
     doc.addEventListener('scroll', this._onScroll, {capture: true, passive: true});
     win.addEventListener('resize', this._onResize, {passive: true});
+    // On-screen keyboards and pinch zoom move the visual viewport without a
+    // window resize (iOS Safari pans it to reveal a focused field).
+    this._onViewport = () => { this.invalidate(false); this.requestRender(); };
+    if (win.visualViewport) {
+      win.visualViewport.addEventListener('resize', this._onViewport, {passive: true});
+      win.visualViewport.addEventListener('scroll', this._onViewport, {passive: true});
+    }
     this.scheduler.register('sfgl', (frame) => this.frame(frame), {phase: 'render'});
     this.requestRender();
   }
@@ -375,6 +382,10 @@ export class Glass {
     if (this.scheduler.unregister) this.scheduler.unregister('sfgl');
     this.env.document.removeEventListener('scroll', this._onScroll, {capture: true});
     this.env.window.removeEventListener('resize', this._onResize);
+    if (this.env.window.visualViewport) {
+      this.env.window.visualViewport.removeEventListener('resize', this._onViewport);
+      this.env.window.visualViewport.removeEventListener('scroll', this._onViewport);
+    }
     if (this._unsubscribeContact) this._unsubscribeContact();
     this.env.document.removeEventListener('visibilitychange', this._onVisibility);
     if (this._ownsLighting && this.lighting && this.lighting.destroy) this.lighting.destroy();

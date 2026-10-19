@@ -5,6 +5,7 @@
  */
 
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
+import { createContentTransitions } from './vendor/sfgl/src/transitions/content.js';
 import { initialTier } from './vendor/sfgl/src/core/quality.js';
 import { renderMarkdown, looksLikeMarkdown, escapeHtml } from './markdown.js';
 import { setupGlass } from './glass.js';
@@ -70,9 +71,12 @@ chat.addEventListener('scroll', () => {
   }
   stick = nearBottom();
 }, { passive: true });
-new ResizeObserver(() => {
+// The chat itself resizes when an on-screen keyboard shrinks the stage.
+const followResize = new ResizeObserver(() => {
   if (stick) scrollToBottom();
-}).observe(thread);
+});
+followResize.observe(thread);
+followResize.observe(chat);
 
 // ------------------------------------------------------------------ glass
 
@@ -105,13 +109,16 @@ const { surface } = glassApi;
 // almost no refraction or colour split, and a crisp hairline rim. Controls
 // inside the bar are a slightly lighter layer of the same glass.
 const GLASS = {
-  bar: { material: -0.5, tint: { color: '#1d1d1d', amount: 0.58 }, frost: 8, refraction: 0.012, dispersion: 0, rim: 0.45, layer: 0 },
-  control: { material: -0.3, tint: { color: '#262628', amount: 0.35 }, frost: 3, refraction: 0.01, dispersion: 0, rim: 0.26, layer: 1 },
-  tile: { material: -0.3, tint: { color: '#262628', amount: 0.6 }, frost: 6, refraction: 0.01, dispersion: 0, rim: 0.2, layer: 1 },
+  bar: { material: -0.5, tint: { color: '#1d1d1d', amount: 0.58 }, frost: 8, refraction: 0.012, dispersion: 0, rim: 0.6, layer: 0 },
+  control: { material: -0.3, tint: { color: '#262628', amount: 0.35 }, frost: 3, refraction: 0.01, dispersion: 0, rim: 0.38, layer: 1 },
+  tile: { material: -0.3, tint: { color: '#262628', amount: 0.6 }, frost: 6, refraction: 0.01, dispersion: 0, rim: 0.3, layer: 1 },
 };
+// The send circle's glass fades to the iMessage blue while there is something to send.
+const SEND_TINT = { color: '#4499f8', amount: 0.86 };
+const SEND_FADE = { duration: 260, easing: 'easeInOut' };
 const barLens = surface.lens(bar, GLASS.bar);
 surface.lens(field, GLASS.control);
-surface.lens(send, GLASS.control);
+const sendLens = surface.lens(send, GLASS.control);
 surface.lens($('monitor'), { ...GLASS.tile, clip: sheetScroll });
 surface.lens($('settingsBtn'), { ...GLASS.control, clip: sheetScroll });
 surface.lens($('spareBtn'), { ...GLASS.control, clip: sheetScroll });
@@ -653,9 +660,25 @@ function canSend() {
   return input.value.trim().length > 0 || pending.some((p) => p.job.state !== 'failed' && p.job.state !== 'cancelled');
 }
 
+// The send arrow comes and goes with sfgl's content transition (the same
+// blur-and-scale used for changing text and symbols).
+const sendIcon = send.querySelector('.send-icon');
+const contentTransitions = createContentTransitions({ root: send, include: '.send-icon' });
+contentTransitions.start();
+let shownSendable = false;
+
 function updateComposer() {
   const running = !!state.live;
   const sendable = canSend();
+  if (sendable !== shownSendable) {
+    shownSendable = sendable;
+    sendLens.transition({ tint: sendable ? SEND_TINT : GLASS.control.tint }, SEND_FADE);
+    if (sendable) sendIcon.hidden = false;
+    else {
+      contentTransitions.exit(contentTransitions.capture(sendIcon));
+      sendIcon.hidden = true;
+    }
+  }
   send.classList.toggle('can-send', sendable);
   send.classList.toggle('can-stop', running && !sendable);
   send.disabled = !sendable && !running;
@@ -951,9 +974,19 @@ addEventListener('resize', autosize);
 // size the stage to the visual viewport.
 const vv = window.visualViewport;
 if (vv) {
+  // The stage covers exactly the visible part of the page. iOS pans the
+  // visual viewport to reveal a focused field, so the stage follows its
+  // offset as well as its height (the glass canvas measures where it really
+  // is, so the glass stays on the bar). Pinch zoom is left alone.
   const fit = () => {
-    const covered = Math.max(0, innerHeight - vv.height - vv.offsetTop);
-    stage.style.bottom = covered > 1 ? `${covered}px` : '';
+    const zoomed = Math.abs(vv.scale - 1) > 0.01;
+    const follow = !zoomed && (vv.offsetTop > 0.5 || innerHeight - vv.height > 1);
+    stage.style.top = follow ? `${vv.offsetTop}px` : '';
+    stage.style.height = follow ? `${vv.height}px` : '';
+    stage.style.bottom = follow ? 'auto' : '';
+    // A keyboard (not a toolbar or a small resize) takes the bottom inset's place.
+    sheet.setKeyboard(!zoomed && innerHeight - vv.height > 120);
+    glassApi.glass.invalidate();
     sheet.relayout();
     glassApi.repaint();
   };

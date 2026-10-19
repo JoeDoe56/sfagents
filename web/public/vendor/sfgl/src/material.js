@@ -80,7 +80,7 @@ export function resolveMaterial(material, geometry, quality) {
     tone,
     toneSpace: 'linear',
     toneAmount: beyondApple,
-    rim: 0.26,
+    rim: 0.4,
     dispersionAmount: 1,
     materialAlpha: density,
     frostSigmaPx: 24 * density,
@@ -161,7 +161,20 @@ export const LIVE_NUMERIC_OPTIONS = Object.freeze({
   frost: [0, 100],
   magnify: [0.001, 3],
   opacity: [0, 1],
+  rim: [0, 2],
+  dispersion: [0, 1],
 });
+
+/**
+ * Mix two tint colours (display RGB 0..1) and their amounts.
+ * @param {{color: number[], amount: number}} from
+ * @param {{color: number[], amount: number}} to
+ * @param {number} k
+ * @returns {{color: number[], amount: number}}
+ */
+export function mixTint(from, to, k) {
+  return {color: [0, 1, 2].map((i) => mixNumber(from.color[i], to.color[i], k)), amount: mixNumber(from.amount, to.amount, k)};
+}
 
 /**
  * Texels per CSS pixel of a source texture placed over a CSS rect.

@@ -31,12 +31,13 @@ export function setupGlass({ stage, chat, thread, quality }) {
   let cache = null; // { width, placed: [...] } in content coordinates
   let sheet = null; // { left, top, width, height, radius, opaque }
   let dirty = true;
-  let painted = { scrollTop: -1, chatTop: NaN, width: 0, height: 0 };
+  let painted = { scrollTop: -1, chatTop: NaN, originTop: NaN, width: 0, height: 0 };
 
   function needsPaint() {
     if (dirty) return true;
     const r = chat.getBoundingClientRect();
-    return chat.scrollTop !== painted.scrollTop || r.top !== painted.chatTop || innerWidth !== painted.width || innerHeight !== painted.height;
+    const o = surface.canvas.getBoundingClientRect();
+    return chat.scrollTop !== painted.scrollTop || r.top !== painted.chatTop || o.top !== painted.originTop || innerWidth !== painted.width || innerHeight !== painted.height;
   }
 
   glass.setBackdrop(
@@ -187,9 +188,16 @@ export function setupGlass({ stage, chat, thread, quality }) {
       canvas.height = ch;
     }
     if (!cache || cache.width !== chat.clientWidth) cache = measure();
+    // Paint in the glass canvas' own coordinates: it is not always at the
+    // viewport's top-left (an iOS keyboard pans the visual viewport), and the
+    // sheet rect is relative to the stage, which follows the visible area.
+    const origin = surface.canvas.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
     const chatRect = chat.getBoundingClientRect();
-    const dy = chatRect.top - chat.scrollTop;
-    const dx = chatRect.left;
+    const dy = chatRect.top - chat.scrollTop - origin.top;
+    const dx = chatRect.left - origin.left;
+    const sheetTop = sheet ? sheet.top + stageRect.top - origin.top : 0;
+    const sheetLeft = sheet ? sheet.left + stageRect.left - origin.left : 0;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, cw, ch);
@@ -198,8 +206,8 @@ export function setupGlass({ stage, chat, thread, quality }) {
     // Only content near the glass can show through it (refraction and blur
     // reach a few dozen pixels past the edge).
     const reach = 64;
-    const bandTop = sheet ? sheet.top - reach : -40;
-    const bandBottom = sheet ? sheet.top + sheet.height + reach : H + 40;
+    const bandTop = sheet ? sheetTop - reach : -40;
+    const bandBottom = sheet ? sheetTop + sheet.height + reach : H + 40;
     for (const p of cache.placed) {
       const ox = p.x + dx;
       const oy = p.y + dy;
@@ -238,12 +246,12 @@ export function setupGlass({ stage, chat, thread, quality }) {
     if (sheet && sheet.opaque > 0) {
       ctx.fillStyle = `rgba(${SHEET_RGB[0]},${SHEET_RGB[1]},${SHEET_RGB[2]},${sheet.opaque})`;
       const pad = 40;
-      bubblePath(ctx, sheet.left - pad, sheet.top - pad, sheet.width + pad * 2, sheet.height + pad * 2, sheet.radius + pad, null);
+      bubblePath(ctx, sheetLeft - pad, sheetTop - pad, sheet.width + pad * 2, sheet.height + pad * 2, sheet.radius + pad, null);
       ctx.fill();
     }
     revision++;
     dirty = false;
-    painted = { scrollTop: chat.scrollTop, chatTop: chatRect.top, width: W, height: H };
+    painted = { scrollTop: chat.scrollTop, chatTop: chatRect.top, originTop: origin.top, width: W, height: H };
   }
 
   addEventListener('resize', invalidateLayout);

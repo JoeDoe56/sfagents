@@ -390,7 +390,7 @@ void main() {
     // 3D light response: the positive Z components stay defined as a planar
     // light crosses zero, so opposite rims fade through neutral.
     float outerPeak = 1.0 - smoothstep(0.0, 1.15, insideCss);
-    float innerRim = 1.0 - smoothstep(0.5, 5.5, insideCss);
+    float innerRim = 1.0 - smoothstep(0.5, 3.5, insideCss);
     float rimSlope = mix(0.58, 1.35, outerPeak);
     vec3 N = normalize(vec3(normal * rimSlope, 0.62));
     vec2 tiltNormal = vec2(sin(radians(u_tiltY)), -sin(radians(u_tiltX))) * 0.34;
@@ -401,17 +401,19 @@ void main() {
     float primaryFacing = max(dot(N, primaryLight), 0.0);
     float secondaryFacing = max(dot(N, secondaryLight), 0.0);
     // Hairline rim, as on Apple's Liquid Glass: under half a CSS pixel wide,
-    // measured in backing pixels so it stays crisp at any render scale.
-    // Brightest where the edge faces the light, with a weaker reflection on
-    // the opposite edge and a faint line all round.
+    // measured in backing pixels so it stays crisp at any render scale. A
+    // box profile (full strength across the line, a one-pixel antialiased
+    // falloff) keeps it a bright line rather than a soft glow. Brightest
+    // where the edge faces the light, with a weaker reflection on the
+    // opposite edge and a faint line all round.
     float insideBacking = max(0.0, -opticalDistance);
     float hairWidth = max(1.0, 0.4 * u_devicePixelRatio);
-    float hairline = 1.0 - smoothstep(0.0, hairWidth, insideBacking);
+    float hairline = clamp(hairWidth + 0.5 - insideBacking, 0.0, 1.0);
     vec2 edgeNormal = normal / max(length(normal), 0.0001);
     vec2 lightDir2 = normalize(primaryLight.xy + vec2(0.0001));
     float litEdge = max(dot(edgeNormal, lightDir2), 0.0);
     float backEdge = max(dot(edgeNormal, -lightDir2), 0.0);
-    float sharp = hairline * u_rim * (0.16 + 0.84 * pow(litEdge, 1.6) + 0.6 * pow(backEdge, 1.6));
+    float sharp = hairline * u_rim * (0.2 + 1.1 * pow(litEdge, 2.0) + 0.7 * pow(backEdge, 2.0));
     float soft = innerRim * pow(primaryFacing, 2.2) * u_specularPrimary * 0.62;
     float opposite = innerRim * 0.42 * pow(secondaryFacing, 2.8) * u_specularSecondary;
     vec3 softRimColor = mix(vec3(1.0), face.rgb, 0.08);

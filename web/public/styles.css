@@ -316,11 +316,11 @@ button { -webkit-tap-highlight-color: transparent; }
   pointer-events: none;
   visibility: hidden;
   opacity: 0;
-  transition: opacity 0.12s ease, visibility 0s linear 0.12s;
+  transition: opacity 0.24s ease, visibility 0s linear 0.24s;
 }
 .rail.open .rail-dots { opacity: 0; }
-.rail.open .rail-list { visibility: visible; opacity: 1; transition: opacity 0.12s ease; }
-.rail.open::before {
+.rail.open .rail-list { visibility: visible; opacity: 1; transition: opacity 0.24s ease; }
+.rail::before {
   content: "";
   position: fixed;
   top: 0;
@@ -329,7 +329,14 @@ button { -webkit-tap-highlight-color: transparent; }
   width: min(100vw, 560px);
   background: linear-gradient(to left, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.6) 50%, transparent 88%);
   pointer-events: none;
+  /* Grows out from the right edge with the labels, at the same pace. */
+  transform-origin: right center;
+  transform: scaleX(0.3);
+  opacity: 0;
+  visibility: hidden;
+  transition: transform 0.36s cubic-bezier(0.2, 0.9, 0.3, 1), opacity 0.36s ease, visibility 0s linear 0.36s;
 }
+.rail.open::before { transform: none; opacity: 1; visibility: visible; transition: transform 0.36s cubic-bezier(0.2, 0.9, 0.3, 1), opacity 0.36s ease; }
 .rail-inner {
   min-height: 100%;
   display: flex;
@@ -351,7 +358,7 @@ button { -webkit-tap-highlight-color: transparent; }
   overflow: hidden;
   text-overflow: ellipsis;
   transform-origin: right center;
-  animation: rail-in 0.18s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: rail-in 0.36s cubic-bezier(0.2, 0.9, 0.3, 1) both;
   transition: background 0.12s ease, color 0.12s ease, transform 0.12s ease;
 }
 .rail-row.depth-1 span { margin-right: 12px; font-size: 13px; background: rgba(36, 36, 40, 0.94); color: rgba(235, 235, 245, 0.7); }
@@ -381,9 +388,9 @@ button { -webkit-tap-highlight-color: transparent; }
   position: absolute;
   left: 50%;
   top: 0;
-  width: 72px;
+  width: 96px;
   height: 18px;
-  margin-left: -36px;
+  margin-left: -48px;
   padding: 0;
   border: 0;
   background: none;
@@ -391,14 +398,16 @@ button { -webkit-tap-highlight-color: transparent; }
   touch-action: none;
   z-index: 6;
 }
+/* Apple Maps' handle: a long thin bar 5 px below the top edge of the bar
+   or sheet, wherever the sheet is. */
 .grabber span {
   position: absolute;
-  left: 18px;
+  left: 19px;
   top: 5px;
-  width: 36px;
-  height: 5px;
-  border-radius: 3px;
-  background: rgba(235, 235, 245, 0.3);
+  width: 58px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(235, 235, 245, 0.32);
 }
 .grabber:focus-visible { outline: none; }
 .grabber:focus-visible span { background: rgba(235, 235, 245, 0.7); }
@@ -549,7 +558,17 @@ button { -webkit-tap-highlight-color: transparent; }
   cursor: pointer;
 }
 .circle:disabled { cursor: default; }
-.send-disc, .stop-disc {
+.send-icon {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  pointer-events: none;
+}
+.send-icon[hidden] { display: none; }
+.send-icon i { width: 18px; height: 18px; }
+.stop-disc {
   position: absolute;
   inset: 5px;
   border-radius: 50%;
@@ -560,11 +579,9 @@ button { -webkit-tap-highlight-color: transparent; }
   transition: transform 0.22s cubic-bezier(0.3, 1.4, 0.5, 1), opacity 0.15s ease;
   pointer-events: none;
 }
-.send-disc { background: var(--send); color: #fff; }
-.send-disc i { width: 16px; height: 16px; }
 .stop-disc { background: rgba(255, 255, 255, 0.92); color: #000; }
 .stop-disc i { width: 12px; height: 12px; }
-.circle.can-send .send-disc, .circle.can-stop .stop-disc { transform: scale(1); opacity: 1; }
+.circle.can-stop:not(.can-send) .stop-disc { transform: scale(1); opacity: 1; }
 .circle:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: 2px; }
 
 /* Expanded sheet content */
@@ -829,7 +846,8 @@ button { -webkit-tap-highlight-color: transparent; }
 @media (prefers-reduced-motion: reduce) {
   .settings-card { animation: none; }
   .rail-row span { animation: none; }
-  .send-disc, .stop-disc, .tile-pin { transition: none; }
+  .rail::before { transition: none; }
+  .stop-disc, .tile-pin { transition: none; }
   .viewer { animation: none; }
   .typing span, .activity.running::after { animation: none; }
 }
