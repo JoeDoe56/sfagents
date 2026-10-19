@@ -128,7 +128,7 @@ export class AgentRuntime implements ChildRunner {
     const allow = d.tools?.allow ?? [];
     if (allow.length > 0 && node.roots.length > 0) {
       const ctx: ToolContext = {
-        workspace: new WorkspaceContext(node.roots, this.tree.protectedFiles),
+        workspace: new WorkspaceContext(node.roots, this.tree.protectedFiles, this.tree.secretFiles),
         maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
         secretEnvNames: this.secretEnvNames,
         shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,

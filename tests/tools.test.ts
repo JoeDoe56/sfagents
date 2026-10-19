@@ -105,6 +105,35 @@ describe('filesystem isolation', () => {
     assert.equal((await call(f, 'write_file', { file_path: 'mcp.json', content: '{}' })).permission, 'deny');
     assert.equal((await call(f, 'edit', { file_path: 'agent.json', old_string: 'main', new_string: 'x' })).permission, 'deny');
   });
+
+  test('the configuration .env (API keys) is invisible to every file tool', async () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, '.env'), 'OPENROUTER_API_KEY=sk-or-v1-supersecret\n');
+    writeJson(path.join(dir, 'agent.json'), baseAgent('main', { tools: { allow: ['read_file', 'write_file', 'grep', 'glob', 'list_directory'] } }));
+    const tree = loadAgentTree(path.join(dir, 'agent.json'));
+    const runtime = new AgentRuntime({ tree, providerFactory: () => { throw new Error('unused'); } });
+    const tools = await runtime.buildTools(tree.root, ['main'], () => {});
+    const f: Fixture = { dir, work: dir, outside: dir, tools };
+    const r = await call(f, 'read_file', { file_path: '.env' });
+    assert.equal(r.permission, 'deny');
+    assert.match(r.reason!, /credentials/);
+    assert.equal((await call(f, 'write_file', { file_path: '.env', content: 'x' })).permission, 'deny');
+    for (const js of ['0', '1']) {
+      process.env['SFAGENTS_GREP_JS'] = js;
+      try {
+        const g = await call(f, 'grep', { pattern: 'supersecret' });
+        assert.match(g.result!.llmContent, /No matches/, `grep strategy js=${js}`);
+      } finally {
+        delete process.env['SFAGENTS_GREP_JS'];
+      }
+    }
+    const gl = await call(f, 'glob', { pattern: '**/.env' });
+    assert.match(gl.result!.llmContent, /No files found/);
+    if (!isWin) {
+      fs.symlinkSync(path.join(dir, '.env'), path.join(dir, 'innocent.txt'));
+      assert.equal((await call(f, 'read_file', { file_path: 'innocent.txt' })).permission, 'deny', 'symlink to .env');
+    }
+  });
 });
 
 describe('file tools', () => {

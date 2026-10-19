@@ -52,6 +52,8 @@ export interface AgentTree {
   readonly mcp: McpConfigFile;
   /** Configuration files no agent file tool may modify. */
   readonly protectedFiles: readonly string[];
+  /** Credential files no agent file tool may read or modify (<configDir>/.env). */
+  readonly secretFiles: readonly string[];
   readonly maxDepth: number;
 }
 
@@ -222,7 +224,8 @@ export function loadAgentTree(rootFile: string, options: LoadOptions = {}): Agen
 
   visitedFiles.set(rootCanonical, '(root)');
   const root = build(rootCanonical, 0, undefined, [rootCanonical]);
-  const tree: AgentTree = { configDir, root, byId, mcp, protectedFiles: [...protectedFiles], maxDepth };
+  const secretFiles = [path.join(configDir, '.env')];
+  const tree: AgentTree = { configDir, root, byId, mcp, protectedFiles: [...protectedFiles], secretFiles, maxDepth };
   return deepFreeze(tree);
 }
 

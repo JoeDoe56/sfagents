@@ -9,7 +9,8 @@
  * nearest existing ancestor, and rejection of dangling file symlinks.
  * Removed: change listeners and runtime add/remove of directories; an agent's
  * roots are fixed when its definition is loaded. Added: protected paths
- * (agent and MCP configuration files) that file tools may never modify.
+ * (agent and MCP configuration files) that file tools may never modify, and
+ * secret paths (the configuration .env) they may not read either.
  */
 
 import * as fs from 'node:fs';
@@ -28,14 +29,17 @@ export interface PathCheck {
 export class WorkspaceContext {
   private readonly directories: readonly string[];
   private readonly protectedPaths: ReadonlySet<string>;
+  private readonly secretPaths: ReadonlySet<string>;
 
   /**
    * @param directories Absolute or relative root directories. Each must exist.
    * @param protectedPaths Files that may be read but never written by file tools.
+   * @param secretPaths Files file tools may neither read nor write (credentials).
    */
   constructor(
     directories: readonly string[],
     protectedPaths: readonly string[] = [],
+    secretPaths: readonly string[] = [],
   ) {
     if (directories.length === 0) {
       throw new Error('A workspace needs at least one root directory.');
@@ -45,6 +49,9 @@ export class WorkspaceContext {
     );
     this.protectedPaths = new Set(
       protectedPaths.map((p) => normalizeForCompare(resolveWorkspacePath(path.resolve(p)))),
+    );
+    this.secretPaths = new Set(
+      secretPaths.map((p) => normalizeForCompare(resolveWorkspacePath(path.resolve(p)))),
     );
   }
 
@@ -102,6 +109,13 @@ export class WorkspaceContext {
         ok: false,
         resolvedPath: resolved,
         reason: `Path is outside this agent's permitted workspace roots: ${pathToCheck}. Permitted roots: ${this.directories.join(', ')}`,
+      };
+    }
+    if (this.secretPaths.has(normalizeForCompare(resolved))) {
+      return {
+        ok: false,
+        resolvedPath: resolved,
+        reason: `Path holds SF Agents credentials and is not accessible to agent file tools: ${pathToCheck}`,
       };
     }
     if (access === 'write' && this.protectedPaths.has(normalizeForCompare(resolved))) {
