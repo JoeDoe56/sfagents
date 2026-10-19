@@ -7,7 +7,15 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { AgentRuntime, AgentTerminateMode, loadAgentTree, type RuntimeEvent } from '@sfagents/core';
+import {
+  addSection,
+  AgentRuntime,
+  AgentTerminateMode,
+  ConversationService,
+  loadAgentTree,
+  readConversation,
+  type RuntimeEvent,
+} from '@sfagents/core';
 import { makeTempDir, runCli, stdioServerConfig, writeJson } from './helpers.js';
 
 const KEY = process.env['OPENROUTER_API_KEY'];
@@ -112,5 +120,74 @@ describe(`live provider (${MODEL})`, { skip }, () => {
     assert.equal(r.code, 0, r.stderr);
     const afterSecond = r.stdout.split('What code word did I give you?')[1] ?? '';
     assert.match(afterSecond, /OSPREY/);
+  });
+
+  test('persistent conversation: restart replays tool calls and reasoning across processes', async () => {
+    const dir = project();
+    writeJson(path.join(dir, 'agent.json'), agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['read_file'] } }));
+    const env = { OPENROUTER_API_KEY: KEY };
+    const one = await runCli(['start', '--yes'], { cwd: dir, env, input: 'Read shared/inventory.txt and tell me the item count. Also remember that my badge number is 5521.\n/exit\n', timeoutMs: 150_000 });
+    assert.equal(one.code, 0, one.stderr);
+    assert.match(one.stdout.replace(/,/g, ''), /1749/);
+    const file = path.join(dir, '.sfagents', 'conversation.md');
+    const stored = readConversation(file).state;
+    assert.ok(stored.messages.some((m) => m.role === 'tool' && m.tool === 'read_file'), 'tool exchange stored');
+    const two = await runCli(['start'], { cwd: dir, env, input: 'What is my badge number, and what count did the file show? Answer briefly.\n/exit\n', timeoutMs: 150_000 });
+    assert.equal(two.code, 0, two.stderr);
+    const answer = two.stdout.split('Answer briefly.')[1] ?? two.stdout;
+    assert.match(answer, /5521/);
+    assert.match(answer.replace(/,/g, ''), /1749/);
+    assert.doesNotMatch(two.stdout, /error:/i);
+  });
+
+  test('persistent conversation: an old fact outside the context is retrieved with section tools', async () => {
+    const dir = project();
+    writeJson(path.join(dir, 'agent.json'), agent('main', { context: { recentExchanges: 2 }, limits: { maxTurns: 8, timeoutSeconds: 180 } }));
+    const tree = loadAgentTree(path.join(dir, 'agent.json'));
+    const file = path.join(dir, '.sfagents', 'conversation.md');
+    const conv = ConversationService.open(file, { configDir: tree.configDir });
+    const say = (u: string, a: string) => {
+      const r = conv.beginRootRun(tree.root);
+      r.user(u);
+      r.start(tree.root);
+      r.assistant({ role: 'assistant', content: a }, 'stop');
+      r.end({ agentId: 'main', status: AgentTerminateMode.GOAL, text: a, turns: 1, toolCalls: [], usage: {}, durationMs: 1 });
+    };
+    addSection(conv.main, { title: 'Data center move' });
+    say('For the data center move, the cutover date is November 14 and the rack label prefix is QX-77.', 'Noted: November 14, rack prefix QX-77.');
+    addSection(conv.main, { title: 'Team lunch' });
+    for (let i = 0; i < 5; i++) say(`Lunch option ${i}: tacos or ramen?`, `Option ${i} noted.`);
+    const runtime = track(new AgentRuntime({ tree, conversation: conv }));
+    const events: RuntimeEvent[] = [];
+    const result = await runtime.createSession().run('What rack label prefix did we choose for the data center move?', { onEvent: (e) => events.push(e) });
+    conv.close();
+    assert.equal(result.status, AgentTerminateMode.GOAL, result.error);
+    const used = result.toolCalls.map((c) => c.name);
+    assert.ok(used.some((n) => ['search_conversation', 'fetch_section', 'search_sections'].includes(n)), `used: ${used.join(', ')}`);
+    assert.match(result.text, /QX-77/);
+    const ctx = events.find((e) => e.type === 'context') as Extract<RuntimeEvent, { type: 'context' }>;
+    assert.equal(ctx.omittedExchanges, 5);
+  });
+
+  test('persistent conversation: the model files distinct topics into sections', async () => {
+    const dir = project();
+    writeJson(path.join(dir, 'agent.json'), agent('main'));
+    const r = await runCli(['start'], {
+      cwd: dir,
+      env: { OPENROUTER_API_KEY: KEY },
+      input:
+        "Let's plan the database migration for our billing service: we move from MySQL 5.7 to Postgres 16 next month.\n" +
+        'For that migration, list three risks briefly.\n' +
+        'Switching topics completely: I want to start learning watercolor painting. What three supplies should I buy first?\n/exit\n',
+      timeoutMs: 200_000,
+    });
+    assert.equal(r.code, 0, r.stderr);
+    const state = readConversation(path.join(dir, '.sfagents', 'conversation.md')).state;
+    const titles = [...state.sections.values()].map((s) => s.title);
+    assert.ok(state.sections.size >= 2, `sections: ${JSON.stringify(titles)}`);
+    const migration = state.messages.find((m) => m.role === 'user' && m.content.includes('MySQL'))!;
+    const painting = state.messages.find((m) => m.role === 'user' && m.content.includes('watercolor'))!;
+    assert.ok(state.sectionOf(painting.id), 'painting message filed');
+    assert.notEqual(state.sectionOf(migration.id), state.sectionOf(painting.id), `titles: ${JSON.stringify(titles)}`);
   });
 });

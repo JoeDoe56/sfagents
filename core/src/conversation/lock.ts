@@ -52,11 +52,22 @@ export function readLock(lockPath: string): LockInfo | undefined {
 function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     // EPERM: exists but owned by someone else.
     return isNodeError(error) && error.code === 'EPERM';
   }
+  // A killed process whose parent has not reaped it still answers signal 0
+  // on Linux; a zombie holds no conversation open, so it does not count.
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
+      if (state === 'Z' || state === 'X') return false;
+    } catch {
+      // /proc unavailable: fall through
+    }
+  }
+  return true;
 }
 
 const held = new Set<ConversationLock>();

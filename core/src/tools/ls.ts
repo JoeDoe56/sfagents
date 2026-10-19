@@ -74,7 +74,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     try {
       const stats = await fs.stat(dirPath).catch(() => null);
       if (!stats) {
-        return this.errorResult(`Error: Directory not found or inaccessible: ${this.target()}`, 'Directory not found or inaccessible.', ToolErrorType.FILE_NOT_FOUND);
+        return this.errorResult(`Error: Directory not found or inaccessible: ${this.target()} (resolved to ${dirPath})`, 'Directory not found or inaccessible.', ToolErrorType.FILE_NOT_FOUND);
       }
       if (!stats.isDirectory()) {
         return this.errorResult(`Error: Path is not a directory: ${this.target()}`, 'Path is not a directory.', ToolErrorType.PATH_IS_NOT_A_DIRECTORY);

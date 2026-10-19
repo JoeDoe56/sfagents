@@ -9,6 +9,7 @@
  */
 
 import os from 'node:os';
+import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { conversationAccess, mcpGrants } from '../agents/definition.js';
 import { createConversationTools, ORGANIZE_GUIDANCE } from '../conversation/tools.js';
@@ -114,6 +115,24 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
   }
   const guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
+}
+
+/**
+ * Relative paths in a parent's task are relative to the parent's primary
+ * root, but a child's file tools resolve against the child's own roots.
+ * Spell out the mapping so the child can translate paths.
+ */
+function childPathNote(parent: AgentNode, child: AgentNode): string[] {
+  const parentRoot = parent.roots[0];
+  if (!parentRoot || child.roots.length === 0 || child.roots[0] === parentRoot) return [];
+  const mapped = child.roots.map((r) => {
+    const rel = path.relative(parentRoot, r).split(path.sep).join('/');
+    return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? `${r} (the parent's "${rel}/")` : r;
+  });
+  return [
+    '',
+    `Paths: relative paths in this task are relative to the parent's workspace root ${parentRoot}. Your own relative paths resolve against ${child.roots[0]}. Your workspace roots: ${mapped.join(', ')}. Use absolute paths when unsure.`,
+  ];
 }
 
 export class AgentRuntime implements ChildRunner {
@@ -454,6 +473,7 @@ export class AgentRuntime implements ChildRunner {
         `Task from parent agent "${parent.id}":`,
         params.task.trim(),
         ...(params.context?.trim() ? ['', 'Context provided by the parent:', params.context.trim()] : []),
+        ...childPathNote(parent, child),
       ].join('\n');
       const agentPath = [...parentPath, child.id];
       let recorder: RunRecorder | undefined;

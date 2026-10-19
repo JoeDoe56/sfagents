@@ -98,6 +98,7 @@ describe('parent and child agents', () => {
     assert.equal(childReq.messages.length, 2);
     assert.match(userOf(childReq), /Task from parent agent "main":\nRead data.txt and echo the number.\n\nContext provided by the parent:\nThe file is in your root./);
     assert.doesNotMatch(JSON.stringify(childReq.messages), /Ask the worker/);
+    assert.match(userOf(childReq), /Paths: relative paths in this task are relative to the parent's workspace root .*work\. Your own relative paths resolve against .*shared\. Your workspace roots: .*shared \(the parent's "shared\/"\)/);
     // The child only sees its own tools.
     assert.deepEqual(childReq.tools!.map((t) => t.name).sort(), ['invoke_child', 'mcp__local__echo', 'read_file']);
     // invoke_child advertises only direct children.

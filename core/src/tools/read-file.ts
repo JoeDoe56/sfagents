@@ -73,7 +73,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<ReadFileToolParams, Tool
       stats = await fs.stat(filePath);
     } catch (error) {
       if (isNodeError(error) && error.code === 'ENOENT') {
-        return errorResult(`File not found: ${this.params.file_path}`, ToolErrorType.FILE_NOT_FOUND);
+        return errorResult(`File not found: ${this.params.file_path} (resolved to ${filePath})`, ToolErrorType.FILE_NOT_FOUND);
       }
       return errorResult(`Error reading file ${this.params.file_path}: ${getErrorMessage(error)}`, ToolErrorType.READ_CONTENT_FAILURE);
     }
