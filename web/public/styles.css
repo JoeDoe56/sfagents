@@ -21,6 +21,7 @@
   --danger: #ff453a;
   --bubble-max: 75%;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
 }
 
 * { box-sizing: border-box; }
@@ -58,7 +59,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .thread {
   max-width: 780px;
   margin: 0 auto;
-  padding: 16px 20px var(--chat-bottom, 120px);
+  padding: calc(16px + var(--safe-top)) max(20px, env(safe-area-inset-right, 0px)) var(--chat-bottom, 120px) max(20px, env(safe-area-inset-left, 0px));
   display: flex;
   flex-direction: column;
 }
@@ -609,7 +610,7 @@ button { -webkit-tap-highlight-color: transparent; }
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 12px;
+  padding: calc(10px + var(--safe-top)) 12px 10px;
   border-bottom: 1px solid rgba(235, 235, 245, 0.1);
 }
 .viewer-title { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; padding: 0 6px; }

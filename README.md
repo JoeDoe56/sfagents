@@ -158,6 +158,8 @@ The page is one conversation in the style of iMessage, with a bottom bar in the 
 - **Approvals** appear as a card in the conversation (Allow Once, Always Allow, Don't Allow). `--yes` skips them.
 - **Attachments** upload with an up2k-style protocol (after [copyparty](https://github.com/9001/copyparty)'s up2k): the browser hashes each chunk, the server asks only for chunks it does not have, chunks upload in parallel and are verified on arrival, an interrupted upload resumes (choose the same file again), and a file the server already has is not uploaded at all. Images are shown to the model; text files are included in the message; other files are named.
 
+It is also a simple installable web app (manifest, icons, standalone display): use "Install" in Chrome or Edge, or Share → Add to Home Screen in Safari. Browsers only offer installation on a secure origin, which includes `localhost`/127.0.0.1 but not a plain-http LAN address.
+
 The glass is [sfgl](https://github.com/JoeDoe56/sfgl) (vendored in `web/public/vendor/sfgl`; refresh it with `npm run vendor:sfgl -- <path to sfgl>`), and the font is Host Grotesk. Add `?quality=superfluid|glass|lite|frost|static` to the URL to force a glass quality tier.
 
 Security: the server listens on 127.0.0.1 only, accepts only requests addressed to this host and port, and refuses cross-site writes. Artifacts and uploads are served in a sandbox, so a page the agent wrote cannot call the API. `--host 0.0.0.0` exposes the agent and its tools (with your permissions) to your network; there is no login.

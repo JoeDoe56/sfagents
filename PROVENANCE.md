@@ -69,6 +69,7 @@ The upstream code is not merged continuously. To take a later upstream fix, comp
 | `src/up2k.ts`, `public/up2k.js` | SF Agents | An independent implementation of the upload protocol of copyparty's up2k (https://github.com/9001/copyparty, MIT): per-chunk SHA-512 hashes truncated to 33 bytes in base64url, a handshake that returns the chunks still needed, an upload identity ("wark") derived from a salt, the size and the hashes, and the chunk-size rule. No copyparty code was used. |
 | `public/sha512.js` | SF Agents | FIPS 180-4 SHA-512, written for this project as a fallback where `crypto.subtle` is unavailable. |
 | `public/*.html`, `public/*.css`, other `public/*.js` | SF Agents | none. The bubble shapes and colours were traced from iMessage screenshots and the sheet geometry from an Apple Maps screen recording supplied by the project owner; no Apple code or assets other than the SF Symbols below. |
+| `public/icons/icon.svg` and the PNG icons rendered from it | Project owner | The SF Agents app icon, supplied by the project owner. |
 | `public/vendor/sfgl/` | Vendored | sfgl (https://github.com/JoeDoe56/sfgl, MIT) at the commit named in its `VENDOR.md`, copied by `scripts/vendor-sfgl.mjs`. Includes Host Grotesk (SIL OFL 1.1) and 33 SF Symbols glyphs, which are Apple's artwork and not covered by any license in this repository (see `vendor/sfgl/symbols/PROVENANCE.md`). |
 
 ## Not taken from upstream

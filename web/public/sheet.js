@@ -16,20 +16,23 @@ const smooth = (a, b, v) => {
   return k * k * (3 - 2 * k);
 };
 
-function safeBottom() {
+function safeInset(side) {
   const probe = document.createElement('div');
-  probe.style.cssText = 'position:fixed;bottom:0;height:env(safe-area-inset-bottom,0px);visibility:hidden;pointer-events:none';
+  probe.style.cssText = `position:fixed;bottom:0;height:env(safe-area-inset-${side},0px);visibility:hidden;pointer-events:none`;
   document.body.append(probe);
   const h = probe.getBoundingClientRect().height;
   probe.remove();
   return h;
 }
+const safeBottom = () => safeInset('bottom');
+const safeTop = () => safeInset('top');
 
 export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent }) {
   let t = 0;
   let detent = 0;
   let anim = null;
   let safe = safeBottom();
+  let safeT = safeTop();
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 
   function geometry(rowH) {
@@ -44,7 +47,8 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     const mediumH = clamp(Math.round(H * 0.46), Math.min(collapsedH + 260, H - 40), Math.max(collapsedH + 260, 560));
     const M = { width: mediumW, left: (W - mediumW) / 2, bottom: 8 + safe * 0.5, height: Math.min(mediumH, H - 24), radius: 40 };
     const fullW = phone ? W : Math.min(W - 32, 720);
-    const top = phone ? 10 : 16;
+    // Below the status bar when installed as an app (black-translucent status bar).
+    const top = (phone ? 10 : 16) + safeT;
     // The full sheet runs past the bottom edge so only its top corners show.
     const F = { width: fullW, left: (W - fullW) / 2, bottom: -40, height: H - top + 40, radius: phone ? 38 : 34 };
     return { C, M, F, H };
@@ -241,6 +245,7 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
 
   addEventListener('resize', () => {
     safe = safeBottom();
+    safeT = safeTop();
     apply();
   });
   new ResizeObserver(() => apply()).observe(row);

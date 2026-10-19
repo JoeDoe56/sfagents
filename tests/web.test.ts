@@ -226,6 +226,16 @@ describe('web server', () => {
       const vendor = await request(s.base, '/vendor/sfgl/src/index.js');
       assert.equal(vendor.status, 200);
       assert.equal((await request(s.base, '/../package.json')).status, 404);
+      // A web app manifest whose icons all exist.
+      assert.match(index.body.toString(), /<link rel="manifest" href="manifest.webmanifest">/);
+      const manifest = await request(s.base, '/manifest.webmanifest');
+      assert.equal(manifest.status, 200);
+      assert.match(String(manifest.headers['content-type']), /^application\/manifest\+json/);
+      const m = JSON.parse(manifest.body.toString()) as { display: string; start_url: string; icons: Array<{ src: string; sizes: string; purpose: string }> };
+      assert.equal(m.display, 'standalone');
+      assert.ok(m.icons.some((i) => i.sizes === '512x512' && i.purpose === 'maskable'));
+      for (const icon of m.icons) assert.equal((await request(s.base, `/${icon.src}`)).status, 200, icon.src);
+      assert.equal((await request(s.base, '/icons/apple-touch-icon.png')).status, 200);
       assert.equal((await request(s.base, '/api/state', { headers: { Host: 'evil.example:80' } })).status, 421);
       const cross = await postJson(s.base, '/api/messages', { text: 'hi' }, { Origin: 'http://evil.example' });
       assert.equal(cross.status, 403);
