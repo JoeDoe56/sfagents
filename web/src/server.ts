@@ -1,7 +1,8 @@
 /**
  * The SF Agents web server: serves the browser client, runs the root agent
  * against the persistent conversation, streams progress over Server-Sent
- * Events, and handles approvals, artifacts and up2k uploads.
+ * Events, and handles approvals, artifacts, up2k uploads and the resource
+ * monitor's readings.
  *
  * Security model: the server can run tools with the user's permissions, so
  * by default it listens on 127.0.0.1 only. Every request must carry a Host
@@ -33,6 +34,7 @@ import {
   type RuntimeEvent,
 } from '@sfagents/core';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
+import { SystemMonitor, type SystemSource } from './system.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
 export const DEFAULT_PORT = 8093;
@@ -56,6 +58,8 @@ export interface WebServerOptions {
   publicDir?: string;
   maxUploadBytes?: number;
   log?: (line: string) => void;
+  /** Tests replace what the resource monitor reads from the machine. */
+  systemSource?: SystemSource;
 }
 
 interface LiveSegment {
@@ -153,6 +157,7 @@ export class WebServer {
   private port: number;
   private readonly host: string;
   private runPromise: Promise<void> | undefined;
+  private readonly system: SystemMonitor;
 
   constructor(private readonly options: WebServerOptions) {
     if (!options.conversation.dir || !options.conversation.file) throw new Error('The web interface needs a persistent conversation.');
@@ -169,6 +174,7 @@ export class WebServer {
       confirm: (request, signal) => this.confirm(request, signal),
     });
     this.session = this.runtime.createSession();
+    this.system = new SystemMonitor(options.systemSource);
     this.up2k = new Up2kStore(options.conversation.dir, options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES);
     this.artifactSignature = this.signature();
     this.server = http.createServer((req, res) => {
@@ -275,6 +281,9 @@ export class WebServer {
           const before = Number(url.searchParams.get('before'));
           return sendJson(res, 200, displayItems(this.conversation.state, { before: Number.isFinite(before) && before > 0 ? before : undefined, limit: 200 }));
         }
+        case 'GET system':
+          // Resource use for the monitor in the sheet (read-only; the Host check keeps other sites out).
+          return sendJson(res, 200, await this.system.read());
         case 'GET events':
           return this.openEvents(req, res);
         case 'POST messages':

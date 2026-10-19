@@ -393,6 +393,25 @@ describe('web server', () => {
     }
   });
 
+  test('the resource monitor reads the machine through /api/system', async () => {
+    const s = await startServer(() => ({ text: 'unused' }));
+    try {
+      const r = await request(s.base, '/api/system');
+      assert.equal(r.status, 200);
+      const snap = JSON.parse(r.body.toString());
+      assert.equal(typeof snap.host, 'string');
+      assert.ok(snap.cpu.cores >= 1);
+      assert.ok(snap.memory.total > 0 && snap.memory.used >= 0);
+      assert.ok(snap.uptime.system > 0 && snap.uptime.sfagents >= 0);
+      assert.ok(Array.isArray(snap.drives));
+      for (const d of snap.drives) assert.ok(d.total >= d.used && d.used >= 0, JSON.stringify(d));
+      // Other sites cannot read it (DNS rebinding).
+      assert.equal((await request(s.base, '/api/system', { headers: { Host: 'evil.example:80' } })).status, 421);
+    } finally {
+      await s.stop();
+    }
+  });
+
   test('tool calls are described for people', () => {
     assert.equal(describeCall('read_file', JSON.stringify({ file_path: 'src/app.ts' })), 'Read src/app.ts');
     assert.equal(describeCall('shell', JSON.stringify({ command: 'npm test' })), 'Ran `npm test`');

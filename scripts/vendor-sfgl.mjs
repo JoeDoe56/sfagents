@@ -25,6 +25,7 @@ export const GLYPHS = [
   'chart.bar', 'list.bullet', 'stop.fill', 'checkmark', 'exclamationmark.triangle', 'paperclip', 'folder',
   'square.and.arrow.down', 'arrow.up.right.square', 'ellipsis', 'waveform', 'music.note', 'film',
   'archivebox', 'gauge', 'text.alignleft', 'scribble', 'gear',
+  'desktopcomputer', 'arrow.up.left.and.arrow.down.right', 'arrow.down',
 ];
 
 if (!fs.existsSync(path.join(source, 'src', 'index.js'))) {

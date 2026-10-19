@@ -13,6 +13,7 @@ import { createSheet } from './sheet.js';
 import { renderTiles, createViewer } from './artifacts.js';
 import { UploadJob } from './up2k.js';
 import { createRail } from './rail.js';
+import { createMonitor } from './monitor.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -121,6 +122,8 @@ const barLens = surface.lens(bar, GLASS.bar);
 surface.lens(field, GLASS.control);
 const sendLens = surface.lens(send, GLASS.control);
 surface.lens($('monitor'), { ...GLASS.tile, clip: sheetScroll });
+// The expand button is a small glass circle on top of the monitor's glass.
+surface.lens($('monExpand'), { ...GLASS.control, layer: 2, clip: sheetScroll });
 surface.lens($('settingsBtn'), { ...GLASS.control, clip: sheetScroll });
 surface.lens($('spareBtn'), { ...GLASS.control, clip: sheetScroll });
 window.sfagents = { glass: glassApi.glass, surface, barLens };
@@ -155,9 +158,25 @@ const sheet = createSheet({
   },
   onDetent: (name) => {
     if (name !== 'collapsed') syncTileLenses();
+    updateMonitor();
   },
 });
 sheetScroll.addEventListener('scroll', () => glassApi.glass.requestRender(), { passive: true });
+
+// ------------------------------------------------------------------ resource monitor
+
+const monitor = createMonitor({
+  root: $('monitor'),
+  expandButton: $('monExpand'),
+  // Drives arriving or leaving change the monitor's height.
+  onDrivesChange: () => glassApi.glass.requestRender(),
+});
+/** Read the machine only while the sheet (and so the monitor) is open. */
+function updateMonitor() {
+  monitor.setActive(sheet.detent !== 'collapsed' && !document.hidden);
+}
+document.addEventListener('visibilitychange', updateMonitor);
+window.sfagents.monitor = monitor;
 
 // ------------------------------------------------------------------ time stamps
 

@@ -609,9 +609,84 @@ button { -webkit-tap-highlight-color: transparent; }
 .monitor {
   flex: 1 1 auto;
   min-width: 0;
-  height: 140px;
+  min-height: 140px;
   border-radius: 26px;
+  padding: 12px 14px 14px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* iOS text styles in dark mode: label, secondary and tertiary label colours */
+  --mon-secondary: rgba(235, 235, 245, 0.6);
+  --mon-tertiary: rgba(235, 235, 245, 0.38);
+  font-variant-numeric: tabular-nums;
 }
+.monitor.loading .mon-stats, .monitor.loading .mon-drives { opacity: 0.45; }
+
+/* Header: the computer's name, and the expand button (it will open the file manager). */
+.mon-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 28px; margin: -2px -4px 0 0; }
+.mon-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 15px; line-height: 20px; font-weight: 600; color: #fff; }
+.mon-title i { width: 15px; height: 15px; color: var(--mon-secondary); flex: none; }
+.mon-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mon-expand {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(235, 235, 245, 0.85);
+  cursor: pointer;
+}
+.mon-expand > span { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.mon-expand i { width: 12px; height: 12px; }
+.mon-expand:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: 2px; }
+
+/* Stats: a flat list of cells (label, value, a smaller line), four to a row here. */
+.mon-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 10px; }
+.stat { display: flex; flex-direction: column; min-width: 0; }
+.stat.wide { grid-column: span 2; }
+.stat-label { font-size: 12px; line-height: 15px; font-weight: 500; color: var(--mon-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-value { display: flex; align-items: baseline; gap: 1px; margin-top: 1px; font-size: 20px; line-height: 24px; font-weight: 600; letter-spacing: -0.01em; color: #fff; white-space: nowrap; }
+.stat-unit { font-size: 13px; font-weight: 500; color: var(--mon-secondary); letter-spacing: 0; }
+.stat-unit:empty { display: none; }
+.stat-arrow { width: 11px; height: 11px; align-self: center; margin-right: 2px; color: var(--mon-secondary); }
+.stat-sub { display: flex; align-items: center; gap: 3px; min-width: 0; font-size: 11px; line-height: 14px; color: var(--mon-tertiary); white-space: nowrap; }
+.stat-sub .stat-arrow { width: 9px; height: 9px; margin: 0; color: var(--mon-tertiary); }
+.stat-subtext { overflow: hidden; text-overflow: ellipsis; }
+.stat.unavailable .stat-value { color: var(--mon-tertiary); }
+
+/* Drives: up to three bars share the width; more scroll sideways. */
+.mon-drives {
+  --drive-count: 1;
+  --drive-gap: 12px;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: calc((100% - (var(--drive-count) - 1) * var(--drive-gap)) / var(--drive-count));
+  gap: var(--drive-gap);
+  margin-top: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  touch-action: pan-x;
+}
+.mon-drives::-webkit-scrollbar { display: none; }
+.mon-drives[hidden] { display: none; }
+/* More than three: a fade at the trailing edge says there is more. */
+.mon-drives.more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent); }
+.drive { min-width: 0; scroll-snap-align: start; }
+.drive-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; font-size: 12px; line-height: 15px; }
+.drive-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: rgba(235, 235, 245, 0.85); }
+.drive-pct { flex: none; color: var(--mon-secondary); }
+.drive-bar { position: relative; height: 6px; margin-top: 5px; border-radius: 3px; overflow: hidden; background: rgba(120, 120, 128, 0.32); }
+/* iOS system colours: blue, then orange from 80 % and red from 90 %. */
+.drive-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 3px; background: #0a84ff; transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.3s ease; }
+.drive.warn .drive-fill { background: #ff9f0a; }
+.drive.full .drive-fill { background: #ff453a; }
 .side-buttons {
   flex: none;
   display: flex;
@@ -847,7 +922,7 @@ button { -webkit-tap-highlight-color: transparent; }
   .settings-card { animation: none; }
   .rail-row span { animation: none; }
   .rail::before { transition: none; }
-  .stop-disc, .tile-pin { transition: none; }
+  .stop-disc, .tile-pin, .drive-fill { transition: none; }
   .viewer { animation: none; }
   .typing span, .activity.running::after { animation: none; }
 }
