@@ -1,0 +1,15 @@
+SF Agents
+
+This product includes software derived from Qwen Code
+(https://github.com/QwenLM/qwen-code), packages/core and packages/cli at
+commit 97925919acb92b089d817991bfefe4545601c8f6, licensed under the Apache
+License, Version 2.0.
+
+Qwen Code was originally based on Gemini CLI
+(https://github.com/google-gemini/gemini-cli), Copyright 2025 Google LLC,
+licensed under the Apache License, Version 2.0.
+
+Files derived from those projects keep their original copyright and license
+headers. PROVENANCE.md lists every derived file, its upstream source and
+whether it was copied unchanged, adapted, or re-implemented from the
+upstream design.

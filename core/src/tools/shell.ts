@@ -85,6 +85,18 @@ export function getShellConfiguration(): ShellConfiguration {
 }
 
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+const WINDOWS_CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
+
+/**
+ * Output is decoded as UTF-8, so ask Windows shells to emit UTF-8 instead of
+ * the console code page (upstream shellExecutionService `applyUtf8Prefix`).
+ */
+export function applyUtf8Prefix(command: string, shell: ShellConfiguration['shell']): string {
+  if (process.platform !== 'win32') return command;
+  if (shell === 'powershell') return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+  if (shell === 'cmd') return `${WINDOWS_CHCP} 65001 >nul 2>nul & ${command}`;
+  return command;
+}
 
 /** Kills the whole process tree of a shell started by {@link runShellCommand}. */
 export function killProcessTree(child: ChildProcess): void {
@@ -156,7 +168,7 @@ export function runShellCommand(
     let settled = false;
     let child: ChildProcess;
     try {
-      child = spawn(shell.executable, [...shell.argsPrefix, command], {
+      child = spawn(shell.executable, [...shell.argsPrefix, applyUtf8Prefix(command, shell.shell)], {
         cwd: options.cwd,
         env: options.env,
         windowsHide: true,

@@ -13,6 +13,7 @@
     "node": ">=20.12"
   },
   "scripts": {
+    "prepare": "tsc -b cli tests",
     "build": "tsc -b cli tests",
     "clean": "tsc -b cli tests --clean",
     "typecheck": "tsc -b cli tests",

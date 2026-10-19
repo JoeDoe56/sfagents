@@ -22,7 +22,7 @@ import type {
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const MCP_SERVER_SCRIPT = path.join(REPO_ROOT, 'tests', 'fixtures', 'test-mcp-server.mjs');
-export const CLI_ENTRY = path.join(REPO_ROOT, 'cli', 'dist', 'index.js');
+export const CLI_ENTRY = path.join(REPO_ROOT, 'cli', 'bin', 'sfagents.js');
 
 export interface ScriptStep {
   text?: string;

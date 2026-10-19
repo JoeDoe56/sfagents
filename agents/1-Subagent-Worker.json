@@ -1,0 +1,19 @@
+{
+  "id": "worker",
+  "description": "Read-only helper: searches and reads files in the workspace and can use the local echo/add MCP tools. Cannot edit files or run commands.",
+  "provider": "openrouter",
+  "model": "anthropic/claude-haiku-5.5",
+  "systemPrompt": "You are a careful read-only research assistant. Use your tools to find facts in the workspace and report them precisely, quoting file paths. If you cannot find something, say so.",
+  "workspace": {
+    "roots": [".."]
+  },
+  "tools": {
+    "allow": ["read_file", "glob", "grep", "list_directory"],
+    "mcpServers": [{ "server": "local-tools", "tools": ["echo", "add"] }],
+    "autoApprove": ["mcp__local-tools__echo", "mcp__local-tools__add"]
+  },
+  "limits": {
+    "maxTurns": 20,
+    "timeoutSeconds": 600
+  }
+}

@@ -73,10 +73,10 @@ Legend: **K** keep (copy with only renames), **D** keep but decouple or trim (su
 | `tools/grep.ts` | D | Keep git grep → system grep → JavaScript fallback strategy and `--null` output parser. Add per-match canonical containment filtering. |
 | `tools/ls.ts` | D | Keep directory listing with ignore globs, dirs-first sorting. |
 | `tools/shell.ts`, `services/shellExecutionService.ts`, `utils/shell-utils.ts` | S + D | Keep `getShellConfiguration` (bash, cmd, PowerShell, Git Bash detection) and the process-group / `taskkill /t` cancel strategy. Replace the 9,000-line PTY/sandbox/SSH/background stack with a small `child_process` runner with timeout, bounded output and exit status. No node-pty. |
-| `tools/mcp-client.ts` | D | Keep `createTransport` for stdio, Streamable HTTP (`httpUrl`) and SSE (`url`), env inheritance with secret stripping, Windows PATH normalization, server-level `includeTools`/`excludeTools`. Drop OAuth, Google and service-account auth, SDK control transport, prompts, resources, MCP apps, version negotiation probing. |
+| `tools/mcp-client.ts` | D | Keep `createTransport` for stdio and Streamable HTTP (`httpUrl`), env inheritance with secret stripping, Windows PATH normalization, server-level `includeTools`/`excludeTools`. Drop OAuth, Google and service-account auth, legacy SSE (`url`; no existing configuration needs it and it would ship untested), SDK control transport, prompts, resources, MCP apps, version negotiation probing. |
 | `tools/mcp-tool.ts` | D | Keep `DiscoveredMCPTool` result transformation (text, image/audio summaries, embedded resources, resource links, `structuredContent`, `isError`). Drop MCP apps, classifier input, progress, persisted output files. |
 | `tools/mcp-client-manager.ts` | S | Replaced by a small `McpManager` (lazy connect, bounded timeouts, status, dispose). |
-| `config/mcp-server-config.ts` | D | Keep the server shape (`command`, `args`, `env`, `cwd`, `httpUrl`, `url`, `headers`, `timeout`, `includeTools`, `excludeTools`, `trust`). Drop OAuth and auth provider fields. |
+| `config/mcp-server-config.ts` | D | Keep the server shape (`command`, `args`, `env`, `cwd`, `httpUrl`, `headers`, `timeout`, `includeTools`, `excludeTools`, `trust`). Drop `url` (SSE), OAuth and auth provider fields. |
 | `utils/envVarResolver.ts` | D | Keep `${VAR}` / `$VAR` expansion for `mcp.json`. |
 | `utils/sanitize-child-env.ts` | D | Keep the idea: strip runtime secrets from child process env (provider API key variables). |
 | `core/openaiContentGenerator/streamingToolCallParser.ts` | D | Keep streamed tool-call argument assembly. Depends on `utils/safeJsonParse.ts` (keep) and `core/tool-call-arguments.ts` (keep). |
@@ -107,17 +107,17 @@ Legend: **K** keep (copy with only renames), **D** keep but decouple or trim (su
 | `utils/cleanup.ts` | D | Keep registered cleanup with per-step and overall timeouts (MCP disconnects on exit). |
 | `i18n/*`, `services/*` (update checks, telemetry), `startup/*`, `patches/*` | R | Outside scope. |
 
-## 5. Retained third-party dependencies (planned)
+## 5. Retained third-party dependencies
 
 | Package | Why |
 | --- | --- |
 | `openai` | OpenAI-compatible chat completions client (OpenRouter). Upstream uses 5.x. |
-| `@modelcontextprotocol/sdk` | MCP client and transports (stdio, Streamable HTTP, SSE). |
+| `@modelcontextprotocol/sdk` | MCP client and transports (stdio, Streamable HTTP). |
 | `ajv`, `ajv-formats` | Tool argument validation (upstream `SchemaValidator`). |
 | `glob` | Glob tool and grep fallback. |
 | `jsonrepair` | Lenient parsing of streamed tool arguments (upstream `safeJsonParse`). |
 | `diff` | Unified diffs in edit and write confirmation prompts. |
-| Dev: `typescript`, `vitest`, `@types/node` | Build and tests. |
+| Dev: `typescript`, `@types/node` | Build. Tests use Node's built-in `node:test` runner instead of upstream's vitest: vitest 3 carries open audit advisories and vitest 4.1 crashes npm 10's installer, while `node:test` adds no dependency. |
 
 Removed relative to upstream core: `@google/genai`, `@anthropic-ai/sdk`, `@modelcontextprotocol/client` v2, all `@opentelemetry/*`, `google-auth-library`, `node-pty`, `sharp`, `web-tree-sitter`, `simple-git`, `undici`, `ws`, `yaml`, `zod` (only as the MCP SDK's own dependency), and roughly 40 others. Relative to upstream cli: `ink`, `react`, `yargs`, `express`, `dotenv`, `chalk`, markdown and highlighting libraries, `@a2a-js/sdk`, `@agentclientprotocol/sdk`.
 

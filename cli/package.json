@@ -5,10 +5,13 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "sfagents": "dist/index.js"
+    "sfagents": "bin/sfagents.js"
   },
   "main": "dist/index.js",
-  "files": ["dist"],
+  "files": [
+    "bin",
+    "dist"
+  ],
   "engines": {
     "node": ">=20.12"
   },

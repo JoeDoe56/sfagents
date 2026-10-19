@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "local-tools": {
+      "description": "Demo stdio server from the test fixtures (echo, add, ...). Replace with your own servers.",
+      "command": "node",
+      "args": ["tests/fixtures/test-mcp-server.mjs"],
+      "cwd": ".",
+      "timeout": 30000
+    }
+  }
+}
