@@ -18,7 +18,10 @@ import type { RunRecorder } from '../runtime/recorder.js';
 import { ConversationLock } from './lock.js';
 import { FileConversationStore, MemoryConversationStore, readConversation, type ConversationStore, type StoreIO } from './store.js';
 import type { ConversationState } from './state.js';
-import type { MessageRecord, ToolMessageStatus } from './types.js';
+import type { AttachmentRef, MessageRecord, ToolMessageStatus } from './types.js';
+import type { ArtifactView } from './state.js';
+import { userMessageFor } from './attachments.js';
+import { ArtifactError, artifactTypeFor, mimeForFilename, safeFilename } from './artifacts.js';
 
 export const STATE_DIR_NAME = '.sfagents';
 export const CONVERSATION_FILE_NAME = 'conversation.md';
@@ -60,8 +63,40 @@ export const INTERRUPTED_NOT_STARTED =
 export const INTERRUPTED_UNKNOWN =
   '[SF Agents: interrupted] This tool call was started, but the session ended before its result was recorded. Its outcome is UNKNOWN: it may or may not have taken effect. Check the current state before retrying.';
 
+export interface CreateArtifactInput {
+  title: string;
+  filename: string;
+  content: string | Buffer;
+  /** Defaults from the file name. */
+  type?: string;
+  mime?: string;
+  run?: string;
+  callId?: string;
+}
+
+export interface UpdateArtifactInput {
+  content: string | Buffer;
+  title?: string;
+  filename?: string;
+  run?: string;
+  callId?: string;
+}
+
+export interface ArtifactContent {
+  view: ArtifactView;
+  rev: number;
+  filename: string;
+  mime: string;
+  data: Buffer;
+}
+
+/** Reads an attached file's bytes (undefined when it is missing). */
+export type AttachmentResolver = (ref: AttachmentRef) => Buffer | undefined;
+
 export class ConversationService {
   private readonly transcriptStores = new Map<string, ConversationStore>();
+  /** Managed files of an in-memory conversation (artifacts, uploads). */
+  private readonly memoryFiles = new Map<string, Buffer>();
   private closed = false;
   /** Run ID of the root turn in progress (for "current_exchange"). */
   activeRootRun: string | undefined;
@@ -223,12 +258,170 @@ export class ConversationService {
     return readConversation(file).state;
   }
 
+  // -------------------------------------------------------------------------
+  // Managed files (artifacts and uploads), relative to the state directory.
+
+  /** Absolute path of a managed file, refusing anything outside the state directory. */
+  managedPath(rel: string): string | undefined {
+    if (!this.dir) return undefined;
+    const abs = path.resolve(this.dir, rel);
+    const relCheck = path.relative(this.dir, abs);
+    if (!relCheck || relCheck.startsWith('..') || path.isAbsolute(relCheck)) return undefined;
+    return abs;
+  }
+
+  private writeManaged(rel: string, data: Buffer): void {
+    if (!this.dir) {
+      this.memoryFiles.set(rel, data);
+      return;
+    }
+    const abs = this.managedPath(rel);
+    if (!abs) throw new ArtifactError(`Refusing to write outside the state directory: ${rel}`);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    const fd = fs.openSync(abs, 'wx');
+    try {
+      fs.writeSync(fd, data);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  /** Reads a managed file; undefined when missing or outside the state directory. */
+  readManaged(rel: string): Buffer | undefined {
+    if (!this.dir) return this.memoryFiles.get(rel);
+    const abs = this.managedPath(rel);
+    if (!abs) return undefined;
+    try {
+      return fs.readFileSync(abs);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Reads a user attachment's bytes. */
+  readAttachment(ref: AttachmentRef): Buffer | undefined {
+    if (!ref.path.startsWith('uploads/')) return undefined;
+    return this.readManaged(ref.path);
+  }
+
+  /** Stores an attachment directly (in-memory conversations and tests; the web server uses up2k). */
+  addUpload(name: string, mime: string, data: Buffer): AttachmentRef {
+    this.assertOpen();
+    const id = `u${randomBytes(8).toString('hex')}`;
+    const rel = `uploads/${id}/${safeFilename(name, 'upload')}`;
+    this.writeManaged(rel, data);
+    return { id, name, mime, path: rel, size: data.length };
+  }
+
+  // -------------------------------------------------------------------------
+  // Artifacts
+
+  /** Artifacts, newest updated first. */
+  artifacts(): ArtifactView[] {
+    return [...this.state.artifactViews.values()].sort((a, b) => b.updatedSeq - a.updatedSeq);
+  }
+
+  private requireArtifact(id: string): ArtifactView {
+    const view = this.state.artifactViews.get(id);
+    if (!view) throw new ArtifactError(`There is no artifact "${id}". Use list_artifacts to see the IDs.`);
+    return view;
+  }
+
+  /** Creates a model artifact: writes revision 1, then records it. */
+  createArtifact(input: CreateArtifactInput): ArtifactView {
+    this.assertOpen();
+    const title = input.title.trim().slice(0, 200) || 'Untitled';
+    const filename = safeFilename(input.filename);
+    const id = `a${this.state.nextSeq}`;
+    const rel = `artifacts/${id}/r1/${filename}`;
+    this.writeManaged(rel, Buffer.isBuffer(input.content) ? input.content : Buffer.from(input.content, 'utf8'));
+    const run = input.run;
+    const message = run && input.callId ? this.state.runs.get(run)?.requested.get(input.callId)?.messageId : undefined;
+    this.main.append({
+      kind: 'artifact',
+      id,
+      type: input.type ?? artifactTypeFor(filename),
+      title,
+      path: rel,
+      mime: input.mime ?? mimeForFilename(filename),
+      ...(run ? { run } : {}),
+      ...(message ? { message } : {}),
+      ...(input.callId ? { callId: input.callId } : {}),
+    });
+    return this.state.artifactViews.get(id)!;
+  }
+
+  /** Writes a new revision of a model artifact and records it. */
+  updateArtifact(id: string, input: UpdateArtifactInput): ArtifactView {
+    this.assertOpen();
+    const view = this.requireArtifact(id);
+    if (view.type === 'agent_transcript') throw new ArtifactError(`Artifact ${id} is an agent transcript and cannot be edited.`);
+    const rev = view.rev + 1;
+    const filename = safeFilename(input.filename ?? (view.path ? path.posix.basename(view.path) : 'artifact.txt'));
+    const rel = `artifacts/${id}/r${rev}/${filename}`;
+    this.writeManaged(rel, Buffer.isBuffer(input.content) ? input.content : Buffer.from(input.content, 'utf8'));
+    const title = input.title?.trim().slice(0, 200);
+    const mime = mimeForFilename(filename);
+    this.main.append({
+      kind: 'artifact_update',
+      artifact: id,
+      rev,
+      path: rel,
+      ...(title ? { title } : {}),
+      ...(mime !== view.mime ? { mime } : {}),
+      ...(input.run ? { run: input.run } : {}),
+      ...(input.callId ? { callId: input.callId } : {}),
+    });
+    return this.state.artifactViews.get(id)!;
+  }
+
+  /** Pins or unpins an artifact (a user action). No record when nothing changes. */
+  setArtifactPinned(id: string, pinned: boolean): ArtifactView {
+    this.assertOpen();
+    const view = this.requireArtifact(id);
+    if (view.pinned !== pinned) this.main.append({ kind: 'artifact_pin', artifact: id, pinned });
+    return this.state.artifactViews.get(id)!;
+  }
+
+  /** Path (relative to the state directory) of a given revision. */
+  artifactRevisionPath(id: string, rev?: number): string | undefined {
+    const view = this.requireArtifact(id);
+    const wanted = rev ?? view.rev;
+    if (wanted === view.rev) return view.path;
+    if (wanted < 1 || wanted > view.rev) throw new ArtifactError(`Artifact ${id} has revisions 1 to ${view.rev}.`);
+    if (wanted === 1) return this.state.artifactById.get(id)?.path;
+    let found: string | undefined;
+    for (const r of this.state.records) {
+      if (r.kind === 'artifact_update' && r.artifact === id && r.rev <= wanted && r.path) found = r.path;
+    }
+    return found ?? this.state.artifactById.get(id)?.path;
+  }
+
+  /** The bytes of an artifact revision (latest by default). */
+  artifactContent(id: string, rev?: number): ArtifactContent {
+    const view = this.requireArtifact(id);
+    const rel = this.artifactRevisionPath(id, rev);
+    if (!rel) throw new ArtifactError(`Artifact ${id} has no stored content.`);
+    const data = this.readManaged(rel);
+    if (!data) throw new ArtifactError(`The file for artifact ${id} is missing (${rel}).`);
+    const filename = path.posix.basename(rel);
+    return { view, rev: rev ?? view.rev, filename, mime: view.type === 'agent_transcript' ? 'text/markdown' : mimeForFilename(filename), data };
+  }
+
   /** Paths that agent file tools must never read or write. */
   protectedPaths(): string[] {
     if (!this.main.file || !this.dir) return [];
     const base = path.basename(this.main.file, '.md');
     if (path.basename(this.dir) === STATE_DIR_NAME) return [this.dir];
-    return [this.main.file, path.join(this.dir, `${base}.lock`), path.join(this.dir, 'transcripts'), path.join(this.dir, 'recovered')];
+    return [
+      this.main.file,
+      path.join(this.dir, `${base}.lock`),
+      path.join(this.dir, 'transcripts'),
+      path.join(this.dir, 'recovered'),
+      path.join(this.dir, 'artifacts'),
+      path.join(this.dir, 'uploads'),
+    ];
   }
 
   /**
@@ -240,7 +433,7 @@ export class ConversationService {
    * produced it.
    */
   history(target: ReplayTarget, fromSeq = this.state.lastResetSeq): ChatMessage[] {
-    return toChatMessages(this.state, target, fromSeq);
+    return toChatMessages(this.state, target, fromSeq, undefined, (ref) => this.readAttachment(ref));
   }
 
   private assertOpen(): void {
@@ -258,12 +451,18 @@ export class ConversationService {
 }
 
 /** Converts stored messages (from `fromSeq` on) into a protocol-valid provider history. */
-export function toChatMessages(state: ConversationState, target: ReplayTarget, fromSeq = 0, messages?: readonly MessageRecord[]): ChatMessage[] {
+export function toChatMessages(
+  state: ConversationState,
+  target: ReplayTarget,
+  fromSeq = 0,
+  messages?: readonly MessageRecord[],
+  resolveAttachment?: AttachmentResolver,
+): ChatMessage[] {
   const out: ChatMessage[] = [];
   const list = messages ?? state.messages.filter((m) => m.seq > fromSeq);
   for (const m of list) {
     if (m.role === 'user') {
-      out.push({ role: 'user', content: m.content });
+      out.push(userMessageFor(m, resolveAttachment));
     } else if (m.role === 'assistant') {
       const run = state.runs.get(m.run);
       const sameModel = run?.start?.provider === target.provider && run?.start?.model === target.model;
@@ -316,8 +515,8 @@ class StoreRunRecorder implements RunRecorder {
     }) as MessageRecord;
   }
 
-  user(content: string): void {
-    this.message({ role: 'user', content });
+  user(content: string, attachments?: AttachmentRef[]): void {
+    this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}) });
   }
 
   start(node: AgentNode): void {

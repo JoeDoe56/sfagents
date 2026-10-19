@@ -11,8 +11,10 @@
 import os from 'node:os';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
-import { conversationAccess, mcpGrants } from '../agents/definition.js';
+import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
 import { createConversationTools, ORGANIZE_GUIDANCE } from '../conversation/tools.js';
+import { ARTIFACT_GUIDANCE, ArtifactToolNames, artifactIndex, createArtifactTools } from '../conversation/artifacts.js';
+import type { AttachmentRef } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import { InvokeChildTool, type ChildRunner } from '../agents/invoke-child.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
@@ -113,7 +115,8 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
   if (node.children.length > 0) {
     env.push(`Child agents you can delegate to with ${ToolNames.INVOKE_CHILD}: ${node.children.map((c) => c.id).join(', ')}`);
   }
-  const guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
+  let guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
+  if (toolNames.includes(ArtifactToolNames.CREATE)) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
 }
 
@@ -232,6 +235,7 @@ export class AgentRuntime implements ChildRunner {
     // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
     if (conversation?.file) {
       for (const tool of createConversationTools(conversation, conversationAccess(d, node.depth))) tools.set(tool.name, tool);
+      for (const tool of createArtifactTools(conversation, artifactAccess(d, node.depth), recorder?.runId)) tools.set(tool.name, tool);
     }
     return tools;
   }
@@ -337,6 +341,10 @@ export class AgentRuntime implements ChildRunner {
         emit({ type: 'error', agentPath, message });
         return finish(AgentTerminateMode.ERROR, message);
       }
+    }
+    if (params.conversation?.file && tools.has(ArtifactToolNames.LIST)) {
+      const index = artifactIndex(params.conversation);
+      if (index) systemExtra = systemExtra ? `${systemExtra}\n\n${index}` : index;
     }
     const systemPrompt = buildSystemPrompt(node, [...tools.keys()], systemExtra);
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
@@ -540,19 +548,22 @@ export class AgentSession {
    * starts. Yields events as they happen and returns the structured result
    * of the root agent's turn.
    */
-  async *send(input: string, options: { signal?: AbortSignal } = {}): AsyncGenerator<RuntimeEvent, AgentRunResult> {
+  async *send(input: string, options: { signal?: AbortSignal; attachments?: AttachmentRef[] } = {}): AsyncGenerator<RuntimeEvent, AgentRunResult> {
     if (this.busy) throw new Error('A turn is already running in this session');
     this.busy = true;
     try {
       const recorder = this.conversation.beginRootRun(this.node);
-      recorder.user(input);
+      recorder.user(input, options.attachments);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;
       const definition = this.node.definition;
       const conversation = this.conversation;
       const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
       const prepareContext = (fixedText: string) =>
-        buildWorkingContext(conversation.state, replayTarget(definition), definition.context ?? {}, fixedText, { retrievable });
+        buildWorkingContext(conversation.state, replayTarget(definition), definition.context ?? {}, fixedText, {
+          retrievable,
+          resolveAttachment: (ref) => conversation.readAttachment(ref),
+        });
       const queue: RuntimeEvent[] = [];
       let wake: (() => void) | undefined;
       const emit = (event: RuntimeEvent) => {
@@ -601,8 +612,11 @@ export class AgentSession {
   }
 
   /** Runs one message to completion, forwarding events to `onEvent`. */
-  async run(input: string, options: { signal?: AbortSignal; onEvent?: (event: RuntimeEvent) => void } = {}): Promise<AgentRunResult> {
-    const it = this.send(input, { signal: options.signal });
+  async run(
+    input: string,
+    options: { signal?: AbortSignal; attachments?: AttachmentRef[]; onEvent?: (event: RuntimeEvent) => void } = {},
+  ): Promise<AgentRunResult> {
+    const it = this.send(input, { signal: options.signal, attachments: options.attachments });
     while (true) {
       const next = await it.next();
       if (next.done) return next.value;

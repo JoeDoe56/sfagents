@@ -31,7 +31,7 @@ export { getErrorMessage } from './utils/errors.js';
 export * from './conversation/types.js';
 export { parseConversation, serializeConversation, serializeRecord, decorationFor } from './conversation/format.js';
 export { ConversationState, SemanticError } from './conversation/state.js';
-export type { SectionState, RunState } from './conversation/state.js';
+export type { SectionState, RunState, ArtifactView } from './conversation/state.js';
 export {
   FileConversationStore,
   MemoryConversationStore,
@@ -51,7 +51,15 @@ export {
   INTERRUPTED_NOT_STARTED,
   INTERRUPTED_UNKNOWN,
 } from './conversation/service.js';
-export type { OpenNotice, ReplayTarget, ServiceOptions } from './conversation/service.js';
+export type {
+  ArtifactContent,
+  AttachmentResolver,
+  CreateArtifactInput,
+  OpenNotice,
+  ReplayTarget,
+  ServiceOptions,
+  UpdateArtifactInput,
+} from './conversation/service.js';
 export { replayTarget } from './runtime/runtime.js';
 export { PersistenceFailure } from './runtime/recorder.js';
 export type { RunRecorder } from './runtime/recorder.js';
@@ -82,3 +90,26 @@ export {
   TURN_RESERVE,
 } from './conversation/context.js';
 export type { ContextPolicy, ContextReport, WorkingContext } from './conversation/context.js';
+export {
+  ArtifactError,
+  ArtifactToolNames,
+  ARTIFACT_GUIDANCE,
+  artifactIndex,
+  artifactTypeFor,
+  createArtifactTools,
+  describeArtifact,
+  isTextMime,
+  MAX_ARTIFACT_CHARS,
+  mimeForFilename,
+  safeFilename,
+} from './conversation/artifacts.js';
+export type { ArtifactAccess } from './conversation/artifacts.js';
+export {
+  IMAGE_TOKEN_ESTIMATE,
+  looksLikeText,
+  MAX_INLINE_TEXT_BYTES,
+  MAX_MODEL_IMAGE_BYTES,
+  MODEL_IMAGE_TYPES,
+  userMessageFor,
+} from './conversation/attachments.js';
+export { estimateMessages } from './conversation/context.js';

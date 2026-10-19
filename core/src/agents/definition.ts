@@ -56,6 +56,13 @@ export interface AgentDefinition {
   conversation?: {
     access?: 'none' | 'read' | 'organize';
   };
+  /**
+   * Artifacts in the persistent conversation: "create" (list, read, create
+   * and update), "read", or "none". Defaults: root "create", children "none".
+   */
+  artifacts?: {
+    access?: 'none' | 'read' | 'create';
+  };
   /** Root only: working-context policy for the persistent conversation. */
   context?: {
     /** Estimated input-token budget for each request (default 48000). */
@@ -100,6 +107,7 @@ const TOP_LEVEL_KEYS = new Set([
   'tools',
   'spawn',
   'conversation',
+  'artifacts',
   'context',
   'limits',
 ]);
@@ -318,6 +326,18 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
     }
   }
 
+  let artifacts: AgentDefinition['artifacts'];
+  if (raw['artifacts'] !== undefined) {
+    const av = c.object(raw['artifacts'], 'artifacts', ['access']);
+    if (av['access'] !== undefined) {
+      const a = c.string(av['access'], 'artifacts.access');
+      if (!['none', 'read', 'create'].includes(a)) c.fail('artifacts.access', 'must be "none", "read" or "create"');
+      artifacts = { access: a as 'none' | 'read' | 'create' };
+    } else {
+      artifacts = {};
+    }
+  }
+
   let context: AgentDefinition['context'];
   if (raw['context'] !== undefined) {
     const cx = c.object(raw['context'], 'context', ['maxInputTokens', 'recentExchanges']);
@@ -359,6 +379,7 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
     tools,
     spawn,
     conversation,
+    artifacts,
     context,
     limits,
   };
@@ -373,6 +394,17 @@ export function conversationAccess(def: AgentDefinition, depth: number): 'none' 
 
 export function accessRank(access: 'none' | 'read' | 'organize'): number {
   return ACCESS_RANK[access];
+}
+
+const ARTIFACT_RANK = { none: 0, read: 1, create: 2 } as const;
+
+/** Effective artifact access: explicit, else root "create" and children "none". */
+export function artifactAccess(def: AgentDefinition, depth: number): 'none' | 'read' | 'create' {
+  return def.artifacts?.access ?? (depth === 0 ? 'create' : 'none');
+}
+
+export function artifactAccessRank(access: 'none' | 'read' | 'create'): number {
+  return ARTIFACT_RANK[access];
 }
 
 /** Normalized MCP grant list: server → allowed tool names (undefined = all). */

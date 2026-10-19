@@ -8,13 +8,13 @@
 
 import type { AgentNode } from '../agents/loader.js';
 import type { AssistantMessage, ToolMessage } from '../providers/types.js';
-import type { ToolMessageStatus } from '../conversation/types.js';
+import type { AttachmentRef, ToolMessageStatus } from '../conversation/types.js';
 import type { AgentRunResult } from './events.js';
 
 export interface RunRecorder {
   readonly runId: string;
-  /** The task or user input that starts this run. */
-  user(content: string): void;
+  /** The task or user input that starts this run, with any attached files. */
+  user(content: string, attachments?: AttachmentRef[]): void;
   /** Run start with the configuration in effect (provenance only). */
   start(node: AgentNode): void;
   /** A complete assistant message (never a streaming fragment). */

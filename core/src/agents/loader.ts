@@ -21,6 +21,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   accessRank,
+  artifactAccess,
+  artifactAccessRank,
   ConfigError,
   conversationAccess,
   FILE_TOOL_IDS,
@@ -281,6 +283,12 @@ function checkEscalation(file: string, child: AgentDefinition, childRoots: reado
     throw new ConfigError(file, 'conversation.access', `permission escalation: parent "${parent.id}" has conversation access "${parentAccess}", so the child cannot have "${childAccess}"`);
   }
 
+  const childArtifacts = artifactAccess(child, parent.depth + 1);
+  const parentArtifacts = artifactAccess(p, parent.depth);
+  if (artifactAccessRank(childArtifacts) > artifactAccessRank(parentArtifacts)) {
+    throw new ConfigError(file, 'artifacts.access', `permission escalation: parent "${parent.id}" has artifact access "${parentArtifacts}", so the child cannot have "${childArtifacts}"`);
+  }
+
   childRoots.forEach((root, i) => {
     if (!parent.roots.some((pr) => isPathWithinRoot(root, pr))) {
       throw new ConfigError(
@@ -302,6 +310,8 @@ export function describeTree(tree: AgentTree): string {
     if (node.children.length > 0) tools.push(`invoke_child(${node.children.map((c) => c.id).join(',')})`);
     const access = conversationAccess(d, node.depth);
     if (access !== 'none') tools.push(`conversation:${access}`);
+    const artifacts = artifactAccess(d, node.depth);
+    if (artifacts !== 'none') tools.push(`artifacts:${artifacts}`);
     const head = isRoot ? '' : `${prefix}${last ? '└─ ' : '├─ '}`;
     lines.push(`${head}${node.id}  (${d.provider}:${d.model}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
     const detailPrefix = isRoot ? '   ' : `${prefix}${last ? '   ' : '│  '}   `;

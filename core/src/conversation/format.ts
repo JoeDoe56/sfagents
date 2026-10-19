@@ -5,6 +5,7 @@
 
 import { randomBytes } from 'node:crypto';
 import {
+  type AttachmentRef,
   ConversationFormatError,
   FORMAT_VERSION,
   type ConversationRecord,
@@ -25,6 +26,8 @@ const KINDS: ReadonlySet<string> = new Set([
   'run_end',
   'section',
   'artifact',
+  'artifact_update',
+  'artifact_pin',
   'context_reset',
   'interrupted',
   'recovery',
@@ -33,12 +36,14 @@ const KINDS: ReadonlySet<string> = new Set([
 /** Fields each kind maps explicitly; anything else round-trips via `extra`. */
 const KNOWN_FIELDS: Record<string, readonly string[]> = {
   conversation: ['seq', 'time', 'v', 'id', 'kind', 'run', 'parentRun', 'agent'],
-  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'b', 'fence'],
+  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'attachments', 'b', 'fence'],
   run_start: ['seq', 'time', 'run', 'agent', 'parentRun', 'callId', 'provider', 'model', 'reasoning', 'config', 'configHash'],
   tool_start: ['seq', 'time', 'run', 'callId', 'tool'],
   run_end: ['seq', 'time', 'run', 'status', 'error', 'turns', 'usage'],
   section: ['seq', 'time', 'op', 'section', 'rev', 'expected', 'title', 'parent', 'assign', 'unassign', 'current'],
-  artifact: ['seq', 'time', 'id', 'type', 'title', 'path', 'run', 'message', 'callId'],
+  artifact: ['seq', 'time', 'id', 'type', 'title', 'path', 'run', 'message', 'callId', 'mime'],
+  artifact_update: ['seq', 'time', 'artifact', 'rev', 'path', 'title', 'mime', 'run', 'callId'],
+  artifact_pin: ['seq', 'time', 'artifact', 'pinned'],
   context_reset: ['seq', 'time'],
   interrupted: ['seq', 'time', 'run', 'notStarted', 'unknown'],
   recovery: ['seq', 'time', 'reason', 'savedTo', 'bytes'],
@@ -74,7 +79,10 @@ export function decorationFor(record: ConversationRecord): string {
         ? '<b>SF Agents conversation</b>'
         : `<b>Agent transcript: ${escapeHtml(record.agent ?? '')}</b>`;
     case 'message': {
-      if (record.role === 'user') return '<b>User</b>';
+      if (record.role === 'user') {
+        const files = record.attachments?.length ? ` <sub>attached ${escapeHtml(record.attachments.map((a) => a.name).join(', '))}</sub>` : '';
+        return `<b>User</b>${files}`;
+      }
       if (record.role === 'assistant') {
         const calls = record.toolCalls?.length ? ` <sub>calls ${escapeHtml(record.toolCalls.map((c) => c.name).join(', '))}</sub>` : '';
         return `<b>${escapeHtml(record.agent)}</b>${calls}`;
@@ -88,6 +96,12 @@ export function decorationFor(record: ConversationRecord): string {
       return record.path
         ? `<sub>Artifact (${escapeHtml(record.type)}): <a href="${escapeHtml(record.path)}">${escapeHtml(record.title)}</a></sub>`
         : `<sub>Artifact (${escapeHtml(record.type)}): ${escapeHtml(record.title)}</sub>`;
+    case 'artifact_update':
+      return record.path
+        ? `<sub>Artifact ${escapeHtml(record.artifact)} revision ${record.rev}: <a href="${escapeHtml(record.path)}">${escapeHtml(record.title ?? 'updated')}</a></sub>`
+        : `<sub>Artifact ${escapeHtml(record.artifact)} revision ${record.rev}</sub>`;
+    case 'artifact_pin':
+      return `<sub>Artifact ${escapeHtml(record.artifact)} ${record.pinned ? 'pinned' : 'unpinned'}</sub>`;
     case 'context_reset':
       return '<sub>Context reset</sub>';
     case 'run_end':
@@ -208,6 +222,28 @@ function strArray(meta: Record<string, unknown>, key: string, problems: string[]
   return v as string[];
 }
 
+function attachments(meta: Record<string, unknown>, problems: string[]): AttachmentRef[] | undefined {
+  const v = meta['attachments'];
+  if (v === undefined) return undefined;
+  const valid =
+    Array.isArray(v) &&
+    v.every(
+      (a) =>
+        a &&
+        typeof a === 'object' &&
+        typeof a.id === 'string' &&
+        typeof a.name === 'string' &&
+        typeof a.mime === 'string' &&
+        typeof a.path === 'string' &&
+        typeof a.size === 'number',
+    );
+  if (!valid) {
+    problems.push('"attachments" must be an array of {id, name, mime, path, size}');
+    return undefined;
+  }
+  return v as AttachmentRef[];
+}
+
 /** Builds a typed record from header metadata; returns problems instead of throwing. */
 function buildRecord(kind: string, meta: Record<string, unknown>, content: string | undefined): { record?: ConversationRecord; problems: string[] } {
   const p: string[] = [];
@@ -265,6 +301,7 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         callId: str(meta, 'callId', false, p),
         tool: str(meta, 'tool', false, p),
         status: status as MessageRecord['status'],
+        attachments: attachments(meta, p),
       };
       if (record.role === 'tool' && (!record.callId || !record.tool)) p.push('tool messages need "callId" and "tool"');
       break;
@@ -336,8 +373,28 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         run: str(meta, 'run', false, p),
         message: str(meta, 'message', false, p),
         callId: str(meta, 'callId', false, p),
+        mime: str(meta, 'mime', false, p),
       };
       break;
+    case 'artifact_update':
+      record = {
+        kind: 'artifact_update',
+        ...base,
+        artifact: str(meta, 'artifact', true, p) ?? '',
+        rev: num(meta, 'rev', true, p) ?? 0,
+        path: str(meta, 'path', false, p),
+        title: str(meta, 'title', false, p),
+        mime: str(meta, 'mime', false, p),
+        run: str(meta, 'run', false, p),
+        callId: str(meta, 'callId', false, p),
+      };
+      break;
+    case 'artifact_pin': {
+      const pinned = meta['pinned'];
+      if (typeof pinned !== 'boolean') p.push('"pinned" must be a boolean');
+      record = { kind: 'artifact_pin', ...base, artifact: str(meta, 'artifact', true, p) ?? '', pinned: pinned === true };
+      break;
+    }
     case 'context_reset':
       record = { kind: 'context_reset', ...base };
       break;

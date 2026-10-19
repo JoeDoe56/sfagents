@@ -35,6 +35,19 @@ export interface ConversationHeader extends RecordBase {
   agent?: string;
 }
 
+/** A file the user attached to a message, stored under the state directory. */
+export interface AttachmentRef {
+  /** `u` + random characters; unique within the conversation directory. */
+  id: string;
+  /** File name as given by the user (display only). */
+  name: string;
+  /** Media type, e.g. "image/png" or "text/plain". */
+  mime: string;
+  /** Path relative to the state directory, e.g. "uploads/u1a2b3c/photo.png". */
+  path: string;
+  size: number;
+}
+
 export interface MessageRecord extends RecordBase {
   kind: 'message';
   id: string;
@@ -50,6 +63,8 @@ export interface MessageRecord extends RecordBase {
   callId?: string;
   tool?: string;
   status?: ToolMessageStatus;
+  /** User messages: attached files. */
+  attachments?: AttachmentRef[];
 }
 
 export interface RunStartRecord extends RecordBase {
@@ -104,6 +119,28 @@ export interface ArtifactRecord extends RecordBase {
   run?: string;
   message?: string;
   callId?: string;
+  /** Media type of the backing file (model-created artifacts). */
+  mime?: string;
+}
+
+/** A new revision of a model-created artifact (the old file is kept). */
+export interface ArtifactUpdateRecord extends RecordBase {
+  kind: 'artifact_update';
+  artifact: string;
+  /** Revision number; the artifact record itself is revision 1. */
+  rev: number;
+  path?: string;
+  title?: string;
+  mime?: string;
+  run?: string;
+  callId?: string;
+}
+
+/** The user pinned or unpinned an artifact. */
+export interface ArtifactPinRecord extends RecordBase {
+  kind: 'artifact_pin';
+  artifact: string;
+  pinned: boolean;
 }
 
 export interface ContextResetRecord extends RecordBase {
@@ -132,6 +169,8 @@ export type ConversationRecord =
   | RunEndRecord
   | SectionRecord
   | ArtifactRecord
+  | ArtifactUpdateRecord
+  | ArtifactPinRecord
   | ContextResetRecord
   | InterruptedRecord
   | RecoveryRecord;

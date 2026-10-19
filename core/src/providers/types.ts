@@ -19,9 +19,12 @@ export interface SystemMessage {
   role: 'system';
   content: string;
 }
+/** OpenAI-compatible user content parts (text plus images). */
+export type UserContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
 export interface UserMessage {
   role: 'user';
-  content: string;
+  content: string | UserContentPart[];
 }
 export interface AssistantMessage {
   role: 'assistant';

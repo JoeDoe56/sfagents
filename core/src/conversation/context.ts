@@ -15,7 +15,8 @@
 
 import type { ChatMessage } from '../providers/types.js';
 import type { ConversationState } from './state.js';
-import { toChatMessages, type ReplayTarget } from './service.js';
+import { toChatMessages, type AttachmentResolver, type ReplayTarget } from './service.js';
+import { IMAGE_TOKEN_ESTIMATE } from './attachments.js';
 import { sectionEntries, unassignedMessages } from './sections.js';
 import type { MessageRecord } from './types.js';
 
@@ -60,8 +61,17 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function estimateMessages(messages: readonly ChatMessage[]): number {
-  return estimateTokens(JSON.stringify(messages));
+/** Estimated tokens of provider messages; image parts count a fixed amount, not their base64 size. */
+export function estimateMessages(messages: readonly ChatMessage[]): number {
+  let images = 0;
+  const json = JSON.stringify(messages, (key, value) => {
+    if (key === 'image_url') {
+      images++;
+      return '';
+    }
+    return value;
+  });
+  return estimateTokens(json) + images * IMAGE_TOKEN_ESTIMATE;
 }
 
 /** Groups stored messages into exchanges, each starting with a user message. */
@@ -125,7 +135,7 @@ export function buildWorkingContext(
   target: ReplayTarget,
   policy: ContextPolicy,
   fixedText: string,
-  options: { retrievable: boolean },
+  options: { retrievable: boolean; resolveAttachment?: AttachmentResolver },
 ): WorkingContext {
   const budget = policy.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS;
   const window = policy.recentExchanges ?? DEFAULT_RECENT_EXCHANGES;
@@ -135,7 +145,7 @@ export function buildWorkingContext(
   const indexTokens = index.text ? estimateTokens(index.text) : 0;
 
   const groups = exchanges(state.messages.filter((m) => m.seq > state.lastResetSeq));
-  const converted = groups.map((g) => toChatMessages(state, target, 0, g));
+  const converted = groups.map((g) => toChatMessages(state, target, 0, g, options.resolveAttachment));
   if (converted.length === 0) {
     return { messages: [], systemExtra: index.text, report: { estimatedTokens: fixed + indexTokens, budget, includedExchanges: 0, omittedExchanges: 0, indexEntries: index.shown, indexTotal: index.total } };
   }

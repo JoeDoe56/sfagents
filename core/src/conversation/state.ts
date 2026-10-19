@@ -34,6 +34,25 @@ export interface RunState {
   interrupted?: InterruptedRecord;
 }
 
+/** Current view of an artifact: its latest revision and pin state. */
+export interface ArtifactView {
+  id: string;
+  type: string;
+  title: string;
+  /** Latest revision's path (relative to the state directory or the config directory). */
+  path?: string;
+  mime?: string;
+  rev: number;
+  pinned: boolean;
+  createdSeq: number;
+  createdTime: string;
+  updatedSeq: number;
+  updatedTime: string;
+  run?: string;
+  message?: string;
+  callId?: string;
+}
+
 export class SemanticError extends Error {}
 
 export class ConversationState {
@@ -49,6 +68,8 @@ export class ConversationState {
   readonly runs = new Map<string, RunState>();
   readonly artifacts: ArtifactRecord[] = [];
   readonly artifactById = new Map<string, ArtifactRecord>();
+  /** Latest revision and pin state per artifact, in creation order. */
+  readonly artifactViews = new Map<string, ArtifactView>();
   /** seq of the last context_reset (0 when none). */
   lastResetSeq = 0;
 
@@ -135,6 +156,15 @@ export class ConversationState {
       }
       case 'interrupted':
         if (!this.runs.get(record.run)?.start) fail(`interrupted record for unknown run ${record.run}`);
+        return;
+      case 'artifact_update': {
+        const view = this.artifactViews.get(record.artifact);
+        if (!view) fail(`artifact_update for unknown artifact ${record.artifact}`);
+        if (record.rev !== view!.rev + 1) fail(`artifact ${record.artifact} revision ${record.rev} does not follow revision ${view!.rev}`);
+        return;
+      }
+      case 'artifact_pin':
+        if (!this.artifactViews.has(record.artifact)) fail(`artifact_pin for unknown artifact ${record.artifact}`);
         return;
       case 'section':
         this.checkSection(record);
@@ -230,6 +260,35 @@ export class ConversationState {
       case 'artifact':
         this.artifacts.push(record);
         this.artifactById.set(record.id, record);
+        this.artifactViews.set(record.id, {
+          id: record.id,
+          type: record.type,
+          title: record.title,
+          path: record.path,
+          mime: record.mime,
+          rev: 1,
+          pinned: false,
+          createdSeq: record.seq,
+          createdTime: record.time,
+          updatedSeq: record.seq,
+          updatedTime: record.time,
+          run: record.run,
+          message: record.message,
+          callId: record.callId,
+        });
+        break;
+      case 'artifact_update': {
+        const view = this.artifactViews.get(record.artifact)!;
+        view.rev = record.rev;
+        if (record.path !== undefined) view.path = record.path;
+        if (record.title !== undefined) view.title = record.title;
+        if (record.mime !== undefined) view.mime = record.mime;
+        view.updatedSeq = record.seq;
+        view.updatedTime = record.time;
+        break;
+      }
+      case 'artifact_pin':
+        this.artifactViews.get(record.artifact)!.pinned = record.pinned;
         break;
       case 'context_reset':
         this.lastResetSeq = record.seq;

@@ -1,0 +1,224 @@
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  AgentRuntime,
+  ArtifactError,
+  ConfigError,
+  ConversationService,
+  estimateMessages,
+  IMAGE_TOKEN_ESTIMATE,
+  loadAgentTree,
+  parseConversation,
+  readConversation,
+  safeFilename,
+  serializeConversation,
+  type ChatMessage,
+  type FunctionDeclaration,
+} from '@sfagents/core';
+import { baseAgent, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script } from './helpers.js';
+
+function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
+  const dir = makeTempDir();
+  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), ...agent });
+  for (const [f, v] of Object.entries(files)) writeJson(path.join(dir, f), v);
+  return dir;
+}
+
+function open(dir: string) {
+  const tree = loadAgentTree(path.join(dir, 'agent.json'));
+  return { tree, conversation: ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir }) };
+}
+
+describe('artifacts: storage and records', () => {
+  test('create, update, pin and reopen; every revision is kept', () => {
+    const dir = project();
+    let { conversation } = open(dir);
+    const a = conversation.createArtifact({ title: 'Launch plan', filename: 'plan.md', content: '# Plan v1' });
+    assert.equal(a.type, 'document');
+    assert.equal(a.mime, 'text/markdown');
+    assert.equal(a.rev, 1);
+    const b = conversation.createArtifact({ title: 'Logo', filename: 'logo.svg', content: '<svg/>' });
+    assert.equal(b.type, 'image');
+    const updated = conversation.updateArtifact(a.id, { content: '# Plan v2', title: 'Launch plan (final)' });
+    assert.equal(updated.rev, 2);
+    conversation.setArtifactPinned(b.id, true);
+    conversation.setArtifactPinned(b.id, true); // no-op, no record
+    conversation.close();
+
+    ({ conversation } = open(dir));
+    const views = conversation.artifacts();
+    assert.deepEqual(views.map((v) => [v.id, v.title, v.rev, v.pinned]), [
+      [a.id, 'Launch plan (final)', 2, false],
+      [b.id, 'Logo', 1, true],
+    ]);
+    assert.equal(conversation.artifactContent(a.id).data.toString(), '# Plan v2');
+    assert.equal(conversation.artifactContent(a.id, 1).data.toString(), '# Plan v1');
+    assert.equal(conversation.state.records.filter((r) => r.kind === 'artifact_pin').length, 1);
+    assert.ok(fs.existsSync(path.join(dir, '.sfagents', 'artifacts', a.id, 'r1', 'plan.md')));
+    assert.ok(fs.existsSync(path.join(dir, '.sfagents', 'artifacts', a.id, 'r2', 'plan.md')));
+    assert.throws(() => conversation.updateArtifact('a999', { content: 'x' }), ArtifactError);
+    assert.throws(() => conversation.artifactContent(a.id, 3), /revisions 1 to 2/);
+    conversation.close();
+  });
+
+  test('records round-trip and invalid revisions or pins are rejected', () => {
+    const dir = project();
+    const { conversation } = open(dir);
+    const a = conversation.createArtifact({ title: 'T', filename: 'x.txt', content: 'x' });
+    conversation.updateArtifact(a.id, { content: 'y' });
+    conversation.setArtifactPinned(a.id, true);
+    const text = fs.readFileSync(conversation.file!, 'utf8');
+    conversation.close();
+    const parsed = parseConversation(text);
+    assert.equal(serializeConversation(parsed.records).length > 0, true);
+    assert.match(text, /<!-- sfa:artifact_update \{.*"rev":2/);
+    assert.match(text, /<!-- sfa:artifact_pin \{.*"pinned":true/);
+    // A skipped revision and a pin of an unknown artifact are semantic errors.
+    const bad = text + `\n<!-- sfa:artifact_update {"seq":${parsed.records.length + 1},"time":"2026-01-01T00:00:00Z","artifact":"${a.id}","rev":5} -->\n`;
+    fs.writeFileSync(conversation.file!, bad);
+    assert.throws(() => readConversation(conversation.file!), /revision 5 does not follow revision 2/);
+  });
+
+  test('file names are sanitized and stay inside the state directory', () => {
+    assert.equal(safeFilename('../../etc/passwd'), 'passwd');
+    assert.equal(safeFilename('..\\..\\evil.md'), 'evil.md');
+    assert.equal(safeFilename('a:b*c?.txt'), 'a_b_c_.txt');
+    assert.equal(safeFilename('CON.txt'), '_CON.txt');
+    assert.equal(safeFilename('...'), 'artifact.txt');
+    const dir = project();
+    const { conversation } = open(dir);
+    const v = conversation.createArtifact({ title: 'x', filename: '../../outside.md', content: 'x' });
+    assert.equal(v.path, `artifacts/${v.id}/r1/outside.md`);
+    assert.equal(fs.existsSync(path.join(dir, 'outside.md')), false);
+    assert.equal(conversation.readManaged('../agent.json'), undefined);
+    conversation.close();
+  });
+});
+
+describe('artifacts: model tools and grants', () => {
+  test('the root creates and updates artifacts; the index and guidance reach later turns', async () => {
+    const dir = project();
+    const { tree, conversation } = open(dir);
+    const script: Script = (req, call) => {
+      const last = req.messages[req.messages.length - 1]!;
+      if (call === 0) return { toolCalls: [{ name: 'create_artifact', args: { title: 'Haiku', filename: 'haiku.md', content: 'old pond' } }] };
+      if (call === 1) return { text: `Done: ${lastToolContent(req)}` };
+      const id = conversation.artifacts()[0]?.id;
+      if (call === 2) return { toolCalls: [{ name: 'update_artifact', args: { id, content: 'old pond\nfrog jumps in' } }] };
+      if (call === 3) return { toolCalls: [{ name: 'read_artifact', args: { id, revision: 1 } }] };
+      if (last.role === 'tool') return { text: 'ok' };
+      return { text: 'ok' };
+    };
+    const { factory, providers } = scriptedFactory(script);
+    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
+    const session = runtime.createSession();
+    const r1 = await session.run('Write a haiku as an artifact');
+    assert.match(r1.text, /Created artifact a\d+ "Haiku"/);
+    const id = conversation.artifacts()[0]!.id;
+    await session.run('Add a second line');
+    const views = conversation.artifacts();
+    assert.equal(views.length, 1);
+    assert.equal(views[0]!.rev, 2);
+    assert.equal(views[0]!.run !== undefined, true);
+    const record = conversation.state.artifactById.get(id)!;
+    assert.ok(record.callId && record.message, 'artifact records link to the requesting call and message');
+    const requests = providers.get('main')!.requests;
+    const firstTools = (requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name);
+    for (const n of ['create_artifact', 'update_artifact', 'list_artifacts', 'read_artifact']) assert.ok(firstTools.includes(n), n);
+    assert.match((requests[0]!.messages[0] as { content: string }).content, /<artifacts_guidance>/);
+    // The second turn's system prompt lists the artifact.
+    assert.match((requests[2]!.messages[0] as { content: string }).content, new RegExp(`<artifacts>\\n- \\[${id}\\] Haiku — haiku.md, document, revision 1`));
+    // read_artifact returns the requested revision.
+    assert.match(JSON.stringify(requests[4]!.messages), /old pond/);
+    assert.doesNotMatch(lastToolContent(requests[4]!.request) ?? '', /frog/);
+    await runtime.dispose();
+    conversation.close();
+  });
+
+  test('children have no artifact tools by default; escalation is rejected; "read" cannot create', async () => {
+    const dir = project({ spawn: { children: ['child.json'] } }, { 'child.json': baseAgent('child') });
+    const tree = loadAgentTree(path.join(dir, 'agent.json'));
+    const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
+    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation });
+    const child = await runtime.buildTools(tree.byId.get('child')!, ['main', 'child'], () => {}, undefined, conversation);
+    assert.equal([...child.keys()].some((k) => k.includes('artifact')), false);
+    await runtime.dispose();
+    conversation.close();
+
+    const esc = project({ artifacts: { access: 'read' }, spawn: { children: ['child.json'] } }, { 'child.json': baseAgent('child', { artifacts: { access: 'create' } }) });
+    assert.throws(() => loadAgentTree(path.join(esc, 'agent.json')), (e: unknown) => e instanceof ConfigError && /artifact access "read"/.test(e.message));
+
+    const ro = project({ artifacts: { access: 'read' } });
+    const t2 = loadAgentTree(path.join(ro, 'agent.json'));
+    const c2 = ConversationService.open(path.join(ro, '.sfagents', 'conversation.md'), { configDir: t2.configDir });
+    const rt2 = new AgentRuntime({ tree: t2, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation: c2 });
+    const names = [...(await rt2.buildTools(t2.root, ['main'], () => {}, undefined, c2)).keys()];
+    assert.ok(names.includes('list_artifacts') && names.includes('read_artifact'));
+    assert.ok(!names.includes('create_artifact') && !names.includes('update_artifact'));
+    await rt2.dispose();
+    c2.close();
+
+    assert.throws(() => loadAgentTree(path.join(project({ artifacts: { access: 'write' } }), 'agent.json')), /must be "none", "read" or "create"/);
+  });
+
+  test('agent file tools cannot reach artifact files', async () => {
+    const dir = project({ tools: { allow: ['read_file'] } });
+    const { tree, conversation } = open(dir);
+    const v = conversation.createArtifact({ title: 'secret-ish', filename: 'n.md', content: 'hidden' });
+    const target = path.join(dir, '.sfagents', v.path!);
+    const script: Script = (req, call) => (call === 0 ? { toolCalls: [{ name: 'read_file', args: { file_path: target } }] } : { text: lastToolContent(req) ?? '' });
+    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation });
+    const r = await runtime.createSession().run('read it');
+    assert.doesNotMatch(r.text, /hidden/);
+    await runtime.dispose();
+    conversation.close();
+  });
+});
+
+describe('attachments', () => {
+  test('images become image parts, text files are inlined, others are named; replay survives reopen', async () => {
+    const dir = project();
+    let { tree, conversation } = open(dir);
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+    const img = conversation.addUpload('photo.png', 'image/png', png);
+    const txt = conversation.addUpload('notes.txt', 'text/plain', Buffer.from('remember the milk'));
+    const bin = conversation.addUpload('data.bin', 'application/octet-stream', Buffer.from([0, 1, 2, 3]));
+    const seen: ChatMessage[][] = [];
+    const runtime = new AgentRuntime({
+      tree,
+      providerFactory: scriptedFactory((req) => {
+        seen.push(req.messages as ChatMessage[]);
+        return { text: 'seen' };
+      }).factory,
+      conversation,
+    });
+    await runtime.createSession().run('What is in these?', { attachments: [img, txt, bin] });
+    const user = seen[0]!.find((m) => m.role === 'user')!;
+    assert.ok(Array.isArray(user.content));
+    const parts = user.content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    assert.equal(parts[0]!.type, 'text');
+    assert.match(parts[0]!.text!, /What is in these\?/);
+    assert.match(parts[0]!.text!, /<attachment name="notes.txt" type="text\/plain">\nremember the milk\n<\/attachment>/);
+    assert.match(parts[0]!.text!, /"data.bin" .* cannot be shown to you/);
+    assert.equal(parts[1]!.image_url!.url, `data:image/png;base64,${png.toString('base64')}`);
+    // The stored body is unchanged; the attachments are references.
+    const stored = conversation.state.messages.find((m) => m.role === 'user')!;
+    assert.equal(stored.content, 'What is in these?');
+    assert.deepEqual(stored.attachments!.map((a) => a.name), ['photo.png', 'notes.txt', 'data.bin']);
+    await runtime.dispose();
+    conversation.close();
+
+    ({ tree, conversation } = open(dir));
+    const history = conversation.history({ provider: 'openrouter', model: 'test/model' });
+    assert.ok(Array.isArray(history[0]!.content));
+    conversation.close();
+  });
+
+  test('image parts are estimated at a fixed cost, not their base64 size', () => {
+    const big = 'A'.repeat(400_000);
+    const tokens = estimateMessages([{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${big}` } }] }]);
+    assert.ok(tokens < IMAGE_TOKEN_ESTIMATE + 100, String(tokens));
+  });
+});

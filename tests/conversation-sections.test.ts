@@ -128,13 +128,13 @@ describe('sections: model tools and grants', () => {
     const { tree, conversation } = open(dir);
     const script: Script = (req) => {
       const last = req.messages[req.messages.length - 1]!;
-      if (last.role === 'user' && last.content.startsWith('Let us plan the uploader')) {
+      if (last.role === 'user' && String(last.content).startsWith('Let us plan the uploader')) {
         return { toolCalls: [{ name: 'add_section', args: { title: 'Uploader', messages: ['current_exchange'] } }] };
       }
-      if (last.role === 'user' && last.content.startsWith('New topic: bread')) {
+      if (last.role === 'user' && String(last.content).startsWith('New topic: bread')) {
         return { toolCalls: [{ name: 'add_section', args: { title: 'Baking', messages: ['current_exchange'] } }] };
       }
-      if (last.role === 'user' && last.content.startsWith('What retry limit')) {
+      if (last.role === 'user' && String(last.content).startsWith('What retry limit')) {
         return { toolCalls: [{ name: 'search_conversation', args: { query: 'retry limit' } }] };
       }
       if (last.role === 'tool' && lastToolContent(req)!.includes('match')) {
@@ -156,7 +156,7 @@ describe('sections: model tools and grants', () => {
     assert.equal(answer.text, 'From history: 5');
 
     const state = conversation.state;
-    const byText = (t: string) => state.messages.find((m) => m.role === 'user' && m.content.startsWith(t))!;
+    const byText = (t: string) => state.messages.find((m) => m.role === 'user' && String(m.content).startsWith(t))!;
     assert.equal(state.sectionOf(byText('Let us plan').id), 's1');
     assert.equal(state.sectionOf(byText('Also add jitter').id), 's1', 'filed under the current section automatically');
     assert.equal(state.sectionOf(byText('New topic').id), 's2');
@@ -166,7 +166,7 @@ describe('sections: model tools and grants', () => {
     for (const n of ['list_sections', 'add_section', 'edit_section', 'search_sections', 'search_conversation', 'fetch_section']) assert.ok(names.includes(n), n);
     assert.match((first.messages[0] as { content: string }).content, /<conversation_memory>/);
     // After /clear, the old exchange is not in the request; it was retrieved on demand.
-    const afterClear = providers.get('main')!.requests.find((r) => (r.messages as ChatMessage[]).some((m) => m.role === 'user' && m.content.startsWith('What retry limit')))!;
+    const afterClear = providers.get('main')!.requests.find((r) => (r.messages as ChatMessage[]).some((m) => m.role === 'user' && String(m.content).startsWith('What retry limit')))!;
     assert.doesNotMatch(JSON.stringify(afterClear.messages), /retry limit is 5/);
     await runtime.dispose();
     conversation.close();
