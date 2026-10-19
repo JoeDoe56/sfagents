@@ -375,7 +375,9 @@ button { -webkit-tap-highlight-color: transparent; }
   scrollbar-width: thin;
 }
 .input::placeholder { color: rgba(235, 235, 245, 0.45); }
-.input.scrolling { overflow-y: auto; }
+.input { touch-action: none; }
+.input.scrolling { overflow-y: auto; touch-action: pan-y; }
+.bar.dragging, .bar.dragging * { user-select: none; -webkit-user-select: none; }
 
 /* Composer attachments (inside the field, above the text, like iMessage) */
 .attachments {
@@ -485,14 +487,33 @@ button { -webkit-tap-highlight-color: transparent; }
   overflow: hidden;
   overscroll-behavior: contain;
   scrollbar-width: none;
-  touch-action: pan-y;
+  touch-action: none;
 }
+.bar[data-state="full"] .sheet-scroll { touch-action: pan-y; }
 .bar[data-state="full"] .sheet-scroll { overflow-y: auto; }
+/* The monitor's edges line up with the text field; the side buttons sit under the send circle. */
+.tools-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0 calc(var(--row-inset, 12px) - 16px) 22px;
+}
 .monitor {
+  flex: 1 1 auto;
+  min-width: 0;
   height: 140px;
   border-radius: 26px;
-  margin-bottom: 22px;
 }
+.side-buttons {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.circle.side { display: grid; place-items: center; color: rgba(235, 235, 245, 0.85); }
+.circle.side:disabled { cursor: default; }
+.side-icon { display: grid; place-items: center; pointer-events: none; }
+.side-icon i { width: 22px; height: 22px; }
 .section-head {
   display: flex;
   align-items: center;
@@ -644,7 +665,78 @@ button { -webkit-tap-highlight-color: transparent; }
 .viewer-body .image { min-height: 100%; display: grid; place-items: center; padding: 20px; background: repeating-conic-gradient(#222 0 25%, #1a1a1a 0 50%) 0 0 / 20px 20px; }
 .viewer-body .image img { max-width: 100%; max-height: calc(100vh - 120px); }
 
+/* ------------------------------------------------------------------ settings */
+
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+}
+.settings-card {
+  width: min(100%, 460px);
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
+  padding: 16px 18px 20px;
+  border-radius: 28px;
+  background: var(--sheet);
+  border: 1px solid rgba(235, 235, 245, 0.08);
+  animation: viewer-in 0.22s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.settings-head { display: flex; align-items: center; justify-content: space-between; }
+.settings-head h2 { margin: 0; font-size: 22px; line-height: 28px; font-weight: 650; }
+.settings-note { margin: 4px 0 16px; font-size: 13px; line-height: 18px; color: var(--ink-2); }
+.settings-group { margin-top: 14px; }
+.settings-group h3 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+.settings-hint { margin: 8px 0 0; font-size: 12px; line-height: 16px; color: var(--ink-2); }
+.segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 14px; background: rgba(118, 118, 128, 0.24); }
+.segmented button {
+  border: 0;
+  border-radius: 10px;
+  padding: 7px 6px;
+  background: transparent;
+  font-size: 14px;
+  cursor: pointer;
+}
+.segmented button[aria-checked="true"] { background: rgba(235, 235, 245, 0.22); font-weight: 600; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; }
+.switch-row span { display: flex; flex-direction: column; gap: 2px; }
+.switch-row strong { font-size: 15px; font-weight: 600; }
+.switch-row small { font-size: 12px; line-height: 16px; color: var(--ink-2); }
+.switch-row input {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  position: relative;
+  width: 51px;
+  height: 31px;
+  margin: 0;
+  border-radius: 16px;
+  background: rgba(120, 120, 128, 0.36);
+  transition: background 0.2s ease;
+  cursor: pointer;
+}
+.switch-row input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 27px;
+  height: 27px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s ease;
+}
+.switch-row input:checked { background: #30d158; }
+.switch-row input:checked::after { transform: translateX(20px); }
+.switch-row input:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: 2px; }
+
 @media (prefers-reduced-motion: reduce) {
+  .settings-card { animation: none; }
   .send-disc, .stop-disc, .tile-pin { transition: none; }
   .viewer { animation: none; }
   .typing span, .activity.running::after { animation: none; }

@@ -44,7 +44,13 @@
     </div>
 
     <div class="sheet-scroll above" id="sheetScroll">
-      <div class="monitor" id="monitor" role="img" aria-label="System resources (coming soon)"></div>
+      <div class="tools-row">
+        <div class="monitor" id="monitor" role="img" aria-label="System resources (coming soon)"></div>
+        <div class="side-buttons">
+          <button class="circle side" id="settingsBtn" type="button" aria-label="Settings" aria-haspopup="dialog"><span class="side-icon above" aria-hidden="true"><i data-symbol="gear"></i></span></button>
+          <button class="circle side" id="spareBtn" type="button" aria-label="Coming soon" disabled></button>
+        </div>
+      </div>
 
       <h2 class="section-head above"><span>Pinned</span><i data-symbol="pin.fill" class="head-pin"></i></h2>
       <div class="tiles above" id="pinned"></div>
@@ -70,6 +76,34 @@
     <a class="viewer-btn" id="viewerDownload" aria-label="Download"><i data-symbol="square.and.arrow.down"></i></a>
   </header>
   <div class="viewer-body" id="viewerBody"></div>
+</div>
+
+<div class="settings-backdrop" id="settings" hidden>
+  <div class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <header class="settings-head">
+      <h2 id="settingsTitle">Settings</h2>
+      <button class="viewer-btn" id="settingsClose" type="button" aria-label="Close"><i data-symbol="xmark"></i></button>
+    </header>
+    <p class="settings-note">These settings are for this app on this device. Agent settings live in agent.json.</p>
+    <section class="settings-group">
+      <h3>Glass quality</h3>
+      <div class="segmented" id="qualityChoice" role="radiogroup" aria-label="Glass quality">
+        <button type="button" role="radio" data-value="auto">Auto</button>
+        <button type="button" role="radio" data-value="superfluid">Superfluid</button>
+        <button type="button" role="radio" data-value="glass">Glass</button>
+        <button type="button" role="radio" data-value="lite">Lite</button>
+        <button type="button" role="radio" data-value="frost">Frost</button>
+        <button type="button" role="radio" data-value="static">Solid</button>
+      </div>
+      <p class="settings-hint" id="qualityHint"></p>
+    </section>
+    <section class="settings-group">
+      <label class="switch-row">
+        <span><strong>Return sends</strong><small>On a keyboard, Return sends and Shift+Return adds a line. Off: Return adds a line.</small></span>
+        <input type="checkbox" id="enterSends" role="switch">
+      </label>
+    </section>
+  </div>
 </div>
 
 <script type="module" src="app.js"></script>

@@ -84,7 +84,9 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     bar.style.borderRadius = `${p.radius}px`;
     bar.style.setProperty('--opaque', opaque.toFixed(3));
     row.style.top = `${pad}px`;
-    row.style.left = row.style.right = `${lerp(10, 12, smooth(0, 1, t))}px`;
+    const inset = lerp(10, 12, smooth(0, 1, t));
+    row.style.left = row.style.right = `${inset}px`;
+    scroller.style.setProperty('--row-inset', `${inset}px`);
     scroller.style.top = `${pad + rowH + 10}px`;
     scroller.style.opacity = smooth(0.08, 0.6, t).toFixed(3);
     scroller.style.visibility = t < 0.02 ? 'hidden' : 'visible';
@@ -134,7 +136,19 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
   }
 
   // ------------------------------------------------------------ dragging
-  let drag = null;
+  //
+  // The whole sheet is draggable, not only the grabber. A press anywhere on
+  // it becomes a sheet drag once it moves vertically past a small threshold;
+  // short presses stay taps and clicks. Content that scrolls keeps its own
+  // gestures: a scrolling text field, and the full sheet's list except when
+  // it is at the top and the finger pulls down (then the sheet follows, as
+  // in Maps). Mouse and pen use pointer events; touch inside the scrolling
+  // list uses touch events so the pull-down can cancel native scrolling.
+  const THRESHOLD = 7;
+  let drag = null; // active drag: { y0, top0, samples }
+  let press = null; // pointer press that may become a drag
+  let suppressClick = false;
+
   function tForTop(g, top) {
     // topAt decreases as t grows; bisect.
     let lo = 0;
@@ -149,45 +163,33 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     return (lo + hi) / 2;
   }
 
-  function startDrag(e) {
-    if (e.button !== undefined && e.button !== 0) return;
+  function beginDrag(y) {
     if (anim) {
       cancelAnimationFrame(anim.raf);
       anim = null;
     }
     const g = geometry(row.offsetHeight);
-    drag = { id: e.pointerId, y0: e.clientY, top0: topAt(g, clamp(t, 0, 2)), moved: false, samples: [{ y: e.clientY, at: performance.now() }] };
+    drag = { y0: y, top0: topAt(g, clamp(t, 0, 2)), samples: [{ y, at: performance.now() }] };
     bar.classList.add('dragging');
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      // ignore
-    }
+    suppressClick = true;
+    // Keep a half-finished text selection from following the finger.
+    window.getSelection?.()?.removeAllRanges?.();
   }
 
-  function moveDrag(e) {
-    if (!drag || e.pointerId !== drag.id) return;
-    const dy = e.clientY - drag.y0;
-    if (Math.abs(dy) > 4) drag.moved = true;
-    if (!drag.moved) return;
+  function moveDrag(y) {
+    if (!drag) return;
     const g = geometry(row.offsetHeight);
-    t = tForTop(g, drag.top0 + dy);
-    drag.samples.push({ y: e.clientY, at: performance.now() });
+    t = tForTop(g, drag.top0 + (y - drag.y0));
+    drag.samples.push({ y, at: performance.now() });
     if (drag.samples.length > 6) drag.samples.shift();
     apply();
-    e.preventDefault();
   }
 
-  function endDrag(e) {
-    if (!drag || e.pointerId !== drag.id) return;
+  function endDrag() {
+    if (!drag) return;
     const d = drag;
     drag = null;
     bar.classList.remove('dragging');
-    if (!d.moved) {
-      // A tap toggles: collapsed ↔ medium; the full sheet steps back to medium.
-      animateTo(detent === 0 ? 1 : detent === 2 ? 1 : 0);
-      return;
-    }
     const first = d.samples[0];
     const last = d.samples[d.samples.length - 1];
     const v = last.at > first.at ? (last.y - first.y) / (last.at - first.at) : 0; // px/ms, + is down
@@ -203,22 +205,117 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
       }
     }
     animateTo(best, v);
+    setTimeout(() => (suppressClick = false), 0);
   }
 
-  grabber.addEventListener('pointerdown', startDrag);
-  grabber.addEventListener('pointermove', moveDrag);
-  grabber.addEventListener('pointerup', endDrag);
-  grabber.addEventListener('pointercancel', endDrag);
-  // Dragging also works from the sheet's own glass (not its controls or content).
+  const toggle = () => animateTo(detent === 0 ? 1 : detent === 2 ? 1 : 0);
+  const inScroller = (target) => scroller.contains(target) && bar.dataset.state === 'full';
+  const scrollingInput = (target) => target.closest?.('textarea') && target.scrollHeight > target.clientHeight + 1;
+
+  /** Whether a vertical move of dy from this target should move the sheet. */
+  function wantsSheet(target, dy) {
+    if (scrollingInput(target)) return false;
+    if (inScroller(target)) return dy > 0 && scroller.scrollTop <= 0;
+    return true;
+  }
+
   bar.addEventListener('pointerdown', (e) => {
-    if (e.target === bar || e.target.classList.contains('bar-fill') || e.target === row) startDrag(e);
+    if (e.button !== 0 || drag) return;
+    // Touches in the full sheet's scrolling list are handled with touch events below.
+    if (e.pointerType === 'touch' && inScroller(e.target)) return;
+    press = { id: e.pointerId, x: e.clientX, y: e.clientY, target: e.target, onGrabber: grabber.contains(e.target) };
   });
-  bar.addEventListener('pointermove', moveDrag);
-  bar.addEventListener('pointerup', endDrag);
-  bar.addEventListener('pointercancel', endDrag);
+  bar.addEventListener('pointermove', (e) => {
+    if (drag && press && e.pointerId === press.id) {
+      moveDrag(e.clientY);
+      e.preventDefault();
+      return;
+    }
+    if (!press || e.pointerId !== press.id) return;
+    const dx = e.clientX - press.x;
+    const dy = e.clientY - press.y;
+    if (Math.abs(dy) < THRESHOLD || Math.abs(dy) < Math.abs(dx)) return;
+    if (!wantsSheet(press.target, dy)) {
+      press = null;
+      return;
+    }
+    beginDrag(press.y);
+    try {
+      bar.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    moveDrag(e.clientY);
+    e.preventDefault();
+  });
+  const pointerEnd = (e) => {
+    if (!press || e.pointerId !== press.id) return;
+    const wasTap = !drag && e.type === 'pointerup' && press.onGrabber;
+    press = null;
+    if (drag) endDrag();
+    else if (wasTap) toggle();
+  };
+  bar.addEventListener('pointerup', pointerEnd);
+  bar.addEventListener('pointercancel', pointerEnd);
+  // A press that turned into a drag must not also click the button or tile under it.
+  bar.addEventListener(
+    'click',
+    (e) => {
+      if (suppressClick) {
+        e.preventDefault();
+        e.stopPropagation();
+        suppressClick = false;
+      }
+    },
+    true,
+  );
+
+  let touch = null; // touch press in the scrolling list: { id, x, y, decided }
+  scroller.addEventListener(
+    'touchstart',
+    (e) => {
+      if (!inScroller(e.target) || e.touches.length !== 1) return;
+      const p = e.touches[0];
+      touch = { id: p.identifier, x: p.clientX, y: p.clientY, decided: false, dragging: false };
+    },
+    { passive: true },
+  );
+  scroller.addEventListener(
+    'touchmove',
+    (e) => {
+      if (!touch) return;
+      const p = [...e.changedTouches].find((x) => x.identifier === touch.id);
+      if (!p) return;
+      if (!touch.decided) {
+        const dx = p.clientX - touch.x;
+        const dy = p.clientY - touch.y;
+        // Decide on the first move so the browser has not started scrolling yet.
+        touch.decided = true;
+        if (dy > 0 && Math.abs(dy) >= Math.abs(dx) && scroller.scrollTop <= 0) {
+          touch.dragging = true;
+          beginDrag(touch.y);
+        } else {
+          touch = null;
+          return;
+        }
+      }
+      if (touch.dragging) {
+        e.preventDefault();
+        moveDrag(p.clientY);
+      }
+    },
+    { passive: false },
+  );
+  const touchEnd = () => {
+    if (touch?.dragging) endDrag();
+    touch = null;
+  };
+  scroller.addEventListener('touchend', touchEnd);
+  scroller.addEventListener('touchcancel', touchEnd);
+
   grabber.addEventListener('click', (e) => {
-    // Pointer taps are handled in endDrag; this covers keyboard activation.
-    if (e.detail === 0) animateTo(detent === 0 ? 1 : detent === 2 ? 1 : 0);
+    // Pointer taps are handled in pointerEnd; this covers keyboard activation.
+    if (e.detail === 0) toggle();
   });
   grabber.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowUp') {
@@ -229,19 +326,6 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
       animateTo(Math.max(0, detent - 1));
     }
   });
-  // Pulling down on the full sheet's content at its top collapses it, as in Maps.
-  let pull = null;
-  scroller.addEventListener('pointerdown', (e) => {
-    if (detent === 2 && scroller.scrollTop <= 0 && e.pointerType !== 'mouse') pull = { id: e.pointerId, y: e.clientY };
-  });
-  scroller.addEventListener('pointermove', (e) => {
-    if (!pull || e.pointerId !== pull.id) return;
-    if (e.clientY - pull.y > 12 && scroller.scrollTop <= 0) {
-      pull = null;
-      startDrag(e);
-    }
-  });
-  scroller.addEventListener('pointerup', () => (pull = null));
 
   addEventListener('resize', () => {
     safe = safeBottom();

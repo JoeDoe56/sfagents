@@ -5,6 +5,7 @@
  */
 
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
+import { initialTier } from './vendor/sfgl/src/core/quality.js';
 import { renderMarkdown, looksLikeMarkdown, escapeHtml } from './markdown.js';
 import { setupGlass } from './glass.js';
 import { createSheet } from './sheet.js';
@@ -74,12 +75,36 @@ new ResizeObserver(() => {
 
 // ------------------------------------------------------------------ glass
 
-const glassApi = setupGlass({ stage, chat, thread, quality: params.get('quality') });
+// App settings (this device only), kept in localStorage.
+const QUALITIES = ['auto', 'superfluid', 'glass', 'lite', 'frost', 'static'];
+function readSetting(key, fallback) {
+  try {
+    const raw = localStorage.getItem(`sfagents.${key}`);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function writeSetting(key, value) {
+  try {
+    localStorage.setItem(`sfagents.${key}`, JSON.stringify(value));
+  } catch {
+    // private mode or storage blocked: the setting lasts for this page only
+  }
+}
+const settings = {
+  quality: QUALITIES.includes(params.get('quality')) ? params.get('quality') : QUALITIES.includes(readSetting('quality', 'auto')) ? readSetting('quality', 'auto') : 'auto',
+  enterSends: readSetting('enterSends', !coarse) === true,
+};
+
+const glassApi = setupGlass({ stage, chat, thread, quality: settings.quality });
 const { surface } = glassApi;
 const barLens = surface.lens(bar, { material: -0.42, layer: 0 });
 surface.lens(field, { material: 0.14, layer: 1 });
 surface.lens(send, { material: 0.14, layer: 1 });
 surface.lens($('monitor'), { material: 0.1, layer: 1, clip: sheetScroll });
+surface.lens($('settingsBtn'), { material: 0.14, layer: 1, clip: sheetScroll });
+surface.lens($('spareBtn'), { material: 0.14, layer: 1, clip: sheetScroll });
 window.sfagents = { glass: glassApi.glass, surface, barLens };
 
 function syncTileLenses() {
@@ -562,7 +587,7 @@ input.addEventListener('input', () => {
   updateComposer();
 });
 input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.isComposing && !coarse) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.isComposing && settings.enterSends) {
     e.preventDefault();
     if (canSend()) submitFromComposer();
   }
@@ -772,10 +797,71 @@ mic.addEventListener('click', () => {
   recognition.start();
 });
 
+// Settings ----------------------------------------------------------------
+
+const settingsEl = $('settings');
+const qualityButtons = [...document.querySelectorAll('#qualityChoice button')];
+let settingsReturn = null;
+
+function showQuality() {
+  for (const b of qualityButtons) b.setAttribute('aria-checked', String(b.dataset.value === settings.quality));
+  const tier = glassApi.tier();
+  $('qualityHint').textContent =
+    settings.quality === 'auto' ? `Chosen for this device: ${tier}. Lowers itself if frames get slow.` : `Drawing with: ${tier}.`;
+}
+
+function setQuality(q) {
+  settings.quality = q;
+  writeSetting('quality', q);
+  const glass = glassApi.glass;
+  glass.options.quality = q;
+  if (q === 'auto') {
+    glass.setTier(
+      initialTier(glass.caps, {
+        deviceMemory: navigator.deviceMemory,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        reducedTransparency: matchMedia('(prefers-reduced-transparency: reduce)').matches,
+      }),
+    );
+  }
+  glass.invalidate(true);
+  requestAnimationFrame(showQuality);
+}
+
+function openSettings() {
+  settingsReturn = document.activeElement;
+  $('enterSends').checked = settings.enterSends;
+  showQuality();
+  settingsEl.hidden = false;
+  $('settingsClose').focus();
+}
+
+function closeSettings() {
+  settingsEl.hidden = true;
+  settingsReturn?.focus?.();
+}
+
+$('settingsBtn').addEventListener('click', openSettings);
+$('settingsClose').addEventListener('click', closeSettings);
+settingsEl.addEventListener('click', (e) => {
+  if (e.target === settingsEl) closeSettings();
+});
+settingsEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    closeSettings();
+  }
+});
+for (const b of qualityButtons) b.addEventListener('click', () => setQuality(b.dataset.value));
+$('enterSends').addEventListener('change', (e) => {
+  settings.enterSends = e.target.checked;
+  writeSetting('enterSends', settings.enterSends);
+});
+
 // Keys --------------------------------------------------------------------
 
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !viewer.open && sheet.detent !== 'collapsed') sheet.set('collapsed');
+  if (e.key === 'Escape' && !viewer.open && settingsEl.hidden && sheet.detent !== 'collapsed') sheet.set('collapsed');
 });
 
 addEventListener('resize', autosize);
