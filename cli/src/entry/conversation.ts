@@ -12,7 +12,12 @@ import {
   ConversationService,
   ConversationStorageError,
   defaultConversationFile,
+  fetchSection,
   forceUnlock,
+  formatSearchResult,
+  formatSectionPage,
+  listSections,
+  searchConversation,
   getErrorMessage,
   readConversation,
   readLock,
@@ -62,42 +67,11 @@ function lockPathFor(file: string): string {
   return path.join(path.dirname(file), `${path.basename(file, '.md')}.lock`);
 }
 
-/** Effective section tree as indented lines (title, id, message count). */
-export function sectionLines(state: ConversationState, limit = 200): string[] {
-  const counts = new Map<string, number>();
-  let unassigned = 0;
-  for (const m of state.messages) {
-    if (m.role === 'tool') continue;
-    const s = state.sectionOf(m.id);
-    if (s) counts.set(s, (counts.get(s) ?? 0) + 1);
-    else unassigned++;
-  }
-  const children = new Map<string | null, string[]>();
-  for (const s of state.sections.values()) {
-    const list = children.get(s.parent) ?? [];
-    list.push(s.id);
-    children.set(s.parent, list);
-  }
-  const lines: string[] = [];
-  const walk = (parent: string | null, depth: number) => {
-    for (const id of children.get(parent) ?? []) {
-      if (lines.length >= limit) return;
-      const s = state.sections.get(id)!;
-      lines.push(`${'  '.repeat(depth)}${s.title}  [${id}, ${counts.get(id) ?? 0} msg${state.currentSection === id ? ', current' : ''}]`);
-      walk(id, depth + 1);
-    }
-  };
-  walk(null, 0);
-  if (lines.length >= limit) lines.push(`… (${state.sections.size - limit} more sections)`);
-  if (unassigned > 0) lines.push(`(unassigned: ${unassigned} msg)`);
-  return lines;
-}
-
 export async function conversationCommand(
   sub: string | undefined,
   args: string[],
   tree: AgentTree,
-  flags: ConversationFlags & { yes?: boolean },
+  flags: ConversationFlags & { yes?: boolean; page?: string },
   streams: { stdout: NodeJS.WritableStream; stderr: NodeJS.WritableStream },
 ): Promise<number> {
   const file = conversationFileFor(flags, tree.configDir);
@@ -158,9 +132,44 @@ export async function conversationCommand(
       return 0;
     }
     case 'sections': {
-      const lines = sectionLines(state);
-      streams.stdout.write(lines.length ? `${lines.join('\n')}\n` : 'No sections yet.\n');
+      const page = flags.page ? Number(flags.page) : undefined;
+      streams.stdout.write(`${stripAnsiAndControl(formatSectionPage(listSections(state, { page, pageSize: 200 })))}\n`);
       return 0;
+    }
+    case 'show': {
+      const target = args[0];
+      if (!target) {
+        streams.stderr.write('Usage: sfagents conversation show <section id|unassigned|message id> [--page N]\n');
+        return 2;
+      }
+      const message = state.messageById.get(target);
+      if (message) {
+        streams.stdout.write(`[${message.id}] ${message.role}${message.tool ? `:${message.tool}` : ''} · ${message.agent} · ${message.time}\n${stripAnsiAndControl(message.content)}\n`);
+        return 0;
+      }
+      try {
+        const r = fetchSection(state, target, { page: flags.page ? Number(flags.page) : undefined, pageChars: 30_000 });
+        streams.stdout.write(`${stripAnsiAndControl(r.text)}\n`);
+        return 0;
+      } catch (error) {
+        streams.stderr.write(`${getErrorMessage(error)}\n`);
+        return 1;
+      }
+    }
+    case 'search': {
+      const query = args.join(' ');
+      if (!query.trim()) {
+        streams.stderr.write('Usage: sfagents conversation search <words…> [--page N]\n');
+        return 2;
+      }
+      try {
+        const r = searchConversation(state, query, { page: flags.page ? Number(flags.page) : undefined, pageSize: 20 });
+        streams.stdout.write(`${stripAnsiAndControl(formatSearchResult(query, r))}\n`);
+        return 0;
+      } catch (error) {
+        streams.stderr.write(`${getErrorMessage(error)}\n`);
+        return 1;
+      }
     }
     case 'artifacts': {
       if (state.artifacts.length === 0) {
@@ -174,7 +183,7 @@ export async function conversationCommand(
       return 0;
     }
     default:
-      streams.stderr.write(`Unknown command "conversation ${sub}". Commands: info, sections, artifacts, unlock${args.length ? '' : ''}.\n`);
+      streams.stderr.write(`Unknown command "conversation ${sub}". Commands: info, sections, show, search, artifacts, unlock.\n`);
       return 2;
   }
 }

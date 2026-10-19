@@ -10,7 +10,8 @@
 
 import os from 'node:os';
 import type { AgentDefinition } from '../agents/definition.js';
-import { mcpGrants } from '../agents/definition.js';
+import { conversationAccess, mcpGrants } from '../agents/definition.js';
+import { createConversationTools, ORGANIZE_GUIDANCE } from '../conversation/tools.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import { InvokeChildTool, type ChildRunner } from '../agents/invoke-child.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
@@ -72,6 +73,10 @@ interface RunParams {
   emit: (event: RuntimeEvent) => void;
   /** Records the run at its message boundaries (persistent or ephemeral conversation). */
   recorder?: RunRecorder;
+  /** The main conversation, for agents granted conversation access. */
+  conversation?: ConversationService;
+  /** Extra system-prompt text (conversation guidance and section index). */
+  systemExtra?: string;
 }
 
 /** Identity of the provider/model an agent uses, as recorded in run_start. */
@@ -89,7 +94,7 @@ function addUsage(total: TokenUsage, add?: TokenUsage): void {
   }
 }
 
-export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[]): string {
+export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string): string {
   const d = node.definition;
   const env = [
     `Agent id: ${node.id}`,
@@ -103,7 +108,8 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[])
   if (node.children.length > 0) {
     env.push(`Child agents you can delegate to with ${ToolNames.INVOKE_CHILD}: ${node.children.map((c) => c.id).join(', ')}`);
   }
-  return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>`;
+  const guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
+  return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
 }
 
 export class AgentRuntime implements ChildRunner {
@@ -145,6 +151,7 @@ export class AgentRuntime implements ChildRunner {
     agentPath: readonly string[],
     emit: (event: RuntimeEvent) => void,
     recorder?: RunRecorder,
+    conversation?: ConversationService,
   ): Promise<Map<string, AnyDeclarativeTool>> {
     const d = node.definition;
     const tools = new Map<string, AnyDeclarativeTool>();
@@ -197,7 +204,11 @@ export class AgentRuntime implements ChildRunner {
     }
 
     if (node.children.length > 0) {
-      tools.set(ToolNames.INVOKE_CHILD, new InvokeChildTool(this, node, agentPath, emit, recorder));
+      tools.set(ToolNames.INVOKE_CHILD, new InvokeChildTool(this, node, agentPath, emit, recorder, conversation));
+    }
+    // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
+    if (conversation?.file) {
+      for (const tool of createConversationTools(conversation, conversationAccess(d, node.depth))) tools.set(tool.name, tool);
     }
     return tools;
   }
@@ -274,7 +285,7 @@ export class AgentRuntime implements ChildRunner {
     let tools: Map<string, AnyDeclarativeTool>;
     try {
       provider = this.provider(d);
-      tools = await this.buildTools(node, agentPath, emit, recorder);
+      tools = await this.buildTools(node, agentPath, emit, recorder, params.conversation);
     } catch (error) {
       const message = getErrorMessage(error);
       emit({ type: 'error', agentPath, message });
@@ -289,7 +300,7 @@ export class AgentRuntime implements ChildRunner {
       throw e;
     }
 
-    const systemPrompt = buildSystemPrompt(node, [...tools.keys()]);
+    const systemPrompt = buildSystemPrompt(node, [...tools.keys()], params.systemExtra);
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
     const declarations = [...tools.values()].map((t) => t.schema);
@@ -400,6 +411,7 @@ export class AgentRuntime implements ChildRunner {
     emit: (event: RuntimeEvent) => void;
     callId?: string;
     parentRecorder?: RunRecorder;
+    conversation?: ConversationService;
   }): Promise<AgentRunResult> {
     const { parent, parentPath, child, signal } = params;
     // Runtime guards, independent of the schema enum.
@@ -441,6 +453,7 @@ export class AgentRuntime implements ChildRunner {
         signal,
         emit,
         recorder,
+        conversation: params.conversation,
       });
     } finally {
       release();
@@ -514,6 +527,7 @@ export class AgentSession {
           signal: options.signal ?? new AbortController().signal,
           emit,
           recorder,
+          conversation: this.conversation,
         })
         .then(
           (r) => {

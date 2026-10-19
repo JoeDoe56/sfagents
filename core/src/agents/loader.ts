@@ -20,7 +20,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  accessRank,
   ConfigError,
+  conversationAccess,
   FILE_TOOL_IDS,
   mcpGrants,
   parseAgentDefinition,
@@ -172,6 +174,9 @@ export function loadAgentTree(rootFile: string, options: LoadOptions = {}): Agen
       );
     }
 
+    if (depth > 0 && def.context !== undefined) {
+      throw new ConfigError(shown, 'context', 'may only be set on the root agent (children always start from a fresh context)');
+    }
     if (parent) checkEscalation(shown, def, roots, parent);
 
     const node: {
@@ -270,6 +275,12 @@ function checkEscalation(file: string, child: AgentDefinition, childRoots: reado
     throw new ConfigError(file, `tools.autoApprove[${i}]`, `permission escalation: parent "${parent.id}" does not auto-approve "${entry}"`);
   });
 
+  const childAccess = conversationAccess(child, parent.depth + 1);
+  const parentAccess = conversationAccess(p, parent.depth);
+  if (accessRank(childAccess) > accessRank(parentAccess)) {
+    throw new ConfigError(file, 'conversation.access', `permission escalation: parent "${parent.id}" has conversation access "${parentAccess}", so the child cannot have "${childAccess}"`);
+  }
+
   childRoots.forEach((root, i) => {
     if (!parent.roots.some((pr) => isPathWithinRoot(root, pr))) {
       throw new ConfigError(
@@ -289,6 +300,8 @@ export function describeTree(tree: AgentTree): string {
     const tools = [...(d.tools?.allow ?? [])];
     for (const [server, list] of mcpGrants(d)) tools.push(list ? `mcp:${server}[${[...list].join(',')}]` : `mcp:${server}[*]`);
     if (node.children.length > 0) tools.push(`invoke_child(${node.children.map((c) => c.id).join(',')})`);
+    const access = conversationAccess(d, node.depth);
+    if (access !== 'none') tools.push(`conversation:${access}`);
     const head = isRoot ? '' : `${prefix}${last ? '└─ ' : '├─ '}`;
     lines.push(`${head}${node.id}  (${d.provider}:${d.model}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
     const detailPrefix = isRoot ? '   ' : `${prefix}${last ? '   ' : '│  '}   `;

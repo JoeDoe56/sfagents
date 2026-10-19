@@ -63,6 +63,8 @@ export const INTERRUPTED_UNKNOWN =
 export class ConversationService {
   private readonly transcriptStores = new Map<string, ConversationStore>();
   private closed = false;
+  /** Run ID of the root turn in progress (for "current_exchange"). */
+  activeRootRun: string | undefined;
   readonly notices: OpenNotice[] = [];
 
   private constructor(
@@ -175,7 +177,9 @@ export class ConversationService {
   /** Starts recording a root-agent run in the main conversation. */
   beginRootRun(node: AgentNode): RunRecorder {
     this.assertOpen();
-    return new StoreRunRecorder(this, this.main, newRunId(), node.id, undefined, undefined);
+    const recorder = new StoreRunRecorder(this, this.main, newRunId(), node.id, undefined, undefined);
+    this.activeRootRun = recorder.runId;
+    return recorder;
   }
 
   /** /clear: later working contexts start after this point; history stays searchable. */

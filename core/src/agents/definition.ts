@@ -48,6 +48,21 @@ export interface AgentDefinition {
     maxDepth?: number;
     children?: string[];
   };
+  /**
+   * Access to the main persistent conversation's sections and history:
+   * "organize" (read + add/edit sections), "read", or "none". Defaults:
+   * root "organize", children "none".
+   */
+  conversation?: {
+    access?: 'none' | 'read' | 'organize';
+  };
+  /** Root only: working-context policy for the persistent conversation. */
+  context?: {
+    /** Estimated input-token budget for each request (default 48000). */
+    maxInputTokens?: number;
+    /** Most recent exchanges kept verbatim when they fit (default 12). */
+    recentExchanges?: number;
+  };
   limits?: {
     maxTurns?: number;
     timeoutSeconds?: number;
@@ -84,6 +99,8 @@ const TOP_LEVEL_KEYS = new Set([
   'workspace',
   'tools',
   'spawn',
+  'conversation',
+  'context',
   'limits',
 ]);
 
@@ -289,6 +306,27 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
     };
   }
 
+  let conversation: AgentDefinition['conversation'];
+  if (raw['conversation'] !== undefined) {
+    const cv = c.object(raw['conversation'], 'conversation', ['access']);
+    if (cv['access'] !== undefined) {
+      const a = c.string(cv['access'], 'conversation.access');
+      if (!['none', 'read', 'organize'].includes(a)) c.fail('conversation.access', 'must be "none", "read" or "organize"');
+      conversation = { access: a as 'none' | 'read' | 'organize' };
+    } else {
+      conversation = {};
+    }
+  }
+
+  let context: AgentDefinition['context'];
+  if (raw['context'] !== undefined) {
+    const cx = c.object(raw['context'], 'context', ['maxInputTokens', 'recentExchanges']);
+    context = {
+      maxInputTokens: c.integer(cx['maxInputTokens'], 'context.maxInputTokens', 2000, 10_000_000),
+      recentExchanges: c.integer(cx['recentExchanges'], 'context.recentExchanges', 1, 1000),
+    };
+  }
+
   let limits: AgentDefinition['limits'];
   if (raw['limits'] !== undefined) {
     const l = c.object(raw['limits'], 'limits', [
@@ -320,8 +358,21 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
     workspace,
     tools,
     spawn,
+    conversation,
+    context,
     limits,
   };
+}
+
+const ACCESS_RANK = { none: 0, read: 1, organize: 2 } as const;
+
+/** Effective conversation access: explicit, else root "organize" and children "none". */
+export function conversationAccess(def: AgentDefinition, depth: number): 'none' | 'read' | 'organize' {
+  return def.conversation?.access ?? (depth === 0 ? 'organize' : 'none');
+}
+
+export function accessRank(access: 'none' | 'read' | 'organize'): number {
+  return ACCESS_RANK[access];
 }
 
 /** Normalized MCP grant list: server → allowed tool names (undefined = all). */

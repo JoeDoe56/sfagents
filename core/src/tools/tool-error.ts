@@ -41,4 +41,5 @@ export enum ToolErrorType {
   SHELL_EXECUTE_ERROR = 'shell_execute_error',
   MCP_TOOL_ERROR = 'mcp_tool_error',
   CHILD_AGENT_ERROR = 'child_agent_error',
+  CONVERSATION_OPERATION_ERROR = 'conversation_operation_error',
 }

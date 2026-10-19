@@ -56,3 +56,20 @@ export { replayTarget } from './runtime/runtime.js';
 export { PersistenceFailure } from './runtime/recorder.js';
 export type { RunRecorder } from './runtime/recorder.js';
 export type { ToolCallContext } from './tools/tools.js';
+export {
+  addSection,
+  editSection,
+  fetchSection,
+  formatSearchResult,
+  formatSectionPage,
+  listSections,
+  searchConversation,
+  searchSections,
+  sectionEntries,
+  SectionOperationError,
+  UNASSIGNED,
+  CURRENT_EXCHANGE,
+} from './conversation/sections.js';
+export type { SectionEntry, SectionPage, SearchHit, SearchResult, FetchResult } from './conversation/sections.js';
+export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE } from './conversation/tools.js';
+export type { ConversationAccess } from './conversation/tools.js';

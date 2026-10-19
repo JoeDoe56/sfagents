@@ -15,6 +15,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import type { AgentNode } from './loader.js';
 import { AgentTerminateMode, type AgentRunResult, type RuntimeEvent } from '../runtime/events.js';
 import type { RunRecorder } from '../runtime/recorder.js';
+import type { ConversationService } from '../conversation/service.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 /** Upper bound on task + context passed to a child. */
@@ -32,6 +33,8 @@ export interface ChildRunner {
     /** The parent's tool call ID and recorder, when the conversation is recorded. */
     callId?: string;
     parentRecorder?: RunRecorder;
+    /** The main conversation (for children granted conversation access). */
+    conversation?: ConversationService;
   }): Promise<AgentRunResult>;
 }
 
@@ -109,6 +112,7 @@ class InvokeChildInvocation extends BaseToolInvocation<InvokeChildParams, ToolRe
         emit: this.tool.emit,
         callId: context?.callId,
         parentRecorder: this.tool.recorder,
+        conversation: this.tool.conversation,
       });
     } catch (error) {
       if (isAbortError(error) || signal.aborted) {
@@ -141,6 +145,7 @@ export class InvokeChildTool extends BaseDeclarativeTool<InvokeChildParams, Tool
     readonly parentPath: readonly string[],
     readonly emit: (event: RuntimeEvent) => void,
     readonly recorder?: RunRecorder,
+    readonly conversation?: ConversationService,
   ) {
     const children = parent.children;
     const list = children

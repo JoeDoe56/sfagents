@@ -52,7 +52,7 @@ Usage:
   sfagents run [options] "<task>"       Run one request and print the final answer ("-" reads stdin)
   sfagents agents validate [options]    Validate agent definitions and print the agent tree
   sfagents mcp list [options]           Show configured MCP servers, status and tools
-  sfagents conversation [info|sections|artifacts|unlock]
+  sfagents conversation [info|sections|show <id>|search <words>|artifacts|unlock]
                                         Inspect the stored conversation (or remove a stale lock)
 
 Options:
@@ -104,6 +104,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         conversation: { type: 'string' },
         ephemeral: { type: 'boolean', default: false },
         persist: { type: 'boolean', default: false },
+        page: { type: 'string' },
         version: { type: 'boolean', short: 'v', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },

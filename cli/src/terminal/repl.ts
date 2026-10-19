@@ -6,7 +6,7 @@
  */
 
 import readline from 'node:readline';
-import { AgentTerminateMode, describeTree, type AgentRuntime, type ConfirmationHandler } from '@sfagents/core';
+import { AgentTerminateMode, describeTree, formatSectionPage, listSections, stripAnsiAndControl, type AgentRuntime, type ConfirmationHandler } from '@sfagents/core';
 import { EventRenderer } from './render.js';
 import { createTerminalConfirm } from './confirm.js';
 import { createStyle } from './style.js';
@@ -25,6 +25,7 @@ export interface ReplOptions {
 const HELP = `Commands:
   /help    show this help
   /tree    show the agent tree
+  /sections  show the conversation's sections
   /clear   reset the working context (history is kept and stays searchable)
   /exit    quit (or Ctrl+D)
 Press Ctrl+C while the agent is working to cancel the current turn.`;
@@ -128,6 +129,11 @@ export async function startRepl(options: ReplOptions): Promise<number> {
         }
         if (line === '/tree') {
           output.write(`${describeTree(options.runtime.tree)}\n`);
+          prompt();
+          continue;
+        }
+        if (line === '/sections') {
+          output.write(`${stripAnsiAndControl(formatSectionPage(listSections(session.conversation.state, { pageSize: 200 })))}\n`);
           prompt();
           continue;
         }
