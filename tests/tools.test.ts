@@ -195,6 +195,33 @@ describe('file tools', () => {
     assert.throws(() => f.tools.get('grep')!.build({ pattern: '(' }), /Invalid regular expression/);
   });
 
+  test('grep JavaScript strategy searches basename filters recursively and preserves path filters', async () => {
+    const f = await fixture(['grep']);
+    fs.writeFileSync(path.join(f.work, 'root.txt'), 'beta\n');
+    fs.mkdirSync(path.join(f.work, 'src', 'deep'));
+    fs.writeFileSync(path.join(f.work, 'src', 'deep', 'nested.txt'), 'beta\n');
+    const previous = process.env['SFAGENTS_GREP_JS'];
+    process.env['SFAGENTS_GREP_JS'] = '1';
+    try {
+      for (const glob of ['*.txt', '**/*.txt']) {
+        const r = await call(f, 'grep', { pattern: 'beta', glob });
+        assert.equal(r.result!.error, undefined);
+        assert.match(r.result!.llmContent, /Found 3 matches/, glob);
+        assert.match(r.result!.llmContent, /File: root\.txt/);
+        assert.match(r.result!.llmContent, /File: src[\\/]a\.txt/);
+        assert.match(r.result!.llmContent, /File: src[\\/]deep[\\/]nested\.txt/);
+        assert.doesNotMatch(r.result!.llmContent, /b\.ts/);
+      }
+      const scoped = await call(f, 'grep', { pattern: 'beta', glob: 'src/*.txt' });
+      assert.match(scoped.result!.llmContent, /Found 1 match/);
+      assert.match(scoped.result!.llmContent, /File: src[\\/]a\.txt/);
+      assert.doesNotMatch(scoped.result!.llmContent, /root\.txt|nested\.txt|b\.ts/);
+    } finally {
+      if (previous === undefined) delete process.env['SFAGENTS_GREP_JS'];
+      else process.env['SFAGENTS_GREP_JS'] = previous;
+    }
+  });
+
   test('grep JavaScript strategy (used on Windows) matches and stays contained', async () => {
     const f = await fixture(['grep']);
     process.env['SFAGENTS_GREP_JS'] = '1';

@@ -345,6 +345,8 @@ class GrepToolInvocation extends BaseToolInvocation<GrepToolParams, ToolResult> 
 
     const filesIterator = globStream(glob ? glob : '**/*', {
       cwd: absolutePath,
+      // Match basename filters such as *.txt at every depth, like recursive grep.
+      matchBase: true,
       dot: true,
       ignore: DEFAULT_IGNORES,
       absolute: true,
