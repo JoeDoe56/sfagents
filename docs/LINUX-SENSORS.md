@@ -52,6 +52,11 @@ Astral's python-build-standalone project and verifies a hard-coded SHA-256
 checksum for each architecture. No global runtime is installed. Later builds
 reuse the prepared runtime.
 
+If preparing the sensors fails (offline, a proxy, an unsupported system), the
+build prints a warning and carries on: the resource monitor then uses the
+operating system's readings, and `npm run build:sensors` tries again. Set
+`SFAGENTS_REQUIRE_SENSORS=1` when packaging so a failure stops the build.
+
 The generated runtime is in `web/native/bin/linux-<architecture>/`, ignored
 by Git and included in the web npm package. Build on the target platform and
 architecture before packaging, just as with the Windows adapter. Python's

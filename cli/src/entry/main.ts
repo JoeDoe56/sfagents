@@ -72,9 +72,9 @@ Options:
       --public-origin <url> (web) Accept this exact external origin behind a reverse proxy
       --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
                             the agent and its tools to your network)
-      --lhm <url|off>       (web) Libre Hardware Monitor's web server for the resource monitor
+      --lhm <url|off>       (web) Read an external Libre Hardware Monitor web server instead of the
+                            bundled sensors (user:password@ for its sign-in); off: OS readings only
       --sensor-admin        (web, Windows) Ask to elevate only the built-in sensor helper
-                            (default http://127.0.0.1:8085; user:password@ for its sign-in)
   -v, --version             Print the version
   -h, --help                Show this help
 

@@ -48,7 +48,7 @@ if (installed.status !== 0 || Number(installed.stdout?.split('.')[0]) < 10) {
 }
 const env = { ...process.env, DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1', DOTNET_CLI_HOME: path.join(tools, 'dotnet-home'), NUGET_PACKAGES: path.join(tools, 'nuget') };
 const result = spawnSync(dotnet, ['publish', path.join(project, 'SfAgents.Sensors.csproj'), '--configfile', path.join(project, 'NuGet.Config'), '-c', 'Release', '-r', rid, '--self-contained', 'true', '-o', output], { env, stdio: 'inherit', windowsHide: true });
-if (result.status !== 0) process.exit(result.status ?? 1);
+if (result.status !== 0) throw new Error(`dotnet publish exited with code ${result.status ?? 'unknown'}`);
 // Keep upstream license texts and package provenance beside the redistributed
 // assemblies, including the self-contained .NET runtime.
 const notices = path.join(output, 'licenses');

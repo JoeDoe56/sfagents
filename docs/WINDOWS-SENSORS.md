@@ -26,6 +26,11 @@ is installed globally. Later builds reuse unchanged output. The build is
 skipped on Linux and macOS. Windows x64 and ARM64 outputs are selected by
 the Node architecture; only x64 was tested on the development machine.
 
+If preparing the sensors fails (offline, a proxy, an unsupported system), the
+build prints a warning and carries on: the resource monitor then uses the
+operating system's readings, and `npm run build:sensors` tries again. Set
+`SFAGENTS_REQUIRE_SENSORS=1` when packaging so a failure stops the build.
+
 The output is `web/native/bin/win-<architecture>/`. It is ignored by Git but
 included in the web npm package, together with adapter source and license
 notices. Build on the target Windows architecture before packaging. Publish
