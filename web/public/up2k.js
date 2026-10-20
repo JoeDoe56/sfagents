@@ -118,7 +118,11 @@ let nextId = 1;
  * cancelled). `progress` is 0..1 over hashing and uploading together.
  */
 export class UploadJob {
-  constructor(file, onChange) {
+  /** @param {{dest?: string}} [options] dest: a folder on the computer to upload into (the file manager) instead of an attachment */
+  constructor(file, onChange, options = {}) {
+    this.dest = options.dest ?? null;
+    /** For an upload into a folder: { path, name, size } once done. */
+    this.placed = null;
     this.id = `j${nextId++}`;
     this.file = file;
     this.name = file.name || 'file';
@@ -195,7 +199,8 @@ export class UploadJob {
     for (let round = 0; round < 4; round++) {
       const hs = await this.handshake(hashes);
       if (hs.done) {
-        this.attachment = hs.attachment;
+        this.attachment = hs.attachment ?? null;
+        this.placed = hs.file ?? null;
         this.state = 'done';
         this.changed();
         return;
@@ -208,7 +213,7 @@ export class UploadJob {
   async handshake(hashes) {
     for (let attempt = 0; ; attempt++) {
       try {
-        const hs = await postJson('/api/up2k/handshake', { name: this.name, size: this.size, mime: this.mime, lmod: this.file.lastModified, hashes });
+        const hs = await postJson('/api/up2k/handshake', { name: this.name, size: this.size, mime: this.mime, lmod: this.file.lastModified, hashes, ...(this.dest ? { dest: this.dest } : {}) });
         this.wark = hs.wark;
         return hs;
       } catch (error) {

@@ -26,6 +26,8 @@ export const GLYPHS = [
   'square.and.arrow.down', 'arrow.up.right.square', 'ellipsis', 'waveform', 'music.note', 'film',
   'archivebox', 'gauge', 'text.alignleft', 'scribble', 'gear',
   'desktopcomputer', 'arrow.up.left.and.arrow.down.right', 'arrow.down',
+  // Monitor windows and the file manager
+  'speedometer', 'cube', 'rectangle.stack', 'tray.2.fill', 'wifi', 'sparkles', 'chevron.left', 'chevron.right', 'chevron.down', 'chevron.up', 'magnifyingglass', 'arrow.up.arrow.down', 'stop.circle', 'xmark.octagon', 'slider.horizontal.3', 'person.crop.circle', 'person.2', 'play.fill', 'arrow.clockwise', 'folder.fill', 'doc.fill', 'doc.text.fill', 'archivebox.fill', 'play.rectangle.fill', 'textformat', 'app', 'tray.full.fill', 'trash', 'trash.fill', 'arrow.uturn.left', 'square.and.arrow.up', 'tray.and.arrow.up', 'tray.and.arrow.down', 'pencil', 'plus.square.on.square', 'folder.badge.plus', 'square.and.pencil', 'info.circle', 'doc.on.doc', 'scissors', 'doc.on.clipboard', 'link', 'eye', 'eye.slash', 'star', 'star.fill', 'house.fill', 'arrow.down.circle', 'photo.on.rectangle', 'music.note.list', 'tv', 'clock', 'ellipsis.circle', 'checkmark.circle', 'checkmark.circle.fill', 'circle', 'square.grid.2x2', 'lock', 'cube.box', 'arrow.down.right.and.arrow.up.left', 'arrow.up', 'xmark',
 ];
 
 if (!fs.existsSync(path.join(source, 'src', 'index.js'))) {

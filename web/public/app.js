@@ -14,6 +14,9 @@ import { renderTiles, createViewer } from './artifacts.js';
 import { UploadJob } from './up2k.js';
 import { createRail } from './rail.js';
 import { createMonitor } from './monitor.js';
+import { openMonitorWindow } from './windows.js';
+import { peekOpen } from './peek.js';
+import { createFileManager } from './files.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -170,12 +173,16 @@ const monitor = createMonitor({
   expandButton: $('monExpand'),
   // Drives arriving or leaving change the monitor's height.
   onDrivesChange: () => glassApi.glass.requestRender(),
+  // A stat opens its window straight from the sheet.
+  onOpen: (key, cell) => openMonitorWindow(key, { from: cell, openInFiles: (path, opts) => openFiles(path, opts) }),
 });
 /** Read the machine only while the sheet (and so the monitor) is open. */
 function updateMonitor() {
-  monitor.setActive(sheet.detent !== 'collapsed' && !document.hidden);
+  // Paused under a window: the window reads the same things in more detail.
+  monitor.setActive(sheet.detent !== 'collapsed' && !document.hidden && !peekOpen() && !document.body.classList.contains('files-open'));
 }
 document.addEventListener('visibilitychange', updateMonitor);
+window.addEventListener('peekchange', updateMonitor);
 window.sfagents.monitor = monitor;
 
 // ------------------------------------------------------------------ time stamps
@@ -847,6 +854,54 @@ function addFiles(files) {
   input.focus();
 }
 
+/** Adds a file that is already on the server (the file manager's "Ask SF Agents") to the message. */
+function addAttachmentRef(ref) {
+  if (pending.length >= state.limits.maxAttachments) {
+    notice(`At most ${state.limits.maxAttachments} attachments per message.`, 'error');
+    return;
+  }
+  const el = document.createElement('div');
+  el.className = 'pending';
+  if (/^image\//.test(ref.mime ?? '')) {
+    const img = document.createElement('img');
+    img.src = `/api/uploads/${encodeURIComponent(ref.id)}`;
+    img.alt = ref.name;
+    el.append(img);
+  } else {
+    const f = document.createElement('div');
+    f.className = 'file';
+    const icon = document.createElement('i');
+    applySymbol(icon, /^video\//.test(ref.mime ?? '') ? 'film' : /^audio\//.test(ref.mime ?? '') ? 'music.note' : 'doc', { size: 22 });
+    const name = document.createElement('span');
+    name.textContent = ref.name;
+    f.append(icon, name);
+    el.append(f);
+  }
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = /^image\//.test(ref.mime ?? '') ? '' : formatBytes(ref.size ?? 0);
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'remove';
+  remove.setAttribute('aria-label', `Remove ${ref.name}`);
+  const x = document.createElement('i');
+  applySymbol(x, 'xmark', { size: 10 });
+  remove.append(x);
+  el.append(label, remove);
+  // Already uploaded: a finished job.
+  const job = { state: 'done', attachment: ref, size: ref.size ?? 0, progress: 1, promise: Promise.resolve(ref), cancel() {} };
+  const entry = { el, url: '', job };
+  remove.addEventListener('click', () => {
+    const i = pending.indexOf(entry);
+    if (i >= 0) pending.splice(i, 1);
+    el.remove();
+    updateComposer();
+  });
+  pending.push(entry);
+  attachmentsEl.append(el);
+  updateComposer();
+}
+
 attachBtn.addEventListener('click', () => picker.click());
 picker.addEventListener('change', () => {
   addFiles([...picker.files]);
@@ -1016,3 +1071,38 @@ if (vv) {
 autosize();
 updateComposer();
 connect();
+
+// ------------------------------------------------------------------ file manager
+
+const fileManager = createFileManager({
+  quality: () => settings.quality,
+  openWindow: (key, from, openInFiles) => openMonitorWindow(key, { from, openInFiles }),
+  attach: (ref) => addAttachmentRef(ref),
+  onOpenChange: (open) => {
+    document.body.classList.toggle('files-open', open);
+    updateMonitor();
+  },
+});
+window.sfagents.files = fileManager;
+
+/** Opens the file manager at `path` (from a window's "Show in Files", a drive), growing out of the monitor. */
+function openFiles(path, opts = {}) {
+  if (fileManager.isOpen) fileManager.navigate(path, opts);
+  else fileManager.open({ path, select: opts.select ?? null, from: $('monitor') });
+}
+
+const expand = $('monExpand');
+expand.removeAttribute('aria-disabled');
+expand.setAttribute('aria-label', 'Open Files');
+expand.addEventListener('click', () => fileManager.open({ from: $('monitor') }));
+// A drive bar opens that drive.
+const drivesEl = $('monitor').querySelector('.mon-drives');
+const openDrive = (e) => {
+  const drive = e.target.closest('.drive');
+  if (!drive?.dataset.mount) return;
+  if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  openFiles(drive.dataset.mount);
+};
+drivesEl.addEventListener('click', openDrive);
+drivesEl.addEventListener('keydown', openDrive);

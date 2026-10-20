@@ -19,7 +19,6 @@ import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { createContentTransitions } from './vendor/sfgl/src/transitions/content.js';
 
 const POLL_MS = 2000;
-const DASH = '—';
 
 /** Cells in reading order; each has a value line and up to two smaller lines. */
 const STATS = [
@@ -33,55 +32,9 @@ const STATS = [
   { key: 'sfagents', label: 'SF Agents' },
 ];
 
-// ------------------------------------------------------------------ formatting
+import { DASH, formatBytes, formatUsedTotal, formatRate, formatDuration, percent, percentText, temperature } from './format.js';
 
-/**
- * Sizes as the platform's own tools show them: decimal units on macOS (as
- * Finder does), binary elsewhere (as Windows and `df -h` do, labelled GB).
- * Memory and VRAM are always binary: a 16 GB module is 16 × 1024³ bytes.
- */
-export function formatBytes(n, binary = true) {
-  if (!Number.isFinite(n) || n < 0) return { num: DASH, unit: '', scale: 1 };
-  const step = binary ? 1024 : 1000;
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  let i = 0;
-  while (n >= step ** (i + 1) * 0.9995 && i < units.length - 1) i++;
-  const v = n / step ** i;
-  const num = i === 0 ? String(Math.round(v)) : v < 10 ? v.toFixed(1) : String(Math.round(v));
-  return { num, unit: units[i], scale: step ** i };
-}
-
-/** "3.5/8.0 GB": both in the total's unit. */
-export function formatUsedTotal(used, total, binary = true) {
-  if (!Number.isFinite(used) || !(total > 0)) return DASH;
-  const t = formatBytes(total, binary);
-  const u = used / t.scale;
-  const digits = Number(t.num) < 10 ? 1 : 0;
-  return `${u.toFixed(digits)}/${t.num} ${t.unit}`;
-}
-
-export function formatRate(n) {
-  if (!Number.isFinite(n)) return { num: DASH, unit: '' };
-  // Below a kilobyte a second reads as idle.
-  if (n < 1000) return { num: '0', unit: 'KB/s' };
-  const b = formatBytes(n, false);
-  return { num: b.num, unit: `${b.unit}/s` };
-}
-
-export function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return DASH;
-  const m = Math.floor(seconds / 60);
-  const h = Math.floor(m / 60);
-  const d = Math.floor(h / 24);
-  if (d > 0) return `${d}d ${h % 24}h`;
-  if (h > 0) return `${h}h ${m % 60}m`;
-  if (m > 0) return `${m}m`;
-  return '<1m';
-}
-
-const percent = (x) => (Number.isFinite(x) ? String(Math.round(Math.max(0, Math.min(1, x)) * 100)) : DASH);
-const percentText = (x) => (Number.isFinite(x) ? `${percent(x)}%` : DASH);
-const temperature = (c) => (Number.isFinite(c) ? `${Math.round(c)} °C` : null);
+export { formatBytes, formatUsedTotal, formatRate, formatDuration };
 
 /**
  * What each cell shows: the value (number, unit, and an optional symbol or
@@ -175,7 +128,7 @@ function setMark(node, item, size) {
   node.classList.toggle('tag', !!item.tag);
 }
 
-export function createMonitor({ root, expandButton, onDrivesChange }) {
+export function createMonitor({ root, expandButton, onDrivesChange, onOpen }) {
   const host = root.querySelector('.mon-host');
   const statsEl = root.querySelector('.mon-stats');
   const drivesEl = root.querySelector('.mon-drives');
@@ -184,6 +137,19 @@ export function createMonitor({ root, expandButton, onDrivesChange }) {
   for (const stat of STATS) {
     const cell = el('div', `stat${stat.wide ? ' wide' : ''}`);
     cell.dataset.stat = stat.key;
+    // Each stat opens its window (graphs and details).
+    if (onOpen) {
+      cell.tabIndex = 0;
+      cell.setAttribute('role', 'button');
+      cell.setAttribute('aria-label', `${stat.label} details`);
+      cell.addEventListener('click', () => onOpen(stat.key, cell));
+      cell.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen(stat.key, cell);
+        }
+      });
+    }
     const label = el('span', 'stat-label', stat.label);
     const value = el('span', 'stat-value');
     const mark = el('span', 'stat-mark');
@@ -223,6 +189,9 @@ export function createMonitor({ root, expandButton, onDrivesChange }) {
       let entry = driveNodes.get(d.mount);
       if (!entry) {
         const node = el('div', 'drive');
+        node.dataset.mount = d.mount;
+        node.setAttribute('role', 'button');
+        node.tabIndex = 0;
         const top = el('div', 'drive-top');
         const name = el('span', 'drive-name');
         const figures = el('span', 'drive-figures');
@@ -311,10 +280,6 @@ export function createMonitor({ root, expandButton, onDrivesChange }) {
     }
   }
 
-  expandButton.addEventListener('click', () => {
-    // The file manager is not built yet; the button shows where it will open.
-    expandButton.animate?.([{ transform: 'scale(1)' }, { transform: 'scale(0.86)' }, { transform: 'scale(1)' }], { duration: 220, easing: 'ease-out' });
-  });
 
   return {
     /** Polls while the monitor is on screen. */

@@ -131,6 +131,8 @@ export class Up2kStore {
   private readonly partials = new Map<string, PartialUpload>();
   /** attachment id → ref, for every completed upload. */
   private readonly completed = new Map<string, AttachmentRef>();
+  /** Uploads into folders finished recently (the client's closing handshake reads them). */
+  private readonly placed = new Map<string, { file: PlacedFile; at: number }>();
 
   constructor(
     /** The conversation state directory (".sfagents"). */
@@ -217,6 +219,14 @@ export class Up2kStore {
     const mime = safeMime(req.mime);
     const wark = this.wark(size, hashes, dest);
 
+    if (dest) {
+      for (const [w, p] of this.placed) if (Date.now() - p.at > 10 * 60_000) this.placed.delete(w);
+      const recent = this.placed.get(wark);
+      if (recent && fs.existsSync(recent.file.path)) {
+        this.placed.delete(wark);
+        return { wark, chunkSize, needed: [], done: true, file: recent.file };
+      }
+    }
     const existing = dest ? undefined : this.readDone(wark);
     if (existing) {
       this.completed.set(existing.id, existing);
@@ -379,7 +389,9 @@ export class Up2kStore {
     }
     await fsp.rm(path.join(this.partialDir, `${p.meta.wark}.json`), { force: true });
     this.partials.delete(p.meta.wark);
-    return { path: target, name, size: p.meta.size };
+    const file = { path: target, name, size: p.meta.size };
+    this.placed.set(p.meta.wark, { file, at: Date.now() });
+    return file;
   }
 
   async close(): Promise<void> {
