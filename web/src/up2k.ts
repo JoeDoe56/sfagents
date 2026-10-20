@@ -16,7 +16,9 @@
  *     a sparse file; there is no merge step.
  *  4. When every chunk has arrived, the file is moved to
  *     `uploads/<id>/<name>` and becomes an attachment that messages can
- *     reference. A later handshake returns it directly.
+ *     reference. A later handshake returns it directly. An upload made
+ *     into a folder (the file manager's Upload) is moved there instead,
+ *     keeping both if the name is taken.
  *
  * Partial uploads survive server restarts (state is kept beside the sparse
  * file) and are discarded after a week without activity.
@@ -83,6 +85,14 @@ export interface HandshakeResponse {
   needed: string[];
   done: boolean;
   attachment?: AttachmentRef;
+  /** For an upload into a folder: where the finished file is. */
+  file?: PlacedFile;
+}
+
+export interface PlacedFile {
+  path: string;
+  name: string;
+  size: number;
 }
 
 interface PartialMeta {
@@ -94,6 +104,8 @@ interface PartialMeta {
   chunkSize: number;
   hashes: string[];
   received: string[];
+  /** The folder the finished file goes into (instead of becoming an attachment). */
+  dest?: string;
 }
 
 interface PartialUpload {
@@ -104,7 +116,7 @@ interface PartialUpload {
   fd?: fsp.FileHandle;
   writing: number;
   saveChain: Promise<void>;
-  finishing?: Promise<AttachmentRef>;
+  finishing?: Promise<AttachmentRef | PlacedFile>;
 }
 
 function safeMime(mime: unknown): string {
@@ -169,8 +181,10 @@ export class Up2kStore {
     return this.completed.get(id);
   }
 
-  wark(size: number, hashes: readonly string[]): string {
-    return createHash('sha512').update(`${this.salt}\n${size}\n${hashes.join('\n')}`).digest().subarray(0, 33).toString('base64url');
+  wark(size: number, hashes: readonly string[], dest?: string): string {
+    // An upload into a folder is its own upload, so the same file can go to two places.
+    const text = `${this.salt}\n${size}\n${hashes.join('\n')}${dest ? `\n${dest}` : ''}`;
+    return createHash('sha512').update(text).digest().subarray(0, 33).toString('base64url');
   }
 
   private donePath(wark: string): string {
@@ -186,7 +200,8 @@ export class Up2kStore {
     }
   }
 
-  async handshake(body: unknown): Promise<HandshakeResponse> {
+  /** @param dest an existing folder (validated by the caller) to upload into, instead of making an attachment. */
+  async handshake(body: unknown, dest?: string): Promise<HandshakeResponse> {
     const req = body as { [K in keyof HandshakeRequest]?: unknown } | null;
     if (!req || typeof req !== 'object') throw new Up2kError('Expected a JSON object.');
     const name = typeof req.name === 'string' ? req.name.slice(0, 255) : '';
@@ -200,18 +215,18 @@ export class Up2kStore {
     const expected = Math.ceil(size / chunkSize);
     if (hashes.length !== expected) throw new Up2kError(`Expected ${expected} chunk hashes for ${size} bytes (chunk size ${chunkSize}), got ${hashes.length}.`);
     const mime = safeMime(req.mime);
-    const wark = this.wark(size, hashes);
+    const wark = this.wark(size, hashes, dest);
 
-    const existing = this.readDone(wark);
+    const existing = dest ? undefined : this.readDone(wark);
     if (existing) {
       this.completed.set(existing.id, existing);
       return { wark, chunkSize, needed: [], done: true, attachment: existing };
     }
-    const partial = await this.openPartial({ wark, name, size, mime, lmod: typeof req.lmod === 'number' ? req.lmod : undefined, chunkSize, hashes, received: [] });
+    const partial = await this.openPartial({ wark, name, size, mime, lmod: typeof req.lmod === 'number' ? req.lmod : undefined, chunkSize, hashes, received: [], ...(dest ? { dest } : {}) });
     const needed = [...new Set(hashes.filter((h) => !partial.received.has(h)))];
     if (needed.length === 0) {
-      const attachment = await this.finish(partial);
-      return { wark, chunkSize, needed: [], done: true, attachment };
+      const outcome = await this.finish(partial);
+      return { wark, chunkSize, needed: [], done: true, ...outcome };
     }
     return { wark, chunkSize, needed, done: false };
   }
@@ -258,7 +273,7 @@ export class Up2kStore {
    * more consecutive chunk hashes, comma-separated). Returns how many
    * chunks are still missing; finishes the upload when none are.
    */
-  async receive(wark: string, hashHeader: string, req: IncomingMessage): Promise<{ remaining: number; attachment?: AttachmentRef }> {
+  async receive(wark: string, hashHeader: string, req: IncomingMessage): Promise<{ remaining: number; attachment?: AttachmentRef; file?: PlacedFile }> {
     const p = this.partials.get(wark);
     if (!p) throw new Up2kError('Unknown upload; send a handshake first.', 404);
     const hashes = hashHeader.split(',').map((h) => h.trim());
@@ -298,11 +313,16 @@ export class Up2kStore {
     }
     await this.saveMeta(p);
     const remaining = new Set(p.meta.hashes.filter((h) => !p.received.has(h))).size;
-    if (remaining === 0) return { remaining, attachment: await this.finish(p) };
+    if (remaining === 0) return { remaining, ...(await this.finish(p)) };
     return { remaining };
   }
 
-  private finish(p: PartialUpload): Promise<AttachmentRef> {
+  private async finish(p: PartialUpload): Promise<{ attachment?: AttachmentRef; file?: PlacedFile }> {
+    const done = await this.complete(p);
+    return 'id' in done ? { attachment: done } : { file: done };
+  }
+
+  private complete(p: PartialUpload): Promise<AttachmentRef | PlacedFile> {
     if (!p.finishing) {
       p.finishing = (async () => {
         while (p.writing > 0) await new Promise((r) => setTimeout(r, 5));
@@ -317,6 +337,7 @@ export class Up2kStore {
           await fd.sync();
           await fd.close();
         }
+        if (p.meta.dest) return this.place(p, dataFile, p.meta.dest);
         const id = `u${createHash('sha256').update(p.meta.wark).digest('hex').slice(0, 16)}`;
         const rel = `uploads/${id}/${safeFilename(p.meta.name, 'upload')}`;
         const target = path.join(this.stateDir, rel);
@@ -335,6 +356,30 @@ export class Up2kStore {
       })();
     }
     return p.finishing;
+  }
+
+  /** Moves a finished upload into its folder under a free name ("Photo 2.jpg" if "Photo.jpg" exists). */
+  private async place(p: PartialUpload, dataFile: string, dest: string): Promise<PlacedFile> {
+    const ext = path.extname(p.meta.name);
+    const clean = safeFilename(p.meta.name, 'upload');
+    const stem = ext && ext !== clean ? clean.slice(0, -ext.length) : clean;
+    let name = clean;
+    for (let i = 2; fs.existsSync(path.join(dest, name)); i++) name = `${stem} ${i}${ext}`;
+    const target = path.join(dest, name);
+    try {
+      await fsp.rename(dataFile, target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw new Up2kError(`Could not save into the folder: ${(error as Error).message}`, 500);
+      await fsp.copyFile(dataFile, target, fs.constants.COPYFILE_EXCL);
+      await fsp.rm(dataFile, { force: true });
+    }
+    if (p.meta.lmod && Number.isFinite(p.meta.lmod)) {
+      const t = new Date(p.meta.lmod);
+      await fsp.utimes(target, t, t).catch(() => undefined);
+    }
+    await fsp.rm(path.join(this.partialDir, `${p.meta.wark}.json`), { force: true });
+    this.partials.delete(p.meta.wark);
+    return { path: target, name, size: p.meta.size };
   }
 
   async close(): Promise<void> {

@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { lhmReadings, type LhmReadings, type LhmReader } from './lhm.js';
+import { lhmReadings, type LhmReadings, type LhmReader, type LhmSensor } from './lhm.js';
 import { WindowsSensorClient } from './windows-sensors.js';
 import { LinuxSensorClient } from './linux-sensors.js';
 
@@ -346,6 +346,8 @@ export class SystemMonitor {
   private physicalCores: Promise<number | null> | undefined;
   private readonly startedAt = Date.now();
   private readonly lhm: LhmReader | null;
+  /** The last sensor list from Libre Hardware Monitor (for the detail windows). */
+  private sensors: LhmSensor[] | null = null;
 
   constructor(
     private readonly source: SystemSource = nodeSystemSource(),
@@ -371,8 +373,19 @@ export class SystemMonitor {
     await this.lhm?.close?.();
   }
 
+  /** Every sensor from the last reading (null when Libre Hardware Monitor is not in use). */
+  lastSensors(): LhmSensor[] | null {
+    return this.sensors;
+  }
+
+  /** What the monitor reads the machine through (for the detail windows' own readers). */
+  get systemSource(): SystemSource {
+    return this.source;
+  }
+
   private async take(): Promise<SystemSnapshot> {
     const sensors = this.lhm ? await this.lhm.read() : null;
+    this.sensors = sensors;
     if (sensors) {
       // Linux collectors omit disk/network rates and approximate CPU load from
       // loadavg. Keep real utilization deltas and missing AMD/sysfs readings.

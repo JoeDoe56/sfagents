@@ -35,6 +35,10 @@ import {
 } from '@sfagents/core';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
+import { FileError, FileService, INLINE_MIME, type Conflict } from './files.js';
+import { writeZip, zipSourcesFor } from './zip.js';
+import { PerformanceMonitor } from './performance.js';
+import { ProcessError, ProcessMonitor } from './processes.js';
 import { LhmClient } from './lhm.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
@@ -55,6 +59,7 @@ export function parsePublicOrigin(value: string): string {
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_CHARS = 400_000;
 const MAX_ATTACHMENTS = 20;
+const MAX_ATTACH_FROM_FILES = 50 * 1024 * 1024;
 
 export const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -127,6 +132,12 @@ const CONTENT_TYPES: Record<string, string> = {
 const INLINE_TYPES = /^(image\/(png|jpeg|gif|webp|svg\+xml|avif)|text\/|application\/(json|pdf|xml)|video\/(mp4|webm)|audio\/)/;
 
 const SANDBOX_CSP = "sandbox allow-scripts allow-popups allow-forms allow-modals allow-downloads; base-uri 'none'";
+/**
+ * Files from the computer open with no scripts at all (an HTML or SVG file
+ * shows its markup and styles only). PDFs are left to the browser's viewer,
+ * which a sandbox would block.
+ */
+const FILE_CSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; font-src 'self' data:";
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const data = JSON.stringify(body);
@@ -179,6 +190,11 @@ export class WebServer {
   private readonly publicHost?: string;
   private runPromise: Promise<void> | undefined;
   private readonly system: SystemMonitor;
+  private readonly files: FileService;
+  private readonly performance: PerformanceMonitor;
+  private readonly processes: ProcessMonitor;
+  private readonly startedAt = Date.now();
+  private cpuMark = { at: Date.now(), usage: process.cpuUsage() };
 
   constructor(private readonly options: WebServerOptions) {
     if (!options.conversation.dir || !options.conversation.file) throw new Error('The web interface needs a persistent conversation.');
@@ -203,6 +219,9 @@ export class WebServer {
       log: this.log,
     });
     this.up2k = new Up2kStore(options.conversation.dir, options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES);
+    this.files = new FileService({ stateDir: options.conversation.dir, projectDir: options.tree.configDir });
+    this.performance = new PerformanceMonitor(this.system);
+    this.processes = new ProcessMonitor(this.system.systemSource);
     this.artifactSignature = this.signature();
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((error: unknown) => this.fail(res, error));
@@ -246,6 +265,7 @@ export class WebServer {
   async close(): Promise<void> {
     if (this.heartbeat) clearInterval(this.heartbeat);
     await this.system.close();
+    this.processes.close();
     this.live?.controller.abort(new Error('server stopping'));
     for (const a of this.approvals.values()) a.resolve('deny');
     await this.runPromise?.catch(() => undefined);
@@ -292,6 +312,8 @@ export class WebServer {
     }
     if (error instanceof HttpError) return sendJson(res, error.status, { error: error.message });
     if (error instanceof Up2kError) return sendJson(res, error.status, { error: error.message });
+    if (error instanceof ProcessError) return sendJson(res, error.status, { error: error.message });
+    if (error instanceof FileError) return sendJson(res, error.status, { error: error.message, ...(error.details && typeof error.details === 'object' ? error.details : {}) });
     if (error instanceof ArtifactError) return sendJson(res, 404, { error: error.message });
     this.log(`web: ${getErrorMessage(error)}`);
     sendJson(res, 500, { error: getErrorMessage(error) });
@@ -314,9 +336,26 @@ export class WebServer {
           const before = Number(url.searchParams.get('before'));
           return sendJson(res, 200, displayItems(this.conversation.state, { before: Number.isFinite(before) && before > 0 ? before : undefined, limit: 200 }));
         }
+        case 'GET files':
+          this.checkFetchSite(req);
+          return this.getFiles(parts[1] ?? '', url, req, res);
+        case 'POST files':
+          return this.postFiles(parts[1] ?? '', parts[2], req, res);
         case 'GET system':
-          // Resource use for the monitor in the sheet (read-only; the Host check keeps other sites out).
-          return sendJson(res, 200, await this.system.read());
+          this.checkFetchSite(req);
+          return this.getSystem(parts[1], res);
+        case 'POST system':
+          return this.postSystem(parts[1] ?? '', req, res);
+        case 'GET processes':
+          this.checkFetchSite(req);
+          if (parts[1]) return sendJson(res, 200, await this.processes.detail(parts[1]));
+          return sendJson(res, 200, await this.processes.list());
+        case 'POST processes': {
+          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+          if (parts[2] === 'end') return sendJson(res, 200, await this.processes.end(parts[1], { force: body.force === true, tree: body.tree === true }));
+          if (parts[2] === 'priority') return sendJson(res, 200, this.processes.setPriority(parts[1], body.level));
+          throw new HttpError(404, 'Not found.');
+        }
         case 'GET events':
           return this.openEvents(req, res);
         case 'POST messages':
@@ -341,13 +380,17 @@ export class WebServer {
         case 'GET uploads':
           return this.serveUpload(parts[1] ?? '', res);
         case 'POST up2k': {
-          if (parts[1] === 'handshake') return sendJson(res, 200, await this.up2k.handshake(await readJson(req)));
+          if (parts[1] === 'handshake') {
+            const body = await readJson(req);
+            const dest = body && typeof body === 'object' && 'dest' in body ? await this.files.uploadFolder((body as { dest: unknown }).dest) : undefined;
+            return sendJson(res, 200, await this.up2k.handshake(body, dest));
+          }
           if (parts[1] === 'chunk') {
             const wark = String(req.headers['x-up2k-wark'] ?? '');
             const hash = String(req.headers['x-up2k-hash'] ?? '');
             if (!wark || !hash) throw new HttpError(400, 'X-Up2k-Wark and X-Up2k-Hash are required.');
             const r = await this.up2k.receive(wark, hash, req);
-            return sendJson(res, 200, { remaining: r.remaining, ...(r.attachment ? { attachment: displayAttachment(r.attachment) } : {}) });
+            return sendJson(res, 200, { remaining: r.remaining, ...(r.attachment ? { attachment: displayAttachment(r.attachment) } : {}), ...(r.file ? { file: r.file } : {}) });
           }
           throw new HttpError(404, 'Not found.');
         }
@@ -357,6 +400,250 @@ export class WebServer {
     }
     if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
     return this.serveStatic(p, req, res);
+  }
+
+  /**
+   * Reads of the computer's files and processes come only from this app's
+   * own pages: a browser says where a request comes from in Sec-Fetch-Site,
+   * so another site cannot even probe for a file with an <img> tag.
+   */
+  private checkFetchSite(req: IncomingMessage): void {
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin' && site !== 'none') throw new HttpError(403, 'Cross-site requests are not allowed.');
+  }
+
+  // ---------------------------------------------------------------------------
+  // System monitor windows
+
+  private async getSystem(action: string | undefined, res: ServerResponse): Promise<void> {
+    switch (action ?? '') {
+      case '': {
+        // Resource use for the monitor in the sheet.
+        const snapshot = await this.system.read();
+        this.performance.record(snapshot);
+        return sendJson(res, 200, snapshot);
+      }
+      case 'detail':
+        return sendJson(res, 200, await this.performance.detail());
+      case 'users':
+        return sendJson(res, 200, await this.processes.users());
+      case 'services':
+        return sendJson(res, 200, await this.processes.services());
+      case 'startup':
+        return sendJson(res, 200, await this.processes.startup());
+      case 'sfagents':
+        return sendJson(res, 200, this.selfInfo());
+      default:
+        throw new HttpError(404, 'Not found.');
+    }
+  }
+
+  private async postSystem(action: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+    if (action === 'services') return sendJson(res, 200, await this.processes.service(body.name, body.action, body.scope));
+    if (action === 'startup') return sendJson(res, 200, await this.processes.setStartup(body.id, body.enabled === true));
+    throw new HttpError(404, 'Not found.');
+  }
+
+  /** SF Agents' own process and conversation, for its window in the monitor. */
+  private selfInfo() {
+    const now = Date.now();
+    const usage = process.cpuUsage(this.cpuMark.usage);
+    const elapsed = Math.max(1, now - this.cpuMark.at) * 1000;
+    const cpu = Math.min(1, (usage.user + usage.system) / elapsed / Math.max(1, (this.system.systemSource.cpus().length)));
+    this.cpuMark = { at: now, usage: process.cpuUsage() };
+    const memory = process.memoryUsage();
+    const root = this.options.tree.root.definition;
+    const state = this.conversation.state;
+    let size: number | null = null;
+    try {
+      size = this.conversation.file ? fs.statSync(this.conversation.file).size : null;
+    } catch {
+      size = null;
+    }
+    return {
+      pid: process.pid,
+      uptime: Math.round((now - this.startedAt) / 1000),
+      cpu,
+      memory: { rss: memory.rss, heapUsed: memory.heapUsed, heapTotal: memory.heapTotal, external: memory.external },
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      url: `http://${this.host.includes(':') ? `[${this.host}]` : this.host}:${this.port}`,
+      publicOrigin: this.publicOrigin ?? null,
+      agent: { id: root.id, model: root.model, provider: root.provider, agents: this.options.tree.byId.size },
+      conversation: {
+        file: this.conversation.file,
+        size,
+        messages: state.messages.length,
+        artifacts: this.conversation.artifacts().length,
+        sections: displaySections(state).length,
+      },
+      running: this.live ? { id: this.live.id } : null,
+      approvals: this.approvals.size,
+      clients: this.clients.size,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Files
+
+  private async getFiles(action: string, url: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const q = url.searchParams;
+    const hidden = q.get('hidden') === '1';
+    switch (action) {
+      case 'locations': {
+        const locations = await this.files.locations();
+        const drives = (await this.system.read().catch(() => undefined))?.drives ?? [];
+        return sendJson(res, 200, { ...locations, drives, platform: this.files.platform });
+      }
+      case 'list':
+        return sendJson(res, 200, await this.files.list(q.get('path'), { hidden }));
+      case 'info':
+        return sendJson(res, 200, await this.files.info(q.get('path')));
+      case 'size':
+        return sendJson(res, 200, await this.files.folderSize(q.get('path')));
+      case 'search':
+        return sendJson(res, 200, await this.files.search(q.get('path'), q.get('q'), { hidden }));
+      case 'text':
+        return sendJson(res, 200, await this.files.readText(q.get('path')));
+      case 'raw':
+        return this.serveFile(await this.files.openForRead(q.get('path')), q.has('download'), req, res);
+      case 'zip':
+        return this.serveZip(q.getAll('path'), res);
+      case 'jobs': {
+        const job = this.files.job(q.get('id') ?? '');
+        if (!job) throw new HttpError(404, 'No such job.');
+        return sendJson(res, 200, job);
+      }
+      default:
+        throw new HttpError(404, 'Not found.');
+    }
+  }
+
+  private async postFiles(action: string, sub: string | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+    const conflict = (['ask', 'replace', 'keep', 'skip'].includes(String(body.conflict)) ? body.conflict : 'ask') as Conflict;
+    const f = this.files;
+    switch (action) {
+      case 'mkdir':
+        return sendJson(res, 200, await f.mkdir(body.dir, body.name));
+      case 'create':
+        return sendJson(res, 200, await f.createFile(body.dir, body.name, body.text ?? ''));
+      case 'rename':
+        return sendJson(res, 200, await f.rename(body.path, body.name));
+      case 'text':
+        return sendJson(res, 200, await f.writeText(body.path, body.text, body.modified, body.force === true));
+      case 'copy':
+        return sendJson(res, 200, await f.copy(body.paths, body.dest, conflict));
+      case 'move':
+        return sendJson(res, 200, await f.move(body.paths, body.dest, conflict));
+      case 'duplicate':
+        return sendJson(res, 200, await f.duplicate(body.paths));
+      case 'trash':
+        return sendJson(res, 200, await f.moveToTrash(body.paths));
+      case 'delete':
+        return sendJson(res, 200, await f.remove(body.paths));
+      case 'restore':
+        return sendJson(res, 200, await f.restore(body.paths));
+      case 'empty-trash':
+        return sendJson(res, 200, await f.emptyTrash());
+      case 'compress':
+        return sendJson(res, 200, await f.compress(body.paths, body.dest));
+      case 'extract':
+        return sendJson(res, 200, await f.extract(body.path, body.dest));
+      case 'jobs':
+        if (sub !== 'cancel') throw new HttpError(404, 'Not found.');
+        return sendJson(res, 200, { cancelled: f.cancel(String(body.id ?? '')) });
+      case 'attach': {
+        // "Ask SF Agents": a copy of the file becomes an attachment for the composer.
+        const file = await f.openForRead(body.path);
+        if (file.size > MAX_ATTACH_FROM_FILES) throw new HttpError(413, 'The file is too large to attach (over 50 MB).');
+        const ref = this.conversation.addUpload(path.basename(file.path), file.type.mime, await fs.promises.readFile(file.path));
+        return sendJson(res, 200, { attachment: displayAttachment(ref) });
+      }
+      default:
+        throw new HttpError(404, 'Not found.');
+    }
+  }
+
+  /** Streams a file, with byte ranges (video and audio seek with them; Safari requires them). */
+  private serveFile(file: { path: string; size: number; modified: number; type: { mime: string } }, download: boolean, req: IncomingMessage, res: ServerResponse): void {
+    const name = path.basename(file.path);
+    const inline = !download && INLINE_MIME.test(file.type.mime);
+    const mime = file.type.mime;
+    const type = mime.startsWith('text/') || mime === 'application/json' || mime === 'application/xml' ? `${mime}; charset=utf-8` : mime;
+    const etag = `"${file.size.toString(36)}-${Math.floor(file.modified).toString(36)}"`;
+    const headers: Record<string, string | number> = {
+      'Content-Type': inline ? type : download ? 'application/octet-stream' : type,
+      'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`,
+      ...(mime === 'application/pdf' ? {} : { 'Content-Security-Policy': FILE_CSP }),
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, no-cache',
+      'Referrer-Policy': 'no-referrer',
+      'Accept-Ranges': 'bytes',
+      ETag: etag,
+      'Last-Modified': new Date(file.modified).toUTCString(),
+    };
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+    let start = 0;
+    let end = file.size - 1;
+    let status = 200;
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
+    if (range && file.size > 0 && (range[1] || range[2])) {
+      if (range[1]) {
+        start = Number(range[1]);
+        if (range[2]) end = Math.min(Number(range[2]), file.size - 1);
+      } else {
+        start = Math.max(0, file.size - Number(range[2]));
+      }
+      if (start > end || start >= file.size) {
+        res.writeHead(416, { 'Content-Range': `bytes */${file.size}` });
+        res.end();
+        return;
+      }
+      status = 206;
+      headers['Content-Range'] = `bytes ${start}-${end}/${file.size}`;
+    }
+    headers['Content-Length'] = file.size === 0 ? 0 : end - start + 1;
+    res.writeHead(status, headers);
+    if (req.method === 'HEAD' || file.size === 0) {
+      res.end();
+      return;
+    }
+    const stream = fs.createReadStream(file.path, { start, end });
+    stream.on('error', () => res.destroy());
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
+  }
+
+  /** Streams a ZIP archive of files and folders (downloading a folder or a selection). */
+  private async serveZip(input: string[], res: ServerResponse): Promise<void> {
+    const paths = this.files.paths(input);
+    for (const p of paths) await fs.promises.lstat(p).catch(() => {
+      throw new FileError(`"${path.basename(p)}" no longer exists.`, 404);
+    });
+    const name = paths.length === 1 ? `${path.basename(paths[0]!) || 'Archive'}.zip` : 'Archive.zip';
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-store',
+    });
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) controller.abort(new Error('client went away'));
+    });
+    try {
+      await writeZip(zipSourcesFor(paths, controller.signal), res, controller.signal);
+      res.end();
+    } catch {
+      res.destroy();
+    }
   }
 
   private serveStatic(p: string, req: IncomingMessage, res: ServerResponse): void {
