@@ -560,3 +560,7 @@
   .fm-drive-fill { transition: none; }
   .flash { animation: none; }
 }
+
+/* Toasts clear the drive bars and the selection toolbar. */
+.files-open .toast-host { bottom: calc(var(--safe-bottom) + 84px); }
+.fm:focus { outline: none; }

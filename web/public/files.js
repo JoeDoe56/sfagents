@@ -186,6 +186,7 @@ export function createFileManager(options) {
   root.setAttribute('role', 'dialog');
   root.setAttribute('aria-modal', 'true');
   root.setAttribute('aria-label', 'Files');
+  root.tabIndex = -1;
   const inner = el('div', 'fm-inner');
   root.append(inner);
 
@@ -444,9 +445,15 @@ export function createFileManager(options) {
 
   // ---------------------------------------------------------------- rendering
 
+  /** Where Back goes: the parent folder; Browse from the Trash and from the top. */
+  function upOf(p) {
+    if (p === null || p === state.locations?.trash) return null;
+    return parentOf(p);
+  }
+
   function renderHeader() {
     const p = state.path;
-    const up = p === null ? null : parentOf(p);
+    const up = upOf(p);
     back.hidden = p === null;
     back.querySelector('.fm-back-label').textContent = up ? baseName(up) : 'Browse';
     selectAll.hidden = !state.selecting;
@@ -530,7 +537,9 @@ export function createFileManager(options) {
             const detail = el('span', 'fm-place-drive');
             const bar = el('span', 'fm-drive-bar');
             const fill = el('span');
-            fill.style.width = `${((d.used / d.total) * 100).toFixed(1)}%`;
+            const frac = d.total > 0 ? d.used / d.total : 0;
+            fill.style.width = `${(frac * 100).toFixed(1)}%`;
+            if (frac >= 0.8) fill.style.background = frac >= 0.9 ? 'var(--red)' : 'var(--orange)';
             bar.append(fill);
             detail.append(bar, el('span', 'fm-place-detail', `${bytesText(d.total - d.used, loc.platform !== 'darwin')} free of ${bytesText(d.total, loc.platform !== 'darwin')}`));
             return placeRow(d.name, d.mount === '/' || /^C:/i.test(d.mount) ? 'desktopcomputer' : 'tray.full.fill', '#8e8e93', () => navigate(d.mount), detail, folderItem(d.mount));
@@ -564,7 +573,7 @@ export function createFileManager(options) {
     if (!entries.length) {
       const box = el('div', 'fm-empty');
       box.append(sym(state.query ? 'magnifyingglass' : 'folder', 34), el('p', '', state.query ? 'No items match.' : l.truncated ? '' : 'This folder is empty.'));
-      if (!state.query && l.writable) {
+      if (!state.query && l.writable && l.path !== state.locations?.trash) {
         const up = el('button', 'ui-button', 'Upload');
         up.type = 'button';
         up.addEventListener('click', () => picker.click());
@@ -1361,8 +1370,9 @@ export function createFileManager(options) {
     return (state.results ?? state.listing?.entries ?? []).find((e) => e.path === node.dataset.path) ?? null;
   }
 
-  root.addEventListener('keydown', (e) => {
-    if (!state.open || document.querySelector('.menu-layer, .dialog-layer, .ql-layer, .peek-layer, .fm-picker-layer')) return;
+  window.addEventListener('keydown', (e) => {
+    if (!state.open || e.defaultPrevented || document.querySelector('.menu-layer, .dialog-layer, .ql-layer, .peek-layer, .fm-picker-layer')) return;
+    if (e.target !== search && e.target.closest?.('input, textarea, [contenteditable="true"]')) return;
     if (e.target === search) {
       if (e.key === 'Escape') {
         search.value = '';
@@ -1404,7 +1414,7 @@ export function createFileManager(options) {
       quickLook(item);
     } else if (mod && e.key === 'ArrowUp' && state.path !== null) {
       e.preventDefault();
-      navigate(parentOf(state.path));
+      navigate(upOf(state.path));
     } else if (mod && e.key.toLowerCase() === 'i' && item) {
       e.preventDefault();
       getInfo(item);
@@ -1456,7 +1466,7 @@ export function createFileManager(options) {
 
   // ---------------------------------------------------------------- open / close
 
-  back.addEventListener('click', () => navigate(state.path === null ? null : parentOf(state.path)));
+  back.addEventListener('click', () => navigate(upOf(state.path)));
   selectAll.addEventListener('click', () => {
     const all = visibleEntries();
     if (state.selection.size === all.length) state.selection.clear();
@@ -1477,7 +1487,11 @@ export function createFileManager(options) {
   top.addEventListener('pointerdown', (e) => {
     if (e.target.closest('button')) return;
     pull = { id: e.pointerId, y: e.clientY, dy: 0, t: performance.now() };
-    top.setPointerCapture(e.pointerId);
+    try {
+      top.setPointerCapture(e.pointerId);
+    } catch {
+      // a synthetic or finished pointer
+    }
   });
   top.addEventListener('pointermove', (e) => {
     if (!pull || e.pointerId !== pull.id) return;
@@ -1568,7 +1582,7 @@ export function createFileManager(options) {
     pollStats();
     await refresh();
     pollList();
-    closeBtn.focus({ preventScroll: true });
+    root.focus({ preventScroll: true });
   }
 
   function close() {
