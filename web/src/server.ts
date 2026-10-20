@@ -40,6 +40,7 @@ import { writeZip, zipSourcesFor } from './zip.js';
 import { PerformanceMonitor } from './performance.js';
 import { ProcessError, ProcessMonitor } from './processes.js';
 import { LhmClient } from './lhm.js';
+import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
 export const DEFAULT_PORT = 8093;
@@ -195,6 +196,8 @@ export class WebServer {
   private readonly processes: ProcessMonitor;
   private readonly startedAt = Date.now();
   private cpuMark = { at: Date.now(), usage: process.cpuUsage() };
+  private readonly agentSettings: AgentSettingsStore;
+  private readonly windows = new ModelWindows();
 
   constructor(private readonly options: WebServerOptions) {
     if (!options.conversation.dir || !options.conversation.file) throw new Error('The web interface needs a persistent conversation.');
@@ -213,6 +216,8 @@ export class WebServer {
       confirm: (request, signal) => this.confirm(request, signal),
     });
     this.session = this.runtime.createSession();
+    this.agentSettings = new AgentSettingsStore(options.conversation.dir);
+    this.session.reasoning = this.agentSettings.get().reasoning;
     this.system = new SystemMonitor(options.systemSource, {
       ...(options.lhmUrl === undefined ? {} : { lhm: options.lhmUrl === null ? null : new LhmClient(options.lhmUrl) }),
       elevateWindowsSensors: options.sensorAdmin,
@@ -355,6 +360,33 @@ export class WebServer {
           if (parts[2] === 'end') return sendJson(res, 200, await this.processes.end(parts[1], { force: body.force === true, tree: body.tree === true }));
           if (parts[2] === 'priority') return sendJson(res, 200, this.processes.setPriority(parts[1], body.level));
           throw new HttpError(404, 'Not found.');
+        }
+        case 'GET agent':
+          this.checkFetchSite(req);
+          if (parts[1] === 'context') return sendJson(res, 200, await this.contextInfo());
+          if (parts[1]) throw new HttpError(404, 'Not found.');
+          return sendJson(res, 200, this.agentInfo());
+        case 'POST agent': {
+          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+          if (body.action === 'reset-context') {
+            // Later requests start from a fresh working context; the history stays stored.
+            if (this.session.running || this.live) throw new HttpError(409, 'Wait for the current reply to finish.');
+            this.session.resetContext();
+            return sendJson(res, 200, await this.contextInfo());
+          }
+          if ('reasoning' in body) {
+            let effort;
+            try {
+              effort = parseEffort(body.reasoning);
+            } catch (error) {
+              throw new HttpError(400, getErrorMessage(error));
+            }
+            this.agentSettings.set({ ...this.agentSettings.get(), reasoning: effort ?? undefined });
+            this.session.reasoning = effort ?? undefined;
+          }
+          const info = this.agentInfo();
+          this.broadcast('agent', info);
+          return sendJson(res, 200, info);
         }
         case 'GET events':
           return this.openEvents(req, res);
@@ -723,11 +755,35 @@ export class WebServer {
   // ---------------------------------------------------------------------------
   // State and events
 
+  /** The root agent and the session's reasoning effort (the send button's sheet). */
+  private agentInfo() {
+    const d = this.options.tree.root.definition;
+    return {
+      id: d.id,
+      description: d.description ?? '',
+      model: d.model,
+      provider: d.provider,
+      reasoning: this.session.reasoning ?? d.reasoning ?? null,
+      configuredReasoning: d.reasoning ?? null,
+      levels: EFFORT_LEVELS,
+      children: this.options.tree.root.children.map((c) => c.id),
+    };
+  }
+
+  /** What the next request would carry, part by part, with the model's own window when the provider lists it. */
+  private async contextInfo() {
+    const d = this.options.tree.root.definition;
+    // A custom provider factory (tests, embedding) may not talk to the configured provider at all.
+    const lookup = this.options.providerFactory ? Promise.resolve(null) : this.windows.lookup(d).catch(() => null);
+    const [usage, window] = await Promise.all([this.session.contextUsage(), lookup]);
+    return { ...usage, model: d.model, modelWindow: window, running: this.session.running };
+  }
+
   private snapshot() {
     const root = this.options.tree.root.definition;
     const { items, more } = displayItems(this.conversation.state, { hideRun: this.live ? this.conversation.activeRootRun : undefined });
     return {
-      agent: { id: root.id, model: root.model, provider: root.provider, description: root.description ?? '' },
+      agent: { id: root.id, model: root.model, provider: root.provider, description: root.description ?? '', reasoning: this.session.reasoning ?? root.reasoning ?? null },
       conversation: { file: this.conversation.file },
       items,
       more,

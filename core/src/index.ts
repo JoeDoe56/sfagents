@@ -83,13 +83,14 @@ export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE } fro
 export type { ConversationAccess } from './conversation/tools.js';
 export {
   buildWorkingContext,
+  contextBreakdown,
   ContextBudgetError,
   DEFAULT_MAX_INPUT_TOKENS,
   DEFAULT_RECENT_EXCHANGES,
   estimateTokens,
   TURN_RESERVE,
 } from './conversation/context.js';
-export type { ContextPolicy, ContextReport, WorkingContext } from './conversation/context.js';
+export type { ContextPolicy, ContextReport, WorkingContext, ContextBreakdown, ContextTool } from './conversation/context.js';
 export {
   ArtifactError,
   ArtifactToolNames,

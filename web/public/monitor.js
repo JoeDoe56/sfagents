@@ -170,7 +170,7 @@ export function createMonitor({ root, expandButton, onDrivesChange, onOpen }) {
   }
 
   // Numbers change in place, so only the digits that differ animate.
-  const transitions = createContentTransitions({ root, include: '.stat-value, .stat-sub, .drive-figures, .mon-host' });
+  const transitions = createContentTransitions({ root, include: '.stat-value, .stat-sub, .usage-amount, .usage-pct, .mon-host' });
   transitions.start();
 
   const driveNodes = new Map(); // mount → { node, name, size, pct, fill }
@@ -188,22 +188,18 @@ export function createMonitor({ root, expandButton, onDrivesChange, onOpen }) {
       seen.add(d.mount);
       let entry = driveNodes.get(d.mount);
       if (!entry) {
-        const node = el('div', 'drive');
+        // A taller bar with the name, used/total and the percentage on one line inside it.
+        const node = el('div', 'drive usage-bar');
         node.dataset.mount = d.mount;
         node.setAttribute('role', 'button');
         node.tabIndex = 0;
-        const top = el('div', 'drive-top');
-        const name = el('span', 'drive-name');
-        const figures = el('span', 'drive-figures');
-        const size = el('span', 'drive-size');
-        const pct = el('span', 'drive-pct');
-        figures.append(size, pct);
-        const bar = el('div', 'drive-bar');
-        const fill = el('span', 'drive-fill');
-        bar.append(fill);
-        // Name above the bar; used/total and the percentage together under it.
-        top.append(name);
-        node.append(top, bar, figures);
+        const fill = el('span', 'usage-fill');
+        const text = el('span', 'usage-text');
+        const name = el('span', 'usage-name');
+        const size = el('span', 'usage-amount');
+        const pct = el('span', 'usage-pct');
+        text.append(name, size, pct);
+        node.append(fill, text);
         entry = { node, name, size, pct, fill };
         driveNodes.set(d.mount, entry);
       }
@@ -220,7 +216,6 @@ export function createMonitor({ root, expandButton, onDrivesChange, onOpen }) {
       const detail = `${d.name}: ${used.num} ${used.unit} used of ${total.num} ${total.unit}, ${free.num} ${free.unit} free`;
       entry.node.title = `${detail} (${d.mount})`;
       entry.node.setAttribute('aria-label', detail);
-      entry.node.setAttribute('role', 'img');
       if (drivesEl.children[i] !== entry.node) drivesEl.insertBefore(entry.node, drivesEl.children[i] ?? null);
     });
     for (const [mount, entry] of driveNodes) {

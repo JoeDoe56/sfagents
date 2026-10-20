@@ -21,6 +21,7 @@ import { openPeek, group, row, el as peekEl } from './peek.js';
 import { openQuickLook } from './quicklook.js';
 import { UploadJob } from './up2k.js';
 import { createFilesGlass } from './filesglass.js';
+import { createSheetFrame } from './modalsheet.js';
 import { DASH, bytesText, dateText, fullDate, formatUsedTotal, percentText, rateText, temperature, formatDuration, plural } from './format.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -181,14 +182,21 @@ async function copyText(text) {
  *   attach: (ref: object) => void, onOpenChange?: (open: boolean) => void}} options
  */
 export function createFileManager(options) {
-  const root = el('section', 'fm');
-  root.hidden = true;
-  root.setAttribute('role', 'dialog');
-  root.setAttribute('aria-modal', 'true');
-  root.setAttribute('aria-label', 'Files');
-  root.tabIndex = -1;
-  const inner = el('div', 'fm-inner');
-  root.append(inner);
+  // An iOS sheet that goes straight to its large detent (see modalsheet.js).
+  const frame = createSheetFrame({
+    detents: ['large'],
+    className: 'fm',
+    label: 'Files',
+    z: 40,
+    scroller: () => scroller,
+    onMove: () => fg?.invalidate(),
+    onClosed: () => finishClose(),
+    // Escape leaves selection first.
+    onEscape: () => (state.selecting ? (setSelecting(false), true) : false),
+  });
+  const root = frame.layer;
+  const inner = frame.panel;
+  inner.classList.add('fm-inner');
 
   // Scrolling content.
   const scroller = el('div', 'fm-scroll');
@@ -247,7 +255,6 @@ export function createFileManager(options) {
   const edgeTop = el('div', 'fm-edge top');
   const edgeBottom = el('div', 'fm-edge bottom');
   inner.append(scroller, edgeTop, edgeBottom, top, bottom, dropHint, picker);
-  document.body.append(root);
 
   // Liquid Glass for the chrome (created on first open, when it can be measured).
   let fg = null;
@@ -389,7 +396,7 @@ export function createFileManager(options) {
     drives.style.setProperty('--count', String(Math.max(1, Math.min(3, list.length))));
     drives.classList.toggle('scrolls', list.length > 3);
     if (changed && fg) {
-      fg.group('drives', [...drives.children], 'bar', { clip: drives });
+      fg.group('drives', [...drives.children], 'tile', { clip: drives });
       updateBands();
     }
   }
@@ -1270,13 +1277,28 @@ export function createFileManager(options) {
 
   function pickFolder({ title: heading, confirm, start }) {
     return new Promise((resolve) => {
-      const layer = el('div', 'fm-picker-layer');
-      const sheet = el('div', 'fm-picker');
+      // The same kind of sheet as Files itself: grabber, close button on the left.
+      let result = null;
+      const frame = createSheetFrame({
+        detents: ['large'],
+        className: 'fm-picker-layer',
+        label: heading,
+        z: 70,
+        scroller: () => list,
+        onClosed: () => {
+          frame.layer.remove();
+          resolve(result);
+        },
+      });
+      const sheet = frame.panel;
+      sheet.classList.add('fm-picker');
       const head = el('header', 'fm-picker-head');
-      const cancel = el('button', 'fm-textbtn', 'Cancel');
+      const cancel = el('button', 'ms-close');
       cancel.type = 'button';
+      cancel.setAttribute('aria-label', 'Cancel');
+      cancel.append(sym('xmark', 15));
       const t = el('h2', '', heading);
-      const add = el('button', 'fm-glass fm-circle');
+      const add = el('button', 'ms-close');
       add.type = 'button';
       add.setAttribute('aria-label', 'New Folder');
       add.append(sym('folder.badge.plus', 17));
@@ -1288,23 +1310,13 @@ export function createFileManager(options) {
       go.type = 'button';
       foot.append(where, go);
       sheet.append(head, list, foot);
-      layer.append(sheet);
-      document.body.append(layer);
-      sheet.animate([{ transform: 'translateY(100%)' }, { transform: 'none' }], { duration: reduced.matches ? 0 : 380, easing: EASE });
+      frame.addDragArea(head);
+      frame.show('large');
       let cur = start;
       const finish = (value) => {
-        window.removeEventListener('keydown', onKey, true);
-        sheet.animate([{ transform: 'none' }, { transform: 'translateY(100%)' }], { duration: reduced.matches ? 0 : 260, easing: 'ease-in', fill: 'forwards' }).onfinish = () => layer.remove();
-        resolve(value);
+        result = value;
+        frame.close();
       };
-      const onKey = (e) => {
-        if (e.key === 'Escape' && !document.querySelector('.dialog-layer')) {
-          e.preventDefault();
-          e.stopPropagation();
-          finish(null);
-        }
-      };
-      window.addEventListener('keydown', onKey, true);
       cancel.addEventListener('click', () => finish(null));
       go.addEventListener('click', () => cur && finish(cur));
       add.addEventListener('click', async () => {
@@ -1482,36 +1494,8 @@ export function createFileManager(options) {
     stats.classList.toggle('at-end', stats.scrollWidth - stats.clientWidth - stats.scrollLeft < 2);
   }, { passive: true });
 
-  // Swipe down at the top of the list (or on the glass bar) to close, as with the sheet.
-  let pull = null;
-  top.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('button')) return;
-    pull = { id: e.pointerId, y: e.clientY, dy: 0, t: performance.now() };
-    try {
-      top.setPointerCapture(e.pointerId);
-    } catch {
-      // a synthetic or finished pointer
-    }
-  });
-  top.addEventListener('pointermove', (e) => {
-    if (!pull || e.pointerId !== pull.id) return;
-    pull.dy = Math.max(0, e.clientY - pull.y);
-    inner.style.transform = `translateY(${pull.dy}px)`;
-    fg?.invalidate();
-  });
-  const endPull = (e) => {
-    if (!pull || e.pointerId !== pull.id) return;
-    const far = pull.dy > 110 || (pull.dy > 40 && pull.dy / (performance.now() - pull.t) > 0.6);
-    pull = null;
-    if (far) close();
-    else {
-      inner.animate([{ transform: inner.style.transform }, { transform: 'none' }], { duration: 220, easing: EASE });
-      fg?.track(260);
-      inner.style.transform = '';
-    }
-  };
-  top.addEventListener('pointerup', endPull);
-  top.addEventListener('pointercancel', endPull);
+  // Dragging the glass bar moves the sheet, as its grabber does.
+  frame.addDragArea(top);
 
   let statsTimer = 0;
   async function pollStats() {
@@ -1535,10 +1519,8 @@ export function createFileManager(options) {
     listTimer = setTimeout(pollList, 5000);
   }
 
-  let fromEl = null;
-
-  /** Opens the sheet (growing out of `from`, the monitor), at `path` or where it was left. */
-  async function open({ path, select = null, from = null } = {}) {
+  /** Opens the sheet at `path`, or where it was left. */
+  async function open({ path, select = null } = {}) {
     if (path !== undefined) {
       state.path = path;
       state.pendingSelect = select;
@@ -1549,40 +1531,16 @@ export function createFileManager(options) {
       return;
     }
     state.open = true;
-    fromEl = from;
-    root.hidden = false;
     options.onOpenChange?.(true);
-    setupGlass();
-    updateBands();
-    fg?.track(560);
-    if (fg && driveNodes.size) fg.group('drives', [...drives.children], 'bar', { clip: drives });
     renderHeader();
     content.replaceChildren(el('div', 'fm-loading'));
-    const src = from?.getBoundingClientRect?.();
-    if (!reduced.matches) {
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const rect = inner.getBoundingClientRect();
-      if (src && src.width) {
-        inner.animate(
-          [
-            { clipPath: `inset(${src.top - rect.top}px ${rect.right - src.right}px ${rect.bottom - src.bottom}px ${src.left - rect.left}px round 26px)`, opacity: 0.6 },
-            { clipPath: `inset(0px 0px 0px 0px round ${vw < 640 ? 38 : 34}px)`, opacity: 1 },
-          ],
-          { duration: 460, easing: EASE },
-        );
-        // The monitor's pieces travel to their new places: the drives down, the stats up.
-        top.animate([{ transform: `translateY(${src.top - rect.top - 8}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 460, easing: EASE });
-        bottom.animate([{ transform: `translateY(${src.bottom - rect.bottom}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 520, easing: EASE });
-        scroller.animate([{ opacity: 0 }, { opacity: 0, offset: 0.35 }, { opacity: 1 }], { duration: 460 });
-      } else {
-        inner.animate([{ transform: `translateY(${vh}px)` }, { transform: 'none' }], { duration: 420, easing: EASE });
-      }
-    }
+    frame.show('large');
+    setupGlass();
+    updateBands();
+    if (fg && driveNodes.size) fg.group('drives', [...drives.children], 'tile', { clip: drives });
     pollStats();
     await refresh();
     pollList();
-    root.focus({ preventScroll: true });
   }
 
   function close() {
@@ -1591,22 +1549,17 @@ export function createFileManager(options) {
     clearTimeout(statsTimer);
     clearTimeout(listTimer);
     closeMenu();
-    const finish = () => {
-      root.hidden = true;
-      inner.style.transform = '';
-      options.onOpenChange?.(false);
-    };
-    if (reduced.matches) return finish();
-    const src = fromEl?.isConnected ? fromEl.getBoundingClientRect() : null;
-    const rect = inner.getBoundingClientRect();
-    const anim = src && src.width && src.top < window.innerHeight
-      ? inner.animate([{ clipPath: 'inset(0px round 38px)', opacity: 1 }, { clipPath: `inset(${src.top - rect.top}px ${rect.right - src.right}px ${rect.bottom - src.bottom}px ${src.left - rect.left}px round 26px)`, opacity: 0 }], { duration: 360, easing: EASE, fill: 'forwards' })
-      : inner.animate([{ transform: inner.style.transform || 'none' }, { transform: `translateY(${window.innerHeight}px)` }], { duration: 320, easing: 'ease-in', fill: 'forwards' });
-    fg?.track(400);
-    anim.onfinish = () => {
-      anim.cancel();
-      finish();
-    };
+    frame.close();
+  }
+
+  function finishClose() {
+    // Closed by a drag or the scrim as well as by close().
+    if (state.open) {
+      state.open = false;
+      clearTimeout(statsTimer);
+      clearTimeout(listTimer);
+    }
+    options.onOpenChange?.(false);
   }
 
   document.addEventListener('visibilitychange', () => {

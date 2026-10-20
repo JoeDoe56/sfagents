@@ -135,3 +135,24 @@ describe('working context', () => {
     assert.equal(readConversation(file).state.messages.filter((m) => m.role === 'user').length, 10);
   });
 });
+
+describe('context breakdown', () => {
+  test('splits the request into its parts and per-tool costs', async () => {
+    const { contextBreakdown, ConversationService: CS } = await import('@sfagents/core');
+    const conversation = CS.memory(process.cwd());
+    const tools = [
+      { name: 'read_file', group: 'builtin' as const, schema: { name: 'read_file', description: 'x'.repeat(400) } },
+      { name: 'mcp__srv__tool', group: 'mcp' as const, server: 'srv', schema: { name: 'mcp__srv__tool', description: 'y'.repeat(40) } },
+    ];
+    const b = contextBreakdown(conversation.state, { provider: 'p', model: 'm' }, { maxInputTokens: 10_000 }, 'You are a test.', tools, { retrievable: false });
+    assert.equal(b.budget, 10_000);
+    assert.equal(b.reserve, 2_500);
+    const builtin = b.categories.find((c) => c.id === 'builtin')!;
+    assert.equal(builtin.items![0]!.name, 'read_file');
+    assert.ok(builtin.tokens > 100);
+    const mcp = b.categories.find((c) => c.id === 'mcp')!;
+    assert.equal(mcp.items![0]!.detail, 'srv');
+    assert.equal(b.used, b.categories.reduce((a, c) => a + c.tokens, 0));
+    assert.equal(b.categories.find((c) => c.id === 'messages')!.tokens, 0);
+  });
+});

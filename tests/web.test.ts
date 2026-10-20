@@ -493,3 +493,89 @@ describe('sfagents web (CLI)', () => {
   });
 });
 
+
+describe('agent settings and context', () => {
+  test('reasoning effort: read, change, persist, and sent with requests', async () => {
+    const seen: Array<string | undefined> = [];
+    const s = await startServer((req) => {
+      seen.push(req.reasoning);
+      return { text: 'ok' };
+    }, { reasoning: 'low' });
+    const ev = events(s.base);
+    try {
+      const get = await request(s.base, '/api/agent');
+      const info = JSON.parse(get.body.toString());
+      assert.equal(info.reasoning, 'low');
+      assert.deepEqual(info.levels, ['low', 'medium', 'high', 'xhigh', 'max']);
+      assert.equal((await postJson(s.base, '/api/agent', { reasoning: 'ultra' })).status, 400);
+      const set = await postJson(s.base, '/api/agent', { reasoning: 'xhigh' });
+      assert.equal(set.status, 200);
+      assert.equal(set.json['reasoning'], 'xhigh');
+      assert.equal(set.json['configuredReasoning'], 'low');
+      await ev.wait((e) => e.event === 'agent' && e.data['reasoning'] === 'xhigh');
+      assert.equal(JSON.parse(fs.readFileSync(path.join(s.dir, '.sfagents', 'web-agent.json'), 'utf8')).reasoning, 'xhigh');
+      await ev.wait((e) => e.event === 'state');
+      assert.equal((await postJson(s.base, '/api/messages', { text: 'think hard' })).status, 202);
+      await ev.wait((e) => e.event === 'run_end');
+      assert.equal(seen.at(-1), 'xhigh');
+      // Back to the agent's own setting.
+      const cleared = await postJson(s.base, '/api/agent', { reasoning: null });
+      assert.equal(cleared.json['reasoning'], 'low');
+    } finally {
+      ev.close();
+      await s.stop();
+    }
+  });
+
+  test('context breakdown: parts add up, tools are listed, a fresh context empties the messages', async () => {
+    const s = await startServer(() => ({ text: 'An answer with a few words in it.' }), { context: { maxInputTokens: 20000 } });
+    const ev = events(s.base);
+    try {
+      await ev.wait((e) => e.event === 'state');
+      await postJson(s.base, '/api/messages', { text: 'hello there' });
+      await ev.wait((e) => e.event === 'run_end');
+      const r = await request(s.base, '/api/agent/context', { headers: { 'Sec-Fetch-Site': 'same-origin' } });
+      assert.equal(r.status, 200);
+      const c = JSON.parse(r.body.toString());
+      assert.equal(c.budget, 20000);
+      assert.equal(c.reserve, 5000);
+      const sum = c.categories.reduce((a: number, x: { tokens: number }) => a + x.tokens, 0);
+      assert.equal(c.used, sum);
+      assert.equal(c.free, c.budget - c.reserve - c.used);
+      const byId = Object.fromEntries(c.categories.map((x: { id: string }) => [x.id, x]));
+      assert.ok(byId.system.tokens > 0);
+      assert.ok(byId.messages.tokens > 0);
+      assert.ok(byId.conversation.items.some((t: { name: string }) => t.name === 'search_conversation'));
+      assert.equal(c.exchanges.included, 1);
+      assert.equal(c.modelWindow, null);
+      assert.ok(c.lastRequest?.usage);
+      const cross = await request(s.base, '/api/agent/context', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+      assert.equal(cross.status, 403);
+      const fresh = await postJson(s.base, '/api/agent', { action: 'reset-context' });
+      assert.equal(fresh.status, 200);
+      const after = fresh.json as { categories: Array<{ id: string; tokens: number }>; exchanges: { sinceReset: number } };
+      assert.equal(after.categories.find((x) => x.id === 'messages')!.tokens, 0);
+      assert.equal(after.exchanges.sinceReset, 0);
+    } finally {
+      ev.close();
+      await s.stop();
+    }
+  });
+});
+
+test("model windows come from the provider's model list, cached", async () => {
+  const { ModelWindows } = await import('@sfagents/web');
+  let calls = 0;
+  const fake = (async (url: string | URL) => {
+    calls++;
+    assert.equal(String(url), 'https://openrouter.ai/api/v1/models');
+    return new Response(JSON.stringify({ data: [{ id: 'a/b', context_length: 400000 }, { id: 'c/d', top_provider: { context_length: 128000 } }] }), { status: 200 });
+  }) as typeof fetch;
+  const w = new ModelWindows(fake);
+  const def = (model: string) => ({ ...baseAgent('main'), model }) as never;
+  assert.equal(await w.lookup(def('a/b')), 400000);
+  assert.equal(await w.lookup(def('a/b')), 400000);
+  assert.equal(await w.lookup(def('c/d')), 128000);
+  assert.equal(await w.lookup(def('x/y')), null);
+  assert.equal(calls, 3);
+});

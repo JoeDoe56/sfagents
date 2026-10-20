@@ -197,3 +197,99 @@ function earliestIncludedSeq(groups: MessageRecord[][], includedCount: number): 
   const first = groups[groups.length - includedCount];
   return first?.[0]?.seq ?? Number.MAX_SAFE_INTEGER;
 }
+
+// ---------------------------------------------------------------------------
+// Context breakdown (the web interface's context view)
+
+export interface ContextTool {
+  name: string;
+  /** "builtin", "mcp", "agents" or "conversation". */
+  group: 'builtin' | 'mcp' | 'agents' | 'conversation';
+  /** MCP server name, for MCP tools. */
+  server?: string;
+  /** The tool's schema as sent to the model. */
+  schema: unknown;
+}
+
+export interface ContextBreakdown {
+  /** The working-context budget (context.maxInputTokens). */
+  budget: number;
+  /** Kept free for tool results and fetched history during a turn. */
+  reserve: number;
+  /** Estimated tokens the next request would carry before a new message. */
+  used: number;
+  free: number;
+  categories: Array<{
+    id: 'system' | 'builtin' | 'mcp' | 'agents' | 'conversation' | 'index' | 'messages';
+    label: string;
+    tokens: number;
+    items?: Array<{ name: string; tokens: number; detail?: string }>;
+  }>;
+  exchanges: { included: number; omitted: number; recentLimit: number; sinceReset: number };
+  sections: { shown: number; total: number };
+  /** Set when even the latest exchange does not fit the budget. */
+  problem?: string;
+}
+
+/**
+ * Splits what the next root request would carry into the parts a person
+ * cares about: the system prompt, each tool family (per tool), the section
+ * index and notes, and the stored messages that fit. Estimates use the same
+ * characters / 4 rule as the working context itself.
+ */
+export function contextBreakdown(
+  state: ConversationState,
+  target: ReplayTarget,
+  policy: ContextPolicy,
+  systemPrompt: string,
+  tools: readonly ContextTool[],
+  options: { retrievable: boolean; resolveAttachment?: AttachmentResolver; extraSystem?: string },
+): ContextBreakdown {
+  const budget = policy.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS;
+  const reserve = Math.floor(budget * TURN_RESERVE);
+  const fixedText = systemPrompt + JSON.stringify(tools.map((t) => t.schema));
+  let working: WorkingContext | undefined;
+  let problem: string | undefined;
+  try {
+    working = buildWorkingContext(state, target, policy, fixedText, options);
+  } catch (error) {
+    if (!(error instanceof ContextBudgetError)) throw error;
+    problem = error.message;
+  }
+  const toolTokens = (t: ContextTool) => estimateTokens(JSON.stringify(t.schema));
+  const family = (group: ContextTool['group']) => tools.filter((t) => t.group === group);
+  const itemsOf = (list: readonly ContextTool[]) => list.map((t) => ({ name: t.name, tokens: toolTokens(t), ...(t.server ? { detail: t.server } : {}) })).sort((a, b) => b.tokens - a.tokens);
+  const sum = (list: Array<{ tokens: number }>) => list.reduce((a, x) => a + x.tokens, 0);
+  const builtin = itemsOf(family('builtin'));
+  const mcp = itemsOf(family('mcp'));
+  const agents = itemsOf(family('agents'));
+  const conversation = itemsOf(family('conversation'));
+  const indexText = [working?.systemExtra, options.extraSystem].filter(Boolean).join('\n\n');
+  const messagesTokens = working?.messages.length ? estimateMessages(working.messages) : 0;
+  const categories: ContextBreakdown['categories'] = [
+    { id: 'system', label: 'System prompt', tokens: estimateTokens(systemPrompt) },
+    { id: 'builtin', label: 'Built-in tools', tokens: sum(builtin), items: builtin },
+    { id: 'mcp', label: 'MCP tools', tokens: sum(mcp), items: mcp },
+    { id: 'agents', label: 'Agents', tokens: sum(agents), items: agents },
+    { id: 'conversation', label: 'Conversation tools', tokens: sum(conversation), items: conversation },
+    { id: 'index', label: 'Sections and notes', tokens: indexText ? estimateTokens(indexText) : 0 },
+    { id: 'messages', label: 'Messages', tokens: messagesTokens },
+  ];
+  const used = sum(categories);
+  const sinceReset = exchanges(state.messages.filter((m) => m.seq > state.lastResetSeq)).length;
+  return {
+    budget,
+    reserve,
+    used,
+    free: Math.max(0, budget - reserve - used),
+    categories,
+    exchanges: {
+      included: working?.report.includedExchanges ?? 0,
+      omitted: working?.report.omittedExchanges ?? sinceReset,
+      recentLimit: policy.recentExchanges ?? DEFAULT_RECENT_EXCHANGES,
+      sinceReset,
+    },
+    sections: { shown: working?.report.indexEntries ?? 0, total: working?.report.indexTotal ?? 0 },
+    ...(problem ? { problem } : {}),
+  };
+}

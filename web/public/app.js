@@ -9,6 +9,7 @@ import { createContentTransitions } from './vendor/sfgl/src/transitions/content.
 import { initialTier } from './vendor/sfgl/src/core/quality.js';
 import { renderMarkdown, looksLikeMarkdown, escapeHtml } from './markdown.js';
 import { setupGlass } from './glass.js';
+import { GLASS, SEND_TINT } from './glassvalues.js';
 import { createSheet } from './sheet.js';
 import { renderTiles, createViewer } from './artifacts.js';
 import { UploadJob } from './up2k.js';
@@ -17,6 +18,11 @@ import { createMonitor } from './monitor.js';
 import { openMonitorWindow } from './windows.js';
 import { peekOpen } from './peek.js';
 import { createFileManager } from './files.js';
+import { openSheet, sheetOpen, setSheetGlass } from './modalsheet.js';
+import { createFilesGlass } from './filesglass.js';
+import { openAgentSheet, agentSheetOpen } from './agentsheet.js';
+import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
+import { onHold } from './menu.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -33,7 +39,7 @@ const picker = $('picker');
 const attachmentsEl = $('attachments');
 const sheetScroll = $('sheetScroll');
 
-for (const el of document.querySelectorAll('i[data-symbol]')) applySymbol(el, el.dataset.symbol);
+for (const el of document.querySelectorAll('i[data-symbol]')) applySymbol(el, el.dataset.symbol, el.dataset.size ? { size: Number(el.dataset.size) } : {});
 
 const coarse = matchMedia('(pointer: coarse)').matches;
 const params = new URLSearchParams(location.search);
@@ -108,18 +114,7 @@ const settings = {
 
 const glassApi = setupGlass({ stage, chat, thread, quality: settings.quality });
 const { surface } = glassApi;
-// Glass values modelled on ChatGPT's iOS composer: a dark neutral body that
-// mostly hides what is behind it (a heavy blur shows only soft shapes),
-// almost no refraction or colour split, and a crisp hairline rim (matched
-// to iOS at 3x) that takes on the colour of what is next to the glass. Controls
-// inside the bar are a slightly lighter layer of the same glass.
-const GLASS = {
-  bar: { material: -0.5, tint: { color: '#1d1d1d', amount: 0.58 }, frost: 8, refraction: 0.012, dispersion: 0, rim: 0.25, layer: 0 },
-  control: { material: -0.3, tint: { color: '#262628', amount: 0.35 }, frost: 3, refraction: 0.01, dispersion: 0, rim: 0.22, layer: 1 },
-  tile: { material: -0.3, tint: { color: '#262628', amount: 0.6 }, frost: 6, refraction: 0.01, dispersion: 0, rim: 0.2, layer: 1 },
-};
-// The send circle's glass fades to the iMessage blue while there is something to send.
-const SEND_TINT = { color: '#4499f8', amount: 0.86 };
+setSheetGlass((o) => createFilesGlass({ ...o, quality: settings.quality, units: '.ui-row, .ag-unit, .settings-group > *' }));
 const SEND_FADE = { duration: 260, easing: 'easeInOut' };
 const barLens = surface.lens(bar, GLASS.bar);
 surface.lens(field, GLASS.control);
@@ -541,6 +536,7 @@ function notice(text, level = '') {
 
 function applySnapshot(s) {
   state.agent = s.agent;
+  setGradientSeed(s.agent?.model);
   state.items = s.items;
   state.more = s.more;
   state.live = s.live;
@@ -609,6 +605,12 @@ function connect() {
       render();
     }, 1200);
   });
+  es.addEventListener('agent', (e) => {
+    const info = JSON.parse(e.data);
+    if (state.agent) Object.assign(state.agent, { reasoning: info.reasoning, model: info.model });
+    setGradientSeed(info.model);
+    agentSheet?.setAgent?.(info);
+  });
   es.addEventListener('notice', (e) => {
     const { text, level } = JSON.parse(e.data);
     notice(text, level === 'error' ? 'error' : '');
@@ -625,6 +627,7 @@ function connect() {
     if (data.error && data.status !== 'ERROR') notice(data.error);
     render();
     updateComposer();
+    if (agentSheetOpen()) agentSheet?.refresh();
     if (queued) {
       const next = queued;
       queued = null;
@@ -690,9 +693,54 @@ function canSend() {
 // The send arrow comes and goes with sfgl's content transition (the same
 // blur-and-scale used for changing text and symbols).
 const sendIcon = send.querySelector('.send-icon');
-const contentTransitions = createContentTransitions({ root: send, include: '.send-icon' });
+const agentIcon = send.querySelector('.agent-icon');
+const contentTransitions = createContentTransitions({ root: send, include: '.send-icon, .agent-icon' });
 contentTransitions.start();
 let shownSendable = false;
+let shownIcon = 'agent';
+
+// The model's own gradient, refracted by the circle while it is the agent
+// button (sfgl's gradient underlay: drawn as if under the glass, over the
+// real backdrop). As a send button it is plain blue.
+const modelGradient = createGradientUnderlay({ seed: 'sfagents', strength: 0.62, margin: 12 });
+let gradientSeed = null;
+let stopGradient = null;
+let gradientFade = 0;
+function setGradientSeed(model) {
+  if (!model || model === gradientSeed) return;
+  gradientSeed = model;
+  modelGradient.setSeed(model);
+  glassApi.glass.requestRender();
+}
+function gradientWanted() {
+  return !shownSendable && !document.hidden && !document.body.classList.contains('files-open') && !sheetOpen();
+}
+function updateGradient() {
+  const want = gradientWanted();
+  cancelAnimationFrame(gradientFade);
+  const target = shownSendable ? 0 : 0.62;
+  const from = modelGradient.strength;
+  if (!shownSendable) sendLens.setOptions({ underlay: modelGradient });
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) modelGradient.freeze(true);
+  // Fade with the tint, so the blue and the gradient cross.
+  const start = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / 260);
+    modelGradient.setStrength(from + (target - from) * t);
+    glassApi.glass.requestRender();
+    if (t < 1) gradientFade = requestAnimationFrame(step);
+    else if (shownSendable) sendLens.setOptions({ underlay: null });
+  };
+  gradientFade = requestAnimationFrame(step);
+  if (want && !stopGradient) stopGradient = modelGradient.animate(glassApi.glass, 24);
+  else if (!want && stopGradient) {
+    stopGradient();
+    stopGradient = null;
+  }
+}
+document.addEventListener('visibilitychange', updateGradient);
+updateGradient();
+window.addEventListener('sheetchange', updateGradient);
 
 function updateComposer() {
   const running = !!state.live;
@@ -700,17 +748,32 @@ function updateComposer() {
   if (sendable !== shownSendable) {
     shownSendable = sendable;
     sendLens.transition({ tint: sendable ? SEND_TINT : GLASS.control.tint }, SEND_FADE);
-    if (sendable) sendIcon.hidden = false;
-    else {
-      contentTransitions.exit(contentTransitions.capture(sendIcon));
-      sendIcon.hidden = true;
-    }
+    updateGradient();
+  }
+  // One icon at a time: the arrow to send, the agent mascot otherwise (the stop disc covers it while running).
+  const icon = sendable ? 'send' : running ? 'none' : 'agent';
+  if (icon !== shownIcon) {
+    const leaving = shownIcon === 'send' ? sendIcon : shownIcon === 'agent' ? agentIcon : null;
+    if (leaving && !leaving.hidden) contentTransitions.exit(contentTransitions.capture(leaving));
+    sendIcon.hidden = icon !== 'send';
+    agentIcon.hidden = icon !== 'agent';
+    shownIcon = icon;
   }
   send.classList.toggle('can-send', sendable);
   send.classList.toggle('can-stop', running && !sendable);
-  send.disabled = !sendable && !running;
-  send.setAttribute('aria-label', sendable ? (running ? 'Send when the agent finishes' : 'Send') : running ? 'Stop' : 'Send');
+  send.disabled = false;
+  send.setAttribute('aria-label', sendable ? (running ? 'Send when the agent finishes' : 'Send') : running ? 'Stop' : 'Agent and context');
   attachmentsEl.hidden = pending.length === 0;
+}
+
+let agentSheet = null;
+function showAgentSheet() {
+  agentSheet = openAgentSheet({
+    agent: state.agent ? { id: state.agent.id, model: state.agent.model, reasoning: state.agent.reasoning } : null,
+    onReasoning: (info) => {
+      if (state.agent) state.agent.reasoning = info.reasoning;
+    },
+  });
 }
 
 input.addEventListener('input', () => {
@@ -726,7 +789,10 @@ input.addEventListener('keydown', (e) => {
 send.addEventListener('click', () => {
   if (canSend()) submitFromComposer();
   else if (state.live) postJson('/api/cancel').catch((error) => notice(error.message, 'error'));
+  else showAgentSheet();
 });
+// Holding the circle (or right-clicking it) opens the agent sheet even when it would send or stop.
+onHold(send, () => showAgentSheet());
 field.addEventListener('click', (e) => {
   if (e.target === field || e.target.classList.contains('field-line')) input.focus();
 });
@@ -978,14 +1044,14 @@ mic.addEventListener('click', () => {
 
 // Settings ----------------------------------------------------------------
 
-const settingsEl = $('settings');
-const qualityButtons = [...document.querySelectorAll('#qualityChoice button')];
-let settingsReturn = null;
+let settingsSheet = null;
+let qualityButtons = [];
 
 function showQuality() {
+  if (!settingsSheet) return;
   for (const b of qualityButtons) b.setAttribute('aria-checked', String(b.dataset.value === settings.quality));
   const tier = glassApi.tier();
-  $('qualityHint').textContent =
+  settingsSheet.body.querySelector('#qualityHint').textContent =
     settings.quality === 'auto' ? `Chosen for this device: ${tier}. Lowers itself if frames get slow.` : `Drawing with: ${tier}.`;
 }
 
@@ -1007,40 +1073,39 @@ function setQuality(q) {
   requestAnimationFrame(showQuality);
 }
 
+/** Settings: a sheet with a medium and a large detent. */
 function openSettings() {
-  settingsReturn = document.activeElement;
-  $('enterSends').checked = settings.enterSends;
+  if (settingsSheet) return;
+  settingsSheet = openSheet({
+    title: 'Settings',
+    detents: ['medium', 'large'],
+    mediumHeight: () => Math.round(innerHeight * 0.52),
+    build(ctx) {
+      ctx.body.append($('settingsTemplate').content.cloneNode(true));
+      for (const i of ctx.body.querySelectorAll('i[data-symbol]')) applySymbol(i, i.dataset.symbol);
+      qualityButtons = [...ctx.body.querySelectorAll('#qualityChoice button')];
+      for (const b of qualityButtons) b.addEventListener('click', () => setQuality(b.dataset.value));
+      const enter = ctx.body.querySelector('#enterSends');
+      enter.checked = settings.enterSends;
+      enter.addEventListener('change', (e) => {
+        settings.enterSends = e.target.checked;
+        writeSetting('enterSends', settings.enterSends);
+      });
+    },
+    onClose: () => {
+      settingsSheet = null;
+      qualityButtons = [];
+    },
+  });
   showQuality();
-  settingsEl.hidden = false;
-  $('settingsClose').focus();
-}
-
-function closeSettings() {
-  settingsEl.hidden = true;
-  settingsReturn?.focus?.();
 }
 
 $('settingsBtn').addEventListener('click', openSettings);
-$('settingsClose').addEventListener('click', closeSettings);
-settingsEl.addEventListener('click', (e) => {
-  if (e.target === settingsEl) closeSettings();
-});
-settingsEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    e.stopPropagation();
-    closeSettings();
-  }
-});
-for (const b of qualityButtons) b.addEventListener('click', () => setQuality(b.dataset.value));
-$('enterSends').addEventListener('change', (e) => {
-  settings.enterSends = e.target.checked;
-  writeSetting('enterSends', settings.enterSends);
-});
 
 // Keys --------------------------------------------------------------------
 
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !viewer.open && settingsEl.hidden && sheet.detent !== 'collapsed') sheet.set('collapsed');
+  if (e.key === 'Escape' && !e.defaultPrevented && !viewer.open && !sheetOpen() && sheet.detent !== 'collapsed') sheet.set('collapsed');
 });
 
 addEventListener('resize', autosize);

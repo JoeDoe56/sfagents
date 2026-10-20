@@ -44,7 +44,8 @@
           <button class="icon-btn above" id="mic" type="button" aria-label="Dictate"><i data-symbol="mic.fill"></i></button>
         </div>
       </div>
-      <button class="circle" id="send" type="button" aria-label="Send" disabled>
+      <button class="circle" id="send" type="button" aria-label="Agent" aria-haspopup="dialog">
+        <span class="agent-icon above" aria-hidden="true"><svg viewBox="0 0 170 120" width="24" height="17"><defs><mask id="agentFace" maskUnits="userSpaceOnUse" x="0" y="0" width="170" height="120"><path fill="#fff" d="M24 8H144V48H164V68H144V92H134V114H120V92H110V114H96V92H72V92H58V114H44V92H34V114H20V92H24V68H4V48H24Z"/><rect x="48" y="32" width="11" height="20" rx="3"/><path d="M105 42L116 36L125 42" fill="none" stroke="#000" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/><path d="M76 62Q84 72 92 62" fill="none" stroke="#000" stroke-width="5" stroke-linecap="round"/></mask></defs><path fill="currentColor" mask="url(#agentFace)" d="M0 0H170V120H0Z"/></svg></span>
         <span class="send-icon above" aria-hidden="true" hidden><i data-symbol="arrow.up"></i></span>
         <span class="stop-disc above" aria-hidden="true"><i data-symbol="stop.fill"></i></span>
       </button>
@@ -61,7 +62,7 @@
           <div class="mon-drives above" aria-label="Drives" hidden></div>
         </section>
         <div class="side-buttons">
-          <button class="circle side" id="settingsBtn" type="button" aria-label="Settings" aria-haspopup="dialog"><span class="side-icon above" aria-hidden="true"><i data-symbol="gear"></i></span></button>
+          <button class="circle side" id="settingsBtn" type="button" aria-label="Settings" aria-haspopup="dialog"><span class="side-icon above" aria-hidden="true"><i data-symbol="gear" data-size="23"></i></span></button>
           <button class="circle side" id="spareBtn" type="button" aria-label="Coming soon" disabled></button>
         </div>
       </div>
@@ -92,12 +93,8 @@
   <div class="viewer-body" id="viewerBody"></div>
 </div>
 
-<div class="settings-backdrop" id="settings" hidden>
-  <div class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-    <header class="settings-head">
-      <h2 id="settingsTitle">Settings</h2>
-      <button class="viewer-btn" id="settingsClose" type="button" aria-label="Close"><i data-symbol="xmark"></i></button>
-    </header>
+<template id="settingsTemplate">
+  <div class="settings-content">
     <p class="settings-note">These settings are for this app on this device. Agent settings live in agent.json.</p>
     <section class="settings-group">
       <h3>Glass quality</h3>
@@ -118,7 +115,7 @@
       </label>
     </section>
   </div>
-</div>
+</template>
 
 <script type="module" src="app.js"></script>
 </body>

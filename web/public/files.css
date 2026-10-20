@@ -5,19 +5,9 @@
   --fm-group: #2c2c2e;
   --fm-row-h: 60px;
   --fm-gutter: max(16px, env(safe-area-inset-left, 0px));
-  position: fixed;
-  inset: 0;
-  z-index: 40;
   color: var(--ink, #fff);
 }
-.fm[hidden] { display: none; }
-.fm-inner {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  background: var(--fm-bg);
-  border-radius: 0;
-}
+.fm-inner { --ms-bg: var(--fm-bg); background: var(--fm-bg); }
 .fm-scroll {
   position: absolute;
   inset: 0;
@@ -26,7 +16,7 @@
   overflow-x: hidden;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding: calc(var(--safe-top) + 72px) 0 calc(var(--safe-bottom) + 112px);
+  padding: 76px 0 calc(var(--safe-bottom) + 112px);
 }
 .fm-hero, .fm-content { max-width: 920px; margin: 0 auto; padding: 0 var(--fm-gutter); box-sizing: border-box; }
 
@@ -34,7 +24,7 @@
 .fm-edge { position: absolute; left: 0; right: 0; z-index: 2; pointer-events: none; opacity: 0; transition: opacity 0.2s ease; }
 .fm-edge.top {
   top: 0;
-  height: calc(var(--safe-top) + 76px);
+  height: 84px;
   background: linear-gradient(to bottom, var(--fm-bg) 0%, rgba(28, 28, 30, 0.86) 45%, rgba(28, 28, 30, 0));
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
@@ -60,7 +50,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: calc(var(--safe-top) + 12px) var(--fm-gutter) 8px;
+  padding: 18px var(--fm-gutter) 8px;
   touch-action: none;
 }
 .fm-glass {
@@ -148,8 +138,8 @@
 .fm-drives[hidden] { display: none; }
 /* A drive: a Liquid Glass capsule, filled from the left as the drive fills. */
 .fm-drive {
-  height: 48px;
-  border-radius: 24px;
+  height: 44px;
+  border-radius: 22px;
   overflow: hidden;
   padding: 0;
   scroll-snap-align: start;
@@ -170,18 +160,20 @@
 .fm-drive-text {
   position: absolute;
   inset: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
-  align-content: center;
-  column-gap: 8px;
-  padding: 0 16px;
-  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 13px;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
+  text-shadow: 0 0.5px 1.5px rgba(0, 0, 0, 0.4);
 }
-.fm-drive-name { grid-column: 1; grid-row: 1; font-size: 13px; line-height: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); }
-.fm-drive-size { grid-column: 1 / span 2; grid-row: 2; font-size: 11px; line-height: 14px; color: rgba(235, 235, 245, 0.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); }
-.fm-drive-pct { grid-column: 2; grid-row: 1; font-size: 13px; line-height: 16px; font-weight: 600; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); }
+/* Name, used/total and percentage on one line, as in the monitor. */
+.fm-drive-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.fm-drive-size { flex: none; color: rgba(255, 255, 255, 0.8); font-size: 11px; }
+.fm-drive-pct { flex: none; font-weight: 600; }
 
 .fm-toolbar {
   max-width: 420px;
@@ -446,25 +438,9 @@
 .fm-info-head { display: flex; align-items: center; gap: 14px; margin: 4px 2px 14px; }
 
 /* Folder picker (Move, Copy) */
-.fm-picker-layer { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, 0.4); display: flex; align-items: flex-end; justify-content: center; }
-.fm-picker {
-  width: min(100%, 620px);
-  height: min(86vh, 760px);
-  display: flex;
-  flex-direction: column;
-  background: #1c1c1e;
-  border-radius: 34px 34px 0 0;
-  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.4);
-  overflow: hidden;
-}
-@media (min-width: 700px) {
-  .fm-picker-layer { align-items: center; }
-  .fm-picker { border-radius: 30px; height: min(80vh, 680px); }
-}
-.fm-picker-head { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; padding: 14px 14px 8px; }
-.fm-picker-head h2 { margin: 0; font-size: 17px; line-height: 22px; font-weight: 600; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56vw; }
-.fm-picker-head .fm-textbtn { justify-self: start; }
-.fm-picker-head .fm-circle { justify-self: end; background: rgba(118, 118, 128, 0.24); }
+.fm-picker { --ms-bg: #1c1c1e; }
+.fm-picker-head { flex: none; display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; gap: 8px; padding: 18px 16px 8px; touch-action: none; }
+.fm-picker-head h2 { margin: 0; font-size: 17px; line-height: 22px; font-weight: 600; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fm-picker-list { flex: 1; overflow-y: auto; padding: 0 16px 12px; }
 .fm-picker-list .fm-section { margin-top: 6px; }
 .fm-picker-foot { flex: none; display: flex; align-items: center; gap: 12px; padding: 12px 16px calc(12px + var(--safe-bottom)); border-top: 0.5px solid rgba(84, 84, 88, 0.6); }

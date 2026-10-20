@@ -72,7 +72,7 @@ export function openPeek(options) {
   close.type = 'button';
   close.setAttribute('aria-label', 'Close');
   close.append(symbol('xmark', 12));
-  head.append(back, titleWrap, close);
+  head.append(close, back, titleWrap);
   const viewport = el('div', 'peek-viewport');
   inner.append(head, viewport);
   card.append(inner);

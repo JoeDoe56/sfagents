@@ -24,3 +24,4 @@ export type { Detail, Point, DetailPoint } from './performance.js';
 export { ProcessMonitor, ProcessError, parseProcStat, parsePs, parseEtime, parseWho, parseSystemctl, parseDesktopEntry, PRIORITY_LEVELS } from './processes.js';
 export type { ProcessRow, ProcessDetail, ServiceRow, StartupRow } from './processes.js';
 export { PowerShell } from './powershell.js';
+export { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';

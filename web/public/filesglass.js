@@ -14,11 +14,9 @@
 
 import { createGlass, imageBackdrop } from './vendor/sfgl/src/index.js';
 import { symbolUrl } from './vendor/sfgl/src/symbols.js';
+import { GLASS } from './glassvalues.js';
 
-const MATERIAL = {
-  control: { material: -0.3, tint: { color: '#2c2c2e', amount: 0.42 }, frost: 3, refraction: 0.012, dispersion: 0, rim: 0.25, layer: 1 },
-  bar: { material: -0.3, tint: { color: '#2c2c2e', amount: 0.5 }, frost: 6, refraction: 0.01, dispersion: 0, rim: 0.22, layer: 1 },
-};
+const MATERIAL = GLASS;
 
 /** Elements painted as one unit (their subtree measured together). */
 const UNITS = '.fm-row, .fm-tile, .fm-place, .fm-section-title, .fm-nav, .fm-title, .fm-info, .fm-path, .fm-search, .fm-empty, .fm-note, .fm-loading';
@@ -28,7 +26,7 @@ function transparent(color) {
   return !color || color === 'transparent' || /rgba\([^)]*,\s*0\)$/.test(color);
 }
 
-export function createFilesGlass({ host, scroller, quality }) {
+export function createFilesGlass({ host, scroller, quality, units = UNITS, background: bg = '#1c1c1e' }) {
   const glass = createGlass({ quality: quality || 'auto' });
   const surface = glass.surface({ host, z: 3 });
   const canvas = document.createElement('canvas');
@@ -37,7 +35,7 @@ export function createFilesGlass({ host, scroller, quality }) {
   let dirty = true;
   let painted = null;
   let bands = [];
-  let background = '#1c1c1e';
+  let background = bg;
 
   glass.setBackdrop(
     imageBackdrop(canvas, {
@@ -167,6 +165,11 @@ export function createFilesGlass({ host, scroller, quality }) {
     return out;
   }
 
+  const ownText = (node) => {
+    for (const c of node.childNodes) if (c.nodeType === Node.TEXT_NODE && c.nodeValue.trim()) return true;
+    return false;
+  };
+
   /** Every unit and grouped background crossing a band, with its rect. */
   function collect(top, bottom, out) {
     const visit = (node) => {
@@ -174,7 +177,7 @@ export function createFilesGlass({ host, scroller, quality }) {
         if (child.hidden) continue;
         const r = child.getBoundingClientRect();
         if (!r.height || r.bottom < top || r.top > bottom) continue;
-        if (child.matches(UNITS)) {
+        if (child.matches(units) || ownText(child) || child.tagName === 'IMG' || child.tagName === 'INPUT') {
           out.push({ unit: child, r });
           continue;
         }
@@ -317,5 +320,14 @@ export function createFilesGlass({ host, scroller, quality }) {
     repaint: schedule,
     track,
     invalidate: () => glass.invalidate(true),
+    destroy() {
+      cancelAnimationFrame(follow);
+      mo.disconnect();
+      try {
+        glass.destroy();
+      } catch {
+        // already gone
+      }
+    },
   };
 }

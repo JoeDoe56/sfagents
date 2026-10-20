@@ -30,7 +30,7 @@ import { ShellTool } from '../tools/shell.js';
 import { WorkspaceContext } from '../permissions/workspace.js';
 import { McpManager } from '../mcp/manager.js';
 import { DiscoveredMcpTool, mcpFunctionName } from '../mcp/mcp-tool.js';
-import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, TokenUsage } from '../providers/types.js';
+import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
 import { createDefaultProviderFactory, credentialEnvNames, type ProviderFactory } from '../providers/factory.js';
 import { executeToolCall } from './tool-executor.js';
 import {
@@ -43,7 +43,7 @@ import {
 import { Semaphore } from '../utils/semaphore.js';
 import { PersistenceFailure, type RunRecorder } from './recorder.js';
 import { ConversationService, type ReplayTarget } from '../conversation/service.js';
-import { buildWorkingContext, type ContextReport } from '../conversation/context.js';
+import { buildWorkingContext, contextBreakdown, type ContextBreakdown, type ContextReport, type ContextTool } from '../conversation/context.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 export const DEFAULT_MAX_TURNS = 40;
@@ -84,6 +84,8 @@ interface RunParams {
    * known (root sessions). Replaces `messages` and adds system-prompt text.
    */
   prepareContext?: (fixedText: string) => { messages: ChatMessage[]; systemExtra?: string; report?: ContextReport };
+  /** Overrides the agent's configured reasoning effort for this run (the root session's setting). */
+  reasoning?: ReasoningEffort;
 }
 
 /** Identity of the provider/model an agent uses, as recorded in run_start. */
@@ -364,7 +366,7 @@ export class AgentRuntime implements ChildRunner {
           model: d.model,
           messages,
           tools: declarations,
-          reasoning: d.reasoning,
+          reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,
           maxOutputTokens: d.maxOutputTokens,
           signal,
@@ -391,6 +393,7 @@ export class AgentRuntime implements ChildRunner {
         return finish(AgentTerminateMode.ERROR, message);
       }
       addUsage(usage, done.usage);
+      if (done.usage) emit({ type: 'model_usage', agentPath, usage: done.usage });
       const assistantMessage = done.message;
       const finishReason = done.finishReason;
       record((r) => r.assistant(assistantMessage, finishReason));
@@ -525,6 +528,10 @@ export class AgentRuntime implements ChildRunner {
 export class AgentSession {
   private busy = false;
   private lastMessages: ChatMessage[] = [];
+  /** Reasoning effort chosen for this session (overrides the root agent's setting). */
+  reasoning: ReasoningEffort | undefined;
+  /** The root agent's most recent model request, as the provider reported it. */
+  lastRequest: { usage: TokenUsage; at: number } | undefined;
 
   constructor(
     private readonly runtime: AgentRuntime,
@@ -535,6 +542,36 @@ export class AgentSession {
   /** The provider messages of the most recent turn (for inspection and tests). */
   get messages(): ChatMessage[] {
     return this.lastMessages;
+  }
+
+  get running(): boolean {
+    return this.busy;
+  }
+
+  /**
+   * What the next request would carry, split by part (system prompt, tool
+   * families per tool, section index and notes, messages), against the
+   * working-context budget. MCP servers the agent uses are connected if they
+   * are not already.
+   */
+  async contextUsage(): Promise<ContextBreakdown & { lastRequest?: { usage: TokenUsage; at: number } }> {
+    const definition = this.node.definition;
+    const conversation = this.conversation;
+    const tools = await this.runtime.buildTools(this.node, [this.node.id], () => undefined, undefined, conversation);
+    const list: ContextTool[] = [...tools.entries()].map(([name, tool]) => ({
+      name,
+      group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.INVOKE_CHILD ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
+      ...(tool instanceof DiscoveredMcpTool ? { server: tool.serverName } : {}),
+      schema: tool.schema,
+    }));
+    const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
+    const index = conversation.file && tools.has(ArtifactToolNames.LIST) ? artifactIndex(conversation) : undefined;
+    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()]), list, {
+      retrievable,
+      resolveAttachment: (ref) => conversation.readAttachment(ref),
+      ...(index ? { extraSystem: index } : {}),
+    });
+    return { ...breakdown, ...(this.lastRequest ? { lastRequest: this.lastRequest } : {}) };
   }
 
   /** /clear: later turns start from a fresh working context; history is kept. */
@@ -567,6 +604,7 @@ export class AgentSession {
       const queue: RuntimeEvent[] = [];
       let wake: (() => void) | undefined;
       const emit = (event: RuntimeEvent) => {
+        if (event.type === 'model_usage' && event.agentPath.length === 1) this.lastRequest = { usage: event.usage, at: Date.now() };
         queue.push(event);
         wake?.();
       };
@@ -583,6 +621,7 @@ export class AgentSession {
           recorder,
           conversation: this.conversation,
           prepareContext,
+          ...(this.reasoning ? { reasoning: this.reasoning } : {}),
         })
         .then(
           (r) => {

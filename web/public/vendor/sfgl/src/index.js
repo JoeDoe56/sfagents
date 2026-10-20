@@ -23,6 +23,7 @@ export {
 export {motion, normalize, interpolate, advance, apply, animate} from './motion/geometry.js';
 export {createContentTransitions, changes} from './transitions/content.js';
 export {createTextUnderlay} from './underlay/text.js';
+export {createGradientUnderlay, gradientSpec, drawGradient, hashSeed} from './underlay/gradient.js';
 export {createContactTracker} from './contact.js';
 export {symbol, applySymbol, symbolUrl, setSymbolBase, resolveSymbol, symbolAliases} from './symbols.js';
 

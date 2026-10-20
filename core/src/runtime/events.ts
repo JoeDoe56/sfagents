@@ -83,6 +83,11 @@ export type RuntimeEvent =
       indexEntries: number;
       indexTotal: number;
     })
+  | (EventBase & {
+      type: 'model_usage';
+      /** Token usage the provider reported for one model request. */
+      usage: TokenUsage;
+    })
   | (EventBase & { type: 'warning'; message: string })
   | (EventBase & { type: 'error'; message: string })
   | (EventBase & { type: 'agent_end'; result: AgentRunResult });

@@ -566,7 +566,17 @@ button { -webkit-tap-highlight-color: transparent; }
   color: #fff;
   pointer-events: none;
 }
-.send-icon[hidden] { display: none; }
+.send-icon[hidden], .agent-icon[hidden] { display: none; }
+.agent-icon {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.94);
+  pointer-events: none;
+  filter: drop-shadow(0 0.5px 1px rgba(0, 0, 0, 0.35));
+}
+.agent-icon svg { display: block; }
 .send-icon i { width: 18px; height: 18px; }
 .stop-disc {
   position: absolute;
@@ -683,7 +693,7 @@ button { -webkit-tap-highlight-color: transparent; }
 /* Drives: up to three bars share the width; more scroll sideways. */
 .mon-drives {
   --drive-count: 1;
-  --drive-gap: 12px;
+  --drive-gap: 8px;
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: calc((100% - (var(--drive-count) - 1) * var(--drive-gap)) / var(--drive-count));
@@ -701,16 +711,13 @@ button { -webkit-tap-highlight-color: transparent; }
 /* More than three: a fade at the trailing edge says there is more. */
 .mon-drives.more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent); }
 .drive { min-width: 0; scroll-snap-align: start; }
-.drive-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; font-size: 12px; line-height: 15px; }
-.drive-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: rgba(235, 235, 245, 0.85); }
-.drive-figures { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; font-size: 11px; line-height: 14px; white-space: nowrap; overflow: hidden; }
-.drive-size { color: var(--mon-tertiary); }
-.drive-pct { color: var(--mon-secondary); font-weight: 500; }
-.drive-bar { position: relative; height: 6px; margin-top: 5px; border-radius: 3px; overflow: hidden; background: rgba(120, 120, 128, 0.32); }
-/* iOS system colours: blue, then orange from 80 % and red from 90 %. */
-.drive-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 3px; background: #0a84ff; transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.3s ease; }
-.drive.warn .drive-fill { background: #ff9f0a; }
-.drive.full .drive-fill { background: #ff453a; }
+/* Each drive: a bar tall enough to carry its name, used/total and percentage on one line. */
+.drive.usage-bar { --h: 20px; cursor: pointer; }
+.drive .usage-text { gap: 4px; padding: 0 7px; font-size: 10px; letter-spacing: -0.01em; }
+/* The figures always show; a long name gives way (the full name is in the tooltip). */
+.drive .usage-name { flex: 1 1 auto; min-width: 0; }
+.drive .usage-amount, .drive .usage-pct { flex: none; }
+.drive:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: 2px; }
 .side-buttons {
   flex: none;
   display: flex;

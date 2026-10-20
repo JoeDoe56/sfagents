@@ -41,7 +41,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 16px 14px 8px 18px;
+  padding: 16px 18px 8px 14px;
   touch-action: none;
   cursor: grab;
 }
@@ -49,18 +49,18 @@
   content: "";
   position: absolute;
   left: 50%;
-  top: 6px;
-  width: 36px;
+  top: 5px;
+  width: 58px;
   height: 4px;
-  margin-left: -18px;
+  margin-left: -29px;
   border-radius: 2px;
-  background: rgba(235, 235, 245, 0.18);
+  background: rgba(235, 235, 245, 0.32);
 }
 .peek-back {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: -8px;
+  margin-left: -4px;
   padding: 4px 6px;
   border: 0;
   border-radius: 10px;
@@ -455,3 +455,216 @@
 @media (prefers-reduced-motion: reduce) {
   .menu-highlight, .ui-switch, .ui-switch::after, .ui-composition span, .toast-bar span { transition: none; }
 }
+
+/* ------------------------------------------------------------------ modal sheets */
+
+.ms-layer { position: fixed; inset: 0; z-index: 45; overflow: hidden; }
+.ms-layer[hidden] { display: none; }
+.ms-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.5); opacity: 0; }
+.ms-panel {
+  --ms-bg: #1c1c1e;
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--ms-bg);
+  border-radius: 38px 38px 0 0;
+  box-shadow: 0 -0.5px 0 rgba(255, 255, 255, 0.12), 0 -8px 40px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  will-change: transform;
+  outline: none;
+}
+.ms-panel.wide { left: 50%; right: auto; width: min(680px, calc(100vw - 48px)); margin-left: calc(min(680px, calc(100vw - 48px)) / -2); }
+.ms-grabber {
+  position: absolute;
+  z-index: 7;
+  left: 50%;
+  top: 0;
+  width: 96px;
+  height: 18px;
+  margin-left: -48px;
+  cursor: grab;
+  touch-action: none;
+}
+.ms-grabber::before {
+  content: "";
+  position: absolute;
+  /* The main sheet's handle (Apple Maps' size), everywhere. */
+  left: 19px;
+  top: 5px;
+  width: 58px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(235, 235, 245, 0.32);
+}
+.ms-head {
+  position: absolute;
+  z-index: 6;
+  left: 0;
+  right: 0;
+  top: 0;
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 16px 8px;
+  touch-action: none;
+}
+.ms-title { margin: 0; text-align: center; font-size: 17px; line-height: 22px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms-trailing { display: flex; justify-content: flex-end; }
+.ms-close {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(120, 120, 128, 0.26);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.22), inset 0 -0.5px 0 rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+.ms-close:active { background: rgba(120, 120, 128, 0.4); }
+.ms-close:focus-visible { outline: 2px solid rgba(10, 132, 255, 0.8); outline-offset: 2px; }
+.ms-edge {
+  position: absolute;
+  z-index: 5;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 86px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  background: linear-gradient(to bottom, var(--ms-bg) 0%, rgba(28, 28, 30, 0.85) 50%, rgba(28, 28, 30, 0));
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+}
+.ms-scrolled .ms-edge { opacity: 1; }
+.ms-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 74px 16px calc(24px + var(--safe-bottom));
+}
+.ms-body.ms-locked { overflow: hidden; }
+
+/* ------------------------------------------------------------------ usage bars (drives, context) */
+
+/* A capsule with its fill and, on one line inside it, a name, used/total and the percentage. */
+.usage-bar {
+  --h: 26px;
+  position: relative;
+  height: var(--h);
+  border-radius: calc(var(--h) / 2);
+  overflow: hidden;
+  background: rgba(120, 120, 128, 0.28);
+  font-variant-numeric: tabular-nums;
+}
+.usage-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  background: #0a84ff;
+  transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.3s ease;
+}
+.usage-bar.warn .usage-fill { background: #ff9f0a; }
+.usage-bar.full .usage-fill { background: #ff453a; }
+.usage-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 calc(var(--h) / 2 - 1px);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  color: #fff;
+  text-shadow: 0 0.5px 1.5px rgba(0, 0, 0, 0.45);
+}
+.usage-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.usage-amount { flex: none; color: rgba(255, 255, 255, 0.82); }
+.usage-pct { flex: none; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .usage-fill { transition: none; } }
+
+/* ------------------------------------------------------------------ the agent sheet */
+
+.ag-line { display: flex; align-items: baseline; gap: 8px; margin: 2px 4px 18px; font-size: 17px; line-height: 22px; min-width: 0; }
+.ag-line strong { font-weight: 600; flex: none; }
+.ag-line span { color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ag-effort { margin-bottom: 18px; }
+.ag-label { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 0 0 10px; font-size: 15px; line-height: 20px; }
+.ag-label strong { font-weight: 600; }
+.ag-label span { color: var(--label-2); }
+.ag-slider { position: relative; z-index: 4; height: 48px; touch-action: none; outline: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ag-slider:focus-visible .ag-track { box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.85); }
+.ag-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 24px;
+  background: rgba(120, 120, 128, 0.24);
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.16);
+}
+.ag-fill {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  border-radius: 20px;
+  background: #0a84ff;
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.28);
+}
+.ag-dot {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: rgba(235, 235, 245, 0.36);
+  z-index: 1;
+}
+.ag-dot.under { background: rgba(255, 255, 255, 0.55); }
+.ag-knob {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  top: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  transition: scale 0.18s ease;
+}
+.ag-slider.active .ag-knob { scale: 1.06; }
+.ag-unit.usage-bar { margin: 0 0 6px; }
+.ag-medium-end { height: 1px; }
+.ag-details { margin-top: 18px; }
+.ag-strip { display: flex; height: 14px; gap: 2px; margin: 0 0 10px; border-radius: 7px; overflow: hidden; }
+.ag-strip > span { flex-basis: 0; min-width: 2px; }
+.ag-strip .reserve { background: repeating-linear-gradient(135deg, rgba(235, 235, 245, 0.42) 0 2px, rgba(235, 235, 245, 0.1) 2px 5px); }
+.ag-strip .free { background: rgba(120, 120, 128, 0.3); }
+.ag-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0 4px 10px; font-variant-numeric: tabular-nums; }
+.ag-summary strong { font-size: 17px; font-weight: 600; }
+.ag-summary span { font-size: 13px; color: var(--label-2); }
+.ag-dot-key { flex: none; width: 10px; height: 10px; border-radius: 3px; }
+.ag-legend .ui-row-value, .ag-family .ui-row-value { font-variant-numeric: tabular-nums; }
+.ag-family > summary { list-style: none; cursor: pointer; }
+.ag-family > summary::-webkit-details-marker { display: none; }
+.ag-family > summary > i:last-child { transition: transform 0.2s ease; }
+.ag-family[open] > summary > i:last-child { transform: rotate(90deg); }
+.ag-family + .ag-family { border-top: 0.5px solid var(--separator); }
+.ag-item { padding-left: 34px; }
+.ag-item .ui-row-label { font: 13px/18px ui-monospace, "SF Mono", Menlo, monospace; color: rgba(235, 235, 245, 0.85); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-problem { margin: 0; padding: 12px 14px; border-radius: 14px; background: rgba(255, 69, 58, 0.16); color: #ff9f97; font-size: 14px; line-height: 19px; }
+.ag-reset { width: 100%; justify-content: center; }
+.ag-note { margin: 10px 4px 0; font-size: 12px; line-height: 16px; color: var(--label-3); }
