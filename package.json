@@ -14,8 +14,10 @@
     "node": ">=20.12"
   },
   "scripts": {
-    "prepare": "tsc -b web cli tests",
-    "build": "tsc -b web cli tests",
+    "prepare": "node scripts/build-sensors.mjs && tsc -b web cli tests",
+    "build": "node scripts/build-sensors.mjs && tsc -b web cli tests",
+    "build:sensors": "node scripts/build-sensors.mjs",
+    "sensors:setup": "powershell.exe -NoProfile -File scripts/setup-sensors.ps1",
     "clean": "tsc -b web cli tests --clean",
     "typecheck": "tsc -b web cli tests",
     "test": "npm run build && node scripts/run-tests.mjs",

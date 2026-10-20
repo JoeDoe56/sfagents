@@ -27,7 +27,8 @@ const STATS = [
   { key: 'gpu', label: 'GPU' },
   { key: 'memory', label: 'Memory' },
   { key: 'disk', label: 'Disk' },
-  { key: 'network', label: 'Network', wide: true },
+  { key: 'network', label: 'Network' },
+  { key: 'processes', label: 'Processes' },
   { key: 'uptime', label: 'Uptime' },
   { key: 'sfagents', label: 'SF Agents' },
 ];
@@ -89,7 +90,7 @@ const temperature = (c) => (Number.isFinite(c) ? `${Math.round(c)} °C` : null);
  * available (with a hint about Libre Hardware Monitor on Windows without it).
  */
 export function describeStats(s) {
-  const missing = s.hint ? 'Needs LHM' : 'Not available';
+  const missing = 'Not available';
   const pctValue = (x) => ({ num: percent(x), unit: Number.isFinite(x) ? '%' : '' });
   const out = {};
 
@@ -132,6 +133,14 @@ export function describeStats(s) {
   }
 
   out.uptime = { num: formatDuration(s.uptime?.system), unit: '', lines: [{ text: 'Computer' }] };
+  const hasCount = Number.isInteger(s.processes) && s.processes >= 0;
+  const hasPower = Number.isFinite(s.power?.watts) && s.power.watts >= 0;
+  out.processes = {
+    num: hasCount ? String(s.processes) : DASH,
+    unit: '',
+    lines: [{ text: hasPower ? `${Math.round(s.power.watts)} W` : '— W' }],
+    title: hasPower ? `Power supply ${s.power.kind === 'input' ? 'input' : s.power.kind === 'output' ? 'output' : 'total'} power` : 'Whole-system power requires a power supply with readable power telemetry.',
+  };
   out.sfagents = { num: formatDuration(s.uptime?.sfagents), unit: '', lines: [{ text: 'This session' }] };
   return out;
 }
@@ -278,6 +287,7 @@ export function createMonitor({ root, expandButton, onDrivesChange }) {
         setText(slot.text, line.text);
       });
       c.cell.classList.toggle('unavailable', v.num === DASH);
+      c.cell.title = v.title || '';
     }
     renderDrives(snapshot.drives || [], snapshot.platform !== 'darwin');
     root.classList.remove('loading');

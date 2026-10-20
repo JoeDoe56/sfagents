@@ -38,7 +38,7 @@ import {
   type ConversationFlags,
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
-import { DEFAULT_HOST, DEFAULT_PORT, WebServer } from '@sfagents/web';
+import { DEFAULT_HOST, DEFAULT_PORT, WebServer, parsePublicOrigin } from '@sfagents/web';
 
 export const VERSION = '0.1.0';
 
@@ -69,9 +69,11 @@ Options:
       --ephemeral           (start) Keep this session in memory only; nothing is stored
       --persist             (run) Record the request in the persistent conversation
       --port <n>            (web) Port to listen on (default ${DEFAULT_PORT})
+      --public-origin <url> (web) Accept this exact external origin behind a reverse proxy
       --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
                             the agent and its tools to your network)
       --lhm <url|off>       (web) Libre Hardware Monitor's web server for the resource monitor
+      --sensor-admin        (web, Windows) Ask to elevate only the built-in sensor helper
                             (default http://127.0.0.1:8085; user:password@ for its sign-in)
   -v, --version             Print the version
   -h, --help                Show this help
@@ -117,8 +119,10 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         persist: { type: 'boolean', default: false },
         page: { type: 'string' },
         port: { type: 'string' },
+        'public-origin': { type: 'string' },
         host: { type: 'string' },
         lhm: { type: 'string' },
+        'sensor-admin': { type: 'boolean', default: false },
         version: { type: 'boolean', short: 'v', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -255,6 +259,12 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
           lhmUrl = parsed.href;
         }
       }
+      let publicOrigin: string | undefined;
+      try {
+        publicOrigin = values['public-origin'] === undefined ? undefined : parsePublicOrigin(values['public-origin']);
+      } catch (error) {
+        return printConfigError(error, streams);
+      }
       try {
         checkCredentials(tree, process.env);
       } catch (error) {
@@ -262,7 +272,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       }
       const conversation = openSelected('start', values, tree, streams);
       if (conversation instanceof Error || !conversation) return EXIT_CONFIG;
-      return serveWeb(tree, conversation, { port, host: values.host ?? DEFAULT_HOST, yes: values.yes, lhmUrl }, streams);
+      return serveWeb(tree, conversation, { port, host: values.host ?? DEFAULT_HOST, publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] }, streams);
     }
     default:
       streams.stderr.write(`Unknown command "${command}".\n\n${USAGE}\n`);
@@ -353,7 +363,7 @@ async function runOnce(
 async function serveWeb(
   tree: AgentTree,
   conversation: ConversationService,
-  opts: { port: number; host: string; yes: boolean; lhmUrl?: string | null },
+  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; lhmUrl?: string | null; sensorAdmin?: boolean },
   streams: Streams,
 ): Promise<number> {
   const style = createStyle(streams.stderr as NodeJS.WriteStream);
@@ -362,8 +372,10 @@ async function serveWeb(
     conversation,
     port: opts.port,
     host: opts.host,
+    publicOrigin: opts.publicOrigin,
     approveAll: opts.yes,
     lhmUrl: opts.lhmUrl,
+    sensorAdmin: opts.sensorAdmin,
     log: (line) => streams.stderr.write(`${line}\n`),
   });
   // Cleanups run in reverse: stop the server (and any run) before closing the conversation.
@@ -379,6 +391,7 @@ async function serveWeb(
   }
   for (const n of conversation.notices) streams.stderr.write(`${n.message}\n`);
   streams.stdout.write(`SF Agents web interface: ${url}\n`);
+  if (opts.publicOrigin) streams.stdout.write(`Reverse proxy origin: ${opts.publicOrigin}\n`);
   if (opts.host !== DEFAULT_HOST && opts.host !== 'localhost' && opts.host !== '::1') {
     streams.stderr.write(
       `${style.yellow('warning:')} listening on ${opts.host}. Anyone who can reach this address can talk to the agent and run its tools with your permissions.\n`,

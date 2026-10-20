@@ -2,10 +2,10 @@
  * System resources for the web client's monitor: CPU, GPU, memory, disk and
  * network activity, uptimes and how full each drive is.
  *
- * Readings come from Libre Hardware Monitor's web server when it is running
- * (see lhm.ts): CPU load, temperature and core count, GPU load, temperature
+ * Windows uses the bundled Libre Hardware Monitor adapter (or an explicitly
+ * configured external server): CPU load, temperature and core count, GPU load, temperature
  * and VRAM, memory, each drive's read and write activity and the network.
- * Without it, the monitor falls back to what the operating system exposes
+ * Linux/macOS and the Windows fallback use what the operating system exposes
  * to an ordinary user, without extra packages: Node's os module everywhere;
  * /proc and /sys on Linux; vm_stat, netstat and ioreg on macOS; nvidia-smi
  * wherever it is installed. Anything unavailable is null and the client
@@ -25,7 +25,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { LhmClient, lhmReadings, type LhmReadings } from './lhm.js';
+import { lhmReadings, type LhmReadings, type LhmReader } from './lhm.js';
+import { WindowsSensorClient } from './windows-sensors.js';
 
 export interface SystemSnapshot {
   host: string;
@@ -40,6 +41,9 @@ export interface SystemSnapshot {
   cpu: { usage: number | null; temperature: number | null; cores: number | null; threads: number; model: string };
   gpu: { usage: number | null; temperature: number | null; name: string; memory: { used: number; total: number } | null } | null;
   memory: { used: number; total: number };
+  processes: number | null;
+  /** Actual PSU telemetry, never an estimate made by adding CPU/GPU power. */
+  power: LhmReadings['power'];
   /** read and write: fraction of time the busiest drive spent reading or writing; rates in bytes per second. */
   disk: { read: number | null; write: number | null; readRate: number; writeRate: number } | null;
   /** Bytes per second over all physical interfaces. */
@@ -323,11 +327,13 @@ export function parseCpuinfo(text: string): number | null {
 const SAMPLE_GAP_MS = 400;
 const STALE_MS = 15_000;
 const DRIVE_TTL_MS = 10_000;
-const WINDOWS_HINT = 'Start Libre Hardware Monitor with its web server (Options → Remote Web Server → Run) for temperatures, the GPU, and disk and network activity.';
+const WINDOWS_HINT = 'Windows hardware sensors (Libre Hardware Monitor) are unavailable; the monitor is using operating-system readings.';
 
 export interface SystemMonitorOptions {
-  /** Libre Hardware Monitor's web server; null to read only the operating system. */
-  lhm?: LhmClient | null;
+  /** An explicit external reader; null disables the embedded Windows adapter. */
+  lhm?: LhmReader | null;
+  elevateWindowsSensors?: boolean;
+  log?: (message: string) => void;
 }
 
 export class SystemMonitor {
@@ -337,13 +343,15 @@ export class SystemMonitor {
   private drives: { at: number; list: DriveUsage[] } | undefined;
   private physicalCores: Promise<number | null> | undefined;
   private readonly startedAt = Date.now();
-  private readonly lhm: LhmClient | null;
+  private readonly lhm: LhmReader | null;
 
   constructor(
     private readonly source: SystemSource = nodeSystemSource(),
     options: SystemMonitorOptions = {},
   ) {
-    this.lhm = options.lhm === undefined ? new LhmClient() : options.lhm;
+    this.lhm = options.lhm === undefined
+      ? (this.source.platform === 'win32' ? new WindowsSensorClient({ elevate: options.elevateWindowsSensors, log: options.log }) : null)
+      : options.lhm;
   }
 
   /** A fresh snapshot (at most one per second; concurrent callers share one). */
@@ -354,6 +362,10 @@ export class SystemMonitor {
       this.pending = undefined;
     });
     return this.pending;
+  }
+
+  async close(): Promise<void> {
+    await this.lhm?.close?.();
   }
 
   private async take(): Promise<SystemSnapshot> {
@@ -384,6 +396,7 @@ export class SystemMonitor {
       threads: cpus.length,
       model: cpus[0]?.model.trim() ?? '',
       cores: await this.cores(),
+      processes: await this.processCount(),
       uptime: { system: Math.round(this.source.uptime()), sfagents: Math.round((at - this.startedAt) / 1000) },
       drives: this.driveList(),
     };
@@ -396,10 +409,12 @@ export class SystemMonitor {
       platform: c.platform,
       at: c.at,
       source: 'lhm',
-      hint: null,
+      hint: this.lhm?.hint ?? null,
       cpu: { usage: r.cpu?.usage ?? null, temperature: r.cpu?.temperature ?? null, cores: r.cpu?.cores ?? c.cores, threads: c.threads, model: r.cpu?.name || c.model },
       gpu: r.gpu,
       memory: r.memory ?? { used: this.source.totalmem() - this.source.freemem(), total: this.source.totalmem() },
+      processes: c.processes,
+      power: r.power,
       disk: r.disk,
       network: r.network,
       uptime: c.uptime,
@@ -427,7 +442,7 @@ export class SystemMonitor {
       platform: c.platform,
       at: b.at,
       source: 'os',
-      hint: this.source.platform === 'win32' ? WINDOWS_HINT : null,
+      hint: this.source.platform === 'win32' ? this.lhm?.hint ?? WINDOWS_HINT : null,
       cpu: {
         usage: cpuTotal > 0 ? Math.min(1, Math.max(0, 1 - (b.cpu.idle - a.cpu.idle) / cpuTotal)) : null,
         temperature: b.cpuTemperature,
@@ -437,6 +452,8 @@ export class SystemMonitor {
       },
       gpu: b.gpu,
       memory: b.memory,
+      processes: c.processes,
+      power: null,
       disk:
         a.disk && b.disk
           ? {
@@ -450,6 +467,19 @@ export class SystemMonitor {
       uptime: c.uptime,
       drives: c.drives,
     };
+  }
+
+  private async processCount(): Promise<number | null> {
+    if (this.lhm?.processes !== null && this.lhm?.processes !== undefined) return this.lhm.processes;
+    if (this.source.platform === 'linux') {
+      const count = this.source.listDir('/proc').filter(name => /^\d+$/.test(name)).length;
+      return count || null;
+    }
+    const windows = this.source.platform === 'win32';
+    const output = await this.source.run(windows ? 'tasklist.exe' : 'ps', windows ? ['/FO', 'CSV', '/NH'] : ['-axo', 'pid=']);
+    if (!output) return null;
+    const count = output.split(/\r?\n/).filter(line => windows ? /^"/.test(line.trim()) : /^\s*\d+\s*$/.test(line)).length;
+    return count || null;
   }
 
   /** Physical cores, looked up once (Libre Hardware Monitor counts them itself). */

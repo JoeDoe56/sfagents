@@ -607,6 +607,7 @@ button { -webkit-tap-highlight-color: transparent; }
   margin: 0 calc(var(--row-inset, 12px) - 16px) 22px;
 }
 .monitor {
+  container-type: inline-size;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 140px;
@@ -665,6 +666,19 @@ button { -webkit-tap-highlight-color: transparent; }
 .stat-sub .stat-mark.tag { font-size: 9px; }
 .stat-subtext { overflow: hidden; text-overflow: ellipsis; }
 .stat.unavailable .stat-value { color: var(--mon-tertiary); }
+
+/* The four-column monitor also fits the narrow sheet beside its side buttons. */
+@container (max-width: 260px) {
+  .mon-stats { column-gap: 6px; }
+  .stat-label { font-size: 10px; line-height: 14px; }
+  .stat[data-stat="processes"] .stat-label { font-size: 9px; }
+  .stat-value { font-size: 18px; }
+  .stat-unit { font-size: 10px; }
+  .stat[data-stat="network"] .stat-value { flex-wrap: wrap; }
+  .stat[data-stat="network"] .stat-unit { flex-basis: 100%; margin-left: 13px; line-height: 12px; }
+  .stat[data-stat="uptime"] .stat-value,
+  .stat[data-stat="sfagents"] .stat-value { font-size: 16px; }
+}
 
 /* Drives: up to three bars share the width; more scroll sideways. */
 .mon-drives {

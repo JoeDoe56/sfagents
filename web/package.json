@@ -12,7 +12,7 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "public"],
+  "files": ["dist", "public", "native/bin", "native/windows/*.cs", "native/windows/*.csproj", "native/windows/NuGet.Config", "native/windows/packages.lock.json", "native/NOTICE.md", "native/licenses"],
   "engines": {
     "node": ">=20.12"
   },

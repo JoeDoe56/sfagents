@@ -6,9 +6,9 @@
  * (CPU and GPU load and temperatures, VRAM, memory, drive and network
  * activity, and much more). Its "Remote Web Server" (Options → Remote Web
  * Server → Run; port 8085 by default) serves the whole sensor tree as JSON
- * at /data.json. SF Agents reads that tree; nothing of Libre Hardware
- * Monitor is bundled or started from here. LibreHardwareMonitor-Linux and
- * other tools that serve the same JSON work too.
+ * at /data.json. This module supports an explicitly configured external
+ * server. Windows uses the bundled library adapter by default; Linux and
+ * macOS keep their existing native readers.
  *
  * The tree (LibreHardwareMonitor.Windows.Forms/Utilities/HttpServer.cs):
  * computer → hardware (HardwareId, e.g. "/intelcpu/0", "/gpu-nvidia/0",
@@ -31,7 +31,16 @@ export interface LhmSensor {
   value: number | null;
 }
 
+export interface LhmReader {
+  read(): Promise<LhmSensor[] | null>;
+  readonly hint?: string | null;
+  readonly processes?: number | null;
+  close?(): Promise<void>;
+}
+
 export interface LhmReadings {
+  /** PSU-reported power only; CPU/GPU package power is not a system total. */
+  power: { watts: number; kind: 'input' | 'output' | 'total' } | null;
   cpu: { usage: number | null; temperature: number | null; cores: number | null; name: string } | null;
   gpu: { usage: number | null; temperature: number | null; name: string; memory: { used: number; total: number } | null } | null;
   memory: { used: number; total: number } | null;
@@ -217,7 +226,23 @@ export function lhmReadings(sensors: LhmSensor[]): LhmReadings {
     network.up += up?.value ?? 0;
   }
 
-  return { cpu, gpu, memory, disk, network };
+  let powerWatts = 0;
+  const powerKinds = new Set<'input' | 'output' | 'total'>();
+  for (const { list } of hardwareOf(/^\/psu\//)) {
+    const input = find(list, 'Power', ['Input Power', 'Total Input', 'Total Input Power', 'PSU In']);
+    const total = find(list, 'Power', ['Total watts', 'Total Power', 'Total']);
+    const output = find(list, 'Power', ['Total Output', 'PSU Out']);
+    const reading = input ?? total ?? output;
+    if (!reading || reading.value === null || reading.value < 0) continue;
+    const kind = input ? 'input' : total ? 'total' : 'output';
+    powerWatts += reading.value;
+    powerKinds.add(kind);
+  }
+
+  const power: LhmReadings['power'] = powerKinds.size
+    ? { watts: powerWatts, kind: powerKinds.size === 1 ? [...powerKinds][0]! : 'total' }
+    : null;
+  return { cpu, gpu, memory, disk, network, power };
 }
 
 export const DEFAULT_LHM_URL = 'http://127.0.0.1:8085';
@@ -225,6 +250,7 @@ const MAX_TREE_BYTES = 8 * 1024 * 1024;
 
 /** Reads a Libre Hardware Monitor web server. */
 export class LhmClient {
+  hint: string | null = null;
   private readonly url: URL;
   private readonly auth: string | undefined;
   private failedAt = 0;
@@ -256,9 +282,11 @@ export class LhmClient {
       const sensors = parseLhmTree(JSON.parse(text.replace(/:\s*(-?Infinity|NaN)\b/g, ':null')));
       if (!sensors) throw new Error('not a sensor tree');
       this.failedAt = 0;
+      this.hint = null;
       return sensors;
     } catch {
       this.failedAt = Date.now();
+      this.hint = 'The external Libre Hardware Monitor server is unavailable. Check its Remote Web Server setting and address.';
       return null;
     }
   }

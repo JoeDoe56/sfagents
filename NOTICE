@@ -30,8 +30,7 @@ The upload protocol in web/src/up2k.ts and web/public/up2k.js follows the
 design of copyparty's up2k (https://github.com/9001/copyparty, MIT License).
 It is an independent implementation; no copyparty code is included.
 
-The resource monitor (web/src/lhm.ts) reads the JSON that Libre Hardware
-Monitor's web server publishes (https://github.com/LibreHardwareMonitor/
-LibreHardwareMonitor, MPL-2.0). Sensor names, identifiers and units were
-taken from its source to read that format; no Libre Hardware Monitor code is
-included, and it is not bundled or started by SF Agents.
+The Windows resource monitor bundles LibreHardwareMonitorLib 0.9.6 and its
+NuGet dependencies, with a self-contained .NET runtime. See
+web/native/NOTICE.md and the adapter's licenses/ directory for source,
+versions and license notices. Linux and macOS use native OS readers.

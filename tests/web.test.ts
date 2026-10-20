@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { ConversationService, loadAgentTree } from '@sfagents/core';
-import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall } from '@sfagents/web';
+import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
 import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script } from './helpers.js';
 
 function project(agent: Record<string, unknown> = {}) {
@@ -16,7 +16,7 @@ function project(agent: Record<string, unknown> = {}) {
   return dir;
 }
 
-async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number } = {}) {
+async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string } = {}) {
   const dir = project(agent);
   const tree = loadAgentTree(path.join(dir, 'agent.json'));
   const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
@@ -216,6 +216,31 @@ describe('up2k uploads', () => {
 });
 
 describe('web server', () => {
+  test('accepts only the configured reverse-proxy host and exact browser origin', async () => {
+    const origin = 'https://llms.example.ts.net';
+    const s = await startServer(() => ({ text: 'ok' }), {}, { publicOrigin: origin });
+    const headers = { Host: new URL(origin).host, Origin: origin };
+    try {
+      assert.equal((await request(s.base, '/api/state', { headers })).status, 200);
+      assert.equal((await postJson(s.base, '/api/cancel', {}, headers)).status, 200);
+      assert.equal((await request(s.base, '/api/state')).status, 200, 'loopback still works');
+      for (const Origin of ['https://evil.example', 'http://llms.example.ts.net', 'null']) {
+        assert.equal((await postJson(s.base, '/api/cancel', {}, { ...headers, Origin })).status, 403);
+      }
+      assert.equal((await request(s.base, '/', { headers: { Host: 'llms.example.ts.net:1234' } })).status, 421);
+      assert.equal((await request(s.base, '/', { headers: { Host: 'evil.example', 'X-Forwarded-Host': headers.Host } })).status, 421);
+    } finally {
+      await s.stop();
+    }
+  });
+
+  test('validates external origins without allowing URL paths or credentials', () => {
+    assert.equal(parsePublicOrigin('https://EXAMPLE.com:443/'), 'https://example.com');
+    for (const value of ['no-url', 'ftp://example.com', 'https://user:secret@example.com', 'https://example.com/path', 'https://example.com/?q=1', 'https://example.com/#fragment']) {
+      assert.throws(() => parsePublicOrigin(value), /--public-origin/);
+    }
+  });
+
   test('serves the client with a CSP and refuses foreign hosts, origins and non-JSON posts', async () => {
     const s = await startServer(() => ({ text: 'ok' }));
     try {
@@ -400,7 +425,8 @@ describe('web server', () => {
       assert.equal(r.status, 200);
       const snap = JSON.parse(r.body.toString());
       assert.equal(typeof snap.host, 'string');
-      assert.ok(snap.cpu.cores >= 1);
+      assert.ok(Number.isInteger(snap.cpu.threads) && snap.cpu.threads >= 1);
+      assert.ok(snap.cpu.cores === null || (Number.isInteger(snap.cpu.cores) && snap.cpu.cores >= 1 && snap.cpu.cores <= snap.cpu.threads));
       assert.ok(snap.memory.total > 0 && snap.memory.used >= 0);
       assert.ok(snap.uptime.system > 0 && snap.uptime.sfagents >= 0);
       assert.ok(Array.isArray(snap.drives));
@@ -455,6 +481,10 @@ describe('sfagents web (CLI)', () => {
     const bad = await runCli(['web', '--port', 'abc', '--config', dir], { env: { OPENROUTER_API_KEY: 'k' } });
     assert.equal(bad.code, 2);
     assert.match(bad.stderr, /--port must be a number/);
+    const badOrigin = await runCli(['web', '--public-origin', 'https://example.com/path', '--config', dir], { env: { OPENROUTER_API_KEY: 'k' } });
+    assert.equal(badOrigin.code, 2);
+    assert.match(badOrigin.stderr, /--public-origin/);
+    assert.equal(fs.existsSync(path.join(dir, '.sfagents', 'conversation.lock')), false);
     const eph = await runCli(['web', '--ephemeral', '--config', dir], { env: { OPENROUTER_API_KEY: 'k' } });
     assert.equal(eph.code, 2);
     const lhm = await runCli(['web', '--lhm', 'ftp://example', '--config', dir], { env: { OPENROUTER_API_KEY: 'k' } });

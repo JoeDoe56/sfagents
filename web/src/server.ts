@@ -35,11 +35,23 @@ import {
 } from '@sfagents/core';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
-import { DEFAULT_LHM_URL, LhmClient } from './lhm.js';
+import { LhmClient } from './lhm.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
 export const DEFAULT_PORT = 8093;
 export const DEFAULT_HOST = '127.0.0.1';
+
+/** Explicit browser origin accepted when a reverse proxy preserves Host. */
+export function parsePublicOrigin(value: string): string {
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
+        url.pathname !== '/' || url.search || url.hash) throw new Error('Invalid origin');
+    return url.origin;
+  } catch {
+    throw new Error('--public-origin must be an HTTP(S) origin without credentials, a path, query or fragment.');
+  }
+}
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_CHARS = 400_000;
 const MAX_ATTACHMENTS = 20;
@@ -47,11 +59,15 @@ const MAX_ATTACHMENTS = 20;
 export const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 export interface WebServerOptions {
+  /** Ask Windows to elevate only the bundled, read-only sensor worker. */
+  sensorAdmin?: boolean;
   tree: AgentTree;
   /** A persistent conversation (the server is its single writer while running). */
   conversation: ConversationService;
   port?: number;
   host?: string;
+  /** Exact external origin; the listening address remains independently configured. */
+  publicOrigin?: string;
   /** Approve every tool call that would ask (sfagents web --yes). */
   approveAll?: boolean;
   /** Tests inject a scripted provider. */
@@ -159,6 +175,8 @@ export class WebServer {
   private heartbeat: NodeJS.Timeout | undefined;
   private port: number;
   private readonly host: string;
+  private readonly publicOrigin?: string;
+  private readonly publicHost?: string;
   private runPromise: Promise<void> | undefined;
   private readonly system: SystemMonitor;
 
@@ -167,6 +185,8 @@ export class WebServer {
     this.conversation = options.conversation;
     this.port = options.port ?? DEFAULT_PORT;
     this.host = options.host ?? DEFAULT_HOST;
+    this.publicOrigin = options.publicOrigin === undefined ? undefined : parsePublicOrigin(options.publicOrigin);
+    this.publicHost = this.publicOrigin === undefined ? undefined : new URL(this.publicOrigin).host;
     this.publicDir = options.publicDir ?? PUBLIC_DIR;
     this.log = options.log ?? (() => {});
     this.runtime = new AgentRuntime({
@@ -177,7 +197,11 @@ export class WebServer {
       confirm: (request, signal) => this.confirm(request, signal),
     });
     this.session = this.runtime.createSession();
-    this.system = new SystemMonitor(options.systemSource, { lhm: options.lhmUrl === null ? null : new LhmClient(options.lhmUrl ?? DEFAULT_LHM_URL) });
+    this.system = new SystemMonitor(options.systemSource, {
+      ...(options.lhmUrl === undefined ? {} : { lhm: options.lhmUrl === null ? null : new LhmClient(options.lhmUrl) }),
+      elevateWindowsSensors: options.sensorAdmin,
+      log: this.log,
+    });
     this.up2k = new Up2kStore(options.conversation.dir, options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES);
     this.artifactSignature = this.signature();
     this.server = http.createServer((req, res) => {
@@ -221,6 +245,7 @@ export class WebServer {
 
   async close(): Promise<void> {
     if (this.heartbeat) clearInterval(this.heartbeat);
+    await this.system.close();
     this.live?.controller.abort(new Error('server stopping'));
     for (const a of this.approvals.values()) a.resolve('deny');
     await this.runPromise?.catch(() => undefined);
@@ -238,6 +263,7 @@ export class WebServer {
   private allowedHost(req: IncomingMessage): boolean {
     const host = String(req.headers.host ?? '').toLowerCase();
     if (!host) return false;
+    if (host === this.publicHost) return true;
     if (this.host === '0.0.0.0' || this.host === '::') return true;
     const names = new Set(['localhost', '127.0.0.1', '[::1]', this.host.includes(':') ? `[${this.host}]` : this.host]);
     return [...names].some((n) => host === `${n}:${this.port}`);
@@ -246,6 +272,10 @@ export class WebServer {
   private checkWrite(req: IncomingMessage): void {
     const origin = req.headers.origin;
     if (origin === undefined) return;
+    if (String(req.headers.host ?? '').toLowerCase() === this.publicHost) {
+      if (origin !== this.publicOrigin) throw new HttpError(403, 'Cross-origin requests are not allowed.');
+      return;
+    }
     let originHost = '';
     try {
       originHost = new URL(origin).host.toLowerCase();

@@ -116,7 +116,7 @@ export function isTextMime(mime: string | undefined): boolean {
  * characters, no leading dots, at most 100 characters (extension kept).
  */
 export function safeFilename(name: string, fallback = 'artifact.txt'): string {
-  let base = path.basename(String(name).replace(/\\/g, '/'));
+  let base = path.posix.basename(String(name).replace(/\\/g, '/'));
   base = base.replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, '_').replace(/^[.\s]+/, '').replace(/[.\s]+$/, '').trim();
   if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(base)) base = `_${base}`;
   if (!base) base = fallback;

@@ -6,3 +6,7 @@ dist/
 !.env.example
 coverage/
 .sfagents/
+.tools/
+web/native/bin/
+web/native/windows/bin/
+web/native/windows/obj/
