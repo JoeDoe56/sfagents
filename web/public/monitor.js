@@ -139,7 +139,7 @@ export function describeStats(s) {
     num: hasCount ? String(s.processes) : DASH,
     unit: '',
     lines: [{ text: hasPower ? `${Math.round(s.power.watts)} W` : '— W' }],
-    title: hasPower ? `Power supply ${s.power.kind === 'input' ? 'input' : s.power.kind === 'output' ? 'output' : 'total'} power` : 'Whole-system power requires a power supply with readable power telemetry.',
+    title: hasPower ? `System ${s.power.kind === 'input' ? 'input' : s.power.kind === 'output' ? 'output' : 'total'} power` : 'Whole-system power requires readable PSU or BMC power telemetry.',
   };
   out.sfagents = { num: formatDuration(s.uptime?.sfagents), unit: '', lines: [{ text: 'This session' }] };
   return out;

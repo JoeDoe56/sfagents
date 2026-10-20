@@ -1,5 +1,13 @@
 # Source provenance
 
+The Linux sensor backend separately vendors the unmodified MIT-licensed
+LibreHardwareMonitor-Linux 1.2.0 collectors and protocol tests from
+`insight-it-gmbh/LibreHardwareMonitor-Linux`, pinned at
+`d6646e75f617d61527911a7d446dc0cfce8b6932`. File hashes and source details
+are in `web/native/linux/vendor/UPSTREAM.json`; its license is retained beside
+the source. See `web/native/NOTICE.md` for the bundled Windows library and
+Linux CPython runtime provenance and licenses.
+
 SF Agents reuses code from **Qwen Code** `packages/core` and `packages/cli` only, under the Apache License 2.0.
 
 - **Upstream:** https://github.com/QwenLM/qwen-code

@@ -5,7 +5,8 @@
  * Windows uses the bundled Libre Hardware Monitor adapter (or an explicitly
  * configured external server): CPU load, temperature and core count, GPU load, temperature
  * and VRAM, memory, each drive's read and write activity and the network.
- * Linux/macOS and the Windows fallback use what the operating system exposes
+ * Linux uses bundled LibreHardwareMonitor-Linux collectors, supplemented by
+ * native readers. macOS and helper fallbacks use what the operating system exposes
  * to an ordinary user, without extra packages: Node's os module everywhere;
  * /proc and /sys on Linux; vm_stat, netstat and ioreg on macOS; nvidia-smi
  * wherever it is installed. Anything unavailable is null and the client
@@ -27,6 +28,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { lhmReadings, type LhmReadings, type LhmReader } from './lhm.js';
 import { WindowsSensorClient } from './windows-sensors.js';
+import { LinuxSensorClient } from './linux-sensors.js';
 
 export interface SystemSnapshot {
   host: string;
@@ -42,7 +44,7 @@ export interface SystemSnapshot {
   gpu: { usage: number | null; temperature: number | null; name: string; memory: { used: number; total: number } | null } | null;
   memory: { used: number; total: number };
   processes: number | null;
-  /** Actual PSU telemetry, never an estimate made by adding CPU/GPU power. */
+  /** Actual PSU/BMC telemetry, never an estimate made by adding CPU/GPU power. */
   power: LhmReadings['power'];
   /** read and write: fraction of time the busiest drive spent reading or writing; rates in bytes per second. */
   disk: { read: number | null; write: number | null; readRate: number; writeRate: number } | null;
@@ -330,7 +332,7 @@ const DRIVE_TTL_MS = 10_000;
 const WINDOWS_HINT = 'Windows hardware sensors (Libre Hardware Monitor) are unavailable; the monitor is using operating-system readings.';
 
 export interface SystemMonitorOptions {
-  /** An explicit external reader; null disables the embedded Windows adapter. */
+  /** An explicit external reader; null disables the embedded platform adapter. */
   lhm?: LhmReader | null;
   elevateWindowsSensors?: boolean;
   log?: (message: string) => void;
@@ -350,7 +352,8 @@ export class SystemMonitor {
     options: SystemMonitorOptions = {},
   ) {
     this.lhm = options.lhm === undefined
-      ? (this.source.platform === 'win32' ? new WindowsSensorClient({ elevate: options.elevateWindowsSensors, log: options.log }) : null)
+      ? (this.source.platform === 'win32' ? new WindowsSensorClient({ elevate: options.elevateWindowsSensors, log: options.log })
+        : this.source.platform === 'linux' ? new LinuxSensorClient({ log: options.log }) : null)
       : options.lhm;
   }
 
@@ -371,11 +374,18 @@ export class SystemMonitor {
   private async take(): Promise<SystemSnapshot> {
     const sensors = this.lhm ? await this.lhm.read() : null;
     if (sensors) {
-      // Libre Hardware Monitor keeps its own rates; the OS samples restart if it goes away.
-      this.previous = undefined;
-      this.last = await this.fromLhm(lhmReadings(sensors));
+      // Linux collectors omit disk/network rates and approximate CPU load from
+      // loadavg. Keep real utilization deltas and missing AMD/sysfs readings.
+      const native = this.source.platform === 'linux' ? await this.nativeSnapshot() : undefined;
+      if (!native) this.previous = undefined;
+      this.last = await this.fromLhm(lhmReadings(sensors), native);
       return this.last;
     }
+    this.last = await this.nativeSnapshot();
+    return this.last;
+  }
+
+  private async nativeSnapshot(): Promise<SystemSnapshot> {
     let before = this.previous;
     if (!before || Date.now() - before.at > STALE_MS) {
       before = await this.sample();
@@ -383,8 +393,7 @@ export class SystemMonitor {
     }
     const now = await this.sample();
     this.previous = now;
-    this.last = await this.snapshot(before, now);
-    return this.last;
+    return this.snapshot(before, now);
   }
 
   private async common(at: number) {
@@ -402,7 +411,7 @@ export class SystemMonitor {
     };
   }
 
-  private async fromLhm(r: LhmReadings): Promise<SystemSnapshot> {
+  private async fromLhm(r: LhmReadings, native?: SystemSnapshot): Promise<SystemSnapshot> {
     const c = await this.common(Date.now());
     return {
       host: c.host,
@@ -410,13 +419,24 @@ export class SystemMonitor {
       at: c.at,
       source: 'lhm',
       hint: this.lhm?.hint ?? null,
-      cpu: { usage: r.cpu?.usage ?? null, temperature: r.cpu?.temperature ?? null, cores: r.cpu?.cores ?? c.cores, threads: c.threads, model: r.cpu?.name || c.model },
-      gpu: r.gpu,
+      cpu: {
+        usage: native ? native.cpu.usage : r.cpu?.usage ?? null,
+        temperature: r.cpu?.temperature ?? native?.cpu.temperature ?? null,
+        cores: native ? c.cores : r.cpu?.cores ?? c.cores,
+        threads: c.threads,
+        model: native ? c.model : r.cpu?.name || c.model,
+      },
+      gpu: r.gpu ? {
+        ...r.gpu,
+        usage: r.gpu.usage ?? native?.gpu?.usage ?? null,
+        temperature: r.gpu.temperature ?? native?.gpu?.temperature ?? null,
+        memory: r.gpu.memory ?? native?.gpu?.memory ?? null,
+      } : native?.gpu ?? null,
       memory: r.memory ?? { used: this.source.totalmem() - this.source.freemem(), total: this.source.totalmem() },
       processes: c.processes,
       power: r.power,
-      disk: r.disk,
-      network: r.network,
+      disk: r.disk ?? native?.disk ?? null,
+      network: r.network ?? native?.network ?? null,
       uptime: c.uptime,
       drives: c.drives,
     };
@@ -442,7 +462,7 @@ export class SystemMonitor {
       platform: c.platform,
       at: b.at,
       source: 'os',
-      hint: this.source.platform === 'win32' ? this.lhm?.hint ?? WINDOWS_HINT : null,
+      hint: this.lhm?.hint ?? (this.source.platform === 'win32' ? WINDOWS_HINT : null),
       cpu: {
         usage: cpuTotal > 0 ? Math.min(1, Math.max(0, 1 - (b.cpu.idle - a.cpu.idle) / cpuTotal)) : null,
         temperature: b.cpuTemperature,

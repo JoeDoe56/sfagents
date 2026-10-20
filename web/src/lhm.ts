@@ -7,8 +7,8 @@
  * activity, and much more). Its "Remote Web Server" (Options → Remote Web
  * Server → Run; port 8085 by default) serves the whole sensor tree as JSON
  * at /data.json. This module supports an explicitly configured external
- * server. Windows uses the bundled library adapter by default; Linux and
- * macOS keep their existing native readers.
+ * server. Windows and Linux use bundled platform adapters by default;
+ * macOS uses native readers.
  *
  * The tree (LibreHardwareMonitor.Windows.Forms/Utilities/HttpServer.cs):
  * computer → hardware (HardwareId, e.g. "/intelcpu/0", "/gpu-nvidia/0",
@@ -39,7 +39,7 @@ export interface LhmReader {
 }
 
 export interface LhmReadings {
-  /** PSU-reported power only; CPU/GPU package power is not a system total. */
+  /** PSU/BMC-reported system power only; CPU/GPU power is not a system total. */
   power: { watts: number; kind: 'input' | 'output' | 'total' } | null;
   cpu: { usage: number | null; temperature: number | null; cores: number | null; name: string } | null;
   gpu: { usage: number | null; temperature: number | null; name: string; memory: { used: number; total: number } | null } | null;
@@ -237,6 +237,15 @@ export function lhmReadings(sensors: LhmSensor[]): LhmReadings {
     const kind = input ? 'input' : total ? 'total' : 'output';
     powerWatts += reading.value;
     powerKinds.add(kind);
+  }
+  // LibreHardwareMonitor-Linux exposes a whole-machine DCMI reading under
+  // the BMC. Do not add it to PSU totals or its rolling System Average.
+  if (!powerKinds.size) {
+    const system = find(groups.get('/lpc/bmc') ?? [], 'Power', ['System Total']);
+    if (system?.value !== null && system?.value !== undefined && system.value >= 0) {
+      powerWatts = system.value;
+      powerKinds.add('total');
+    }
   }
 
   const power: LhmReadings['power'] = powerKinds.size

@@ -11,5 +11,6 @@ export type { SystemSnapshot, SystemSource, SystemMonitorOptions, DriveUsage, Di
 export { LhmClient, DEFAULT_LHM_URL, parseLhmTree, parseLhmValue, lhmReadings } from './lhm.js';
 export type { LhmSensor, LhmReadings, LhmReader } from './lhm.js';
 export { WindowsSensorClient, sensorEnvironment } from './windows-sensors.js';
+export { LinuxSensorClient } from './linux-sensors.js';
 export { describeCall, displayItems, displaySections } from './display.js';
 export type { DisplayItem, DisplayArtifact, DisplayApproval, DisplayAttachment, DisplaySection } from './display.js';

@@ -1,0 +1,2 @@
+# Preserve the exact upstream bytes recorded in the vendor SHA-256 manifest.
+web/native/linux/vendor/** -text

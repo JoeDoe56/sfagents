@@ -58,13 +58,13 @@ test('closing cancels an in-flight read', async () => {
   assert.equal(await pending, null);
 });
 
-test('Linux and macOS default to their native sources without starting a Windows helper', async () => {
+test('native-only Linux and macOS monitoring works without a helper', async () => {
   for (const platform of ['linux', 'darwin'] as const) {
     const source: SystemSource = {
       platform, readFile: () => null, readLink: () => null, listDir: dir => dir === '/proc' ? ['1', '42', 'self', 'net'] : [], statfs: () => null,
       run: async command => command === 'ps' ? '  1\n 42\n' : null, cpus: () => [], totalmem: () => 100, freemem: () => 40, uptime: () => 100, hostname: () => platform,
     };
-    const monitor = new SystemMonitor(source);
+    const monitor = new SystemMonitor(source, { lhm: null });
     try {
       const snapshot = await monitor.read();
       assert.equal(snapshot.source, 'os');

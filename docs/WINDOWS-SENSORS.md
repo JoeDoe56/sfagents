@@ -6,9 +6,9 @@ desktop app or web server is needed. The adapter includes its .NET runtime.
 It reads sensors only, and cannot change fans, execute commands or serve HTTP.
 It closes when SF Agents closes. The agent's API keys are not passed to it.
 
-Linux and macOS continue using the existing `/proc`, `/sys`, `vm_stat`,
-`netstat`, `ioreg` and other native readers. They neither download nor start
-the Windows adapter.
+Linux uses its own [bundled Linux backend](LINUX-SENSORS.md), supplemented by
+native readers. macOS continues using `vm_stat`, `netstat`, `ioreg` and the
+other native readers. Neither platform downloads or starts the Windows adapter.
 
 The Processes cell counts all operating-system processes. Its smaller wattage
 line uses a PSU-reported whole-system reading when available (preferring input

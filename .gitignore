@@ -10,3 +10,5 @@ coverage/
 web/native/bin/
 web/native/windows/bin/
 web/native/windows/obj/
+__pycache__/
+*.pyc

@@ -1,0 +1,12 @@
+{
+  "license": "MIT",
+  "commit": "d6646e75f617d61527911a7d446dc0cfce8b6932",
+  "version": "1.2.0",
+  "files": {
+    "lhmlinux/server.py": "bf0277b13a9edcd81f4f5f008ef1f7120399e8d8958c2e2a1d07087bb8aafdcf",
+    "tests/test_protocol.py": "1f28a9a8dac72a606e16ba76942a8efff38ecc8e12f8589b70800642fe24e15e",
+    "README.md": "09a790f683bc6f95d4b174955abd33b21aff3c314e9c12df6641649a9a964335",
+    "LICENSE": "acd6d22b23b00c219580345b4c673bfe9c60f7b9c9b7e62899c37466750a574f"
+  },
+  "repository": "https://github.com/insight-it-gmbh/LibreHardwareMonitor-Linux"
+}

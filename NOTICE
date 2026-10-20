@@ -33,4 +33,10 @@ It is an independent implementation; no copyparty code is included.
 The Windows resource monitor bundles LibreHardwareMonitorLib 0.9.6 and its
 NuGet dependencies, with a self-contained .NET runtime. See
 web/native/NOTICE.md and the adapter's licenses/ directory for source,
-versions and license notices. Linux and macOS use native OS readers.
+versions and license notices.
+
+The Linux resource monitor bundles LibreHardwareMonitor-Linux 1.2.0,
+Copyright 2026 Insight-IT GmbH, Berlin — Dominic Ballenthin, under the MIT
+License, with a private CPython runtime. See web/native/linux/vendor/LICENSE,
+web/native/linux/vendor/UPSTREAM.json and web/native/NOTICE.md for source,
+versions and runtime notices. macOS uses native OS readers.
