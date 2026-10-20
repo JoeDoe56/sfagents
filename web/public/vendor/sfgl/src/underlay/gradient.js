@@ -47,7 +47,8 @@ const SCHEMES = {
   mono: [0, 8, -10, 16],
 };
 const STYLES = ['blobs', 'swirl', 'waves', 'aurora'];
-const BLENDS = ['lighter', 'screen', 'source-over'];
+// Additive blending washes overlapping shapes out to white; these keep the colours.
+const BLENDS = ['screen', 'source-over', 'soft-light', 'overlay'];
 
 /**
  * The gradient a seed describes (plain data: inspect it, test it, store it).
@@ -68,7 +69,7 @@ export function gradientSpec(seed) {
     blobs.push({
       hue: (hue + offsets[i % offsets.length] + range(-14, 14) + 360) % 360,
       sat: range(62, 96),
-      light: range(48, 68),
+      light: range(44, 62),
       radius: range(0.34, 0.78),
       aspect: range(0.55, 1.5),
       spin: range(-0.6, 0.6),
@@ -78,7 +79,7 @@ export function gradientSpec(seed) {
       py: r() * Math.PI * 2,
       ax: range(0.12, 0.42),
       ay: range(0.12, 0.42),
-      alpha: range(0.65, 1),
+      alpha: range(0.55, 0.9),
     });
   }
   return {
