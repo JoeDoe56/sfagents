@@ -18,8 +18,21 @@ export interface McpServerGrant {
   tools?: string[];
 }
 
+/** Another agent this one may message, from a "N-name.json" entry in tools.allow. */
+export interface AgentGrant {
+  /** The agent's file name, relative to the agents folder (e.g. "researcher.json"). */
+  file: string;
+  /** The agent's name (its file name without ".json"). */
+  agent: string;
+  /** How many instances (parallel threads) of it this agent may run at once. */
+  max: number;
+}
+
 export interface AgentDefinition {
+  /** The agent's name: its file name without ".json" (an "id" in the file is only a label). */
   id: string;
+  /** Display name, when it differs from the file name. */
+  name?: string;
   description?: string;
   provider: ProviderName;
   /** Only for provider "openai-compatible". */
@@ -41,29 +54,27 @@ export interface AgentDefinition {
     mcpServers?: Array<string | McpServerGrant>;
     /** Tool IDs that skip the confirmation prompt (e.g. "edit", "mcp__srv__*"). */
     autoApprove?: string[];
-  };
-  spawn?: {
-    maxConcurrentChildren?: number;
-    /** Root agent only: maximum depth of the agent tree (root = 0). */
-    maxDepth?: number;
-    children?: string[];
+    /** Agents this one may message ("N-name.json" entries of tools.allow). */
+    agents?: AgentGrant[];
   };
   /**
    * Access to the main persistent conversation's sections and history:
    * "organize" (read + add/edit sections), "read", or "none". Defaults:
-   * root "organize", children "none".
+   * "organize" while the agent replies in the main conversation, "none"
+   * while it works in a thread with another agent.
    */
   conversation?: {
     access?: 'none' | 'read' | 'organize';
   };
   /**
    * Artifacts in the persistent conversation: "create" (list, read, create
-   * and update), "read", or "none". Defaults: root "create", children "none".
+   * and update), "read", or "none". Defaults: "create" in the main
+   * conversation, "none" in a thread.
    */
   artifacts?: {
     access?: 'none' | 'read' | 'create';
   };
-  /** Root only: working-context policy for the persistent conversation. */
+  /** Working-context policy (the main conversation, and its threads with other agents). */
   context?: {
     /** Estimated input-token budget for each request (default 48000). */
     maxInputTokens?: number;
@@ -91,10 +102,15 @@ export class ConfigError extends Error {
 }
 
 export const AGENT_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+/** Agent names come from file names: anything printable without path separators. */
+export const AGENT_NAME_PATTERN = /^[^\\/:*?"<>|\x00-\x1f]{1,100}$/;
+/** "3-researcher.json" in tools.allow: may run up to 3 instances of agents/researcher.json. */
+export const AGENT_GRANT_PATTERN = /^([1-9][0-9]{0,2})-(.+\.json)$/i;
 
 const TOP_LEVEL_KEYS = new Set([
   '$schema',
   'id',
+  'name',
   'description',
   'provider',
   'providerOptions',
@@ -105,7 +121,6 @@ const TOP_LEVEL_KEYS = new Set([
   'maxOutputTokens',
   'workspace',
   'tools',
-  'spawn',
   'conversation',
   'artifacts',
   'context',
@@ -182,19 +197,24 @@ class FieldChecker {
  * Validates one parsed agent JSON document. Cross-file rules (children,
  * escalation, MCP server existence, roots on disk) are checked by the loader.
  */
-export function parseAgentDefinition(raw: unknown, file: string): AgentDefinition {
+export function parseAgentDefinition(raw: unknown, file: string, agentName?: string): AgentDefinition {
   const c: FieldChecker = new FieldChecker(file);
   if (!isPlainObject(raw)) c.fail(undefined, 'agent definition must be a JSON object');
   for (const key of Object.keys(raw)) {
+    if (key === 'spawn') {
+      c.fail('spawn', 'is no longer used: let an agent message another by adding "N-name.json" to tools.allow (N = how many it may run at once)');
+    }
     if (!TOP_LEVEL_KEYS.has(key)) {
       c.fail(key, `unknown field. Allowed fields: ${[...TOP_LEVEL_KEYS].filter((k) => k !== '$schema').join(', ')}`);
     }
   }
 
-  const id = c.string(raw['id'], 'id', { nonEmpty: true });
-  if (!AGENT_ID_PATTERN.test(id)) {
-    c.fail('id', 'must start with a letter and contain only letters, digits, "_" or "-" (max 64 characters)');
-  }
+  // The agent is known by its file name; an "id" in the file is a label.
+  const label = c.optionalString(raw['id'], 'id', { nonEmpty: true, maxLength: 100 });
+  const name = c.optionalString(raw['name'], 'name', { nonEmpty: true, maxLength: 100 }) ?? (label && label !== agentName ? label : undefined);
+  const id = agentName ?? label;
+  if (!id) c.fail('id', 'is required when the definition is not loaded from a file');
+  if (!AGENT_NAME_PATTERN.test(id)) c.fail('id', 'must not contain path separators or control characters (max 100 characters)');
   const description = c.optionalString(raw['description'], 'description', { maxLength: 2000 });
 
   const provider = c.string(raw['provider'], 'provider', { nonEmpty: true });
@@ -249,14 +269,26 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
   let tools: AgentDefinition['tools'];
   if (raw['tools'] !== undefined) {
     const t = c.object(raw['tools'], 'tools', ['allow', 'mcpServers', 'autoApprove']);
-    const allow = c.stringArray(t['allow'], 'tools.allow', { unique: true });
-    allow?.forEach((name, i) => {
-      if (!BUILTIN_TOOL_IDS.includes(name)) {
+    const allowAll = c.stringArray(t['allow'], 'tools.allow', { unique: true });
+    const allow: string[] = [];
+    const agents: AgentGrant[] = [];
+    allowAll?.forEach((entry, i) => {
+      const grant = AGENT_GRANT_PATTERN.exec(entry);
+      if (grant) {
+        const target = grant[2]!;
+        if (target.includes('/') || target.includes('\\')) c.fail(`tools.allow[${i}]`, 'agent grants name a file in the agents folder, without a path');
+        const agent = target.replace(/\.json$/i, '');
+        if (agents.some((a) => a.agent === agent)) c.fail(`tools.allow[${i}]`, `"${agent}" is granted twice`);
+        agents.push({ file: target, agent, max: Number(grant[1]) });
+        return;
+      }
+      if (!BUILTIN_TOOL_IDS.includes(entry)) {
         c.fail(
           `tools.allow[${i}]`,
-          `unknown built-in tool "${name}". Built-in tools: ${BUILTIN_TOOL_IDS.join(', ')}. MCP tools are granted with tools.mcpServers; child agents with spawn.children.`,
+          `unknown tool "${entry}". Built-in tools: ${BUILTIN_TOOL_IDS.join(', ')}. Other agents are granted as "N-name.json" (N = how many may run at once); MCP tools with tools.mcpServers.`,
         );
       }
+      allow.push(entry);
     });
     let mcpServers: Array<string | McpServerGrant> | undefined;
     if (t['mcpServers'] !== undefined) {
@@ -301,17 +333,7 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
         c.fail(field, `"${entry}" is not in tools.allow, so it cannot be auto-approved`);
       }
     });
-    tools = { allow, mcpServers, autoApprove };
-  }
-
-  let spawn: AgentDefinition['spawn'];
-  if (raw['spawn'] !== undefined) {
-    const s = c.object(raw['spawn'], 'spawn', ['maxConcurrentChildren', 'maxDepth', 'children']);
-    spawn = {
-      maxConcurrentChildren: c.integer(s['maxConcurrentChildren'], 'spawn.maxConcurrentChildren', 1, 16),
-      maxDepth: c.integer(s['maxDepth'], 'spawn.maxDepth', 0, 16),
-      children: c.stringArray(s['children'], 'spawn.children', { unique: true, nonEmptyItems: true }),
-    };
+    tools = { allow: allowAll === undefined ? undefined : allow, mcpServers, autoApprove, ...(agents.length ? { agents } : {}) };
   }
 
   let conversation: AgentDefinition['conversation'];
@@ -367,6 +389,7 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
 
   return {
     id,
+    ...(name ? { name } : {}),
     description,
     provider: provider as ProviderName,
     providerOptions,
@@ -377,7 +400,6 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
     maxOutputTokens,
     workspace,
     tools,
-    spawn,
     conversation,
     artifacts,
     context,
@@ -387,7 +409,7 @@ export function parseAgentDefinition(raw: unknown, file: string): AgentDefinitio
 
 const ACCESS_RANK = { none: 0, read: 1, organize: 2 } as const;
 
-/** Effective conversation access: explicit, else root "organize" and children "none". */
+/** Effective conversation access: explicit, else "organize" in the main conversation (depth 0) and "none" in a thread. */
 export function conversationAccess(def: AgentDefinition, depth: number): 'none' | 'read' | 'organize' {
   return def.conversation?.access ?? (depth === 0 ? 'organize' : 'none');
 }
@@ -398,7 +420,7 @@ export function accessRank(access: 'none' | 'read' | 'organize'): number {
 
 const ARTIFACT_RANK = { none: 0, read: 1, create: 2 } as const;
 
-/** Effective artifact access: explicit, else root "create" and children "none". */
+/** Effective artifact access: explicit, else "create" in the main conversation (depth 0) and "none" in a thread. */
 export function artifactAccess(def: AgentDefinition, depth: number): 'none' | 'read' | 'create' {
   return def.artifacts?.access ?? (depth === 0 ? 'create' : 'none');
 }
@@ -417,7 +439,7 @@ export function mcpGrants(def: AgentDefinition): Map<string, ReadonlySet<string>
   return grants;
 }
 
-/** Built-in tools an agent may call, never including the shell for a child. */
+/** Built-in tools an agent may call. */
 export function builtinAllow(def: AgentDefinition): readonly string[] {
   return def.tools?.allow ?? [];
 }

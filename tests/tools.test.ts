@@ -9,7 +9,7 @@ import {
   type AnyDeclarativeTool,
   type ToolResult,
 } from '@sfagents/core';
-import { baseAgent, makeTempDir, writeJson } from './helpers.js';
+import { baseAgent, makeTempDir, writeJson, writeAgent } from './helpers.js';
 
 const isWin = process.platform === 'win32';
 
@@ -28,8 +28,8 @@ async function fixture(allow: string[], limits: Record<string, unknown> = {}): P
   fs.writeFileSync(path.join(work, 'src', 'b.ts'), 'export const Beta = 2;\n');
   const outside = makeTempDir();
   fs.writeFileSync(path.join(outside, 'secret.txt'), 'TOP SECRET beta\n');
-  writeJson(path.join(dir, 'agent.json'), baseAgent('main', { workspace: { roots: ['work'] }, tools: { allow }, limits }));
-  const tree = loadAgentTree(path.join(dir, 'agent.json'));
+  writeAgent(dir, baseAgent('main', { workspace: { roots: ['work'] }, tools: { allow }, limits }));
+  const tree = loadAgentTree(dir);
   const runtime = new AgentRuntime({ tree, providerFactory: () => { throw new Error('unused'); } });
   const tools = await runtime.buildTools(tree.root, ['main'], () => {});
   return { dir, work, outside, tools };
@@ -58,7 +58,7 @@ describe('filesystem isolation', () => {
 
   test('paths outside the roots are rejected (absolute, .., config dir)', async () => {
     const f = await fixture(['read_file', 'list_directory', 'glob', 'grep', 'write_file']);
-    for (const p of [path.join(f.outside, 'secret.txt'), '../../' + path.relative(path.dirname(path.dirname(f.work)), path.join(f.outside, 'secret.txt')), '../agent.json']) {
+    for (const p of [path.join(f.outside, 'secret.txt'), '../../' + path.relative(path.dirname(path.dirname(f.work)), path.join(f.outside, 'secret.txt')), '../agents/main.json']) {
       const r = await call(f, 'read_file', { file_path: p });
       assert.equal(r.permission, 'deny', `read ${p}`);
       assert.match(r.reason!, /outside this agent's permitted workspace roots/);
@@ -93,24 +93,24 @@ describe('filesystem isolation', () => {
 
   test('agent and MCP configuration files are write-protected', async () => {
     const dir = makeTempDir();
-    writeJson(path.join(dir, 'agent.json'), baseAgent('main', { tools: { allow: ['write_file', 'edit', 'read_file'] } }));
-    const tree = loadAgentTree(path.join(dir, 'agent.json'));
+    writeAgent(dir, baseAgent('main', { tools: { allow: ['write_file', 'edit', 'read_file'] } }));
+    const tree = loadAgentTree(dir);
     const runtime = new AgentRuntime({ tree, providerFactory: () => { throw new Error('unused'); } });
     const tools = await runtime.buildTools(tree.root, ['main'], () => {});
     const f: Fixture = { dir, work: dir, outside: dir, tools };
-    assert.equal((await call(f, 'read_file', { file_path: 'agent.json' })).permission, 'allow');
-    const w = await call(f, 'write_file', { file_path: 'agent.json', content: '{}' });
+    assert.equal((await call(f, 'read_file', { file_path: 'agents/main.json' })).permission, 'allow');
+    const w = await call(f, 'write_file', { file_path: 'agents/main.json', content: '{}' });
     assert.equal(w.permission, 'deny');
     assert.match(w.reason!, /protected SF Agents configuration file/);
     assert.equal((await call(f, 'write_file', { file_path: 'mcp.json', content: '{}' })).permission, 'deny');
-    assert.equal((await call(f, 'edit', { file_path: 'agent.json', old_string: 'main', new_string: 'x' })).permission, 'deny');
+    assert.equal((await call(f, 'edit', { file_path: 'agents/main.json', old_string: 'main', new_string: 'x' })).permission, 'deny');
   });
 
   test('the configuration .env (API keys) is invisible to every file tool', async () => {
     const dir = makeTempDir();
     fs.writeFileSync(path.join(dir, '.env'), 'OPENROUTER_API_KEY=sk-or-v1-supersecret\n');
-    writeJson(path.join(dir, 'agent.json'), baseAgent('main', { tools: { allow: ['read_file', 'write_file', 'grep', 'glob', 'list_directory'] } }));
-    const tree = loadAgentTree(path.join(dir, 'agent.json'));
+    writeAgent(dir, baseAgent('main', { tools: { allow: ['read_file', 'write_file', 'grep', 'glob', 'list_directory'] } }));
+    const tree = loadAgentTree(dir);
     const runtime = new AgentRuntime({ tree, providerFactory: () => { throw new Error('unused'); } });
     const tools = await runtime.buildTools(tree.root, ['main'], () => {});
     const f: Fixture = { dir, work: dir, outside: dir, tools };

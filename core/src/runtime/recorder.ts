@@ -24,8 +24,6 @@ export interface RunRecorder {
   /** The full tool message returned to the model, and how the call ended. */
   toolResult(message: ToolMessage, tool: string, status: ToolMessageStatus): void;
   end(result: AgentRunResult): void;
-  /** Recorder for a child run requested by tool call `callId`. */
-  child(child: AgentNode, agentPath: readonly string[], callId: string, title: string): RunRecorder;
 }
 
 /** Thrown when a recorder write fails; the runtime stops the run. */

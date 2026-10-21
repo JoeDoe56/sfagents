@@ -17,11 +17,11 @@ import {
   type ChatMessage,
   type FunctionDeclaration,
 } from '@sfagents/core';
-import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script } from './helpers.js';
+import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
   const dir = makeTempDir();
-  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), ...agent });
+  writeAgent(dir, { ...baseAgent('main'), ...agent });
   for (const [f, v] of Object.entries(files)) writeJson(path.join(dir, f), v);
   return dir;
 }
@@ -172,16 +172,16 @@ describe('sections: model tools and grants', () => {
     conversation.close();
   });
 
-  test('children get no conversation access by default; a read grant cannot organize; escalation is rejected', async () => {
+  test('agents in a thread get no conversation access by default; a read grant cannot organize', async () => {
     const dir = project(
-      { spawn: { children: ['reader.json', 'blind.json'] } },
-      { 'reader.json': baseAgent('reader', { conversation: { access: 'read' } }), 'blind.json': baseAgent('blind') },
+      { tools: { allow: ['1-reader.json', '1-blind.json'] } },
+      { 'agents/reader.json': baseAgent('reader', { conversation: { access: 'read' } }), 'agents/blind.json': baseAgent('blind') },
     );
     const { tree, conversation } = open(dir);
     seed(conversation, tree, [['the secret project codename is OSPREY', 'ok']]);
     const script: Script = (req, n, agent) => {
       if (agent === 'main') {
-        if (n === 0) return { toolCalls: [{ name: 'invoke_child', args: { agent: 'reader', task: 'find the codename' } }, { name: 'invoke_child', args: { agent: 'blind', task: 'find the codename' } }] };
+        if (n === 0) return { toolCalls: [{ name: 'message_agent', args: { agent: 'reader', message: 'find the codename' } }, { name: 'message_agent', args: { agent: 'blind', message: 'find the codename' } }] };
         return { text: 'done' };
       }
       if (agent === 'reader') {
@@ -204,15 +204,10 @@ describe('sections: model tools and grants', () => {
     const blindReq = providers.get('blind')!.requests[1]!.messages as ChatMessage[];
     assert.match((blindReq.at(-1) as { content: string }).content, /not available to agent "blind"/);
     assert.equal(conversation.state.sections.size, 0);
-    // Search covers the main conversation only, never child transcripts.
+    // Search covers the main conversation only, never threads between agents.
     assert.equal(searchConversation(conversation.state, 'find the codename').hits.filter((h) => h.role === 'user').length, 0);
     await runtime.dispose();
     conversation.close();
-
-    const bad = project({ conversation: { access: 'read' }, spawn: { children: ['c.json'] } }, { 'c.json': baseAgent('c', { conversation: { access: 'organize' } }) });
-    assert.throws(() => loadAgentTree(path.join(bad, 'agent.json')), (e: unknown) => e instanceof ConfigError && /conversation access "read", so the child cannot have "organize"/.test(e.message));
-    const ctx = project({ spawn: { children: ['c.json'] } }, { 'c.json': baseAgent('c', { context: { maxInputTokens: 5000 } }) });
-    assert.throws(() => loadAgentTree(path.join(ctx, 'agent.json')), /\[context\]: may only be set on the root agent/);
   });
 
   test('ephemeral runs do not offer section tools', async () => {

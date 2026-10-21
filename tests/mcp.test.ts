@@ -20,8 +20,7 @@ import {
   stdioServerConfig,
   toolContents,
   writeJson,
-  type Script,
-} from './helpers.js';
+  type Script, writeAgent } from './helpers.js';
 
 const runtimes: AgentRuntime[] = [];
 after(async () => {
@@ -30,7 +29,7 @@ after(async () => {
 
 function setup(agent: Record<string, unknown>, servers: Record<string, unknown>, script: Script, opts: { approveAll?: boolean; extraFiles?: Record<string, unknown> } = {}) {
   const dir = makeTempDir();
-  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), ...agent });
+  writeAgent(dir, { ...baseAgent('main'), ...agent });
   writeJson(path.join(dir, 'mcp.json'), { mcpServers: servers });
   for (const [f, v] of Object.entries(opts.extraFiles ?? {})) writeJson(path.join(dir, f), v);
   const tree = loadAgentTree(path.join(dir, 'agent.json'));

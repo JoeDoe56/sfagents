@@ -12,7 +12,7 @@ export const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
 
 export class MissingCredentialError extends Error {
   constructor(readonly envName: string, agentId: string) {
-    super(`Environment variable ${envName} is not set (needed by agent "${agentId}"). Set it in your shell or in a .env file next to agent.json.`);
+    super(`Environment variable ${envName} is not set (needed by agent "${agentId}"). Set it in your shell or in the project's .env file.`);
     this.name = 'MissingCredentialError';
   }
 }

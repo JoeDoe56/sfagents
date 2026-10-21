@@ -17,11 +17,11 @@ import {
   type ChatMessage,
   type FunctionDeclaration,
 } from '@sfagents/core';
-import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script } from './helpers.js';
+import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
   const dir = makeTempDir();
-  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), ...agent });
+  writeAgent(dir, { ...baseAgent('main'), ...agent });
   for (const [f, v] of Object.entries(files)) writeJson(path.join(dir, f), v);
   return dir;
 }
@@ -149,21 +149,20 @@ describe('artifacts: model tools and grants', () => {
     conversation.close();
   });
 
-  test('children have no artifact tools by default; escalation is rejected; "read" cannot create', async () => {
-    const dir = project({ spawn: { children: ['child.json'] } }, { 'child.json': baseAgent('child') });
-    const tree = loadAgentTree(path.join(dir, 'agent.json'));
+  test('agents in a thread have no artifact tools by default; "read" cannot create', async () => {
+    const dir = project({}, { 'agents/helper.json': baseAgent('helper') });
+    const tree = loadAgentTree(dir);
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
     const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation });
-    const child = await runtime.buildTools(tree.byId.get('child')!, ['main', 'child'], () => {}, undefined, conversation);
-    assert.equal([...child.keys()].some((k) => k.includes('artifact')), false);
+    const inThread = await runtime.buildTools(tree.byId.get('helper')!, ['main', 'helper'], () => {}, undefined, conversation, 'thread');
+    assert.equal([...inThread.keys()].some((k) => k.includes('artifact')), false);
+    const asMain = await runtime.buildTools(tree.byId.get('helper')!, ['helper'], () => {}, undefined, conversation, 'main');
+    assert.ok(asMain.has('create_artifact'), 'the same agent replying in the conversation creates artifacts');
     await runtime.dispose();
     conversation.close();
 
-    const esc = project({ artifacts: { access: 'read' }, spawn: { children: ['child.json'] } }, { 'child.json': baseAgent('child', { artifacts: { access: 'create' } }) });
-    assert.throws(() => loadAgentTree(path.join(esc, 'agent.json')), (e: unknown) => e instanceof ConfigError && /artifact access "read"/.test(e.message));
-
     const ro = project({ artifacts: { access: 'read' } });
-    const t2 = loadAgentTree(path.join(ro, 'agent.json'));
+    const t2 = loadAgentTree(ro);
     const c2 = ConversationService.open(path.join(ro, '.sfagents', 'conversation.md'), { configDir: t2.configDir });
     const rt2 = new AgentRuntime({ tree: t2, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation: c2 });
     const names = [...(await rt2.buildTools(t2.root, ['main'], () => {}, undefined, c2)).keys()];
@@ -172,7 +171,8 @@ describe('artifacts: model tools and grants', () => {
     await rt2.dispose();
     c2.close();
 
-    assert.throws(() => loadAgentTree(path.join(project({ artifacts: { access: 'write' } }), 'agent.json')), /must be "none", "read" or "create"/);
+    const bad = project({ artifacts: { access: 'write' } }, { 'agents/ok.json': baseAgent('ok') });
+    assert.match(loadAgentTree(bad).skipped[0]!.error, /must be "none", "read" or "create"/);
   });
 
   test('agent file tools cannot reach artifact files', async () => {

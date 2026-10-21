@@ -4,8 +4,10 @@
 
 export * from './agents/definition.js';
 export * from './agents/loader.js';
-export { InvokeChildTool, toChildPayload, MAX_CHILD_INPUT_CHARS } from './agents/invoke-child.js';
-export type { ChildResultPayload, InvokeChildParams } from './agents/invoke-child.js';
+export { MessageAgentTool, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE } from './agents/message-agent.js';
+export type { AgentReplyPayload, MessageAgentParams, AgentMessenger } from './agents/message-agent.js';
+export { ThreadService, ThreadRecorder, ThreadBusyError, threadKey, threadPair, threadMessages, THREADS_DIR_NAME } from './agents/threads.js';
+export type { ThreadInfo, ThreadLease } from './agents/threads.js';
 export * from './runtime/events.js';
 export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS } from './runtime/runtime.js';
 export type { RuntimeOptions } from './runtime/runtime.js';

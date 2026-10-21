@@ -16,13 +16,13 @@ import {
   type ChatMessage,
   type RuntimeEvent,
 } from '@sfagents/core';
-import { baseAgent, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script } from './helpers.js';
+import { baseAgent, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
 
 const TARGET = { provider: 'openrouter', model: 'test/model' };
 
 function tree(agent: Record<string, unknown> = {}): { dir: string; tree: AgentTree } {
   const dir = makeTempDir();
-  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), ...agent });
+  writeAgent(dir, { ...baseAgent('main'), ...agent });
   return { dir, tree: loadAgentTree(path.join(dir, 'agent.json')) };
 }
 

@@ -21,7 +21,7 @@ import {
   parseSystemctl,
   parseWho,
 } from '@sfagents/web';
-import { baseAgent, makeTempDir, scriptedFactory, writeJson } from './helpers.js';
+import { baseAgent, makeTempDir, scriptedFactory, writeJson, writeAgent } from './helpers.js';
 
 describe('processes: parsers', () => {
   test('/proc/[pid]/stat with spaces and parentheses in the name', () => {
@@ -118,7 +118,7 @@ describe('processes: live (Linux)', { skip: process.platform !== 'linux' }, () =
 describe('processes: HTTP API', () => {
   test('lists, details, ends processes; detail and SF Agents windows; cross-site reads refused', async () => {
     const dir = makeTempDir('sfagents-proc-web-');
-    writeJson(path.join(dir, 'agent.json'), baseAgent('main'));
+    writeAgent(dir, baseAgent('main'));
     const agents = loadAgentTree(path.join(dir, 'agent.json'));
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: agents.configDir });
     const server = new WebServer({ tree: agents, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, lhmUrl: null });

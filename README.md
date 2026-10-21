@@ -1,6 +1,6 @@
 # SF Agents
 
-A small agent runtime and CLI. You define agents in JSON. Each agent talks to a model through OpenRouter (or any OpenAI-compatible endpoint), uses the built-in file, search and shell tools and the MCP tools it is allowed, and can delegate to the child agents it declares.
+A small agent runtime and CLI. You define agents in JSON. Each agent talks to a model through OpenRouter (or any OpenAI-compatible endpoint), uses the built-in file, search and shell tools and the MCP tools it is allowed, and can message the other agents it is granted, in persistent threads, in parallel.
 
 SF Agents started as an extraction of the minimal runtime from Qwen Code's `packages/core` and `packages/cli` (see [PROVENANCE.md](PROVENANCE.md)). It has a terminal interface and a web interface (`sfagents web`), one persistent conversation per project, and artifacts the agent creates for you to keep.
 
@@ -22,7 +22,7 @@ npx sfagents --help
 
 ## Configure the API key
 
-Set `OPENROUTER_API_KEY` in your shell, or put it in an untracked `.env` file next to `agent.json`:
+Set `OPENROUTER_API_KEY` in your shell, or put it in an untracked `.env` file in the project directory (next to the `agents` folder):
 
 ```sh
 cp .env.example .env    # then edit .env
@@ -34,53 +34,50 @@ Keys never go in agent JSON. `.env` is git-ignored. Variables already set in the
 
 | Command | What it does |
 | --- | --- |
-| `sfagents start` | Opens (or creates) this project's persistent conversation and talks to the root agent. Streams answers, shows tool and child activity, asks before risky calls. Ctrl+C cancels the running turn; `/exit` or Ctrl+D quits; `/clear` resets the working context (history is kept); `/sections` shows the topic tree; `/tree` shows the agents. `--ephemeral` keeps the session in memory only. |
+| `sfagents start` | Opens (or creates) this project's persistent conversation and talks to the selected agent (`--agent <name>`, else `main`). Streams answers, shows tool activity and messages between agents, asks before risky calls. Ctrl+C cancels the running turn; `/exit` or Ctrl+D quits; `/clear` resets the working context (history is kept); `/sections` shows the topic tree; `/tree` shows the agents; `/agent <name>` hands the conversation to another agent. `--ephemeral` keeps the session in memory only. |
 | `sfagents run "<task>"` | One request, ephemeral unless `--persist` (or `--conversation <file>`) records it in the conversation. The answer goes to stdout and activity to stderr. `-` reads the task from stdin. `--json` prints the structured result. Exit code: 0 done, 1 failed, 2 configuration error, 130 cancelled. |
 | `sfagents web` | Serves the web interface at http://127.0.0.1:8093 (`--port`, `--host`). The same persistent conversation as `start`, with attachments, approvals in the page and the artifacts sheet. Ctrl+C stops it. See [Web interface](#web-interface). |
 | `sfagents conversation …` | Inspects the stored conversation without opening it for writing: `info`, `sections`, `show <section\|unassigned\|message id>`, `search <words>`, `artifacts`. `unlock` removes a stale lock after confirmation. |
-| `sfagents agents validate` | Validates every agent file and prints the tree with each agent's tools, auto-approvals and roots. |
+| `sfagents agents validate` | Reads the `agents` folder and prints each agent with its tools, grants, auto-approvals and roots, then the files it skipped and why. |
 | `sfagents mcp list` | Connects to each server in `mcp.json` and shows its status, tools and which agents may use it. |
 
-Common options: `--config <dir|file>` (defaults to the current directory), `--mcp <file>`, `--yes` (approve every call that would ask), `--show-reasoning`, `--show-context` (one line per turn: estimated context size, recent exchanges sent, older ones left out), `--conversation <file>`, `--page N` (for `conversation` listings).
+Common options: `--config <dir|file>` (the project directory, its `agents` folder or one agent file; defaults to the current directory), `--agent <name>` / `-a` (the agent that replies), `--mcp <file>`, `--yes` (approve every call that would ask), `--show-reasoning`, `--show-context` (one line per turn: estimated context size, recent exchanges sent, older ones left out), `--conversation <file>`, `--page N` (for `conversation` listings).
 
 ## Files
 
 ```text
-agent.json                    root agent
-agents/1-Subagent-Worker.json a child agent (name and number are for sorting only)
+agents/                       one JSON file per agent, any name (main.json replies by default)
+  main.json
+  worker.json
 mcp.json                      named MCP servers (optional)
 .env                          secrets (optional, untracked)
 .sfagents/                    local conversation state (created by start; never committed)
   conversation.md             the persistent conversation: messages, sections, artifact references
-  transcripts/<run>.md        one per child agent run
+  threads/<a>--<b>.md         the persistent thread between two agents (one per pair, or --2… for parallel ones)
   artifacts/<id>/r<rev>/      every revision of each artifact the agent created
   uploads/                    files attached in the web interface (and partial uploads)
 ```
 
-This repository ships a working example: a root agent with file tools and shell, a read-only `worker` child, and a demo MCP server. Run `npx sfagents agents validate` to see it.
+This repository ships a working example: `main` with file tools and shell, which may message a read-only `worker` (two at once), and a demo MCP server. Run `npx sfagents agents validate` to see it.
 
 ## Agent definition
 
+Every `.json` file in the `agents` folder is an agent, named by its file name (`agents/Research Helper.json` is "Research Helper"). Only files that pass validation are loaded; the others are skipped with the reason (`agents validate` lists them), so one broken file never stops the rest.
+
 ```json
 {
-  "id": "main",
-  "description": "Shown to the parent when this agent is a child.",
+  "description": "Shown to agents that may message this one.",
   "provider": "openrouter",
   "model": "anthropic/claude-haiku-5.5",
-  "systemPrompt": "You are the root agent.",
+  "systemPrompt": "You are the main agent.",
   "reasoning": "low",
   "temperature": 0.2,
   "maxOutputTokens": 4000,
   "workspace": { "roots": ["."] },
   "tools": {
-    "allow": ["read_file", "write_file", "edit", "glob", "grep", "list_directory", "shell"],
+    "allow": ["read_file", "write_file", "edit", "glob", "grep", "list_directory", "shell", "2-worker.json"],
     "mcpServers": ["local-tools", { "server": "github", "tools": ["search_issues"] }],
     "autoApprove": ["edit", "mcp__local-tools__*"]
-  },
-  "spawn": {
-    "maxConcurrentChildren": 2,
-    "maxDepth": 4,
-    "children": ["agents/1-Subagent-Worker.json"]
   },
   "conversation": { "access": "organize" },
   "artifacts": { "access": "create" },
@@ -97,44 +94,46 @@ This repository ships a working example: a root agent with file tools and shell,
 
 | Field | Notes |
 | --- | --- |
-| `id` | Required. Unique in the tree. Starts with a letter; letters, digits, `_`, `-`. |
+| `name` | Optional display name. The file name is the agent's identity (an older `id` field that differs from it is shown as the name). |
 | `provider` | `openrouter`, or `openai-compatible` with `"providerOptions": { "baseUrl": "...", "apiKeyEnv": "MY_KEY_VAR" }`. |
 | `model` | Any model ID the provider accepts. Nothing is hardcoded. |
 | `reasoning` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Sent as OpenRouter's `reasoning.effort` (or `reasoning_effort` for other endpoints). Reasoning blocks are passed back across tool calls. |
-| `workspace.roots` | Directories the file tools may touch, relative to this file. The root agent defaults to `["."]`. Children default to **no** filesystem access. |
-| `tools.allow` | Built-in tools: `read_file`, `write_file`, `edit`, `glob`, `grep`, `list_directory`, `shell`. |
+| `workspace.roots` | Directories the file tools may touch, relative to the project directory. Default `["."]`. |
+| `tools.allow` | Built-in tools: `read_file`, `write_file`, `edit`, `glob`, `grep`, `list_directory`, `shell`. And **grants**: `"N-name.json"` lets this agent message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
 | `tools.mcpServers` | Server names from `mcp.json`, optionally limited to listed tools. |
 | `tools.autoApprove` | Tools that skip the confirmation prompt. Built-in IDs, `mcp__<server>__<tool>` or `mcp__<server>__*`. |
-| `spawn.children` | Child definition files, relative to this file, inside the configuration directory. Children use the same format and may have their own children. |
-| `spawn.maxDepth` | Root only. Maximum tree depth (default 4). |
-| `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Root defaults to `organize`; children default to `none` and may never exceed their parent. |
-| `artifacts.access` | Artifacts: `create` (create, update, list and read), `read` (list and read) or `none`. Root defaults to `create`; children default to `none` and may never exceed their parent. |
-| `context` | Root only. Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
+| `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Default: `organize` when the agent replies in the conversation, `none` when it replies in a thread. |
+| `artifacts.access` | Artifacts: `create` (create, update, list and read), `read` (list and read) or `none`. Same defaults as `conversation.access`. |
+| `context` | Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
 | `limits` | Turn budget and timeouts. Defaults are shown above. |
 
-Unknown fields are errors, so a typo cannot silently change permissions. Every error names the file and field.
+Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. Each agent's permissions are its own. An agent it may message can have wider permissions, or entirely different tools, roots and MCP servers; grants may form any graph, including two agents that may message each other.
 
-## Delegation
+## Agents talking to each other
 
-An agent with children gets one extra tool, `invoke_child`. It lists only that agent's direct children, by ID and description. A child runs in a fresh context with its own system prompt, model, tools, roots and limits. It receives only the task and the optional context its parent passes (at most 32,000 characters together), never the parent's conversation. The parent gets a structured JSON result:
+The conversation is one thread for the user; which agent replies to it is a separate choice (`--agent`, `/agent` in `start`, or the agent menu on the web). An agent with grants gets the `message_agent` tool: `agent` (one it was granted), `message`, and optionally `thread` (which of its N threads to that agent). Its system prompt asks it to use agents freely and to write to them in terse, structured messages meant for an agent, not a person.
+
+Each pair of agents shares **one persistent thread**, stored in `.sfagents/threads/<a>--<b>.md`. It is the same thread whoever writes first and whichever agent the user selected: when `main` writes to `worker` today and the user later selects `worker`, which writes to `main`, both see everything said before. The agent that replies does so in that thread, with its own system prompt, model, tools and roots; it sees the thread, never the user's conversation. The writer gets a structured result:
 
 ```json
-{ "agent": "worker", "status": "completed", "response": "…", "turns": 3,
+{ "agent": "worker", "thread": 1, "status": "replied", "reply": "…", "turns": 3,
   "toolCalls": { "read_file": { "ok": 2, "failed": 0 } }, "durationMs": 5210 }
 ```
 
-`status` is `completed`, `error`, `max_turns`, `timeout` or `cancelled`. Children run one at a time in this version; `maxConcurrentChildren` is still enforced, so parallel execution can be added later without changing the semantics. Cancelling the root cancels the whole chain.
+`status` is `replied`, `error`, `max_turns`, `timeout` or `cancelled`. Several `message_agent` calls in one turn run **in parallel**, to different agents or to the same agent in separate threads (`threads/<a>--<b>--2.md` and so on, up to the grant's N). An agent replying in a thread can itself message other agents, also in parallel. A reply may not wait on the agent that is waiting for it (that would deadlock); it gets an error saying so instead. Cancelling the reply in the conversation cancels everything under it.
+
+Threads are listed as artifacts of the conversation (`type: "agent_transcript"`). The web interface shows them as conversations.
 
 ## Persistent conversation
 
-`sfagents start` continues one ongoing conversation per project, stored in `.sfagents/conversation.md` next to `agent.json`. Close the CLI, come back tomorrow, and the agent still has the thread. The file is plain Markdown: opened in an editor or on GitHub it reads as a transcript, with metadata hidden in HTML comments. [docs/CONVERSATION-FORMAT.md](docs/CONVERSATION-FORMAT.md) specifies it.
+`sfagents start` continues one ongoing conversation per project, stored in `.sfagents/conversation.md` in the project directory. Close the CLI, come back tomorrow, and the agent still has the thread. The file is plain Markdown: opened in an editor or on GitHub it reads as a transcript, with metadata hidden in HTML comments. [docs/CONVERSATION-FORMAT.md](docs/CONVERSATION-FORMAT.md) specifies it.
 
-- **Sections.** The root agent organizes the conversation into topics and subtopics with its section tools. New messages are filed under the current section automatically. Renaming or moving a section never changes the stored messages.
+- **Sections.** The agent replying in the conversation organizes the conversation into topics and subtopics with its section tools. New messages are filed under the current section automatically. Renaming or moving a section never changes the stored messages.
 - **Working context.** Each request carries the system prompt, a bounded index of section titles, and the most recent complete exchanges that fit the budget. Older material stays stored; the agent fetches it with `search_conversation` or `fetch_section` when it becomes relevant. `--show-context` prints what each turn sent.
-- **Children** run in fresh contexts. Each child run is stored in `transcripts/<run>.md` and linked from the parent conversation as an `agent_transcript` artifact. Children cannot see the main conversation unless their definition grants `conversation.access`.
+- **Threads between agents** are stored in `threads/<a>--<b>.md` and linked from the conversation as `agent_transcript` artifacts. An agent replying in a thread cannot see the main conversation unless its definition grants `conversation.access`.
 - **One writer.** A second `start` on the same conversation gets an error naming the process that holds it. A lock left by a crashed process is replaced automatically when that process is provably gone; `sfagents conversation unlock` handles anything else.
 - **Durability and crashes.** Every message, tool start and tool result is flushed to disk before the next step. After a crash, the next start reports interrupted runs and marks each unfinished tool call as either "never started" or "outcome unknown". Nothing is retried automatically, and the model is told which is which. A damaged ending is moved to `.sfagents/recovered/` and recorded, never silently dropped.
-- **What is not restored.** "Always allow" approvals and `--yes` apply to the running process only. On resume, tools and permissions come from the current `agent.json`.
+- **What is not restored.** "Always allow" approvals and `--yes` apply to the running process only. On resume, tools and permissions come from the current agent files.
 - **Privacy.** `.sfagents/` contains a `.gitignore` that excludes everything in it, and agent file tools cannot read or write it. Conversations can still contain anything you or your tools put in them, so treat the folder as private.
 
 ## Artifacts
@@ -159,7 +158,9 @@ The page is one conversation in the style of iMessage, with a bottom bar in the 
 
 The monitor's expand button opens **Files**, an opaque sheet that slides up from the bottom and stops just under the status bar, as the Claude app's sheets do (no medium height; drag its top or pull down at the top of the list to close it): a glass close button at the top left, the readings as glass chips beside it (each still opens its window), a ⋯ button at the top right, and the drives as Liquid Glass bars along the bottom, each with its name, used/total and percentage on one line (tap one to open it; the monitor's drive bars open it too). Browse lists your folders, the SF Agents project, the Trash, drives and favorites; folders show as a list or icons, sorted by name, date, size or kind, with hidden files on request, breadcrumbs and search (this folder at once, the folders inside after a pause). Hold an item (or right-click it) for a menu like Apple's: Share, Download and Info, Quick Look, Rename, Duplicate, Move, Copy to…, Compress or Uncompress (ZIP), Copy, Cut, Copy Path, Ask SF Agents (attaches the file to your message), favorites, Delete (to the system Trash, with Undo) and Put Back. ⋯ has Upload (the browser's file and media picker, into the open folder; dropping files works too), New Folder, Select (with a toolbar for many items), New Text File, Paste, view and sort options, Get Info, Copy Path, Download as ZIP and Empty Trash. Quick Look previews images, video, audio, PDFs, Markdown, HTML (without scripts), text and code, with an editor for text files; swipe or use the arrow keys between files. Name clashes ask whether to keep both, replace or skip; long operations show progress and can be cancelled. Keyboard: arrows, Space (Quick Look), F2, ⌘/Ctrl+A, C, X, V, Delete, ⌘/Ctrl+I and ⌘/Ctrl+↑. Next to it are two round buttons under the send button: **Settings** (a sheet with a medium and a large height: glass quality and whether Return sends) and a placeholder.
 
-The round button at the right of the field is the **agent button** when there is nothing to send: it shows the app icon's character, and its glass refracts a moving gradient made from the model's name (the same model always gets the same gradient; another model gets a different one). With text it becomes the blue send button, and while a reply runs, stop. Tap it with nothing to send, or hold it (right-click with a mouse) at any time, for the agent sheet: at medium height the agent, a **reasoning effort** slider (Low, Medium, High, Extra High, Max; kept per conversation in `.sfagents/web-agent.json` and sent with every request instead of the agent's `reasoning` setting) and a **context** bar (how much of the working-context budget the next request uses). Drag it up for the breakdown: a bar and list of the system prompt, built-in, MCP, agent and conversation tools, the section index and notes, the messages, the share kept free for each turn and what is left; each tool family's tools and their sizes; the budget, the model's own context window when the provider lists it, the exchanges and sections kept, and the provider's figures for the last request. **Start a Fresh Context** makes later replies start without the earlier messages (they stay stored and searchable). All sheets and windows put their close button at the top left. Then **Pinned** artifacts, a divider, and all artifacts, newest first, as glass tiles. Tap a tile to open it; the pin button pins or unpins it.
+The round button at the right of the field is the **agent button** when there is nothing to send: it shows the app icon's character, and its glass refracts a moving gradient made from the model's name (the same model always gets the same gradient; another model gets a different one). With text it becomes the blue send button, and while a reply runs, stop. Tap it with nothing to send, or hold it (right-click with a mouse) at any time, for the agent sheet: at medium height the **agent** (a pop-up button: tap it for a menu of the project's agents, with each one's model), a **reasoning effort** slider (Low, Medium, High, Extra High, Max; kept per agent in `.sfagents/web-agent.json` and sent with every request instead of the agent's `reasoning` setting) and a **context** bar (how much of the working-context budget the next request uses). Drag it up for the breakdown: a bar and list of the system prompt, built-in, MCP, agent and conversation tools, the section index and notes, the messages, the share kept free for each turn and what is left; each tool family's tools and their sizes; the budget, the model's own context window when the provider lists it, the exchanges and sections kept, and the provider's figures for the last request. **Start a Fresh Context** makes later replies start without the earlier messages (they stay stored and searchable). Changes in the agent sheet and in Settings are saved by the check button at the top right; the close button at the top left, a swipe down or Escape leave without saving. All sheets and windows put their close button at the top left.
+
+In the chat, a message one agent sends another shows as a line with a chevron: tap it to open their **thread** in a sheet, as a conversation, following it live. An artifact the agent creates or updates shows as a **card with a preview** right after the call that made it; tapping it (or its tile) opens it in the file manager's Quick Look. Then **Pinned** artifacts, a divider, and all artifacts, newest first, as glass tiles. Tap a tile to open it; the pin button pins or unpins it.
 - **Approvals** appear as a card in the conversation (Allow Once, Always Allow, Don't Allow). `--yes` skips them.
 - **Attachments** upload with an up2k-style protocol (after [copyparty](https://github.com/9001/copyparty)'s up2k): the browser hashes each chunk, the server asks only for chunks it does not have, chunks upload in parallel and are verified on arrival, an interrupted upload resumes (choose the same file again), and a file the server already has is not uploaded at all. Images are shown to the model; text files are included in the message; other files are named.
 
@@ -178,12 +179,12 @@ cross-origin writes. The proxy is responsible for controlling access.
 
 - **Tool allowlists** are checked when each call is executed. A model asking for a tool it was not given gets an error back; nothing runs.
 - **File tools** resolve every path to its canonical real path (following `..` and symlinks, including for files that do not exist yet) and refuse anything outside the agent's roots. Agent and MCP configuration files are read-only to all file tools.
-- **Child authority is a subset of the parent's.** Built-in tools, MCP servers and tools, auto-approvals and roots must each fit inside the parent's, or loading fails. The loaded tree is frozen.
-- **Shell is root-only.** A path allowlist cannot confine arbitrary commands, and this version has no OS sandbox, so `shell` on any child is a configuration error. Shell commands run with your user's full permissions. Every command asks for approval unless you auto-approve `shell`.
+- **Each agent has exactly its own permissions.** Messaging another agent never passes on the writer's tools or roots, and the other agent's are not limited by the writer's: grant wider or different ones when you want them. Grants are explicit (`N-name.json`). The loaded definitions are frozen.
+- **Shell** runs commands with your user's full permissions (a path allowlist cannot confine arbitrary commands, and there is no OS sandbox), so grant it deliberately. Every command asks for approval unless you auto-approve `shell`.
 - **Writes, edits, shell and MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag. In `run` mode without a terminal, calls that need approval are denied and the model is told why.
 - **MCP servers are not workspace-confined.** A server can reach anything its own process can. Grant servers per agent, preferably limited to specific tools.
 - **Conversation state** (`.sfagents/`, including artifacts and uploads) is invisible to all file tools; it changes only through the conversation service and the web server.
-- **Secrets:** the configuration directory's `.env` cannot be read, searched or written by any file tool (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model. The root agent's approved shell commands could still read `.env`, so approve shell commands with care.
+- **Secrets:** the configuration directory's `.env` cannot be read, searched or written by any file tool (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model. Approved shell commands could still read `.env`, so approve shell commands with care.
 
 ## MCP servers
 
@@ -213,7 +214,7 @@ Set `SFAGENTS_LIVE_MODEL` to run the live tests against another model. Set `SFAG
 core/src/
   runtime/      agent loop, tool executor, events
   providers/    OpenAI-compatible provider, streamed tool-call parser
-  agents/       JSON schema, tree loader, invoke_child
+  agents/       JSON schema, agents-folder loader, threads, message_agent
   tools/        built-in tools
   mcp/          mcp.json, connections, MCP tool wrapper
   permissions/  workspace containment
@@ -231,12 +232,11 @@ Core has no terminal or web code; the CLI and the web server use only Core's pub
 
 ## Known limitations
 
-- Children run sequentially; no live parent/child messaging.
 - Search is lexical (all query words must appear); there is no semantic or embedding search yet, and no section summaries.
 - Section deletion and merging are not supported yet.
 - Token counts for the context budget are estimates (characters ÷ 4).
 - If SF Agents itself is force-killed, a shell command it started keeps running; the next start reports that call's outcome as unknown.
-- No OS sandbox, which is why `shell` is limited to the root agent.
+- No OS sandbox: any agent granted `shell` runs commands as your user.
 - Model output is text only; MCP image and audio results are summarized, not shown to the model. Attached images are shown to the model (if it supports images); other binary attachments are only named.
 - The web interface has one conversation, no login and no multi-user support. The file manager works with the files of the account SF Agents runs as; anyone who can reach the web interface can read, change and delete those files, so keep it on a trusted network.
 - No MCP OAuth flow; use headers with environment variables.

@@ -58,7 +58,7 @@ export class EventRenderer {
     const who = depth > 0 ? s.magenta(`[${event.agentPath[event.agentPath.length - 1]}] `) : '';
     switch (event.type) {
       case 'text': {
-        if (depth > 0) return; // children report through their result
+        if (depth > 0) return; // other agents report through their reply
         if (this.reasoningOpen) {
           this.options.activity.write('\n');
           this.reasoningOpen = false;
@@ -79,11 +79,11 @@ export class EventRenderer {
         return;
       }
       case 'tool_request':
-        if (event.name === 'invoke_child') return; // shown by agent_start
+        if (event.name === 'message_agent') return; // shown by agent_start
         this.activityLine(depth, `${who}${s.cyan('⚙')} ${s.bold(event.name)} ${s.dim(oneLine(event.description))}`);
         return;
       case 'tool_result':
-        if (event.name === 'invoke_child') return; // shown by agent_end
+        if (event.name === 'message_agent') return; // shown by agent_end
         this.activityLine(
           depth,
           `${who}${event.ok ? s.green('  ✓') : s.red('  ✗')} ${s.dim(oneLine(event.display || (event.ok ? 'done' : 'failed')))}`,

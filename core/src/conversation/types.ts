@@ -6,7 +6,8 @@
 
 export const FORMAT_VERSION = 1;
 
-export type ConversationKind = 'main' | 'transcript';
+/** A thread is the persistent conversation between two agents (see agents/threads.ts). */
+export type ConversationKind = 'main' | 'transcript' | 'thread';
 export type MessageRole = 'user' | 'assistant' | 'tool';
 export type ToolMessageStatus = 'ok' | 'error' | 'denied' | 'cancelled' | 'not_started';
 export type RunStatus = 'GOAL' | 'ERROR' | 'MAX_TURNS' | 'TIMEOUT' | 'CANCELLED';

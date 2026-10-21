@@ -77,7 +77,9 @@ export function decorationFor(record: ConversationRecord): string {
     case 'conversation':
       return record.conversationKind === 'main'
         ? '<b>SF Agents conversation</b>'
-        : `<b>Agent transcript: ${escapeHtml(record.agent ?? '')}</b>`;
+        : record.conversationKind === 'thread'
+          ? `<b>Agent thread: ${escapeHtml((record.agent ?? '').split(',').join(' ↔ '))}</b>`
+          : `<b>Agent transcript: ${escapeHtml(record.agent ?? '')}</b>`;
     case 'message': {
       if (record.role === 'user') {
         const files = record.attachments?.length ? ` <sub>attached ${escapeHtml(record.attachments.map((a) => a.name).join(', '))}</sub>` : '';
@@ -256,13 +258,13 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
   switch (kind) {
     case 'conversation': {
       const ck = str(meta, 'kind', true, p);
-      if (ck !== undefined && ck !== 'main' && ck !== 'transcript') p.push('"kind" must be "main" or "transcript"');
+      if (ck !== undefined && ck !== 'main' && ck !== 'transcript' && ck !== 'thread') p.push('"kind" must be "main", "transcript" or "thread"');
       record = {
         kind: 'conversation',
         ...base,
         v: num(meta, 'v', true, p) ?? 0,
         id: str(meta, 'id', true, p) ?? '',
-        conversationKind: (ck as 'main' | 'transcript') ?? 'main',
+        conversationKind: (ck as 'main' | 'transcript' | 'thread') ?? 'main',
         run: str(meta, 'run', false, p),
         parentRun: str(meta, 'parentRun', false, p),
         agent: str(meta, 'agent', false, p),

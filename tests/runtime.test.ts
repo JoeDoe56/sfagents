@@ -12,13 +12,13 @@ import {
   type ConfirmationRequest,
   type RuntimeEvent,
 } from '@sfagents/core';
-import { baseAgent, collectEvents, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script } from './helpers.js';
+import { baseAgent, collectEvents, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
 
 function setup(agent: Record<string, unknown>) {
   const dir = makeTempDir();
   fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'work', 'notes.txt'), 'The answer is 42.\n');
-  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), workspace: { roots: ['work'] }, ...agent });
+  writeAgent(dir, { ...baseAgent('main'), workspace: { roots: ['work'] }, ...agent });
   return { dir, tree: loadAgentTree(path.join(dir, 'agent.json')) };
 }
 

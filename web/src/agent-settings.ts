@@ -1,7 +1,8 @@
 /**
- * The web interface's per-conversation agent settings (the reasoning effort
- * picked on the send button's sheet), kept in the conversation's state
- * directory, and a best-effort lookup of a model's context window.
+ * The web interface's per-conversation agent settings (which agent replies,
+ * and the reasoning effort picked for each on the send button's sheet), kept
+ * in the conversation's state directory, and a best-effort lookup of a
+ * model's context window.
  */
 
 import fs from 'node:fs';
@@ -12,7 +13,10 @@ import { OPENROUTER_BASE_URL, REASONING_EFFORTS, type AgentDefinition, type Reas
 export const EFFORT_LEVELS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export interface AgentSettings {
-  reasoning?: ReasoningEffort;
+  /** The agent replying in the conversation. */
+  agent?: string;
+  /** Reasoning effort chosen per agent. */
+  efforts?: Record<string, ReasoningEffort>;
 }
 
 export class AgentSettingsStore {
@@ -23,7 +27,14 @@ export class AgentSettingsStore {
     this.file = path.join(stateDir, 'web-agent.json');
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, unknown>;
-      if (typeof raw.reasoning === 'string' && (REASONING_EFFORTS as readonly string[]).includes(raw.reasoning)) this.value.reasoning = raw.reasoning as ReasoningEffort;
+      if (typeof raw.agent === 'string') this.value.agent = raw.agent;
+      const efforts: Record<string, ReasoningEffort> = {};
+      if (raw.efforts && typeof raw.efforts === 'object') {
+        for (const [k, v] of Object.entries(raw.efforts as Record<string, unknown>)) if (typeof v === 'string' && (REASONING_EFFORTS as readonly string[]).includes(v)) efforts[k] = v as ReasoningEffort;
+      }
+      // Earlier files held one effort for the agent of the time.
+      if (typeof raw.reasoning === 'string' && (REASONING_EFFORTS as readonly string[]).includes(raw.reasoning) && this.value.agent && !efforts[this.value.agent]) efforts[this.value.agent] = raw.reasoning as ReasoningEffort;
+      if (Object.keys(efforts).length) this.value.efforts = efforts;
     } catch {
       // none saved yet
     }

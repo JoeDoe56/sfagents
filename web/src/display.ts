@@ -6,7 +6,7 @@
  */
 
 import path from 'node:path';
-import type { ArtifactView, AttachmentRef, ConfirmationRequest, ConversationState, MessageRecord } from '@sfagents/core';
+import { threadKey, type ArtifactView, type AttachmentRef, type ConfirmationRequest, type ConversationState, type MessageRecord } from '@sfagents/core';
 
 export interface DisplayAttachment {
   id: string;
@@ -17,9 +17,9 @@ export interface DisplayAttachment {
 }
 
 export type DisplayItem =
-  | { kind: 'user'; id: string; seq: number; time: string; text: string; attachments: DisplayAttachment[] }
+  | { kind: 'user'; id: string; seq: number; time: string; text: string; attachments: DisplayAttachment[]; /** In a thread: the agent that wrote it. */ agent?: string }
   | { kind: 'assistant'; id: string; seq: number; time: string; text: string; agent: string }
-  | { kind: 'activity'; id: string; seq: number; time: string; text: string; status?: string }
+  | { kind: 'activity'; id: string; seq: number; time: string; text: string; status?: string; /** A message to another agent: the thread it went to. */ thread?: string; agent?: string; /** The artifact a call created or updated. */ artifact?: string }
   | { kind: 'notice'; id: string; seq: number; time: string; text: string };
 
 export interface DisplayArtifact {
@@ -33,6 +33,8 @@ export interface DisplayArtifact {
   created: string;
   updated: string;
   url: string;
+  /** The file on disk, for the file manager's Quick Look. */
+  file?: string;
 }
 
 export interface DisplayApproval {
@@ -89,6 +91,8 @@ export function describeCall(name: string, argsJson: string): string {
       return `Ran ${str(args['command']) ? `\`${clip(String(args['command']), 60)}\`` : 'a command'}`;
     case 'invoke_child':
       return `Asked ${str(args['agent']) ?? str(args['child']) ?? 'a child agent'}${str(args['task']) ? `: ${clip(String(args['task']), 60)}` : ''}`;
+    case 'message_agent':
+      return `Messaged ${str(args['agent']) ?? 'an agent'}${str(args['message']) ? `: ${clip(String(args['message']), 60)}` : ''}`;
     case 'create_artifact':
       return `Created ${str(args['title']) ? `“${clip(String(args['title']), 60)}”` : 'an artifact'}`;
     case 'update_artifact':
@@ -117,23 +121,49 @@ export function describeCall(name: string, argsJson: string): string {
 }
 
 /** Display items for messages with seq > `afterSeq`, at most `limit` from the end. */
+/** A message_agent call: which agent, and the key of their thread 1 (the usual one). */
+function threadOf(name: string, argsJson: string, from: string): { thread?: string; agent?: string } {
+  if (name !== 'message_agent') return {};
+  try {
+    const args = JSON.parse(argsJson) as { agent?: unknown; thread?: unknown };
+    if (typeof args.agent !== 'string') return {};
+    return { agent: args.agent, thread: threadKey(from, args.agent, typeof args.thread === 'number' ? args.thread : 1) };
+  } catch {
+    return {};
+  }
+}
+
+/** The artifact a create_artifact or update_artifact call made or changed. */
+function artifactOf(name: string, argsJson: string, created: string | undefined): { artifact?: string } {
+  if (name === 'create_artifact') return created ? { artifact: created } : {};
+  if (name !== 'update_artifact') return {};
+  try {
+    const id = (JSON.parse(argsJson) as { id?: unknown }).id;
+    return typeof id === 'string' ? { artifact: id } : {};
+  } catch {
+    return {};
+  }
+}
+
 export function displayItems(
   state: ConversationState,
-  options: { before?: number; limit?: number; /** A run in progress, shown live instead. */ hideRun?: string } = {},
+  options: { before?: number; limit?: number; /** A run in progress, shown live instead. */ hideRun?: string; /** A thread between agents: user messages carry who wrote them. */ thread?: boolean } = {},
 ): { items: DisplayItem[]; more: boolean } {
   const items: DisplayItem[] = [];
   const results = new Map<string, string | undefined>();
   for (const m of state.messages) if (m.role === 'tool' && m.callId) results.set(`${m.run}:${m.callId}`, m.status);
+  const created = new Map<string, string>();
+  for (const a of state.artifacts) if (a.message && a.callId && a.type !== 'agent_transcript') created.set(`${a.message}:${a.callId}`, a.id);
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
       const m = record as MessageRecord;
       if (m.role === 'user') {
-        items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment) });
+        items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment), ...(options.thread ? { agent: m.agent } : {}) });
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {
         if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent });
         for (const c of m.toolCalls ?? []) {
-          items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown' });
+          items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.id}:${c.id}`)) });
         }
       }
     } else if (record.kind === 'context_reset') {
@@ -150,7 +180,7 @@ export function displayItems(
   return { items: more ? items.slice(items.length - limit) : items, more };
 }
 
-export function displayArtifact(v: ArtifactView): DisplayArtifact {
+export function displayArtifact(v: ArtifactView, file?: string): DisplayArtifact {
   const filename = v.path ? path.posix.basename(v.path) : v.title;
   return {
     id: v.id,
@@ -163,6 +193,7 @@ export function displayArtifact(v: ArtifactView): DisplayArtifact {
     created: v.createdTime,
     updated: v.updatedTime,
     url: `/api/artifacts/${encodeURIComponent(v.id)}/raw`,
+    ...(file ? { file } : {}),
   };
 }
 

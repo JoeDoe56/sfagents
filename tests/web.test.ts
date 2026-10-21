@@ -8,11 +8,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { ConversationService, loadAgentTree } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
-import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script } from './helpers.js';
+import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
 
 function project(agent: Record<string, unknown> = {}) {
   const dir = makeTempDir('sfagents-web-');
-  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), ...agent });
+  writeAgent(dir, { ...baseAgent('main'), ...agent });
   return dir;
 }
 
@@ -513,7 +513,7 @@ describe('agent settings and context', () => {
       assert.equal(set.json['reasoning'], 'xhigh');
       assert.equal(set.json['configuredReasoning'], 'low');
       await ev.wait((e) => e.event === 'agent' && e.data['reasoning'] === 'xhigh');
-      assert.equal(JSON.parse(fs.readFileSync(path.join(s.dir, '.sfagents', 'web-agent.json'), 'utf8')).reasoning, 'xhigh');
+      assert.equal(JSON.parse(fs.readFileSync(path.join(s.dir, '.sfagents', 'web-agent.json'), 'utf8')).efforts.main, 'xhigh');
       await ev.wait((e) => e.event === 'state');
       assert.equal((await postJson(s.base, '/api/messages', { text: 'think hard' })).status, 202);
       await ev.wait((e) => e.event === 'run_end');

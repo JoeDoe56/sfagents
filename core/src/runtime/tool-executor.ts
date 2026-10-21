@@ -196,7 +196,7 @@ async function executeInner(
       return failure(call.id, call.name, 'Tool call cancelled before execution.', ToolErrorType.EXECUTION_CANCELLED);
     }
     // Child agents have their own turn budget and timeout.
-    const timeout = call.name === ToolNames.INVOKE_CHILD ? undefined : ctx.toolTimeoutMs;
+    const timeout = call.name === ToolNames.MESSAGE_AGENT ? undefined : ctx.toolTimeoutMs;
     ctx.beforeExecute?.(call.id, call.name);
     const result = await runWithTimeout(invocation, signal, timeout, call.id);
     return { callId: call.id, name: call.name, result };

@@ -1,0 +1,35 @@
+{
+  "description": "The default agent for this checkout. Edit freely; see README for every field.",
+  "provider": "openrouter",
+  "model": "anthropic/claude-haiku-5.5",
+  "systemPrompt": "You are the SF Agents main agent. Answer directly when you can. Use your tools to inspect and change files in the workspace, and hand self-contained research or lookups to the worker agent (message it; you can run two at once). Keep answers concise.",
+  "reasoning": "low",
+  "workspace": {
+    "roots": [
+      "."
+    ]
+  },
+  "tools": {
+    "allow": [
+      "read_file",
+      "glob",
+      "grep",
+      "list_directory",
+      "edit",
+      "write_file",
+      "shell",
+      "2-worker.json"
+    ],
+    "mcpServers": [
+      "local-tools"
+    ],
+    "autoApprove": [
+      "mcp__local-tools__echo",
+      "mcp__local-tools__add"
+    ]
+  },
+  "limits": {
+    "maxTurns": 40,
+    "timeoutSeconds": 1800
+  }
+}

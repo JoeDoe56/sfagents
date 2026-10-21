@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler } from './helpers.js';
+import { makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
 
 let mock: Awaited<ReturnType<typeof startMockOpenAI>>;
 let handler: MockChatHandler = () => ({ text: 'unset' });
@@ -23,7 +23,7 @@ function project(agent: Record<string, unknown> = {}, extra: (dir: string) => vo
   const dir = makeTempDir();
   fs.mkdirSync(path.join(dir, 'work'));
   fs.writeFileSync(path.join(dir, 'work', 'hello.txt'), 'hello from the workspace\n');
-  writeJson(path.join(dir, 'agent.json'), {
+  writeAgent(dir, {
     id: 'main',
     provider: 'openai-compatible',
     providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },
@@ -48,9 +48,8 @@ describe('sfagents CLI', () => {
   });
 
   test('agents validate prints the tree; invalid config exits 2 with file and field', async () => {
-    const dir = project({ spawn: { children: ['agents/1-Subagent-Worker.json'] } }, (d) =>
-      writeJson(path.join(d, 'agents', '1-Subagent-Worker.json'), {
-        id: 'worker',
+    const dir = project({ tools: { allow: ['2-worker.json'] } }, (d) =>
+      writeJson(path.join(d, 'agents', 'worker.json'), {
         provider: 'openai-compatible',
         providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },
         model: 'mock/model',
@@ -59,18 +58,20 @@ describe('sfagents CLI', () => {
     );
     const ok = await runCli(['agents', 'validate'], { cwd: dir });
     assert.equal(ok.code, 0, ok.stderr);
-    assert.match(ok.stdout, /^main/m);
-    assert.match(ok.stdout, /└─ worker/);
-    assert.match(ok.stdout, /2 agent definitions valid/);
+    assert.match(ok.stdout, /^\* main .*message:worker×2/ms);
+    assert.match(ok.stdout, /^ {2}worker/m);
+    assert.match(ok.stdout, /2 agents loaded/);
+    const picked = await runCli(['agents', 'validate', '--agent', 'worker'], { cwd: dir });
+    assert.match(picked.stdout, /^\* worker/m);
 
-    writeJson(path.join(dir, 'agents', '1-Subagent-Worker.json'), { id: 'worker', provider: 'openrouter', model: 'm', systemPrompt: 'w', tools: { allow: ['shell'] } });
-    const bad = await runCli(['agents', 'validate', '--config', dir]);
-    assert.equal(bad.code, 2);
-    assert.match(bad.stderr, /agents[\\/]1-Subagent-Worker\.json \[tools\.allow\]: "shell" is only allowed on the root agent/);
+    writeJson(path.join(dir, 'agents', 'broken.json'), { provider: 'openrouter', model: 'm', systemPrompt: 'w', tools: { allow: ['web_fetch'] } });
+    const skipped = await runCli(['agents', 'validate', '--config', dir]);
+    assert.equal(skipped.code, 0);
+    assert.match(skipped.stdout, /skipped agents[\\/]broken\.json: \[tools\.allow\[0\]\]: unknown tool "web_fetch"/);
 
     const missing = await runCli(['agents', 'validate'], { cwd: makeTempDir() });
     assert.equal(missing.code, 2);
-    assert.match(missing.stderr, /No agent definition found/);
+    assert.match(missing.stderr, /No agents found/);
   });
 
   test('run: streams the answer to stdout and tool activity to stderr', async () => {
@@ -139,17 +140,16 @@ describe('sfagents CLI', () => {
     assert.match(r.stdout, /Earlier you said: My name is Ada\./);
   });
 
-  test('start: shows child invocation status', async () => {
+  test('start: shows messages to other agents', async () => {
     handler = (body) => {
       const system = String(body.messages[0]!['content']);
       if (system.startsWith('You are worker')) return { text: 'worker result 99' };
       return lastTool(body) === undefined
-        ? { toolCalls: [{ name: 'invoke_child', args: { agent: 'worker', task: 'compute' } }] }
-        : { text: `Final: ${JSON.parse(lastTool(body)!).response}` };
+        ? { toolCalls: [{ name: 'message_agent', args: { agent: 'worker', message: 'compute' } }] }
+        : { text: `Final: ${JSON.parse(lastTool(body)!).reply}` };
     };
-    const dir = project({ spawn: { children: ['agents/1-Subagent-Worker.json'] } }, (d) =>
-      writeJson(path.join(d, 'agents', '1-Subagent-Worker.json'), {
-        id: 'worker',
+    const dir = project({ tools: { allow: ['1-worker.json'] } }, (d) =>
+      writeJson(path.join(d, 'agents', 'worker.json'), {
         description: 'computes',
         provider: 'openai-compatible',
         providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },

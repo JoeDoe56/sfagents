@@ -217,6 +217,16 @@ export class ConversationService {
     return recorder;
   }
 
+  /**
+   * Lists a thread between agents among this conversation's artifacts (once
+   * per thread file): the interface shows it, and opens it as a conversation.
+   */
+  noteThread(relPath: string, title: string): void {
+    if (this.closed) return;
+    if (this.state.artifacts.some((a) => a.type === 'agent_transcript' && a.path === relPath)) return;
+    this.main.append({ kind: 'artifact', id: `a${this.main.state.nextSeq}`, type: 'agent_transcript', title, path: relPath });
+  }
+
   /** /clear: later working contexts start after this point; history stays searchable. */
   resetContext(): void {
     this.assertOpen();
@@ -409,6 +419,13 @@ export class ConversationService {
     return { view, rev: rev ?? view.rev, filename, mime: view.type === 'agent_transcript' ? 'text/markdown' : mimeForFilename(filename), data };
   }
 
+  /** Where an artifact's latest revision is stored on disk (undefined for in-memory conversations). */
+  artifactFile(id: string): string | undefined {
+    if (!this.dir) return undefined;
+    const rel = this.artifactRevisionPath(id);
+    return rel ? this.managedPath(rel) ?? undefined : undefined;
+  }
+
   /** Paths that agent file tools must never read or write. */
   protectedPaths(): string[] {
     if (!this.main.file || !this.dir) return [];
@@ -570,20 +587,4 @@ class StoreRunRecorder implements RunRecorder {
     if (this.parentRun) this.service.closeTranscript(this.runId);
   }
 
-  child(_child: AgentNode, agentPath: readonly string[], callId: string, title: string): RunRecorder {
-    const run = newRunId();
-    const agent = agentPath.join('/');
-    const { store, relPath } = this.service.openTranscript(run, this.runId, agent);
-    this.store.append({
-      kind: 'artifact',
-      id: `a${this.store.state.nextSeq}`,
-      type: 'agent_transcript',
-      title: title.length > 200 ? `${title.slice(0, 199)}…` : title,
-      ...(relPath ? { path: relPath } : {}),
-      run,
-      ...(this.callMessage.has(callId) ? { message: this.callMessage.get(callId) } : {}),
-      callId,
-    });
-    return new StoreRunRecorder(this.service, store, run, agent, this.runId, callId);
-  }
 }

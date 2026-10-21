@@ -14,7 +14,7 @@ Design goals, in priority order:
 ```text
 <config dir>/.sfagents/
   conversation.md          main conversation (this format, kind "main")
-  transcripts/<run>.md     one child agent run each (this format, kind "transcript")
+  threads/<a>--<b>.md      the persistent thread between two agents (this format, kind "thread")
   recovered/               damaged tails moved aside during recovery
   artifacts/<id>/r<rev>/   content of each artifact revision
   uploads/<id>/<name>      attached files (uploads/.up2k/ holds partial uploads)
@@ -22,7 +22,7 @@ Design goals, in priority order:
   .gitignore               "*" so the folder is never committed by accident
 ```
 
-`<config dir>` is the directory holding the root `agent.json`. A different conversation file can be chosen with `--conversation <file>`; its transcripts and lock then live next to it.
+`<config dir>` is the project directory (the one holding the `agents` folder). A different conversation file can be chosen with `--conversation <file>`; its transcripts and lock then live next to it.
 
 ## Encoding
 
@@ -98,19 +98,20 @@ Sections form a tree that the model maintains with tools; the CLI can inspect it
 - Invariants checked on load: unique section IDs, parents exist, no cycles, assigned messages exist and are `user` or `assistant`.
 - Renaming or moving a section never changes message IDs, bodies or order. Deleting and merging sections are not part of version 1.
 
-## Runs and child transcripts
+## Runs and threads between agents
 
-Every agent invocation has a run ID (`r` + 10 random base-36 characters). The root agent's runs write to the main conversation. When the root invokes a child:
+Every agent invocation has a run ID (`r` + 10 random base-36 characters). Runs of the agent replying to the user write to the main conversation. When an agent messages another with `message_agent`:
 
-1. The main conversation gets an `artifact` record: `type: "agent_transcript"`, `path: "transcripts/<run>.md"`, `run`, `callId`, `message` (the assistant message that requested `invoke_child`).
-2. The child's `run_start`, messages and `run_end` go into `transcripts/<run>.md`, whose `conversation` header names `run`, `parentRun` and `agent`.
-3. The parent receives only the structured child result as its tool message, never the child's messages.
+1. The pair's thread is `threads/<a>--<b>.md` (the two agent names sorted, so it is the same file whoever writes; `--N` is appended for a second or later parallel thread). Its `conversation` header has `kind: "thread"` and `agent: "<a>,<b>"`.
+2. The writer's message is appended to the thread as a `user` message whose `agent` is the writer. The replier's `run_start`, messages and `run_end` follow, with `agent` set to the replier.
+3. The first time a thread is used from a conversation, the conversation gets an `artifact` record: `type: "agent_transcript"`, `path: "threads/<key>.md"`, with `run`, `callId` and `message` of the call that started it.
+4. The writer receives only the structured reply as its tool message. When an agent replies in a thread, its context is the thread: the other agent's messages and replies are user turns, its own earlier messages and replies are its assistant turns.
 
-Grandchildren follow the same pattern from the child's transcript file.
+Older conversations may hold `transcript` files under `transcripts/<run>.md` from the previous child-agent design; they still load and display.
 
 ## Artifacts
 
-An `artifact` record references displayable content; it does not contain it. `path` is relative to the `.sfagents` directory for managed content (transcripts), or to the configuration directory for project files.
+An `artifact` record references displayable content; it does not contain it. `path` is relative to the `.sfagents` directory for managed content (threads, artifacts), or to the configuration directory for project files.
 
 - A missing backing file is reported as a missing artifact. The conversation still loads.
 - Artifact records grant no filesystem or execution permissions.
@@ -133,7 +134,7 @@ A user message's `attachments` reference files under `uploads/`. The body stays 
 - **Damaged tail.** If a file ends in an unfinished record (no closing marker, or an unparseable header line), the writer copies those bytes to `recovered/<file>-<time>.txt`, truncates the file at the last complete record and appends a `recovery` record. The damage is never silent, and the bytes are kept.
 - **Damage elsewhere** (for example a bad manual edit) is reported with a line number, and the conversation will not open for writing until it is fixed. Manual edits made while no writer is running are fine as long as the file stays valid.
 - **Interrupted runs.** On open, each run with a `run_start` but no `run_end` gets an `interrupted` record. Its tool calls are classified as `notStarted` (requested, no `tool_start`) or `unknown` (started, no result). Nothing is retried automatically. When the working context is rebuilt, each unresolved call gets a clearly labelled synthetic tool message saying whether it never ran or its outcome is unknown. These synthetic messages are never written as observed `tool` messages.
-- **Authority.** `run_start` records note the model and configuration in effect, for provenance only. On resume, SF Agents always uses the current validated `agent.json`; stored data never restores tools, permissions or "always allow" approvals.
+- **Authority.** `run_start` records note the model and configuration in effect, for provenance only. On resume, SF Agents always uses the current validated agent files; stored data never restores tools, permissions or "always allow" approvals.
 
 ## Versioning
 

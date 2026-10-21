@@ -123,6 +123,13 @@ export function makeTempDir(prefix = 'sfagents-test-'): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
+/** Writes an agent definition to <project>/agents/<id>.json (the id defaults to "main"). */
+export function writeAgent(projectDir: string, definition: Record<string, unknown>): string {
+  const file = path.join(projectDir, 'agents', `${String(definition['id'] ?? 'main')}.json`);
+  writeJson(file, definition);
+  return file;
+}
+
 export function writeJson(file: string, value: unknown): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(value, null, 2));

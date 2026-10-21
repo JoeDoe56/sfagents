@@ -1,69 +1,70 @@
 /**
- * Loads and validates an SF Agents definition tree.
+ * Loads a project's agents: every `*.json` file in its `agents` folder that
+ * is a valid agent definition. Files that are not (bad JSON, unknown fields,
+ * an unknown MCP server, missing workspace roots) are skipped and reported,
+ * so one broken file never takes the others down.
  *
- * Rules enforced here (all fail closed, with file and field in the error):
- * - Child files resolve relative to the declaring file and must stay inside
- *   the configuration directory (the directory holding the root agent.json),
- *   after symlink resolution.
- * - No cycles; no file used by two parents; unique agent IDs.
- * - Tree depth is bounded by the root's spawn.maxDepth (default 4).
- * - `shell` is root-only in this version: a workspace path allowlist cannot
- *   confine arbitrary commands and SF Agents has no OS sandbox yet.
- * - A child never exceeds its parent's authority: built-in tools, MCP servers
- *   and tools, auto-approvals and workspace roots must be subsets.
- * - Every MCP server an agent names must exist in mcp.json.
- * - Child agents get no filesystem roots unless they declare them.
+ * An agent is known by its file name: `agents/researcher.json` is
+ * "researcher", whatever it calls itself inside. Each agent carries its own
+ * permissions; none is limited by another's. An agent may message others it
+ * is granted with "N-name.json" entries in `tools.allow` (N: how many
+ * threads with that agent it may run at once); grants may form any graph,
+ * cycles included.
  *
- * The resulting tree is deeply frozen; runtime code cannot widen it.
+ * The result is deeply frozen; runtime code cannot widen it.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import {
-  accessRank,
-  artifactAccess,
-  artifactAccessRank,
-  ConfigError,
-  conversationAccess,
-  FILE_TOOL_IDS,
-  mcpGrants,
-  parseAgentDefinition,
-  type AgentDefinition,
-} from './definition.js';
-import { ToolNames } from '../tools/tool-names.js';
-import { isPathWithinRoot, WorkspaceContext } from '../permissions/workspace.js';
+import { ConfigError, artifactAccess, conversationAccess, mcpGrants, parseAgentDefinition, type AgentDefinition } from './definition.js';
+import { WorkspaceContext } from '../permissions/workspace.js';
 import { loadMcpConfig, type McpConfigFile } from '../mcp/config.js';
 
-export const DEFAULT_MAX_DEPTH = 4;
-export const DEFAULT_MAX_CONCURRENT_CHILDREN = 1;
+export const AGENTS_DIR_NAME = 'agents';
+/** The agent the project starts with when none is chosen: "main", else the first by name. */
+export const DEFAULT_AGENT_NAME = 'main';
 
 export interface AgentNode {
+  /** The agent's name (its file name without ".json"). */
   readonly id: string;
   /** Canonical absolute path of the definition file. */
   readonly file: string;
-  readonly depth: number;
   readonly definition: Readonly<AgentDefinition>;
   /** Canonical workspace roots; empty when the agent has no filesystem access. */
   readonly roots: readonly string[];
-  readonly parentId?: string;
-  readonly children: readonly AgentNode[];
+  /** Agents this one may message → how many threads with each it may run at once. */
+  readonly grants: ReadonlyMap<string, number>;
+}
+
+export interface SkippedAgentFile {
+  /** Path relative to the project directory. */
+  file: string;
+  error: string;
 }
 
 export interface AgentTree {
+  /** The project directory (holding the agents folder, mcp.json, .env and .sfagents). */
   readonly configDir: string;
+  readonly agentsDir: string;
+  /** The agent chosen at load time (the default for the main conversation). */
   readonly root: AgentNode;
   readonly byId: ReadonlyMap<string, AgentNode>;
   readonly mcp: McpConfigFile;
+  /** Agent files that were not loaded, and why. */
+  readonly skipped: readonly SkippedAgentFile[];
+  /** Grants naming agents that are not loaded, and similar notes. */
+  readonly warnings: readonly string[];
   /** Configuration files no agent file tool may modify. */
   readonly protectedFiles: readonly string[];
   /** Credential files no agent file tool may read or modify (<configDir>/.env). */
   readonly secretFiles: readonly string[];
-  readonly maxDepth: number;
 }
 
 export interface LoadOptions {
-  /** Path to mcp.json; defaults to <configDir>/mcp.json. */
+  /** Path to mcp.json; defaults to <project>/mcp.json. */
   mcpConfigFile?: string;
+  /** The agent to start with (a name, or a file in the agents folder). */
+  agent?: string;
 }
 
 function readJson(file: string): unknown {
@@ -92,235 +93,159 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   return value;
 }
 
-function canonical(file: string): string {
-  return fs.realpathSync(file);
-}
-
 function rel(configDir: string, file: string): string {
   return path.relative(configDir, file) || path.basename(file);
 }
 
-export function loadAgentTree(rootFile: string, options: LoadOptions = {}): AgentTree {
-  const absRoot = path.resolve(rootFile);
-  if (!fs.existsSync(absRoot)) {
-    throw new ConfigError(absRoot, undefined, 'root agent definition not found');
+/**
+ * Where a project is: a project directory (holding `agents/`), the agents
+ * folder itself, or one agent file inside it (which also picks that agent).
+ */
+export function locateProject(target: string): { projectDir: string; agent?: string } {
+  const abs = path.resolve(target);
+  if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
+    if (path.basename(abs) === AGENTS_DIR_NAME && !fs.existsSync(path.join(abs, AGENTS_DIR_NAME))) return { projectDir: path.dirname(abs) };
+    return { projectDir: abs };
   }
-  const rootCanonical = canonical(absRoot);
-  const configDir = path.dirname(rootCanonical);
+  if (abs.toLowerCase().endsWith('.json') && path.basename(path.dirname(abs)) === AGENTS_DIR_NAME) {
+    return { projectDir: path.dirname(path.dirname(abs)), agent: path.basename(abs).replace(/\.json$/i, '') };
+  }
+  if (path.basename(abs) === 'agent.json' && fs.existsSync(abs)) {
+    throw new ConfigError(
+      abs,
+      undefined,
+      `agents now live in an "${AGENTS_DIR_NAME}" folder: move this file to ${path.join(path.dirname(abs), AGENTS_DIR_NAME, 'main.json')}, and replace "spawn.children" with "N-name.json" entries in tools.allow`,
+    );
+  }
+  return { projectDir: path.dirname(abs) };
+}
+
+/** Loads every valid agent of a project. Throws only when none is usable. */
+export function loadAgentTree(target: string, options: LoadOptions = {}): AgentTree {
+  const located = locateProject(target);
+  const configDir = fs.realpathSync(located.projectDir);
+  const agentsDir = path.join(configDir, AGENTS_DIR_NAME);
+  if (!fs.existsSync(agentsDir) || !fs.statSync(agentsDir).isDirectory()) {
+    const legacy = path.join(configDir, 'agent.json');
+    if (fs.existsSync(legacy)) locateProject(legacy); // throws the migration message
+    throw new ConfigError(agentsDir, undefined, `no "${AGENTS_DIR_NAME}" folder: create it and add an agent definition (for example ${AGENTS_DIR_NAME}/main.json)`);
+  }
   const mcpFile = path.resolve(options.mcpConfigFile ?? path.join(configDir, 'mcp.json'));
   const mcp = loadMcpConfig(mcpFile);
 
-  const byId = new Map<string, AgentNode>();
-  const visitedFiles = new Map<string, string>(); // file -> parent id that declared it
-  const protectedFiles = new Set<string>([rootCanonical, mcpFile]);
-  let maxDepth = DEFAULT_MAX_DEPTH;
+  const skipped: SkippedAgentFile[] = [];
+  const warnings: string[] = [];
+  const protectedFiles = new Set<string>([mcpFile]);
+  const loaded = new Map<string, { file: string; definition: AgentDefinition; roots: string[] }>();
 
-  const build = (
-    file: string,
-    depth: number,
-    parent: AgentNode | undefined,
-    stack: string[],
-  ): AgentNode => {
+  const files = fs
+    .readdirSync(agentsDir, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.json'))
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b));
+
+  for (const name of files) {
+    const file = fs.realpathSync(path.join(agentsDir, name));
+    protectedFiles.add(file);
     const shown = rel(configDir, file);
-    const def = parseAgentDefinition(readJson(file), shown);
-    if (depth === 0) maxDepth = def.spawn?.maxDepth ?? DEFAULT_MAX_DEPTH;
-    else if (def.spawn?.maxDepth !== undefined) {
-      throw new ConfigError(shown, 'spawn.maxDepth', 'may only be set on the root agent');
-    }
-    if (depth > maxDepth) {
-      throw new ConfigError(shown, undefined, `agent tree is deeper than spawn.maxDepth (${maxDepth}) set on the root agent`);
-    }
-    const existing = byId.get(def.id);
-    if (existing) {
-      throw new ConfigError(shown, 'id', `duplicate agent id "${def.id}" (also defined in ${rel(configDir, existing.file)})`);
-    }
-
-    const allow = def.tools?.allow ?? [];
-    if (depth > 0 && allow.includes(ToolNames.SHELL)) {
-      throw new ConfigError(
-        shown,
-        'tools.allow',
-        '"shell" is only allowed on the root agent in this version: workspace roots cannot confine shell commands and no OS sandbox is available',
-      );
-    }
-
-    // MCP servers must exist.
-    const grants = mcpGrants(def);
-    for (const [server] of grants) {
-      if (!mcp.servers[server]) {
-        throw new ConfigError(
-          shown,
-          'tools.mcpServers',
-          `unknown MCP server "${server}". ${mcp.file ? `Servers defined in ${rel(configDir, mcp.file)}: ${Object.keys(mcp.servers).join(', ') || '(none)'}` : 'No mcp.json was found.'}`,
-        );
+    const agentName = name.replace(/\.json$/i, '');
+    try {
+      const def = parseAgentDefinition(readJson(file), shown, agentName);
+      for (const [server] of mcpGrants(def)) {
+        if (!mcp.servers[server]) {
+          throw new ConfigError(
+            shown,
+            'tools.mcpServers',
+            `unknown MCP server "${server}". ${mcp.file ? `Servers defined in ${rel(configDir, mcp.file)}: ${Object.keys(mcp.servers).join(', ') || '(none)'}` : 'No mcp.json was found.'}`,
+          );
+        }
       }
+      // Workspace roots are relative to the project directory ("." is the
+      // project, and the default).
+      const specs = def.workspace?.roots ?? ['.'];
+      const roots: string[] = [];
+      specs.forEach((spec, i) => {
+        try {
+          roots.push(WorkspaceContext.resolveAndValidateDir(path.resolve(configDir, spec)));
+        } catch (error) {
+          throw new ConfigError(shown, `workspace.roots[${i}]`, error instanceof Error ? error.message : String(error));
+        }
+      });
+      if (loaded.has(agentName)) throw new ConfigError(shown, undefined, `another file is already named "${agentName}"`);
+      loaded.set(agentName, { file, definition: def, roots: [...new Set(roots)] });
+    } catch (error) {
+      skipped.push({ file: shown, error: error instanceof ConfigError ? error.message.replace(`${shown}: `, '').replace(`${shown} `, '') : String(error) });
     }
+  }
 
-    // Workspace roots.
-    let roots: string[] = [];
-    const rootSpecs = def.workspace?.roots ?? (depth === 0 ? ['.'] : []);
-    rootSpecs.forEach((spec, i) => {
-      const abs = path.resolve(path.dirname(file), spec);
-      try {
-        roots.push(WorkspaceContext.resolveAndValidateDir(abs));
-      } catch (error) {
-        throw new ConfigError(shown, `workspace.roots[${i}]`, error instanceof Error ? error.message : String(error));
+  if (loaded.size === 0) {
+    const why = skipped.length ? ` Skipped: ${skipped.map((s) => `${s.file}: ${s.error}`).join('; ')}` : '';
+    throw new ConfigError(agentsDir, undefined, `no valid agent definitions.${why}`);
+  }
+
+  const byId = new Map<string, AgentNode>();
+  for (const [id, a] of loaded) {
+    const grants = new Map<string, number>();
+    for (const g of a.definition.tools?.agents ?? []) {
+      if (!loaded.has(g.agent)) {
+        warnings.push(`${rel(configDir, a.file)}: "${g.file}" is not a loaded agent, so "${id}" cannot message it`);
+        continue;
       }
-    });
-    roots = [...new Set(roots)];
-    if (roots.length === 0 && allow.some((t) => FILE_TOOL_IDS.includes(t))) {
-      throw new ConfigError(
-        shown,
-        'workspace.roots',
-        'this agent allows file tools but declares no workspace roots. Child agents do not inherit filesystem access; list the directories explicitly',
-      );
+      grants.set(g.agent, g.max);
     }
+    byId.set(id, { id, file: a.file, definition: a.definition, roots: a.roots, grants });
+  }
 
-    if (depth > 0 && def.context !== undefined) {
-      throw new ConfigError(shown, 'context', 'may only be set on the root agent (children always start from a fresh context)');
+  let rootName = options.agent ?? located.agent;
+  if (rootName) {
+    rootName = rootName.replace(/\.json$/i, '');
+    if (!byId.has(rootName)) {
+      const bad = skipped.find((s) => path.basename(s.file).replace(/\.json$/i, '') === rootName);
+      throw new ConfigError(agentsDir, undefined, bad ? `agent "${rootName}" was not loaded: ${bad.error}` : `no agent named "${rootName}". Agents: ${[...byId.keys()].join(', ')}`);
     }
-    if (parent) checkEscalation(shown, def, roots, parent);
+  } else {
+    rootName = byId.has(DEFAULT_AGENT_NAME) ? DEFAULT_AGENT_NAME : [...byId.keys()][0]!;
+  }
 
-    const node: {
-      id: string;
-      file: string;
-      depth: number;
-      definition: AgentDefinition;
-      roots: string[];
-      parentId?: string;
-      children: AgentNode[];
-    } = {
-      id: def.id,
-      file,
-      depth,
-      definition: def,
-      roots,
-      parentId: parent?.id,
-      children: [],
-    };
-    byId.set(def.id, node);
-
-    (def.spawn?.children ?? []).forEach((childSpec, i) => {
-      const field = `spawn.children[${i}]`;
-      if (!childSpec.toLowerCase().endsWith('.json')) {
-        throw new ConfigError(shown, field, 'child definition paths must end in .json');
-      }
-      const childAbs = path.resolve(path.dirname(file), childSpec);
-      if (!fs.existsSync(childAbs)) {
-        throw new ConfigError(shown, field, `unknown child: file not found: ${childSpec}`);
-      }
-      const childFile = canonical(childAbs);
-      if (!isPathWithinRoot(childFile, configDir)) {
-        throw new ConfigError(shown, field, `child definition is outside the configuration directory ${configDir}: ${childSpec}`);
-      }
-      if (stack.includes(childFile)) {
-        const chain = [...stack, childFile].map((f) => rel(configDir, f)).join(' -> ');
-        throw new ConfigError(shown, field, `cycle in agent tree: ${chain}`);
-      }
-      const declaredBy = visitedFiles.get(childFile);
-      if (declaredBy !== undefined) {
-        throw new ConfigError(shown, field, `${rel(configDir, childFile)} is already a child of "${declaredBy}"; each definition file may have only one parent`);
-      }
-      visitedFiles.set(childFile, def.id);
-      protectedFiles.add(childFile);
-      node.children.push(build(childFile, depth + 1, node, [...stack, childFile]));
-    });
-
-    return node;
+  const tree: AgentTree = {
+    configDir,
+    agentsDir,
+    root: byId.get(rootName)!,
+    byId,
+    mcp,
+    skipped,
+    warnings,
+    protectedFiles: [...protectedFiles],
+    secretFiles: [path.join(configDir, '.env')],
   };
-
-  visitedFiles.set(rootCanonical, '(root)');
-  const root = build(rootCanonical, 0, undefined, [rootCanonical]);
-  const secretFiles = [path.join(configDir, '.env')];
-  const tree: AgentTree = { configDir, root, byId, mcp, protectedFiles: [...protectedFiles], secretFiles, maxDepth };
   return deepFreeze(tree);
 }
 
-function checkEscalation(file: string, child: AgentDefinition, childRoots: readonly string[], parent: AgentNode): void {
-  const p = parent.definition;
-  const parentAllow = new Set(p.tools?.allow ?? []);
-  (child.tools?.allow ?? []).forEach((tool, i) => {
-    if (!parentAllow.has(tool)) {
-      throw new ConfigError(file, `tools.allow[${i}]`, `permission escalation: parent "${parent.id}" does not allow "${tool}"`);
-    }
-  });
-
-  const parentGrants = mcpGrants(p);
-  for (const [server, tools] of mcpGrants(child)) {
-    if (!parentGrants.has(server)) {
-      throw new ConfigError(file, 'tools.mcpServers', `permission escalation: parent "${parent.id}" has no access to MCP server "${server}"`);
-    }
-    const parentTools = parentGrants.get(server);
-    if (parentTools !== undefined) {
-      if (tools === undefined) {
-        throw new ConfigError(
-          file,
-          'tools.mcpServers',
-          `permission escalation: parent "${parent.id}" may only use tools [${[...parentTools].join(', ')}] on "${server}", so the child must list a subset`,
-        );
-      }
-      for (const t of tools) {
-        if (!parentTools.has(t)) {
-          throw new ConfigError(file, 'tools.mcpServers', `permission escalation: parent "${parent.id}" may not use "${t}" on MCP server "${server}"`);
-        }
-      }
-    }
-  }
-
-  const parentAuto = new Set(p.tools?.autoApprove ?? []);
-  (child.tools?.autoApprove ?? []).forEach((entry, i) => {
-    if (parentAuto.has(entry)) return;
-    if (entry.startsWith('mcp__') && !entry.endsWith('__*')) {
-      const server = entry.slice(5).split('__')[0];
-      if (parentAuto.has(`mcp__${server}__*`)) return;
-    }
-    throw new ConfigError(file, `tools.autoApprove[${i}]`, `permission escalation: parent "${parent.id}" does not auto-approve "${entry}"`);
-  });
-
-  const childAccess = conversationAccess(child, parent.depth + 1);
-  const parentAccess = conversationAccess(p, parent.depth);
-  if (accessRank(childAccess) > accessRank(parentAccess)) {
-    throw new ConfigError(file, 'conversation.access', `permission escalation: parent "${parent.id}" has conversation access "${parentAccess}", so the child cannot have "${childAccess}"`);
-  }
-
-  const childArtifacts = artifactAccess(child, parent.depth + 1);
-  const parentArtifacts = artifactAccess(p, parent.depth);
-  if (artifactAccessRank(childArtifacts) > artifactAccessRank(parentArtifacts)) {
-    throw new ConfigError(file, 'artifacts.access', `permission escalation: parent "${parent.id}" has artifact access "${parentArtifacts}", so the child cannot have "${childArtifacts}"`);
-  }
-
-  childRoots.forEach((root, i) => {
-    if (!parent.roots.some((pr) => isPathWithinRoot(root, pr))) {
-      throw new ConfigError(
-        file,
-        `workspace.roots[${i}]`,
-        `permission escalation: ${root} is not inside any workspace root of parent "${parent.id}" (${parent.roots.join(', ') || 'none'})`,
-      );
-    }
-  });
+/** The same project with another agent as the default (the main conversation's agent). */
+export function withRoot(tree: AgentTree, agent: string): AgentTree {
+  const root = tree.byId.get(agent);
+  if (!root) throw new Error(`no agent named "${agent}"`);
+  return root === tree.root ? tree : Object.freeze({ ...tree, root });
 }
 
-/** Human-readable tree for `sfagents agents validate`. */
+/** Human-readable list for `sfagents agents validate`. */
 export function describeTree(tree: AgentTree): string {
   const lines: string[] = [];
-  const walk = (node: AgentNode, prefix: string, last: boolean, isRoot: boolean) => {
+  for (const node of tree.byId.values()) {
     const d = node.definition;
     const tools = [...(d.tools?.allow ?? [])];
     for (const [server, list] of mcpGrants(d)) tools.push(list ? `mcp:${server}[${[...list].join(',')}]` : `mcp:${server}[*]`);
-    if (node.children.length > 0) tools.push(`invoke_child(${node.children.map((c) => c.id).join(',')})`);
-    const access = conversationAccess(d, node.depth);
+    for (const [agent, max] of node.grants) tools.push(`message:${agent}×${max}`);
+    const access = conversationAccess(d, 0);
     if (access !== 'none') tools.push(`conversation:${access}`);
-    const artifacts = artifactAccess(d, node.depth);
+    const artifacts = artifactAccess(d, 0);
     if (artifacts !== 'none') tools.push(`artifacts:${artifacts}`);
-    const head = isRoot ? '' : `${prefix}${last ? '└─ ' : '├─ '}`;
-    lines.push(`${head}${node.id}  (${d.provider}:${d.model}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
-    const detailPrefix = isRoot ? '   ' : `${prefix}${last ? '   ' : '│  '}   `;
-    lines.push(`${detailPrefix}tools: ${tools.length ? tools.join(', ') : '(none)'}`);
-    if (d.tools?.autoApprove?.length) lines.push(`${detailPrefix}auto-approve: ${d.tools.autoApprove.join(', ')}`);
-    lines.push(`${detailPrefix}roots: ${node.roots.length ? node.roots.join(', ') : '(no filesystem access)'}`);
-    const childPrefix = isRoot ? '' : `${prefix}${last ? '   ' : '│  '}`;
-    node.children.forEach((child, i) => walk(child, childPrefix, i === node.children.length - 1, false));
-  };
-  walk(tree.root, '', true, true);
+    lines.push(`${node === tree.root ? '* ' : '  '}${node.id}${d.name ? ` "${d.name}"` : ''}  (${d.provider}:${d.model}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
+    lines.push(`      tools: ${tools.length ? tools.join(', ') : '(none)'}`);
+    if (d.tools?.autoApprove?.length) lines.push(`      auto-approve: ${d.tools.autoApprove.join(', ')}`);
+    lines.push(`      roots: ${node.roots.length ? node.roots.join(', ') : '(no filesystem access)'}`);
+  }
+  for (const s of tree.skipped) lines.push(`  skipped ${s.file}: ${s.error}`);
+  for (const w of tree.warnings) lines.push(`  note: ${w}`);
   return lines.join('\n');
 }

@@ -601,9 +601,24 @@
 
 /* ------------------------------------------------------------------ the agent sheet */
 
-.ag-line { display: flex; align-items: baseline; gap: 8px; margin: 2px 4px 18px; font-size: 17px; line-height: 22px; min-width: 0; }
-.ag-line strong { font-weight: 600; flex: none; }
-.ag-line span { color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ag-agent { display: flex; align-items: center; gap: 12px; margin: 0 4px 2px; min-height: 36px; }
+.ag-agent-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.ag-agent-label { font-size: 17px; line-height: 22px; font-weight: 600; }
+.ag-agent-desc { font-size: 13px; line-height: 17px; color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Calendar's pop-up button: a grey capsule, the choice and a pair of chevrons. */
+.ag-picker {
+  display: inline-flex; align-items: center; gap: 6px; flex: none; max-width: 62%;
+  height: 34px; padding: 0 11px 0 13px; border: 0; border-radius: 17px;
+  background: rgba(120, 120, 128, 0.24); color: var(--label);
+  font: inherit; font-size: 17px; line-height: 22px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.ag-picker:disabled { cursor: default; }
+.ag-picker:disabled .ag-chevrons { opacity: 0.35; }
+.ag-picker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ag-chevrons { display: inline-flex; flex-direction: column; align-items: center; gap: 0; color: var(--label-2); line-height: 0; }
+.ag-chevrons i { margin: -1px 0; }
+.ag-model { margin: 0 4px 18px; font-size: 13px; line-height: 17px; color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ag-effort { margin-bottom: 18px; }
 .ag-label { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 0 0 10px; font-size: 15px; line-height: 20px; }
 .ag-label strong { font-weight: 600; }

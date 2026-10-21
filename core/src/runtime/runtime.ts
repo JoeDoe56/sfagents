@@ -9,14 +9,16 @@
  */
 
 import os from 'node:os';
-import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
 import { createConversationTools, ORGANIZE_GUIDANCE } from '../conversation/tools.js';
 import { ARTIFACT_GUIDANCE, ArtifactToolNames, artifactIndex, createArtifactTools } from '../conversation/artifacts.js';
 import type { AttachmentRef } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
-import { InvokeChildTool, type ChildRunner } from '../agents/invoke-child.js';
+import { AGENT_MESSAGING_GUIDANCE, MessageAgentTool, type AgentMessenger } from '../agents/message-agent.js';
+import { ThreadRecorder, ThreadService, threadMessages } from '../agents/threads.js';
+import { newRunId } from '../conversation/service.js';
+import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
@@ -40,7 +42,6 @@ import {
   type RuntimeEvent,
   type ToolActivity,
 } from './events.js';
-import { Semaphore } from '../utils/semaphore.js';
 import { PersistenceFailure, type RunRecorder } from './recorder.js';
 import { ConversationService, type ReplayTarget } from '../conversation/service.js';
 import { buildWorkingContext, contextBreakdown, type ContextBreakdown, type ContextReport, type ContextTool } from '../conversation/context.js';
@@ -86,6 +87,10 @@ interface RunParams {
   prepareContext?: (fixedText: string) => { messages: ChatMessage[]; systemExtra?: string; report?: ContextReport };
   /** Overrides the agent's configured reasoning effort for this run (the root session's setting). */
   reasoning?: ReasoningEffort;
+  /** "main": replying in the main conversation; "thread": answering another agent. */
+  role?: 'main' | 'thread';
+  /** For a thread: the agent it is talking to. */
+  threadWith?: string;
 }
 
 /** Identity of the provider/model an agent uses, as recorded in run_start. */
@@ -114,33 +119,23 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
       : 'Workspace: none (this agent has no filesystem access)',
     `Tools available to you: ${toolNames.length ? toolNames.join(', ') : '(none)'}`,
   ];
-  if (node.children.length > 0) {
-    env.push(`Child agents you can delegate to with ${ToolNames.INVOKE_CHILD}: ${node.children.map((c) => c.id).join(', ')}`);
+  if (toolNames.includes(ToolNames.MESSAGE_AGENT)) {
+    env.push(`Agents you can message with ${ToolNames.MESSAGE_AGENT}: ${[...node.grants.keys()].join(', ')}`);
   }
   let guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
+  if (toolNames.includes(ToolNames.MESSAGE_AGENT)) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
   if (toolNames.includes(ArtifactToolNames.CREATE)) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
 }
 
-/**
- * Relative paths in a parent's task are relative to the parent's primary
- * root, but a child's file tools resolve against the child's own roots.
- * Spell out the mapping so the child can translate paths.
- */
-function childPathNote(parent: AgentNode, child: AgentNode): string[] {
-  const parentRoot = parent.roots[0];
-  if (!parentRoot || child.roots.length === 0 || child.roots[0] === parentRoot) return [];
-  const mapped = child.roots.map((r) => {
-    const rel = path.relative(parentRoot, r).split(path.sep).join('/');
-    return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? `${r} (the parent's "${rel}/")` : r;
-  });
-  return [
-    '',
-    `Paths: relative paths in this task are relative to the parent's workspace root ${parentRoot}. Your own relative paths resolve against ${child.roots[0]}. Your workspace roots: ${mapped.join(', ')}. Use absolute paths when unsure.`,
-  ];
+/** What an agent answering another agent in a thread is told about it. */
+function threadNote(node: AgentNode, other: string, omitted: number): string {
+  return `<thread>
+You are "${node.id}", answering "${other}" in your persistent thread with it. Its messages arrive as user messages; your final reply goes back to it as the answer. Answer what it asked, terse and structured for an agent to use. If you need something from it, say so in your reply; it can write back in this thread.${omitted ? ` ${omitted} earlier exchange(s) of this thread are not shown.` : ''}
+</thread>`;
 }
 
-export class AgentRuntime implements ChildRunner {
+export class AgentRuntime implements AgentMessenger {
   readonly tree: AgentTree;
   readonly mcp: McpManager;
   private readonly providerFactory: ProviderFactory;
@@ -149,8 +144,8 @@ export class AgentRuntime implements ChildRunner {
   private readonly secretEnvNames: readonly string[];
   /** "Always allow" decisions, per agent id, for the life of the runtime. */
   private readonly sessionApprovals = new Map<string, Set<string>>();
-  /** Active-children semaphores, per parent agent id. */
-  private readonly childSlots = new Map<string, Semaphore>();
+  /** The persistent threads between agents. */
+  readonly threads: ThreadService;
   private disposed = false;
   readonly conversation?: ConversationService;
 
@@ -163,6 +158,7 @@ export class AgentRuntime implements ChildRunner {
     this.confirm = options.confirm;
     this.approveAll = options.approveAll ?? false;
     this.conversation = options.conversation;
+    this.threads = new ThreadService(options.conversation?.dir);
   }
 
   /**
@@ -180,8 +176,11 @@ export class AgentRuntime implements ChildRunner {
     emit: (event: RuntimeEvent) => void,
     recorder?: RunRecorder,
     conversation?: ConversationService,
+    role: 'main' | 'thread' = 'main',
   ): Promise<Map<string, AnyDeclarativeTool>> {
     const d = node.definition;
+    // Access defaults depend on where the agent works (see conversationAccess).
+    const depth = role === 'main' ? 0 : 1;
     const tools = new Map<string, AnyDeclarativeTool>();
     const allow = d.tools?.allow ?? [];
     if (allow.length > 0 && node.roots.length > 0) {
@@ -201,8 +200,6 @@ export class AgentRuntime implements ChildRunner {
         [ToolNames.SHELL]: () => new ShellTool(ctx),
       };
       for (const id of allow) {
-        // Defense in depth: the loader already rejects shell on children.
-        if (id === ToolNames.SHELL && node.depth > 0) continue;
         const make = factories[id];
         if (make) tools.set(id, make());
       }
@@ -231,13 +228,13 @@ export class AgentRuntime implements ChildRunner {
       }
     }
 
-    if (node.children.length > 0) {
-      tools.set(ToolNames.INVOKE_CHILD, new InvokeChildTool(this, node, agentPath, emit, recorder, conversation));
+    if (node.grants.size > 0) {
+      tools.set(ToolNames.MESSAGE_AGENT, new MessageAgentTool(this, node, this.tree.byId, agentPath, emit, conversation));
     }
     // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
     if (conversation?.file) {
-      for (const tool of createConversationTools(conversation, conversationAccess(d, node.depth))) tools.set(tool.name, tool);
-      for (const tool of createArtifactTools(conversation, artifactAccess(d, node.depth), recorder?.runId)) tools.set(tool.name, tool);
+      for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
+      for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined)) tools.set(tool.name, tool);
     }
     return tools;
   }
@@ -314,7 +311,7 @@ export class AgentRuntime implements ChildRunner {
     let tools: Map<string, AnyDeclarativeTool>;
     try {
       provider = this.provider(d);
-      tools = await this.buildTools(node, agentPath, emit, recorder, params.conversation);
+      tools = await this.buildTools(node, agentPath, emit, recorder, params.conversation, params.role ?? 'main');
     } catch (error) {
       const message = getErrorMessage(error);
       emit({ type: 'error', agentPath, message });
@@ -407,38 +404,43 @@ export class AgentRuntime implements ChildRunner {
         return finish(AgentTerminateMode.GOAL);
       }
 
+      const execContext = {
+        agentId: node.id,
+        agentPath,
+        tools,
+        autoApprove: d.tools?.autoApprove ?? [],
+        sessionApprovals: approvals,
+        approveAll: this.approveAll,
+        confirm: this.confirm,
+        toolTimeoutMs: (d.limits?.toolTimeoutSeconds ?? DEFAULT_TOOL_TIMEOUT_MS / 1000) * 1000,
+        maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
+        emit,
+        beforeExecute: (callId: string, tool: string) => record((r) => r.toolStart(callId, tool)),
+      };
       const pending: ParsedToolCall[] = [...done.toolCalls];
       while (pending.length > 0) {
-        const call = pending.shift()!;
         if (signal.aborted) {
           // Keep the conversation valid: every tool call gets a response.
-          for (const c of [call, ...pending]) {
+          for (const c of pending) {
             const cancelled = { role: 'tool' as const, tool_call_id: c.id, content: 'Cancelled before execution.' };
             record((r) => r.toolResult(cancelled, c.name, 'not_started'));
             messages.push(cancelled);
           }
           return finish(...stopReason());
         }
-        const outcome = await executeToolCall(
-          call,
-          {
-            agentId: node.id,
-            agentPath,
-            tools,
-            autoApprove: d.tools?.autoApprove ?? [],
-            sessionApprovals: approvals,
-            approveAll: this.approveAll,
-            confirm: this.confirm,
-            toolTimeoutMs: (d.limits?.toolTimeoutSeconds ?? DEFAULT_TOOL_TIMEOUT_MS / 1000) * 1000,
-            maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
-            emit,
-            beforeExecute: (callId, tool) => record((r) => r.toolStart(callId, tool)),
-          },
-          signal,
-        );
-        record((r) => r.toolResult(outcome.message, call.name, outcome.status));
-        messages.push(outcome.message);
-        activity.push(outcome.activity);
+        // Consecutive messages to other agents run in parallel; everything
+        // else runs one at a time, in order. Results are recorded in order.
+        const batch = [pending.shift()!];
+        if (batch[0]!.name === ToolNames.MESSAGE_AGENT) {
+          while (pending[0]?.name === ToolNames.MESSAGE_AGENT) batch.push(pending.shift()!);
+        }
+        const outcomes = await Promise.all(batch.map((call) => executeToolCall(call, execContext, signal)));
+        batch.forEach((call, i) => {
+          const outcome = outcomes[i]!;
+          record((r) => r.toolResult(outcome.message, call.name, outcome.status));
+          messages.push(outcome.message);
+          activity.push(outcome.activity);
+        });
       }
     }
     } catch (e) {
@@ -448,64 +450,59 @@ export class AgentRuntime implements ChildRunner {
     return finish(AgentTerminateMode.MAX_TURNS, `Agent "${node.id}" reached its limit of ${maxTurns} model turns before finishing.`);
   }
 
-  /** ChildRunner: runs a declared child in a fresh, isolated context. */
-  async runChild(params: {
-    parent: AgentNode;
-    parentPath: readonly string[];
-    child: AgentNode;
-    task: string;
-    context?: string;
+  /**
+   * AgentMessenger: `from` writes to `to` in their thread; `to` answers with
+   * the thread as its context, and its reply is returned. The exchange is
+   * recorded in the thread's file, and the thread is listed as an artifact
+   * of the main conversation the first time it is used there.
+   */
+  async messageAgent(params: {
+    from: AgentNode;
+    fromPath: readonly string[];
+    to: AgentNode;
+    max: number;
+    message: string;
+    thread?: number;
     signal: AbortSignal;
     emit: (event: RuntimeEvent) => void;
     callId?: string;
-    parentRecorder?: RunRecorder;
     conversation?: ConversationService;
-  }): Promise<AgentRunResult> {
-    const { parent, parentPath, child, signal } = params;
-    // Runtime guards, independent of the schema enum.
-    if (!parent.children.includes(child) || this.tree.byId.get(child.id) !== child) {
-      throw new Error(`"${child.id}" is not a declared child of "${parent.id}"`);
+  }): Promise<{ result: AgentRunResult; thread: string; instance: number }> {
+    const { from, to, signal } = params;
+    if (from.grants.get(to.id) === undefined || this.tree.byId.get(to.id) !== to) {
+      throw new Error(`"${from.id}" may not message "${to.id}"`);
     }
-    if (parentPath.includes(child.id)) {
-      throw new Error(`recursion guard: "${child.id}" is already running in this chain (${parentPath.join(' > ')})`);
-    }
-    if (parentPath.length > this.tree.maxDepth) {
-      throw new Error(`depth guard: maximum agent depth ${this.tree.maxDepth} reached`);
-    }
-    const emit = params.emit;
-    let slots = this.childSlots.get(parent.id);
-    if (!slots) {
-      slots = new Semaphore(parent.definition.spawn?.maxConcurrentChildren ?? 1);
-      this.childSlots.set(parent.id, slots);
-    }
-    const release = await slots.acquire(signal);
+    const lease = await this.threads.acquire(from.id, to.id, params.max, signal, params.thread);
     try {
-      const input = [
-        `Task from parent agent "${parent.id}":`,
-        params.task.trim(),
-        ...(params.context?.trim() ? ['', 'Context provided by the parent:', params.context.trim()] : []),
-        ...childPathNote(parent, child),
-      ].join('\n');
-      const agentPath = [...parentPath, child.id];
-      let recorder: RunRecorder | undefined;
-      if (params.parentRecorder) {
-        // Child transcript and its artifact reference are written before the child runs.
-        recorder = params.parentRecorder.child(child, agentPath, params.callId ?? 'unknown', `${child.id}: ${params.task.replace(/\s+/g, ' ').trim()}`);
-        recorder.user(input);
-      }
-      const messages: ChatMessage[] = [{ role: 'user', content: input }];
-      return await this.run({
-        node: child,
-        agentPath,
-        messages,
-        task: params.task,
+      const run = newRunId();
+      const store = lease.store;
+      store.append({ kind: 'message', id: `m${store.state.nextSeq}`, run, role: 'user', agent: from.id, content: params.message });
+      params.conversation?.noteThread?.(lease.relPath, `${from.id} ↔ ${to.id}${lease.instance > 1 ? ` (${lease.instance})` : ''}`);
+      const recorder = new ThreadRecorder(store, run, to.id, this.tree.configDir);
+      const d = to.definition;
+      const budget = d.context?.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS;
+      const target = replayTarget(d);
+      const prepareContext = (fixedText: string) => {
+        const usable = Math.floor(budget * (1 - TURN_RESERVE)) - Math.ceil(fixedText.length / 4) - 200;
+        const { messages, omitted } = threadMessages(store.state, to.id, target, Math.max(1000, usable));
+        return { messages, systemExtra: threadNote(to, from.id, omitted) };
+      };
+      const result = await this.run({
+        node: to,
+        agentPath: [...params.fromPath, to.id],
+        messages: [],
+        task: params.message,
         signal,
-        emit,
+        emit: params.emit,
         recorder,
         conversation: params.conversation,
+        prepareContext,
+        role: 'thread',
+        threadWith: from.id,
       });
+      return { result, thread: lease.key, instance: lease.instance };
     } finally {
-      release();
+      lease.release();
     }
   }
 
@@ -516,6 +513,7 @@ export class AgentRuntime implements ChildRunner {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.threads.close();
     await this.mcp.dispose();
   }
 }
@@ -535,9 +533,22 @@ export class AgentSession {
 
   constructor(
     private readonly runtime: AgentRuntime,
-    readonly node: AgentNode,
+    /** The agent replying in the conversation (any of the project's agents; see setAgent). */
+    public node: AgentNode,
     readonly conversation: ConversationService,
   ) {}
+
+  /**
+   * Hands the conversation to another agent: later turns are its, with the
+   * same history. Not while a turn is running.
+   */
+  setAgent(name: string): AgentNode {
+    const node = this.runtime.tree.byId.get(name);
+    if (!node) throw new Error(`no agent named "${name}"`);
+    if (this.busy && node !== this.node) throw new Error('Cannot change the agent while a turn is running');
+    this.node = node;
+    return node;
+  }
 
   /** The provider messages of the most recent turn (for inspection and tests). */
   get messages(): ChatMessage[] {
@@ -560,7 +571,7 @@ export class AgentSession {
     const tools = await this.runtime.buildTools(this.node, [this.node.id], () => undefined, undefined, conversation);
     const list: ContextTool[] = [...tools.entries()].map(([name, tool]) => ({
       name,
-      group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.INVOKE_CHILD ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
+      group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.MESSAGE_AGENT ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
       ...(tool instanceof DiscoveredMcpTool ? { server: tool.serverName } : {}),
       schema: tool.schema,
     }));
@@ -621,6 +632,7 @@ export class AgentSession {
           recorder,
           conversation: this.conversation,
           prepareContext,
+          role: 'main',
           ...(this.reasoning ? { reasoning: this.reasoning } : {}),
         })
         .then(

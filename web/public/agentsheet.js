@@ -1,15 +1,18 @@
 /**
  * The send button's sheet: the agent, its reasoning effort and how full its
- * working context is. The medium detent shows the agent (a plain line for
- * now; it becomes a picker later), the reasoning slider and the context bar;
- * the large one adds the context breakdown, in the spirit of Qwen Code's
- * /context, laid out the Apple way.
+ * working context is. The medium detent shows the agent (a pop-up button
+ * that opens a menu of the project's agents, as Calendar's do), the
+ * reasoning slider and the context bar; the large one adds the context
+ * breakdown, in the spirit of Qwen Code's /context, laid out the Apple way.
+ * Changes are staged: the check button saves them, the close button, a swipe
+ * down or Escape drop them.
  */
 
 import { getJson, postJson } from './api.js';
 import { openSheet } from './modalsheet.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showError, confirmDialog, toast } from './dialogs.js';
+import { showMenu } from './menu.js';
 
 const LEVEL_NAMES = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -234,13 +237,60 @@ const CATEGORY_COLORS = {
 let current = null;
 
 /** Opens the sheet (or brings the open one forward). Returns a handle the app refreshes after each reply. */
-export function openAgentSheet({ agent, onReasoning } = {}) {
+export function openAgentSheet({ agent, onSaved } = {}) {
   if (current) return current;
   let info = agent ?? null;
   let context = null;
   let slider = null;
   let bar = null;
   const parts = {};
+  // The project's agents (for the menu), what is saved, and what is staged.
+  let agents = [];
+  let saved = { agent: info?.id ?? null, reasoning: info?.reasoning ?? null };
+  const staged = { ...saved };
+  const levelsOf = () => info?.levels ?? ['low', 'medium', 'high', 'xhigh', 'max'];
+  const agentById = (id) => agents.find((a) => a.id === id);
+
+  function stagedAgent() {
+    return agentById(staged.agent) ?? info;
+  }
+
+  /** Shows the staged agent and effort, and marks the sheet changed when they differ from what is saved. */
+  function showStaged(animate = true) {
+    const a = stagedAgent();
+    parts.agentName.textContent = a?.name ?? a?.id ?? 'Agent';
+    parts.agentModel.textContent = a?.model ?? '';
+    parts.agentDesc.textContent = a?.description ?? '';
+    parts.agentDesc.hidden = !a?.description;
+    const levels = levelsOf();
+    const value = staged.reasoning && levels.includes(staged.reasoning) ? staged.reasoning : 'medium';
+    parts.level.textContent = staged.reasoning ? (LEVEL_NAMES[value] ?? value) : 'Default';
+    if (animate) slider.set(value);
+    parts.picker.disabled = agents.length < 2 && !!agents.length;
+    ctx.setDirty(staged.agent !== saved.agent || (staged.reasoning ?? null) !== (saved.reasoning ?? null));
+  }
+
+  function pickAgent() {
+    if (!agents.length) return;
+    showMenu({
+      anchor: parts.picker,
+      align: 'end',
+      groups: [
+        agents.map((a) => ({
+          label: a.name ?? a.id,
+          detail: a.model,
+          checked: a.id === staged.agent,
+          action: () => {
+            if (a.id === staged.agent) return;
+            staged.agent = a.id;
+            // Each agent keeps its own effort.
+            staged.reasoning = a.id === saved.agent ? saved.reasoning : (a.reasoning ?? null);
+            showStaged();
+          },
+        })),
+      ],
+    });
+  }
 
   const ctx = openSheet({
     title: 'Agent',
@@ -248,11 +298,22 @@ export function openAgentSheet({ agent, onReasoning } = {}) {
     className: 'ag-sheet',
     build(sheet) {
       const body = sheet.body;
-      // The agent: a plain line until there is a picker.
-      const line = el('p', 'ag-line ag-unit');
-      parts.agentName = el('strong', '', info?.id ?? 'Agent');
-      parts.agentModel = el('span', '', info?.model ?? '');
-      line.append(parts.agentName, parts.agentModel);
+      // The agent: a row with a pop-up button, as Calendar's are.
+      const line = el('div', 'ag-agent ag-unit');
+      const text = el('div', 'ag-agent-text');
+      parts.agentDesc = el('span', 'ag-agent-desc', '');
+      parts.agentDesc.hidden = true;
+      text.append(el('span', 'ag-agent-label', 'Agent'), parts.agentDesc);
+      parts.picker = el('button', 'ag-picker');
+      parts.picker.type = 'button';
+      parts.picker.setAttribute('aria-haspopup', 'menu');
+      parts.agentName = el('span', 'ag-picker-name', info?.name ?? info?.id ?? 'Agent');
+      const chevrons = el('span', 'ag-chevrons');
+      chevrons.append(sym('chevron.up', 8), sym('chevron.down', 8));
+      parts.picker.append(parts.agentName, chevrons);
+      parts.picker.addEventListener('click', pickAgent);
+      line.append(text, parts.picker);
+      parts.agentModel = el('p', 'ag-model ag-unit', info?.model ?? '');
 
       const effort = el('div', 'ag-effort');
       const label = el('p', 'ag-label ag-unit');
@@ -266,13 +327,9 @@ export function openAgentSheet({ agent, onReasoning } = {}) {
         label: 'Reasoning effort',
         onMove: () => sheet.invalidateGlass(),
         onInput: (v) => (parts.level.textContent = LEVEL_NAMES[v] ?? v),
-        onChange: async (v) => {
-          try {
-            info = await postJson('/api/agent', { reasoning: v });
-            onReasoning?.(info);
-          } catch (error) {
-            showError(error.message, "Couldn't change the reasoning effort");
-          }
+        onChange: (v) => {
+          staged.reasoning = v;
+          showStaged(false);
         },
       });
       effort.append(label, slider.element);
@@ -283,9 +340,24 @@ export function openAgentSheet({ agent, onReasoning } = {}) {
       marker.dataset.mediumEnd = '';
 
       parts.details = el('div', 'ag-details');
-      body.append(line, effort, bar.element, marker, parts.details);
+      body.append(line, parts.agentModel, effort, bar.element, marker, parts.details);
       // The slider's capsule is Liquid Glass, as ChatGPT's is.
       sheet.addGlass(slider.element.querySelector('.ag-track'), 'control');
+    },
+    onConfirm: async () => {
+      const body = {};
+      if (staged.agent && staged.agent !== saved.agent) body.agent = staged.agent;
+      if ((staged.reasoning ?? null) !== (saved.reasoning ?? null) || body.agent) body.reasoning = staged.reasoning;
+      if (!Object.keys(body).length) return true;
+      try {
+        info = await postJson('/api/agent', body);
+        saved = { agent: info.id, reasoning: info.reasoning };
+        onSaved?.(info);
+        return true;
+      } catch (error) {
+        showError(error.message, "Couldn't change the agent");
+        return false;
+      }
     },
     onClose: () => {
       clearInterval(timer);
@@ -304,15 +376,15 @@ export function openAgentSheet({ agent, onReasoning } = {}) {
 
   async function loadAgent() {
     try {
-      info = await getJson('/api/agent');
-      parts.agentName.textContent = info.id;
-      parts.agentModel.textContent = info.model;
-      if (info.reasoning) {
-        slider.set(info.reasoning);
-        parts.level.textContent = LEVEL_NAMES[info.reasoning] ?? info.reasoning;
-      }
+      const [one, all] = await Promise.all([getJson('/api/agent'), getJson('/api/agents')]);
+      const untouched = staged.agent === saved.agent && (staged.reasoning ?? null) === (saved.reasoning ?? null);
+      info = one;
+      agents = all.agents;
+      saved = { agent: info.id, reasoning: info.reasoning };
+      if (untouched) Object.assign(staged, saved);
+      showStaged();
     } catch {
-      // the line keeps what the page knew
+      // the row keeps what the page knew
     }
   }
 
@@ -442,8 +514,14 @@ export function openAgentSheet({ agent, onReasoning } = {}) {
   current = {
     refresh: () => loadContext(),
     setAgent: (a) => {
+      // Another window changed it: follow, unless this sheet has its own changes.
+      const untouched = staged.agent === saved.agent && (staged.reasoning ?? null) === (saved.reasoning ?? null);
       info = { ...info, ...a };
-      if (a.reasoning) slider.set(a.reasoning);
+      saved = { agent: info.id, reasoning: info.reasoning ?? null };
+      if (untouched) {
+        Object.assign(staged, saved);
+        showStaged();
+      }
     },
     close: () => ctx.close(),
   };

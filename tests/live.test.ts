@@ -16,7 +16,7 @@ import {
   readConversation,
   type RuntimeEvent,
 } from '@sfagents/core';
-import { makeTempDir, runCli, stdioServerConfig, writeJson } from './helpers.js';
+import { makeTempDir, runCli, stdioServerConfig, writeJson, writeAgent } from './helpers.js';
 
 const KEY = process.env['OPENROUTER_API_KEY'];
 const MODEL = process.env['SFAGENTS_LIVE_MODEL'] ?? 'anthropic/claude-haiku-5.5';
@@ -55,7 +55,7 @@ function track(r: AgentRuntime) {
 describe(`live provider (${MODEL})`, { skip }, () => {
   test('CLI run: basic request returns a real final response', async () => {
     const dir = project();
-    writeJson(path.join(dir, 'agent.json'), agent('main'));
+    writeAgent(dir, agent('main'));
     const r = await runCli(['run', 'Reply with exactly the word: TANGERINE'], { cwd: dir, env: { OPENROUTER_API_KEY: KEY }, timeoutMs: 120_000 });
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /TANGERINE/);
@@ -63,7 +63,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('tool loop with reasoning: built-in file tool result reaches the answer', async () => {
     const dir = project();
-    writeJson(path.join(dir, 'agent.json'), agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['read_file', 'glob'] } }));
+    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['read_file', 'glob'] } }));
     const runtime = track(new AgentRuntime({ tree: loadAgentTree(path.join(dir, 'agent.json')) }));
     const events: RuntimeEvent[] = [];
     const result = await runtime.createSession().run('What is the warehouse code in the inventory file under shared/? Find and read it.', { onEvent: (e) => events.push(e) });
@@ -74,7 +74,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('MCP stdio tool through the model loop', async () => {
     const dir = project();
-    writeJson(path.join(dir, 'agent.json'), agent('main', { tools: { mcpServers: [{ server: 'local', tools: ['add'] }], autoApprove: ['mcp__local__add'] } }));
+    writeAgent(dir, agent('main', { tools: { mcpServers: [{ server: 'local', tools: ['add'] }], autoApprove: ['mcp__local__add'] } }));
     const runtime = track(new AgentRuntime({ tree: loadAgentTree(path.join(dir, 'agent.json')) }));
     const result = await runtime.createSession().run('Use the add tool to compute 1749 + 2486 and tell me the result.');
     assert.equal(result.status, AgentTerminateMode.GOAL, result.error);
@@ -110,7 +110,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('interactive start keeps context across a follow-up', async () => {
     const dir = project();
-    writeJson(path.join(dir, 'agent.json'), agent('main'));
+    writeAgent(dir, agent('main'));
     const r = await runCli(['start'], {
       cwd: dir,
       env: { OPENROUTER_API_KEY: KEY },
@@ -124,7 +124,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('persistent conversation: restart replays tool calls and reasoning across processes', async () => {
     const dir = project();
-    writeJson(path.join(dir, 'agent.json'), agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['read_file'] } }));
+    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['read_file'] } }));
     const env = { OPENROUTER_API_KEY: KEY };
     const one = await runCli(['start', '--yes'], { cwd: dir, env, input: 'Read shared/inventory.txt and tell me the item count. Also remember that my badge number is 5521.\n/exit\n', timeoutMs: 150_000 });
     assert.equal(one.code, 0, one.stderr);
@@ -142,7 +142,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('persistent conversation: an old fact outside the context is retrieved with section tools', async () => {
     const dir = project();
-    writeJson(path.join(dir, 'agent.json'), agent('main', { context: { recentExchanges: 2 }, limits: { maxTurns: 8, timeoutSeconds: 180 } }));
+    writeAgent(dir, agent('main', { context: { recentExchanges: 2 }, limits: { maxTurns: 8, timeoutSeconds: 180 } }));
     const tree = loadAgentTree(path.join(dir, 'agent.json'));
     const file = path.join(dir, '.sfagents', 'conversation.md');
     const conv = ConversationService.open(file, { configDir: tree.configDir });
@@ -171,7 +171,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('persistent conversation: the model files distinct topics into sections', async () => {
     const dir = project();
-    writeJson(path.join(dir, 'agent.json'), agent('main'));
+    writeAgent(dir, agent('main'));
     const r = await runCli(['start'], {
       cwd: dir,
       env: { OPENROUTER_API_KEY: KEY },

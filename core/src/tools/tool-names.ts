@@ -18,8 +18,8 @@ export const ToolNames = {
   LS: 'list_directory',
   /** Upstream: run_shell_command */
   SHELL: 'shell',
-  /** SF Agents: delegates to a declared child agent. */
-  INVOKE_CHILD: 'invoke_child',
+  /** SF Agents: messages another agent in their persistent thread. */
+  MESSAGE_AGENT: 'message_agent',
 } as const;
 
 /** Built-in tool IDs an agent definition may list in `tools.allow`. */

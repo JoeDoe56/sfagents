@@ -5,7 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { ConversationService, loadAgentTree } from '@sfagents/core';
 import { FileService, Trash, WebServer, chunkHash, crc32, extractZip, readZipEntries, safeEntryPath, up2kChunkSize, writeZip, zipSourcesFor, type Job } from '@sfagents/web';
-import { baseAgent, makeTempDir, scriptedFactory, writeJson } from './helpers.js';
+import { baseAgent, makeTempDir, scriptedFactory, writeJson, writeAgent } from './helpers.js';
 
 function tree(root: string, files: Record<string, string | null>) {
   for (const [rel, content] of Object.entries(files)) {
@@ -241,7 +241,7 @@ async function post(base: string, pathname: string, body: unknown) {
 describe('files: HTTP API', () => {
   test('list, ranges, ZIP download, operations, upload into a folder, attach, and cross-site reads refused', async () => {
     const dir = makeTempDir('sfagents-files-web-');
-    writeJson(path.join(dir, 'agent.json'), baseAgent('main'));
+    writeAgent(dir, baseAgent('main'));
     const agents = loadAgentTree(path.join(dir, 'agent.json'));
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: agents.configDir });
     const server = new WebServer({ tree: agents, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, lhmUrl: null });

@@ -143,6 +143,59 @@ function buildTile(a, { onOpen, onPin }) {
   return tile;
 }
 
+/**
+ * An artifact in the chat, where it was made: a preview with its title and
+ * file name, like a shared document in Messages. Tapping it opens it.
+ */
+export function chatCard(a, onOpen) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'art-card';
+  card.setAttribute('aria-label', `Open ${a.title}`);
+  const preview = document.createElement('div');
+  preview.className = 'art-card-preview';
+  const icon = document.createElement('i');
+  applySymbol(icon, ICONS[a.type] || 'doc', { size: 34 });
+  preview.append(icon);
+  const foot = document.createElement('div');
+  foot.className = 'art-card-foot';
+  const small = document.createElement('i');
+  applySymbol(small, ICONS[a.type] || 'doc', { size: 15 });
+  const text = document.createElement('div');
+  text.className = 'art-card-text';
+  const title = document.createElement('strong');
+  title.textContent = a.title;
+  const meta = document.createElement('span');
+  meta.textContent = `${a.filename}${a.rev > 1 ? ` · v${a.rev}` : ''}`;
+  text.append(title, meta);
+  foot.append(small, text);
+  card.append(preview, foot);
+  card.addEventListener('click', () => onOpen(a));
+  loadPreview(a).then((p) => {
+    if (p.kind === 'image') {
+      const img = document.createElement('img');
+      img.alt = '';
+      img.loading = 'lazy';
+      img.src = `${a.url}?rev=${a.rev}`;
+      preview.className = 'art-card-preview image';
+      preview.replaceChildren(img);
+    } else if (a.type === 'html') {
+      // A web page: a scaled, script-free render.
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', '');
+      frame.setAttribute('tabindex', '-1');
+      frame.loading = 'lazy';
+      frame.src = `${a.url}?rev=${a.rev}`;
+      preview.className = 'art-card-preview page';
+      preview.replaceChildren(frame);
+    } else if (p.kind === 'prose' || p.kind === 'code') {
+      preview.className = `art-card-preview text ${p.kind}`;
+      preview.textContent = p.kind === 'prose' ? proseExcerpt(p.text) : p.text;
+    }
+  });
+  return card;
+}
+
 /** The full-screen artifact viewer. */
 export function createViewer({ root, title, meta, body, close, pin, open, download, onPin }) {
   let current = null;

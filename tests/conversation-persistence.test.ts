@@ -24,21 +24,20 @@ import {
   startMockOpenAI,
   writeJson,
   type MockChatHandler,
-  type Script,
-} from './helpers.js';
+  type Script, writeAgent } from './helpers.js';
 
 const isWin = process.platform === 'win32';
 
 function project(agent: Record<string, unknown> = {}, extraFiles: Record<string, unknown> = {}) {
   const dir = makeTempDir();
   fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
-  writeJson(path.join(dir, 'agent.json'), { ...baseAgent('main'), workspace: { roots: ['work'] }, ...agent });
+  writeAgent(dir, { ...baseAgent('main'), workspace: { roots: ['work'] }, ...agent });
   for (const [f, v] of Object.entries(extraFiles)) writeJson(path.join(dir, f), v);
   return { dir, file: path.join(dir, '.sfagents', 'conversation.md') };
 }
 
 function openRuntime(dir: string, script: Script, opts: { approveAll?: boolean; io?: Parameters<typeof ConversationService.open>[1]['io'] } = {}) {
-  const tree = loadAgentTree(path.join(dir, 'agent.json'));
+  const tree = loadAgentTree(dir);
   const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir, io: opts.io });
   const { factory, providers } = scriptedFactory(script);
   const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation, approveAll: opts.approveAll });
@@ -87,8 +86,8 @@ describe('persistent conversation (runtime)', () => {
     await second.close();
 
     // A different model must not receive another model's reasoning blocks.
-    const agent = JSON.parse(fs.readFileSync(path.join(dir, 'agent.json'), 'utf8'));
-    writeJson(path.join(dir, 'agent.json'), { ...agent, model: 'other/model' });
+    const agent = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'main.json'), 'utf8'));
+    writeAgent(dir, { ...agent, model: 'other/model' });
     const third = openRuntime(dir, () => ({ text: 'ok' }));
     await third.runtime.createSession().run('third');
     const sent3 = third.providers.get('main')!.requests[0]!.messages as ChatMessage[];
@@ -161,13 +160,13 @@ describe('persistent conversation (runtime)', () => {
     await second.close();
   });
 
-  test('child transcripts are stored under their own run and linked from the parent', async () => {
-    const { dir } = project({ spawn: { children: ['agents/1-Subagent-Helper.json'] } }, { 'agents/1-Subagent-Helper.json': baseAgent('helper', { description: 'helps' }) });
+  test('threads between agents are stored as their own files and linked from the conversation', async () => {
+    const { dir } = project({ tools: { allow: ['1-helper.json'] } }, { 'agents/helper.json': baseAgent('helper', { description: 'helps' }) });
     const first = openRuntime(dir, (req, n, agent) =>
       agent === 'main'
         ? n === 0
-          ? { toolCalls: [{ name: 'invoke_child', args: { agent: 'helper', task: 'Say the password.' } }] }
-          : { text: `Helper said: ${JSON.parse(lastToolContent(req)!).response}` }
+          ? { toolCalls: [{ name: 'message_agent', args: { agent: 'helper', message: 'Say the password.' } }] }
+          : { text: `Helper said: ${JSON.parse(lastToolContent(req)!).reply}` }
         : { text: 'swordfish' },
     );
     const r = await first.runtime.createSession().run('ask the helper');
@@ -176,23 +175,19 @@ describe('persistent conversation (runtime)', () => {
 
     const { state } = readConversation(path.join(dir, '.sfagents', 'conversation.md'));
     const artifact = state.artifacts.find((a) => a.type === 'agent_transcript')!;
-    assert.equal(artifact.title, 'helper: Say the password.');
-    assert.match(artifact.path!, /^transcripts\/r[0-9a-z]{10}\.md$/);
-    assert.equal(state.messageById.get(artifact.message!)!.toolCalls![0]!.id, artifact.callId);
-    const transcript = readConversation(path.join(dir, '.sfagents', artifact.path!)).state;
-    assert.equal(transcript.header!.conversationKind, 'transcript');
-    assert.equal(transcript.header!.parentRun, state.messageById.get(artifact.message!)!.run);
-    assert.deepEqual(transcript.messages.map((m) => [m.role, m.content]), [
-      ['user', 'Task from parent agent "main":\nSay the password.'],
+    assert.equal(artifact.path, 'threads/helper--main.md');
+    const thread = readConversation(path.join(dir, '.sfagents', artifact.path!)).state;
+    assert.equal(thread.header!.conversationKind, 'thread');
+    assert.deepEqual(thread.messages.map((m) => [m.role, m.content]), [
+      ['user', 'Say the password.'],
       ['assistant', 'swordfish'],
     ]);
-    assert.equal([...transcript.runs.values()][0]!.end!.status, 'GOAL');
-    // The parent's context contains only the structured result, not the child's messages.
+    // The writer's context holds only the reply, not the thread.
     const second = openRuntime(dir, () => ({ text: 'ok' }));
     await second.runtime.createSession().run('next');
     const sent = JSON.stringify(second.providers.get('main')!.requests[0]!.messages);
-    assert.doesNotMatch(sent, /Task from parent agent/);
-    assert.equal(second.conversation.transcript(artifact.run!)!.messages.length, 2);
+    assert.match(sent, /swordfish/);
+    assert.doesNotMatch(sent, /<thread>/);
     await second.close();
   });
 
@@ -235,7 +230,7 @@ describe('persistent conversation (runtime)', () => {
     const { dir } = project({ tools: { allow: ['write_file'] } });
     let asked = 0;
     for (let round = 0; round < 2; round++) {
-      const tree = loadAgentTree(path.join(dir, 'agent.json'));
+      const tree = loadAgentTree(dir);
       const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
       const { factory } = scriptedFactory((_req, n) => (n === 0 ? { toolCalls: [{ name: 'write_file', args: { file_path: `f${round}.txt`, content: 'x' } }] } : { text: 'ok' }));
       const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation, confirm: async () => (asked++, 'allow_always') });
@@ -260,7 +255,7 @@ describe('persistent conversation (CLI)', () => {
   function cliProject(agent: Record<string, unknown> = {}) {
     const dir = makeTempDir();
     fs.mkdirSync(path.join(dir, 'work'));
-    writeJson(path.join(dir, 'agent.json'), {
+    writeAgent(dir, {
       id: 'main',
       provider: 'openai-compatible',
       providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },

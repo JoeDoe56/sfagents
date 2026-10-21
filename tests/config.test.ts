@@ -2,237 +2,152 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadAgentTree, describeTree, ConfigError } from '@sfagents/core';
+import { loadAgentTree, describeTree, ConfigError, locateProject, withRoot } from '@sfagents/core';
 import { baseAgent, makeTempDir, writeJson, stdioServerConfig } from './helpers.js';
 
+/** A project: files are relative to it (agents go in "agents/"). */
 function setup(files: Record<string, unknown>, mcp?: unknown): string {
   const dir = makeTempDir();
   fs.mkdirSync(path.join(dir, 'work', 'sub'), { recursive: true });
-  for (const [name, value] of Object.entries(files)) writeJson(path.join(dir, name), value);
+  fs.mkdirSync(path.join(dir, 'agents'), { recursive: true });
+  for (const [name, value] of Object.entries(files)) {
+    if (typeof value === 'string') fs.writeFileSync(path.join(dir, name), value);
+    else writeJson(path.join(dir, name), value);
+  }
   if (mcp) writeJson(path.join(dir, 'mcp.json'), mcp);
   return dir;
 }
 
-function expectConfigError(dir: string, pattern: RegExp) {
-  assert.throws(
-    () => loadAgentTree(path.join(dir, 'agent.json')),
-    (e: unknown) => e instanceof ConfigError && pattern.test(e.message),
-  );
+/** The single agent file's error, as the loader reports a skipped file. */
+function skippedError(dir: string, pattern: RegExp, extra: Record<string, unknown> = { 'agents/ok.json': baseAgent('ok') }) {
+  for (const [name, value] of Object.entries(extra)) writeJson(path.join(dir, name), value);
+  const tree = loadAgentTree(dir);
+  assert.ok(tree.skipped.some((s) => pattern.test(`${s.file}: ${s.error}`)), `expected a skipped file matching ${pattern}; got ${JSON.stringify(tree.skipped)}`);
 }
 
-describe('agent JSON tree', () => {
-  test('loads root, child and grandchild with resolved roots', () => {
+describe('agents folder', () => {
+  test('loads every valid file, named by its file name, with grants and roots', () => {
     const dir = setup(
       {
-        'agent.json': baseAgent('main', {
+        'agents/main.json': baseAgent('main', {
           workspace: { roots: ['work'] },
-          tools: { allow: ['read_file', 'write_file', 'shell'], mcpServers: ['local'] },
-          spawn: { children: ['agents/1-Subagent-Worker.json'], maxConcurrentChildren: 2 },
+          tools: { allow: ['read_file', 'write_file', 'shell', '2-Research Helper.json'], mcpServers: ['local'] },
         }),
-        'agents/1-Subagent-Worker.json': baseAgent('worker', {
-          description: 'does work',
-          workspace: { roots: ['../work/sub'] },
-          tools: { allow: ['read_file'], mcpServers: [{ server: 'local', tools: ['echo'] }] },
-          spawn: { children: ['2-Subagent-Helper.json'] },
-        }),
-        'agents/2-Subagent-Helper.json': baseAgent('helper'),
+        'agents/Research Helper.json': {
+          ...baseAgent('ignored-label'),
+          description: 'does research',
+          workspace: { roots: ['work/sub'] },
+          tools: { allow: ['read_file', 'shell', '1-main.json'], mcpServers: [{ server: 'local', tools: ['echo'] }] },
+        },
+        'agents/plain.json': baseAgent('plain'),
       },
       { mcpServers: { local: stdioServerConfig() } },
     );
-    const tree = loadAgentTree(path.join(dir, 'agent.json'));
-    assert.equal(tree.root.id, 'main');
+    const tree = loadAgentTree(dir);
+    assert.equal(tree.root.id, 'main', '"main" replies by default');
+    assert.deepEqual([...tree.byId.keys()].sort(), ['Research Helper', 'main', 'plain']);
     assert.deepEqual(tree.root.roots, [path.join(dir, 'work')]);
-    const worker = tree.root.children[0]!;
-    assert.equal(worker.id, 'worker');
-    assert.equal(worker.depth, 1);
-    assert.deepEqual(worker.roots, [path.join(dir, 'work', 'sub')]);
-    const helper = worker.children[0]!;
-    assert.equal(helper.id, 'helper');
-    assert.equal(helper.depth, 2);
-    assert.deepEqual(helper.roots, [], 'children get no filesystem access by default');
-    assert.equal(tree.byId.size, 3);
+    const helper = tree.byId.get('Research Helper')!;
+    assert.equal(helper.definition.name, 'ignored-label', 'an id that differs from the file name is a label');
+    assert.deepEqual(helper.roots, [path.join(dir, 'work', 'sub')]);
+    assert.deepEqual([...tree.root.grants], [['Research Helper', 2]]);
+    assert.deepEqual([...helper.grants], [['main', 1]], 'grants may point back: any graph is allowed');
+    assert.ok(helper.definition.tools?.allow?.includes('shell'), 'any agent may have the shell');
+    assert.deepEqual(tree.byId.get('plain')!.roots, [dir], 'the project directory by default');
     assert.ok(Object.isFrozen(tree.root.definition), 'definitions are frozen');
-    assert.ok(Object.isFrozen(tree.root.children), 'child lists are frozen');
-    assert.match(describeTree(tree), /worker[\s\S]*helper/);
-    assert.ok(tree.protectedFiles.includes(path.join(dir, 'agents', '2-Subagent-Helper.json')));
+    assert.match(describeTree(tree), /\* main[\s\S]*message:Research Helper×2/);
+    assert.ok(tree.protectedFiles.includes(path.join(dir, 'agents', 'plain.json')));
   });
 
-  test('root workspace defaults to the config directory', () => {
-    const dir = setup({ 'agent.json': baseAgent('main') });
-    assert.deepEqual(loadAgentTree(path.join(dir, 'agent.json')).root.roots, [dir]);
+  test('an agent with file tools and no roots works in the project directory', () => {
+    const dir = setup({ 'agents/main.json': baseAgent('main') });
+    assert.deepEqual(loadAgentTree(dir).root.roots, [dir]);
   });
 
-  test('rejects unknown child files', () => {
-    const dir = setup({ 'agent.json': baseAgent('main', { spawn: { children: ['agents/missing.json'] } }) });
-    expectConfigError(dir, /unknown child: file not found/);
+  test('picks the agent to start with: --agent, an agent file, "main", else the first', () => {
+    const dir = setup({ 'agents/zed.json': baseAgent('zed'), 'agents/alpha.json': baseAgent('alpha') });
+    assert.equal(loadAgentTree(dir).root.id, 'alpha');
+    assert.equal(loadAgentTree(dir, { agent: 'zed' }).root.id, 'zed');
+    assert.equal(loadAgentTree(path.join(dir, 'agents', 'zed.json')).root.id, 'zed');
+    assert.equal(loadAgentTree(path.join(dir, 'agents')).root.id, 'alpha');
+    assert.throws(() => loadAgentTree(dir, { agent: 'nobody' }), /no agent named "nobody"/);
+    const tree = loadAgentTree(dir);
+    assert.equal(withRoot(tree, 'zed').root.id, 'zed');
+    assert.deepEqual(locateProject(path.join(dir, 'agents', 'alpha.json')), { projectDir: dir, agent: 'alpha' });
   });
 
-  test('rejects cycles', () => {
+  test('skips invalid files and keeps the rest', () => {
     const dir = setup({
-      'agent.json': baseAgent('main', { spawn: { children: ['a.json'] } }),
-      'a.json': baseAgent('a', { spawn: { children: ['b.json'] } }),
-      'b.json': baseAgent('b', { spawn: { children: ['a.json'] } }),
+      'agents/main.json': baseAgent('main'),
+      'agents/broken.json': '{ "model": ',
+      'agents/old.json': baseAgent('old', { spawn: { children: ['x.json'] } }),
+      'agents/typo.json': baseAgent('typo', { tool: { allow: [] } }),
+      'agents/notes.txt': 'not an agent',
     });
-    expectConfigError(dir, /cycle in agent tree: agent.json -> a.json -> b.json -> a.json/);
+    const tree = loadAgentTree(dir);
+    assert.deepEqual([...tree.byId.keys()], ['main']);
+    const why = Object.fromEntries(tree.skipped.map((s) => [path.basename(s.file), s.error]));
+    assert.match(why['broken.json']!, /invalid JSON/);
+    assert.match(why['old.json']!, /spawn.*N-name\.json/);
+    assert.match(why['typo.json']!, /\[tool\]: unknown field/);
+    assert.equal(why['notes.txt'], undefined, 'only .json files are read');
+    assert.match(describeTree(tree), /skipped agents\/broken\.json/);
   });
 
-  test('rejects a root that lists itself', () => {
-    const dir = setup({ 'agent.json': baseAgent('main', { spawn: { children: ['agent.json'] } }) });
-    expectConfigError(dir, /cycle/);
+  test('a grant to an agent that is not loaded is dropped with a note', () => {
+    const dir = setup({ 'agents/main.json': baseAgent('main', { tools: { allow: ['3-ghost.json', '1-bad.json'] } }), 'agents/bad.json': '{' });
+    const tree = loadAgentTree(dir);
+    assert.equal(tree.root.grants.size, 0);
+    assert.equal(tree.warnings.length, 2);
+    assert.match(tree.warnings[0]!, /"3-ghost.json"|"ghost.json"/);
   });
 
-  test('rejects duplicate ids', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { spawn: { children: ['a.json', 'b.json'] } }),
-      'a.json': baseAgent('dup'),
-      'b.json': baseAgent('dup'),
-    });
-    expectConfigError(dir, /duplicate agent id "dup"/);
+  test('fails only when no agent is usable, or there is no agents folder', () => {
+    const empty = setup({ 'agents/bad.json': '{' });
+    assert.throws(() => loadAgentTree(empty), (e: unknown) => e instanceof ConfigError && /no valid agent definitions.*bad\.json/.test(e.message));
+    const none = makeTempDir();
+    assert.throws(() => loadAgentTree(none), /no "agents" folder/);
+    const legacy = makeTempDir();
+    writeJson(path.join(legacy, 'agent.json'), baseAgent('main'));
+    assert.throws(() => loadAgentTree(legacy), /move this file to .*agents.*main\.json/);
   });
 
-  test('rejects a file used by two parents', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { spawn: { children: ['a.json', 'b.json'] } }),
-      'a.json': baseAgent('a', { spawn: { children: ['shared.json'] } }),
-      'b.json': baseAgent('b', { spawn: { children: ['shared.json'] } }),
-      'shared.json': baseAgent('shared'),
-    });
-    expectConfigError(dir, /only one parent/);
-  });
-
-  test('rejects child paths outside the configuration directory', () => {
-    const outside = makeTempDir();
-    writeJson(path.join(outside, 'evil.json'), baseAgent('evil'));
-    const dir = setup({ 'agent.json': baseAgent('main', { spawn: { children: [path.join(outside, 'evil.json')] } }) });
-    expectConfigError(dir, /outside the configuration directory/);
-    const dir2 = setup({ 'agent.json': baseAgent('main', { spawn: { children: [`../${path.basename(outside)}/evil.json`] } }) });
-    expectConfigError(dir2, /outside the configuration directory/);
-  });
-
-  test('rejects child symlinks that point outside the configuration directory', { skip: process.platform === 'win32' }, () => {
-    const outside = makeTempDir();
-    writeJson(path.join(outside, 'evil.json'), baseAgent('evil'));
-    const dir = setup({ 'agent.json': baseAgent('main', { spawn: { children: ['link.json'] } }) });
-    fs.symlinkSync(path.join(outside, 'evil.json'), path.join(dir, 'link.json'));
-    expectConfigError(dir, /outside the configuration directory/);
-  });
-
-  test('rejects shell on child agents', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { workspace: { roots: ['work'] }, tools: { allow: ['shell'] }, spawn: { children: ['c.json'] } }),
-      'c.json': baseAgent('c', { workspace: { roots: ['work'] }, tools: { allow: ['shell'] } }),
-    });
-    expectConfigError(dir, /"shell" is only allowed on the root agent/);
-  });
-
-  test('rejects built-in tool escalation', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { workspace: { roots: ['work'] }, tools: { allow: ['read_file'] }, spawn: { children: ['c.json'] } }),
-      'c.json': baseAgent('c', { workspace: { roots: ['work'] }, tools: { allow: ['read_file', 'write_file'] } }),
-    });
-    expectConfigError(dir, /permission escalation: parent "main" does not allow "write_file"/);
-  });
-
-  test('rejects workspace root escalation', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { workspace: { roots: ['work/sub'] }, tools: { allow: ['read_file'] }, spawn: { children: ['c.json'] } }),
-      'c.json': baseAgent('c', { workspace: { roots: ['work'] }, tools: { allow: ['read_file'] } }),
-    });
-    expectConfigError(dir, /is not inside any workspace root of parent "main"/);
-  });
-
-  test('rejects MCP server and tool escalation', () => {
-    const mcp = { mcpServers: { a: stdioServerConfig(), b: stdioServerConfig() } };
-    const dir = setup(
-      {
-        'agent.json': baseAgent('main', { tools: { mcpServers: ['a'] }, spawn: { children: ['c.json'] } }),
-        'c.json': baseAgent('c', { tools: { mcpServers: ['b'] } }),
-      },
-      mcp,
-    );
-    expectConfigError(dir, /no access to MCP server "b"/);
-    const dir2 = setup(
-      {
-        'agent.json': baseAgent('main', { tools: { mcpServers: [{ server: 'a', tools: ['echo'] }] }, spawn: { children: ['c.json'] } }),
-        'c.json': baseAgent('c', { tools: { mcpServers: ['a'] } }),
-      },
-      mcp,
-    );
-    expectConfigError(dir2, /must list a subset/);
-    const dir3 = setup(
-      {
-        'agent.json': baseAgent('main', { tools: { mcpServers: [{ server: 'a', tools: ['echo'] }] }, spawn: { children: ['c.json'] } }),
-        'c.json': baseAgent('c', { tools: { mcpServers: [{ server: 'a', tools: ['add'] }] } }),
-      },
-      mcp,
-    );
-    expectConfigError(dir3, /may not use "add"/);
-  });
-
-  test('rejects auto-approve escalation', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { workspace: { roots: ['work'] }, tools: { allow: ['edit'] }, spawn: { children: ['c.json'] } }),
-      'c.json': baseAgent('c', { workspace: { roots: ['work'] }, tools: { allow: ['edit'], autoApprove: ['edit'] } }),
-    });
-    expectConfigError(dir, /does not auto-approve "edit"/);
-  });
-
-  test('rejects file tools on a child without roots', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { tools: { allow: ['read_file'] }, spawn: { children: ['c.json'] } }),
-      'c.json': baseAgent('c', { tools: { allow: ['read_file'] } }),
-    });
-    expectConfigError(dir, /declares no workspace roots/);
-  });
-
-  test('rejects unknown fields, tools, providers and MCP servers with file and field', () => {
-    let dir = setup({ 'agent.json': baseAgent('main', { tool: { allow: [] } }) });
-    expectConfigError(dir, /agent.json \[tool\]: unknown field/);
-    dir = setup({ 'agent.json': baseAgent('main', { tools: { allow: ['read_file', 'read_file'] } }) });
-    expectConfigError(dir, /\[tools.allow\[1\]\]: duplicate entry/);
-    dir = setup({ 'agent.json': baseAgent('main', { tools: { allow: ['web_fetch'] } }) });
-    expectConfigError(dir, /unknown built-in tool "web_fetch"/);
-    dir = setup({ 'agent.json': baseAgent('main', { provider: 'qwen-oauth' }) });
-    expectConfigError(dir, /unsupported provider "qwen-oauth"/);
-    dir = setup({ 'agent.json': baseAgent('main', { reasoning: 'extreme' }) });
-    expectConfigError(dir, /\[reasoning\]: must be one of/);
-    dir = setup({ 'agent.json': baseAgent('main', { tools: { mcpServers: ['nope'] } }) });
-    expectConfigError(dir, /unknown MCP server "nope"/);
-    dir = setup({ 'agent.json': baseAgent('main', { tools: { allow: ['read_file'], autoApprove: ['edit'] } }) });
-    expectConfigError(dir, /"edit" is not in tools.allow/);
-    dir = setup({ 'agent.json': baseAgent('main', { provider: 'openai-compatible' }) });
-    expectConfigError(dir, /providerOptions\]: is required/);
-    dir = setup({ 'agent.json': baseAgent('main', { id: '1bad id' }) });
-    expectConfigError(dir, /\[id\]: must start with a letter/);
-    dir = setup({ 'agent.json': baseAgent('main', { workspace: { roots: ['does-not-exist'] } }) });
-    expectConfigError(dir, /workspace.roots\[0\]\]: Directory does not exist/);
-  });
-
-  test('rejects invalid JSON with the file name', () => {
-    const dir = makeTempDir();
-    fs.writeFileSync(path.join(dir, 'agent.json'), '{ "id": "main", }');
-    expectConfigError(dir, /agent.json: invalid JSON/);
-  });
-
-  test('enforces spawn.maxDepth', () => {
-    const dir = setup({
-      'agent.json': baseAgent('main', { spawn: { maxDepth: 1, children: ['a.json'] } }),
-      'a.json': baseAgent('a', { spawn: { children: ['b.json'] } }),
-      'b.json': baseAgent('b'),
-    });
-    expectConfigError(dir, /deeper than spawn.maxDepth \(1\)/);
+  test('validates fields, grants and MCP servers per file', () => {
+    let dir = setup({});
+    skippedError(dir, /\[tools.allow\[1\]\]: duplicate entry/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['read_file', 'read_file'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /unknown tool "web_fetch"/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['web_fetch'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /agent grants name a file in the agents folder/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['1-../x.json'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /unsupported provider "qwen-oauth"/, { 'agents/a.json': baseAgent('a', { provider: 'qwen-oauth' }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[reasoning\]: must be one of/, { 'agents/a.json': baseAgent('a', { reasoning: 'extreme' }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /unknown MCP server "nope"/, { 'agents/a.json': baseAgent('a', { tools: { mcpServers: ['nope'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /"edit" is not in tools.allow/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['read_file'], autoApprove: ['edit'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /providerOptions\]: is required/, { 'agents/a.json': baseAgent('a', { provider: 'openai-compatible' }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /workspace.roots\[0\]\]: Directory does not exist/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['does-not-exist'] } }), 'agents/ok.json': baseAgent('ok') });
   });
 
   test('validates mcp.json', () => {
-    let dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { 'bad__name': stdioServerConfig() } });
+    const expectConfigError = (dir: string, pattern: RegExp) =>
+      assert.throws(
+        () => loadAgentTree(dir),
+        (e: unknown) => e instanceof ConfigError && pattern.test(e.message),
+      );
+    let dir = setup({ 'agents/main.json': baseAgent('main') }, { mcpServers: { 'bad__name': stdioServerConfig() } });
     expectConfigError(dir, /must not contain "__"/);
-    dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { x: { command: 'a', httpUrl: 'http://x' } } });
+    dir = setup({ 'agents/main.json': baseAgent('main') }, { mcpServers: { x: { command: 'a', httpUrl: 'http://x' } } });
     expectConfigError(dir, /exactly one of/);
-    dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { x: { httpUrl: 'ftp://x' } } });
+    dir = setup({ 'agents/main.json': baseAgent('main') }, { mcpServers: { x: { httpUrl: 'ftp://x' } } });
     expectConfigError(dir, /must be an http\(s\) URL/);
-    dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { x: { url: 'http://x/sse' } } });
+    dir = setup({ 'agents/main.json': baseAgent('main') }, { mcpServers: { x: { url: 'http://x/sse' } } });
     expectConfigError(dir, /legacy SSE servers are not supported/);
-    dir = setup({ 'agent.json': baseAgent('main') }, { mcpServers: { x: { command: 'a', oauth: {} } } });
+    dir = setup({ 'agents/main.json': baseAgent('main') }, { mcpServers: { x: { command: 'a', oauth: {} } } });
     expectConfigError(dir, /\[mcpServers.x.oauth\]: unknown field/);
   });
 });

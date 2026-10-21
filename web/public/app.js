@@ -11,7 +11,8 @@ import { renderMarkdown, looksLikeMarkdown, escapeHtml } from './markdown.js';
 import { setupGlass } from './glass.js';
 import { GLASS, SEND_TINT } from './glassvalues.js';
 import { createSheet } from './sheet.js';
-import { renderTiles, createViewer } from './artifacts.js';
+import { renderTiles, createViewer, chatCard } from './artifacts.js';
+import { openTranscript, refreshTranscript } from './transcript.js';
 import { UploadJob } from './up2k.js';
 import { createRail } from './rail.js';
 import { createMonitor } from './monitor.js';
@@ -225,13 +226,13 @@ function entries() {
     if (Number.isFinite(t) && (it.kind === 'user' || it.kind === 'assistant')) lastTime = t;
     if (it.kind === 'user') push({ key: it.id, type: 'msg', side: 'out', text: it.text, attachments: it.attachments });
     else if (it.kind === 'assistant') push({ key: it.id, type: 'msg', side: 'in', text: it.text, rich: true });
-    else if (it.kind === 'activity') push({ key: it.id, type: 'activity', text: it.text, status: it.status });
+    else if (it.kind === 'activity') pushActivity(push, it.id, it);
     else push({ key: it.id, type: 'notice', text: it.text, level: /^Error/.test(it.text) ? 'error' : '' });
   }
   if (state.live) {
     for (const seg of state.live.segments) {
       if (seg.kind === 'text') push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true });
-      else push({ key: `live:${state.live.id}:${seg.id}`, type: 'activity', text: seg.text, status: seg.status });
+      else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
     }
     const last = state.live.segments[state.live.segments.length - 1];
     const waiting = !last || last.kind !== 'text' || state.live.stalled;
@@ -251,6 +252,16 @@ function entries() {
     e.tail = sideOf(next) !== side;
   }
   return out;
+}
+
+/** A tool call: a line, a link to a thread between agents, and an artifact's card after the call that made it. */
+function pushActivity(push, key, it) {
+  if (it.thread) push({ key, type: 'threadlink', text: it.text, status: it.status, thread: it.thread, agent: it.agent });
+  else push({ key, type: 'activity', text: it.text, status: it.status });
+  if (it.artifact && it.status !== 'error' && it.status !== 'denied') {
+    const a = state.artifacts.find((x) => x.id === it.artifact);
+    if (a) push({ key: `${key}:art`, type: 'artifact', artifact: a });
+  }
 }
 
 function bubbleHtml(e) {
@@ -333,6 +344,26 @@ function buildEntry(e) {
       el.className = `activity ${e.status || ''}`;
       el.textContent = e.text;
       break;
+    case 'threadlink': {
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = `activity link ${e.status || ''}`;
+      el.setAttribute('aria-label', `${e.text}. Open the thread`);
+      const text = document.createElement('span');
+      text.textContent = e.text;
+      const chevron = document.createElement('i');
+      applySymbol(chevron, 'chevron.right', { size: 10 });
+      el.append(text, chevron);
+      const writer = e.thread.split('--').find((n) => n !== e.agent) ?? state.agent?.id;
+      el.addEventListener('click', () => openTranscript(e.thread, { me: writer }));
+      break;
+    }
+    case 'artifact': {
+      el = document.createElement('div');
+      el.className = 'msg in first tail-room';
+      el.append(chatCard(e.artifact, openArtifact));
+      break;
+    }
     case 'notice':
       el = document.createElement('div');
       el.className = `notice ${e.level || ''}`;
@@ -351,6 +382,10 @@ function signature(e) {
       return `msg|${e.side}|${e.first}|${e.tail}|${hashText(e.text || '')}|${(e.attachments || []).length}`;
     case 'activity':
       return `act|${e.status}|${e.text}`;
+    case 'threadlink':
+      return `thr|${e.status}|${e.text}|${e.thread}`;
+    case 'artifact':
+      return `art|${e.artifact.id}|${e.artifact.rev}|${e.artifact.title}`;
     case 'typing':
       return `typing|${e.first}`;
     case 'approval':
@@ -588,9 +623,10 @@ function connect() {
     render();
   });
   es.addEventListener('activity_end', (e) => {
-    const { run, id, status } = JSON.parse(e.data);
+    const { run, id, status, artifact } = JSON.parse(e.data);
     const seg = state.live?.id === run ? state.live.segments.find((s) => s.id === id) : null;
     if (seg) seg.status = status;
+    if (seg && artifact) seg.artifact = artifact;
     render();
   });
   es.addEventListener('approval', (e) => {
@@ -610,7 +646,7 @@ function connect() {
   });
   es.addEventListener('agent', (e) => {
     const info = JSON.parse(e.data);
-    if (state.agent) Object.assign(state.agent, { reasoning: info.reasoning, model: info.model });
+    state.agent = { ...(state.agent ?? {}), ...info };
     setGradientSeed(info.model);
     agentSheet?.setAgent?.(info);
   });
@@ -619,6 +655,7 @@ function connect() {
     notice(text, level === 'error' ? 'error' : '');
   });
   es.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
+  es.addEventListener('threads', () => refreshTranscript());
   es.addEventListener('sections', (e) => setSections(JSON.parse(e.data).sections));
   es.addEventListener('run_end', (e) => {
     const data = JSON.parse(e.data);
@@ -666,11 +703,18 @@ async function pinArtifact(a, pinned) {
 
 function setArtifacts(list) {
   state.artifacts = list || [];
-  const handlers = { onOpen: (a) => viewer.show(a), onPin: pinArtifact };
+  const handlers = { onOpen: openArtifact, onPin: pinArtifact };
   renderTiles($('pinned'), state.artifacts.filter((a) => a.pinned), handlers);
   renderTiles($('allArtifacts'), state.artifacts, handlers);
   viewer.refresh(state.artifacts);
   syncTileLenses();
+  render(); // the chat's artifact cards
+}
+
+/** A file artifact opens in the file manager's Quick Look; without a file on disk, in the artifact viewer. */
+function openArtifact(a) {
+  if (!a.file) return viewer.show(a);
+  fileManager.quickLookFile(a.file).catch(() => viewer.show(a));
 }
 
 // ------------------------------------------------------------------ composer
@@ -774,9 +818,10 @@ function updateComposer() {
 let agentSheet = null;
 function showAgentSheet() {
   agentSheet = openAgentSheet({
-    agent: state.agent ? { id: state.agent.id, model: state.agent.model, reasoning: state.agent.reasoning } : null,
-    onReasoning: (info) => {
-      if (state.agent) state.agent.reasoning = info.reasoning;
+    agent: state.agent ? { ...state.agent } : null,
+    onSaved: (info) => {
+      state.agent = { ...(state.agent ?? {}), ...info };
+      setGradientSeed(info.model);
     },
   });
 }

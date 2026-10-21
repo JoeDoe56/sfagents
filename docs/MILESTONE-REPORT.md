@@ -198,3 +198,28 @@ Totals: **147 deterministic tests** passing; import audit and `npm audit` clean.
 - The model-slug gradient is not started. The Windows paths of the process list, services, startup items and the Recycle Bin are written against PowerShell and .NET APIs but have not been run on Windows yet.
 - Dictation uses the browser's Web Speech API (Chrome, Safari); Firefox shows the mic as unavailable.
 - SF Symbols are Apple's artwork (see `web/public/vendor/sfgl/symbols/PROVENANCE.md`).
+
+# Agents folder and threads between agents
+
+## Result
+
+Agents are now peers rather than a tree. Every valid `.json` file in `agents/` is an agent named by its file; invalid files are skipped with their reason. The conversation stays one thread for the user, and which agent replies to it is chosen separately (`--agent`, `/agent`, the agent menu on the web). Agents message each other with `message_agent` in persistent per-pair threads, in parallel, each with exactly its own permissions.
+
+## What was built
+
+| Area | Delivered |
+| --- | --- |
+| Loader | `agents/` folder; file stem is the identity, optional `name`; `spawn` rejected with a migration message; grants `"N-name.json"` in `tools.allow` (N = parallel threads, 1–999), any graph including cycles; no escalation rules; roots relative to the project; `main` replies by default. |
+| Threads | `ThreadService`: `threads/<a>--<b>[--N].md` (kind `thread`), one per pair whoever writes; parallel instances; deadlock refusal when a replier would wait on its writer; replay with the other agent as user turns and the agent's own words as assistant turns. |
+| `message_agent` | Enum of granted agents, message, optional thread; guidance for terse, structured agent-to-agent writing; parallel execution of calls in one turn; structured reply payload. |
+| CLI | `--agent/-a`, `/agent <name>`, validate prints every agent and skipped files. |
+| Web | `GET /api/agents`, `GET /api/threads[/key]`, `POST /api/agent {agent, reasoning}`, reasoning kept per agent. Agent sheet: Calendar-style pop-up button and menu of agents, staged changes saved with the check button. Chat: links to threads (opened as conversations in a sheet, live), artifact cards with previews that open in Quick Look. |
+
+## Verification
+
+| Check | Evidence |
+| --- | --- |
+| Folder loading, names, grants, skipping, selection | `config` tests |
+| Messaging with the replier's own (wider) tools; one thread per pair across selection changes; three replies running at once; deadlock and ungranted refusals | `threads` tests |
+| Thread files and artifact link survive a restart; the writer's context holds only the reply | `conversation-persistence` tests |
+| Agent menu, staging, X discards, check saves, gradient follows the agent; thread sheet; artifact card to Quick Look | Headless Chromium at phone size against a scripted three-agent project |

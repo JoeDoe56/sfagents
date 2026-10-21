@@ -1597,9 +1597,34 @@ export function createFileManager(options) {
     }
   });
 
+  /** Quick Look for one file, from outside the file manager (an artifact in the chat). */
+  async function quickLookFile(p) {
+    const item = await getJson('/api/files/info', { path: p });
+    openQuickLook({
+      item,
+      items: [item],
+      iconFor,
+      actions: {
+        share: (i) => shareItems([i]),
+        download: (i) => download([i]),
+        info: (i) => getInfo(i),
+        ask: (i) => askAgent([i]),
+        menu: (i, anchor) =>
+          showMenu({
+            anchor,
+            groups: [
+              [{ label: 'Show in Files', symbol: 'folder', action: () => (state.open ? navigate(parentOf(i.path), { select: i.path }) : open({ path: parentOf(i.path), select: i.path })) }],
+              [{ label: 'Download', symbol: 'arrow.down.circle', action: () => download([i]) }],
+            ],
+          }),
+      },
+    });
+  }
+
   return {
     open,
     close,
+    quickLookFile,
     navigate: (p, o) => (state.open ? navigate(p, o) : open({ path: p, select: o?.select ?? null })),
     get isOpen() {
       return state.open;

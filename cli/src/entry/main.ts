@@ -50,16 +50,17 @@ export const EXIT_CANCELLED = 130;
 const USAGE = `SF Agents ${VERSION}
 
 Usage:
-  sfagents start [options]              Start an interactive conversation with the root agent
+  sfagents start [options]              Start an interactive conversation (with --agent, or "main")
   sfagents run [options] "<task>"       Run one request and print the final answer ("-" reads stdin)
-  sfagents agents validate [options]    Validate agent definitions and print the agent tree
+  sfagents agents validate [options]    Check the agents folder: every agent, its tools, and skipped files
   sfagents mcp list [options]           Show configured MCP servers, status and tools
   sfagents web [options]                Serve the web interface (default http://127.0.0.1:${DEFAULT_PORT})
   sfagents conversation [info|sections|show <id>|search <words>|artifacts|unlock]
                                         Inspect the stored conversation (or remove a stale lock)
 
 Options:
-  -c, --config <dir|file>   Directory containing agent.json, or an agent JSON file (default: .)
+  -c, --config <dir|file>   Project directory (holding the agents folder), or one agent file in it (default: .)
+  -a, --agent <name>        The agent that replies (a file in agents/, without ".json"; default: main)
       --mcp <file>          MCP server definitions (default: <config dir>/mcp.json)
   -y, --yes                 Approve every tool call that would ask for confirmation
       --show-reasoning      Print model reasoning text when the provider returns it
@@ -109,6 +110,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       allowPositionals: true,
       options: {
         config: { type: 'string', short: 'c' },
+        agent: { type: 'string', short: 'a' },
         mcp: { type: 'string' },
         yes: { type: 'boolean', short: 'y', default: false },
         'show-reasoning': { type: 'boolean', default: false },
@@ -142,10 +144,11 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
     return command || values.help ? EXIT_OK : EXIT_CONFIG;
   }
 
-  const location = locateConfig(values.config, values.mcp);
-  loadEnvFile(location.configDir);
+  let location;
   let tree: AgentTree;
   try {
+    location = locateConfig(values.config, values.mcp, process.cwd(), values.agent);
+    loadEnvFile(location.configDir);
     tree = loadConfig(location);
   } catch (error) {
     return printConfigError(error, streams);
@@ -158,7 +161,9 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         return EXIT_CONFIG;
       }
       const style = createStyle(streams.stdout as NodeJS.WriteStream);
-      streams.stdout.write(`${describeTree(tree)}\n\n${style.green('✓')} ${tree.byId.size} agent definition${tree.byId.size === 1 ? '' : 's'} valid (config: ${tree.configDir})\n`);
+      streams.stdout.write(
+        `${describeTree(tree)}\n\n${style.green('✓')} ${tree.byId.size} agent${tree.byId.size === 1 ? '' : 's'} loaded${tree.skipped.length ? `, ${tree.skipped.length} file${tree.skipped.length === 1 ? '' : 's'} skipped` : ''} (project: ${tree.configDir}; * replies by default)\n`,
+      );
       try {
         checkCredentials(tree, process.env);
       } catch (error) {

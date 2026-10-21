@@ -25,7 +25,8 @@ export interface ReplOptions {
 
 const HELP = `Commands:
   /help    show this help
-  /tree    show the agent tree
+  /tree    show the agents
+  /agent   show which agent replies; /agent <name> hands the conversation to another
   /sections  show the conversation's sections
   /clear   reset the working context (history is kept and stays searchable)
   /exit    quit (or Ctrl+D)
@@ -43,7 +44,7 @@ export async function startRepl(options: ReplOptions): Promise<number> {
   const session = options.runtime.createSession();
   const root = options.runtime.tree.root;
   output.write(
-    `${style.bold('SF Agents')} ${style.dim(`— root agent "${root.id}" (${root.definition.provider}:${root.definition.model})`)}\n${style.dim('Type /help for commands.')}\n`,
+    `${style.bold('SF Agents')} ${style.dim(`— agent "${root.id}" (${root.definition.provider}:${root.definition.model})`)}\n${style.dim('Type /help for commands.')}\n`,
   );
   for (const notice of options.notices ?? []) output.write(`${style.dim(notice)}\n`);
 
@@ -130,6 +131,19 @@ export async function startRepl(options: ReplOptions): Promise<number> {
         }
         if (line === '/tree') {
           output.write(`${describeTree(options.runtime.tree)}\n`);
+          prompt();
+          continue;
+        }
+        if (line === '/agent' || line.startsWith('/agent ')) {
+          const name = line.slice('/agent'.length).trim();
+          if (name) {
+            if (!options.runtime.tree.byId.has(name)) output.write(style.dim(`No agent named "${name}". Agents: ${[...options.runtime.tree.byId.keys()].join(', ')}\n`));
+            else {
+              session.setAgent(name);
+              const d = session.node.definition;
+              output.write(style.dim(`"${name}" (${d.provider}:${d.model}) replies from now on.\n`));
+            }
+          } else output.write(style.dim(`"${session.node.id}" replies. Agents: ${[...options.runtime.tree.byId.keys()].join(', ')}\n`));
           prompt();
           continue;
         }

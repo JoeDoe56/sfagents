@@ -23,8 +23,10 @@ import {
   AgentTerminateMode,
   ArtifactError,
   getErrorMessage,
+  threadKey,
   type AgentRunResult,
   type AgentSession,
+  type AgentNode,
   type AgentTree,
   type AttachmentRef,
   type ConfirmationDecision,
@@ -92,6 +94,11 @@ interface LiveSegment {
   id: string;
   text: string;
   status?: string;
+  /** A message to another agent: who, and their thread. */
+  agent?: string;
+  thread?: string;
+  /** The artifact a call created or updated (set when it finishes). */
+  artifact?: string;
 }
 
 interface LiveRun {
@@ -217,7 +224,9 @@ export class WebServer {
     });
     this.session = this.runtime.createSession();
     this.agentSettings = new AgentSettingsStore(options.conversation.dir);
-    this.session.reasoning = this.agentSettings.get().reasoning;
+    // The agent picked last time keeps replying (when it still exists).
+    const saved = this.agentSettings.get().agent;
+    this.selectAgent(saved && options.tree.byId.has(saved) ? saved : this.session.node.id, false);
     this.system = new SystemMonitor(options.systemSource, {
       ...(options.lhmUrl === undefined ? {} : { lhm: options.lhmUrl === null ? null : new LhmClient(options.lhmUrl) }),
       elevateWindowsSensors: options.sensorAdmin,
@@ -361,6 +370,17 @@ export class WebServer {
           if (parts[2] === 'priority') return sendJson(res, 200, this.processes.setPriority(parts[1], body.level));
           throw new HttpError(404, 'Not found.');
         }
+        case 'GET agents':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, this.agentsInfo());
+        case 'GET threads': {
+          this.checkFetchSite(req);
+          if (!parts[1]) return sendJson(res, 200, { threads: this.runtime.threads.list() });
+          const state = this.runtime.threads.read(parts[1]);
+          if (!state) throw new HttpError(404, 'No such thread.');
+          const info = this.runtime.threads.list().find((t) => t.key === parts[1]);
+          return sendJson(res, 200, { thread: info, ...displayItems(state, { thread: true, limit: 2000 }) });
+        }
         case 'GET agent':
           this.checkFetchSite(req);
           if (parts[1] === 'context') return sendJson(res, 200, await this.contextInfo());
@@ -374,6 +394,12 @@ export class WebServer {
             this.session.resetContext();
             return sendJson(res, 200, await this.contextInfo());
           }
+          // A new agent first, so a reasoning effort in the same request is that agent's.
+          if (body.agent !== undefined) {
+            if (typeof body.agent !== 'string' || !this.options.tree.byId.has(body.agent)) throw new HttpError(400, `No agent named "${String(body.agent)}".`);
+            if (body.agent !== this.session.node.id && (this.session.running || this.live)) throw new HttpError(409, 'Wait for the current reply to finish before changing the agent.');
+            this.selectAgent(body.agent);
+          }
           if ('reasoning' in body) {
             let effort;
             try {
@@ -381,7 +407,11 @@ export class WebServer {
             } catch (error) {
               throw new HttpError(400, getErrorMessage(error));
             }
-            this.agentSettings.set({ ...this.agentSettings.get(), reasoning: effort ?? undefined });
+            const settings = this.agentSettings.get();
+            const efforts = { ...(settings.efforts ?? {}) };
+            if (effort) efforts[this.session.node.id] = effort;
+            else delete efforts[this.session.node.id];
+            this.agentSettings.set({ ...settings, efforts });
             this.session.reasoning = effort ?? undefined;
           }
           const info = this.agentInfo();
@@ -400,7 +430,7 @@ export class WebServer {
           return this.answerApproval(parts[1] ?? '', req, res);
         case 'GET artifacts':
           if (parts[1] && parts[2] === 'raw') return this.serveArtifact(parts[1], url, res);
-          return sendJson(res, 200, { artifacts: this.conversation.artifacts().filter((a) => a.type !== 'agent_transcript').map(displayArtifact) });
+          return sendJson(res, 200, { artifacts: this.displayArtifacts() });
         case 'POST artifacts': {
           if (!parts[1] || parts[2] !== 'pin') throw new HttpError(404, 'Not found.');
           const body = (await readJson(req)) as { pinned?: unknown };
@@ -485,7 +515,7 @@ export class WebServer {
     const cpu = Math.min(1, (usage.user + usage.system) / elapsed / Math.max(1, (this.system.systemSource.cpus().length)));
     this.cpuMark = { at: now, usage: process.cpuUsage() };
     const memory = process.memoryUsage();
-    const root = this.options.tree.root.definition;
+    const root = this.session.node.definition;
     const state = this.conversation.state;
     let size: number | null = null;
     try {
@@ -503,7 +533,7 @@ export class WebServer {
       arch: process.arch,
       url: `http://${this.host.includes(':') ? `[${this.host}]` : this.host}:${this.port}`,
       publicOrigin: this.publicOrigin ?? null,
-      agent: { id: root.id, model: root.model, provider: root.provider, agents: this.options.tree.byId.size },
+      agent: { id: this.session.node.id, model: root.model, provider: root.provider, agents: this.options.tree.byId.size },
       conversation: {
         file: this.conversation.file,
         size,
@@ -755,24 +785,50 @@ export class WebServer {
   // ---------------------------------------------------------------------------
   // State and events
 
-  /** The root agent and the session's reasoning effort (the send button's sheet). */
-  private agentInfo() {
-    const d = this.options.tree.root.definition;
+  /** Hands the conversation to `name`, with the reasoning effort chosen for it. */
+  private selectAgent(name: string, save = true): void {
+    this.session.setAgent(name);
+    const settings = this.agentSettings.get();
+    this.session.reasoning = settings.efforts?.[name];
+    if (save && settings.agent !== name) this.agentSettings.set({ ...settings, agent: name });
+  }
+
+  private describeAgent(node: AgentNode) {
+    const d = node.definition;
     return {
-      id: d.id,
+      id: node.id,
+      name: d.name ?? node.id,
       description: d.description ?? '',
       model: d.model,
       provider: d.provider,
-      reasoning: this.session.reasoning ?? d.reasoning ?? null,
       configuredReasoning: d.reasoning ?? null,
+      grants: [...node.grants].map(([agent, max]) => ({ agent, max })),
+    };
+  }
+
+  /** The agent replying now and the session's reasoning effort (the send button's sheet). */
+  private agentInfo() {
+    const node = this.session.node;
+    return {
+      ...this.describeAgent(node),
+      reasoning: this.session.reasoning ?? node.definition.reasoning ?? null,
       levels: EFFORT_LEVELS,
-      children: this.options.tree.root.children.map((c) => c.id),
+    };
+  }
+
+  /** Every agent of the project (for the sheet's agent menu), and files that were skipped. */
+  private agentsInfo() {
+    return {
+      current: this.session.node.id,
+      agents: [...this.options.tree.byId.values()].map((n) => ({ ...this.describeAgent(n), reasoning: this.agentSettings.get().efforts?.[n.id] ?? n.definition.reasoning ?? null })),
+      skipped: this.options.tree.skipped,
+      warnings: this.options.tree.warnings,
     };
   }
 
   /** What the next request would carry, part by part, with the model's own window when the provider lists it. */
   private async contextInfo() {
-    const d = this.options.tree.root.definition;
+    const d = this.session.node.definition;
     // A custom provider factory (tests, embedding) may not talk to the configured provider at all.
     const lookup = this.options.providerFactory ? Promise.resolve(null) : this.windows.lookup(d).catch(() => null);
     const [usage, window] = await Promise.all([this.session.contextUsage(), lookup]);
@@ -780,14 +836,14 @@ export class WebServer {
   }
 
   private snapshot() {
-    const root = this.options.tree.root.definition;
     const { items, more } = displayItems(this.conversation.state, { hideRun: this.live ? this.conversation.activeRootRun : undefined });
     return {
-      agent: { id: root.id, model: root.model, provider: root.provider, description: root.description ?? '', reasoning: this.session.reasoning ?? root.reasoning ?? null },
+      agent: this.agentInfo(),
+      threads: this.runtime.threads.list(),
       conversation: { file: this.conversation.file },
       items,
       more,
-      artifacts: this.conversation.artifacts().filter((a) => a.type !== 'agent_transcript').map(displayArtifact),
+      artifacts: this.displayArtifacts(),
       sections: displaySections(this.conversation.state),
       live: this.live ? { id: this.live.id, segments: this.live.segments } : null,
       approvals: [...this.approvals.values()].map((a) => a.display),
@@ -838,11 +894,24 @@ export class WebServer {
     this.broadcast('sections', { sections: displaySections(this.conversation.state) });
   }
 
+  /** The conversation's artifacts as the page shows them (threads between agents are listed apart). */
+  private displayArtifacts() {
+    return this.conversation
+      .artifacts()
+      .filter((a) => a.type !== 'agent_transcript')
+      .map((a) => displayArtifact(a, this.conversation.artifactFile(a.id)));
+  }
+
+  /** The threads between agents (the chat links to them; the sheet shows them). */
+  private publishThreads(): void {
+    this.broadcast('threads', { threads: this.runtime.threads.list() });
+  }
+
   private publishArtifacts(force = false): void {
     const sig = this.signature();
     if (!force && sig === this.artifactSignature) return;
     this.artifactSignature = sig;
-    this.broadcast('artifacts', { artifacts: this.conversation.artifacts().filter((a) => a.type !== 'agent_transcript').map(displayArtifact) });
+    this.broadcast('artifacts', { artifacts: this.displayArtifacts() });
   }
 
   // ---------------------------------------------------------------------------
@@ -894,6 +963,7 @@ export class WebServer {
       }
       this.live = undefined;
       this.publishArtifacts();
+      this.publishThreads();
       const { items, more } = displayItems(this.conversation.state);
       this.broadcast('run_end', {
         run: id,
@@ -922,8 +992,15 @@ export class WebServer {
       case 'tool_request': {
         const prefix = root ? '' : `${event.agentPath.slice(1).join(' › ')}: `;
         const seg: LiveSegment = { kind: 'activity', id: `${event.agentPath.join('/')}:${event.callId}`, text: prefix + describeCall(event.name, JSON.stringify(event.args)), status: 'running' };
+        if (event.name === 'message_agent' && typeof event.args['agent'] === 'string') {
+          // A message to another agent: the chat can open their thread, live.
+          seg.agent = event.args['agent'];
+          seg.thread = threadKey(event.agentPath[event.agentPath.length - 1]!, event.args['agent'], typeof event.args['thread'] === 'number' ? event.args['thread'] : 1);
+        }
+        if (event.name === 'update_artifact' && typeof event.args['id'] === 'string') seg.artifact = event.args['id'];
         live.segments.push(seg);
         this.broadcast('activity', { run: live.id, segment: seg });
+        if (seg.thread) setTimeout(() => this.publishThreads(), 50);
         return;
       }
       case 'tool_result': {
@@ -931,9 +1008,21 @@ export class WebServer {
         const seg = live.segments.find((s) => s.id === id);
         const status = event.ok ? 'ok' : event.errorType === 'execution_denied' ? 'denied' : 'error';
         if (seg) seg.status = status;
-        this.broadcast('activity_end', { run: live.id, id, status });
+        // A new or changed artifact shows in the chat where it was made.
+        let artifact: string | undefined;
+        if (seg && event.ok && (event.name === 'create_artifact' || event.name === 'update_artifact')) {
+          if (event.name === 'update_artifact') artifact = seg.artifact;
+          else {
+            // Call ids repeat across runs with some providers: the newest match is this call's.
+            const made = this.conversation.artifacts().filter((a) => a.callId === event.callId).sort((a, b) => b.createdSeq - a.createdSeq)[0];
+            artifact = made?.id;
+          }
+          if (artifact) seg.artifact = artifact;
+        }
+        this.broadcast('activity_end', { run: live.id, id, status, ...(artifact ? { artifact } : {}) });
         this.publishArtifacts();
         this.publishSections();
+        if (event.name === 'message_agent') this.publishThreads();
         return;
       }
       case 'warning':

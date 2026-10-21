@@ -1,34 +1,34 @@
 /**
- * Resolves the SF Agents configuration directory, loads an optional untracked
- * `.env` file from it and loads the validated agent tree.
+ * Resolves the SF Agents project directory (the one holding the `agents`
+ * folder), loads an optional untracked `.env` file from it and loads the
+ * project's agents.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadAgentTree, type AgentTree } from '@sfagents/core';
+import { AGENTS_DIR_NAME, locateProject, loadAgentTree, type AgentTree } from '@sfagents/core';
 
-export const ROOT_AGENT_FILE = 'agent.json';
 export const MCP_CONFIG_FILE = 'mcp.json';
 export const ENV_FILE = '.env';
 
 export interface ConfigLocation {
+  /** The project directory. */
   configDir: string;
-  agentFile: string;
+  /** The agent to start with, when one was named. */
+  agent?: string;
   mcpFile: string;
 }
 
-/** `--config` may name a directory containing agent.json or an agent JSON file. */
-export function locateConfig(configOption: string | undefined, mcpOption: string | undefined, cwd = process.cwd()): ConfigLocation {
-  const target = path.resolve(cwd, configOption ?? '.');
-  let agentFile: string;
-  if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
-    agentFile = path.join(target, ROOT_AGENT_FILE);
-  } else {
-    agentFile = target;
-  }
-  const configDir = path.dirname(agentFile);
+/**
+ * `--config` names the project directory (default: the current one) or one
+ * agent file in its agents folder; `--agent` names the agent to start with.
+ */
+export function locateConfig(configOption: string | undefined, mcpOption: string | undefined, cwd = process.cwd(), agentOption?: string): ConfigLocation {
+  const located = locateProject(path.resolve(cwd, configOption ?? '.'));
+  const configDir = located.projectDir;
   const mcpFile = mcpOption ? path.resolve(cwd, mcpOption) : path.join(configDir, MCP_CONFIG_FILE);
-  return { configDir, agentFile, mcpFile };
+  const agent = agentOption ?? located.agent;
+  return { configDir, mcpFile, ...(agent ? { agent } : {}) };
 }
 
 /**
@@ -62,10 +62,10 @@ export function loadEnvFile(configDir: string, env: NodeJS.ProcessEnv = process.
 }
 
 export function loadConfig(location: ConfigLocation): AgentTree {
-  if (!fs.existsSync(location.agentFile)) {
+  if (!fs.existsSync(path.join(location.configDir, AGENTS_DIR_NAME)) && !fs.existsSync(path.join(location.configDir, 'agent.json'))) {
     throw new Error(
-      `No agent definition found at ${location.agentFile}. Run sfagents from a directory containing ${ROOT_AGENT_FILE}, or pass --config <dir|file>.`,
+      `No agents found: ${location.configDir} has no "${AGENTS_DIR_NAME}" folder. Run sfagents from a project directory with ${AGENTS_DIR_NAME}/<name>.json files, or pass --config <dir>.`,
     );
   }
-  return loadAgentTree(location.agentFile, { mcpConfigFile: location.mcpFile });
+  return loadAgentTree(location.configDir, { mcpConfigFile: location.mcpFile, ...(location.agent ? { agent: location.agent } : {}) });
 }
