@@ -14,6 +14,7 @@
  */
 
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
+import { GLASS, SEND_TINT } from './glassvalues.js';
 
 const OPEN_EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
 const CLOSE_EASE = 'cubic-bezier(0.4, 0, 0.9, 0.6)';
@@ -29,6 +30,7 @@ function el(tag, className, text) {
 let probe = null;
 /** The top safe-area inset (status bar, Dynamic Island) in px. */
 export function safeTop() {
+  if (typeof window.__sfSafeTop === 'number') return window.__sfSafeTop; // tests: a phone's status bar
   if (!probe) {
     probe = el('div');
     probe.style.cssText = 'position:fixed;left:0;top:0;width:0;height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none';
@@ -52,6 +54,20 @@ let defaultGlass = null;
 /** Sets how sheets make their Liquid Glass (the app passes sfgl with its quality setting). */
 export function setSheetGlass(factory) {
   defaultGlass = factory;
+}
+
+/**
+ * Real sfgl glass for an overlay's buttons (windows, Quick Look, pickers):
+ * `host` holds the canvas, `scroller` is what the glass refracts. Returns
+ * null when glass cannot be made (the buttons keep their CSS look).
+ */
+export function makeGlass(opts) {
+  if (!defaultGlass) return null;
+  try {
+    return defaultGlass(opts);
+  } catch {
+    return null;
+  }
 }
 /** Whether any modal sheet is open. */
 export function sheetOpen() {
@@ -387,6 +403,20 @@ export function openSheet(options) {
   const title = el('h2', 'ms-title', options.title);
   const trailing = el('div', 'ms-trailing');
   if (options.trailing) trailing.append(options.trailing);
+  // A sheet that edits something has a check button: it saves and closes.
+  // The close button, a swipe down, the scrim and Escape close without saving.
+  let confirmBtn = null;
+  if (options.onConfirm) {
+    confirmBtn = el('button', 'ms-close ms-confirm');
+    confirmBtn.type = 'button';
+    confirmBtn.setAttribute('aria-label', options.confirmLabel ?? 'Done');
+    confirmBtn.dataset.glass = 'control';
+    const check = el('i');
+    applySymbol(check, 'checkmark', { size: 16 });
+    confirmBtn.append(check);
+    trailing.append(confirmBtn);
+  }
+  let confirmed = false;
   head.append(closeBtn, title, trailing);
   const body = el('div', 'ms-body');
   const edge = el('div', 'ms-edge');
@@ -401,7 +431,7 @@ export function openSheet(options) {
     onClosed: () => {
       glass?.destroy();
       frame.layer.remove();
-      options.onClose?.();
+      options.onClose?.(confirmed);
     },
     onMove: () => frame?.onMove?.(),
   });
@@ -414,7 +444,15 @@ export function openSheet(options) {
     const factory = options.glass ?? defaultGlass;
     if (glass || !factory) return;
     try {
-      glass = factory({ host: frame.panel, scroller: body });
+      glass = factory({
+        host: frame.panel,
+        scroller: body,
+        // The fade under the header is part of what the close button refracts.
+        edges: () => {
+          const r = edge.getBoundingClientRect();
+          return [{ from: 'top', top: r.top, height: r.height, opacity: frame.panel.classList.contains('ms-scrolled') ? 1 : 0, stops: [[0, 1], [0.5, 0.85], [1, 0]] }];
+        },
+      });
       glass.lens(closeBtn, 'control');
       for (const node of trailing.querySelectorAll('[data-glass]')) glass.lens(node, node.dataset.glass || 'control');
       for (const [node, kind] of extraGlass) glass.lens(node, kind, { clip: body });
@@ -433,8 +471,26 @@ export function openSheet(options) {
     }
   };
   closeBtn.addEventListener('click', () => frame.close());
+  confirmBtn?.addEventListener('click', async () => {
+    confirmBtn.disabled = true;
+    try {
+      if ((await options.onConfirm(ctx)) === false) return;
+      confirmed = true;
+      frame.close();
+    } finally {
+      confirmBtn.disabled = false;
+    }
+  });
   body.addEventListener('scroll', () => frame.panel.classList.toggle('ms-scrolled', body.scrollTop > 2), { passive: true });
-  ctx = { invalidateGlass: () => glass?.invalidate(), addGlass: (node, kind = 'control') => (extraGlass.push([node, kind]), glass?.lens(node, kind, { clip: body })), body, head, title, frame, close: () => frame.close(), set: (d) => frame.set(d), setTitle: (t) => (title.textContent = t), refresh: () => frame.refresh() };
+  ctx = {
+    /** Marks the sheet as changed: the check button turns blue, as Apple's Done does. */
+    setDirty(on) {
+      if (!confirmBtn) return;
+      confirmBtn.classList.toggle('dirty', !!on);
+      const lens = glass?.lensOf?.(confirmBtn);
+      lens?.transition({ tint: on ? SEND_TINT : GLASS.control.tint }, { duration: 220, easing: 'easeInOut' });
+    },
+    invalidateGlass: () => glass?.invalidate(), addGlass: (node, kind = 'control') => (extraGlass.push([node, kind]), glass?.lens(node, kind, { clip: body })), body, head, title, frame, close: () => frame.close(), set: (d) => frame.set(d), setTitle: (t) => (title.textContent = t), refresh: () => frame.refresh() };
   options.build(ctx);
   frame.show(options.detents?.[0] ?? 'large');
   setupGlass();

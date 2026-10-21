@@ -21,7 +21,7 @@ import { openPeek, group, row, el as peekEl } from './peek.js';
 import { openQuickLook } from './quicklook.js';
 import { UploadJob } from './up2k.js';
 import { createFilesGlass } from './filesglass.js';
-import { createSheetFrame } from './modalsheet.js';
+import { createSheetFrame, makeGlass } from './modalsheet.js';
 import { DASH, bytesText, dateText, fullDate, formatUsedTotal, percentText, rateText, temperature, formatDuration, plural } from './format.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -261,7 +261,19 @@ export function createFileManager(options) {
   function setupGlass() {
     if (fg) return;
     try {
-      fg = createFilesGlass({ host: inner, scroller, quality: options.quality?.() });
+      fg = createFilesGlass({
+        host: inner,
+        scroller,
+        quality: options.quality?.(),
+        edges: () => {
+          const t = edgeTop.getBoundingClientRect();
+          const b = edgeBottom.getBoundingClientRect();
+          return [
+            { from: 'top', top: t.top, height: t.height, opacity: root.classList.contains('scrolled') ? 1 : 0 },
+            { from: 'bottom', top: b.top, height: b.height, opacity: 1, stops: [[0, 0.9], [1, 0]] },
+          ];
+        },
+      });
     } catch {
       fg = null;
       root.classList.add('no-glass');
@@ -1279,6 +1291,13 @@ export function createFileManager(options) {
     return new Promise((resolve) => {
       // The same kind of sheet as Files itself: grabber, close button on the left.
       let result = null;
+      let pickerGlass = null;
+      const pickerBands = () => {
+        if (!pickerGlass) return;
+        const r = head.getBoundingClientRect();
+        pickerGlass.setBands([{ top: r.top, bottom: r.bottom }]);
+        pickerGlass.invalidate();
+      };
       const frame = createSheetFrame({
         detents: ['large'],
         className: 'fm-picker-layer',
@@ -1286,9 +1305,11 @@ export function createFileManager(options) {
         z: 70,
         scroller: () => list,
         onClosed: () => {
+          pickerGlass?.destroy();
           frame.layer.remove();
           resolve(result);
         },
+        onMove: () => pickerBands(),
       });
       const sheet = frame.panel;
       sheet.classList.add('fm-picker');
@@ -1312,6 +1333,13 @@ export function createFileManager(options) {
       sheet.append(head, list, foot);
       frame.addDragArea(head);
       frame.show('large');
+      // Its buttons are real Liquid Glass too.
+      pickerGlass = makeGlass({ host: sheet, scroller: list });
+      if (pickerGlass) {
+        pickerGlass.lens(cancel, 'control');
+        pickerGlass.lens(add, 'control');
+        pickerBands();
+      }
       let cur = start;
       const finish = (value) => {
         result = value;

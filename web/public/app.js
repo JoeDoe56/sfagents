@@ -23,6 +23,7 @@ import { createFilesGlass } from './filesglass.js';
 import { openAgentSheet, agentSheetOpen } from './agentsheet.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
+import { installPress, registerGlass } from './press.js';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -113,6 +114,8 @@ const settings = {
 };
 
 const glassApi = setupGlass({ stage, chat, thread, quality: settings.quality });
+registerGlass(glassApi.glass);
+installPress();
 const { surface } = glassApi;
 setSheetGlass((o) => createFilesGlass({ ...o, quality: settings.quality, units: '.ui-row, .ag-unit, .settings-group > *' }));
 const SEND_FADE = { duration: 260, easing: 'easeInOut' };
@@ -720,7 +723,6 @@ function updateGradient() {
   cancelAnimationFrame(gradientFade);
   const target = shownSendable ? 0 : 0.62;
   const from = modelGradient.strength;
-  if (!shownSendable) sendLens.setOptions({ underlay: modelGradient });
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) modelGradient.freeze(true);
   // Fade with the tint, so the blue and the gradient cross.
   const start = performance.now();
@@ -729,7 +731,6 @@ function updateGradient() {
     modelGradient.setStrength(from + (target - from) * t);
     glassApi.glass.requestRender();
     if (t < 1) gradientFade = requestAnimationFrame(step);
-    else if (shownSendable) sendLens.setOptions({ underlay: null });
   };
   gradientFade = requestAnimationFrame(step);
   if (want && !stopGradient) stopGradient = modelGradient.animate(glassApi.glass, 24);
@@ -739,6 +740,10 @@ function updateGradient() {
   }
 }
 document.addEventListener('visibilitychange', updateGradient);
+// The underlay stays attached: at strength 0 it draws nothing. (Changing lens
+// options with setOptions would cancel the tint's running transition, which
+// left the circle blue after a send.)
+sendLens.setOptions({ underlay: modelGradient });
 updateGradient();
 window.addEventListener('sheetchange', updateGradient);
 
@@ -1055,9 +1060,9 @@ function showQuality() {
     settings.quality === 'auto' ? `Chosen for this device: ${tier}. Lowers itself if frames get slow.` : `Drawing with: ${tier}.`;
 }
 
-function setQuality(q) {
+function setQuality(q, persist = true) {
   settings.quality = q;
-  writeSetting('quality', q);
+  if (persist) writeSetting('quality', q);
   const glass = glassApi.glass;
   glass.options.quality = q;
   if (q === 'auto') {
@@ -1073,9 +1078,15 @@ function setQuality(q) {
   requestAnimationFrame(showQuality);
 }
 
-/** Settings: a sheet with a medium and a large detent. */
+/**
+ * Settings: a sheet with a medium and a large detent. Changes are a draft
+ * (glass quality previews at once) until the check button saves them; the
+ * close button or a swipe down puts everything back.
+ */
 function openSettings() {
   if (settingsSheet) return;
+  const saved = { quality: settings.quality, enterSends: settings.enterSends };
+  const draft = { ...saved };
   settingsSheet = openSheet({
     title: 'Settings',
     detents: ['medium', 'large'],
@@ -1083,16 +1094,28 @@ function openSettings() {
     build(ctx) {
       ctx.body.append($('settingsTemplate').content.cloneNode(true));
       for (const i of ctx.body.querySelectorAll('i[data-symbol]')) applySymbol(i, i.dataset.symbol);
+      const dirty = () => ctx.setDirty(draft.quality !== saved.quality || draft.enterSends !== saved.enterSends);
       qualityButtons = [...ctx.body.querySelectorAll('#qualityChoice button')];
-      for (const b of qualityButtons) b.addEventListener('click', () => setQuality(b.dataset.value));
+      for (const b of qualityButtons)
+        b.addEventListener('click', () => {
+          draft.quality = b.dataset.value;
+          setQuality(draft.quality, false);
+          dirty();
+        });
       const enter = ctx.body.querySelector('#enterSends');
-      enter.checked = settings.enterSends;
+      enter.checked = draft.enterSends;
       enter.addEventListener('change', (e) => {
-        settings.enterSends = e.target.checked;
-        writeSetting('enterSends', settings.enterSends);
+        draft.enterSends = e.target.checked;
+        dirty();
       });
     },
-    onClose: () => {
+    onConfirm: () => {
+      writeSetting('quality', draft.quality);
+      settings.enterSends = draft.enterSends;
+      writeSetting('enterSends', draft.enterSends);
+    },
+    onClose: (confirmed) => {
+      if (!confirmed && settings.quality !== saved.quality) setQuality(saved.quality, false);
       settingsSheet = null;
       qualityButtons = [];
     },

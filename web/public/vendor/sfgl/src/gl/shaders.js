@@ -170,6 +170,7 @@ uniform float u_globalLightIntensity;
 uniform vec4  u_contact;
 uniform float u_scrollEdge;
 uniform float u_opacity;
+uniform float u_highlight;           // pressed: the body lifts toward a light grey, as iOS buttons do
 
 float udRoundBox(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
@@ -401,6 +402,7 @@ void main() {
   }
   // Preserve the signed slider's endpoints and its clear zero.
   rgb = mix(rgb, u_materialTone, u_toneAmount * dBody);
+  rgb = mix(rgb, vec3(0.74), clamp(u_highlight, 0.0, 1.0) * 0.8 * dBody);
   if (u_specular) {
     // 3D light response: the positive Z components stay defined as a planar
     // light crosses zero, so opposite rims fade through neutral.

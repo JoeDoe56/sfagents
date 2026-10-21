@@ -439,7 +439,7 @@
 
 /* Folder picker (Move, Copy) */
 .fm-picker { --ms-bg: #1c1c1e; }
-.fm-picker-head { flex: none; display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; gap: 8px; padding: 18px 16px 8px; touch-action: none; }
+.fm-picker-head { position: relative; z-index: 5; flex: none; display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; gap: 8px; padding: 18px 16px 8px; touch-action: none; }
 .fm-picker-head h2 { margin: 0; font-size: 17px; line-height: 22px; font-weight: 600; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fm-picker-list { flex: 1; overflow-y: auto; padding: 0 16px 12px; }
 .fm-picker-list .fm-section { margin-top: 6px; }
@@ -453,7 +453,7 @@
 .ql-layer { position: fixed; inset: 0; z-index: 50; background: #000; color: #fff; }
 .ql-top {
   position: absolute;
-  z-index: 2;
+  z-index: 5;
   left: 0;
   right: 0;
   top: 0;
@@ -461,8 +461,9 @@
   align-items: center;
   gap: 8px;
   padding: calc(var(--safe-top) + 10px) 12px 10px;
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
 }
+/* The fade under the top buttons sits below the glass canvas, so the glass stays clear. */
+.ql-shade { position: absolute; z-index: 2; left: 0; right: 0; top: 0; height: calc(var(--safe-top) + 90px); background: linear-gradient(to bottom, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0)); pointer-events: none; }
 .ql-title { flex: 1; min-width: 0; text-align: center; }
 .ql-title h2 { margin: 0; font-size: 15px; line-height: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ql-meta { display: block; font-size: 12px; line-height: 16px; color: rgba(235, 235, 245, 0.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -483,7 +484,7 @@
 }
 .ql-btn[hidden] { display: none; }
 .ql-btn:active { transform: scale(0.94); }
-.ql-nav { position: absolute; z-index: 2; top: 50%; margin-top: -20px; }
+.ql-nav { position: absolute; z-index: 5; top: 50%; margin-top: -20px; }
 .ql-nav.prev { left: 12px; }
 .ql-nav.next { right: 12px; }
 @media (hover: none) { .ql-nav { display: none; } }

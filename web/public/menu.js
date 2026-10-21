@@ -165,7 +165,8 @@ export function showMenu(options) {
 
   render(options.groups, options.quick, options.title);
   if (!reduced.matches) {
-    stackEl.animate([{ opacity: 0, transform: 'scale(0.86)' }, { opacity: 1, transform: 'none' }], { duration: 300, easing: EASE });
+    if (morphFrom()) morph(true);
+    else stackEl.animate([{ opacity: 0, transform: 'scale(0.86)' }, { opacity: 1, transform: 'none' }], { duration: 300, easing: EASE });
     scrim.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220 });
   }
 
@@ -262,8 +263,41 @@ export function showMenu(options) {
       return;
     }
     layer.style.pointerEvents = 'none';
-    stackEl.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(0.92)' }], { duration: 180, easing: 'ease-in', fill: 'forwards' });
-    scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, fill: 'forwards' }).onfinish = () => layer.remove();
+    if (morphFrom()) morph(false);
+    else stackEl.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(0.92)' }], { duration: 180, easing: 'ease-in', fill: 'forwards' });
+    scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: options.anchor instanceof Element ? 260 : 180, fill: 'forwards' }).onfinish = () => layer.remove();
+  }
+
+  // A pull-down menu grows out of its button, as iOS 26's do: the glass
+  // shape stretches from the button's outline to the menu's with a little
+  // overshoot, while the items come in from a blur; closing folds it back
+  // into the button.
+  function morphFrom() {
+    if (options.preview || !(options.anchor instanceof Element) || !options.anchor.isConnected) return null;
+    const a = options.anchor.getBoundingClientRect();
+    return a.width ? a : null;
+  }
+  function morph(opening) {
+    const a = morphFrom();
+    const p = panel.getBoundingClientRect();
+    const radius = Math.min(a.height / 2, parseFloat(getComputedStyle(options.anchor).borderTopLeftRadius) || a.height / 2);
+    const from = `inset(${a.top - p.top}px ${p.right - a.right}px ${p.bottom - a.bottom}px ${a.left - p.left}px round ${radius}px)`;
+    const to = 'inset(0px 0px 0px 0px round 26px)';
+    const content = panel.querySelector('.menu-scroll');
+    const shrink = Math.max(0.35, Math.min(1, a.width / p.width));
+    if (opening) {
+      panel.animate([{ clipPath: from }, { clipPath: to }], { duration: 460, easing: 'cubic-bezier(0.22, 1.18, 0.36, 1)' });
+      content?.animate(
+        [
+          { opacity: 0, filter: 'blur(8px)', transform: `scale(${shrink})`, transformOrigin: `${a.left + a.width / 2 - p.left}px ${a.top + a.height / 2 - p.top}px` },
+          { opacity: 1, filter: 'blur(0px)', transform: 'none', transformOrigin: `${a.left + a.width / 2 - p.left}px ${a.top + a.height / 2 - p.top}px` },
+        ],
+        { duration: 380, easing: 'cubic-bezier(0.25, 1.1, 0.4, 1)' },
+      );
+    } else {
+      panel.animate([{ clipPath: to, opacity: 1 }, { clipPath: from, opacity: 1, offset: 0.85 }, { clipPath: from, opacity: 0 }], { duration: 260, easing: 'cubic-bezier(0.4, 0, 0.6, 1)', fill: 'forwards' });
+      content?.animate([{ opacity: 1, filter: 'blur(0px)' }, { opacity: 0, filter: 'blur(6px)' }], { duration: 160, fill: 'forwards' });
+    }
   }
 
   current = { close };

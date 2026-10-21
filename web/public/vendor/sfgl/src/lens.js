@@ -72,6 +72,7 @@ export class Lens {
     this.matrix = IDENTITY;
     this.hasTransform = false;
     this.contact = undefined;
+    this.highlightValue = 0;
     this.drawn = false;
     this._dirty = true;
     this._shapeDirty = true;
@@ -129,6 +130,19 @@ export class Lens {
 
   layer() { return finiteNumber(this._value('layer', 0), 0); }
   underlay() { return this._value('underlay', null); }
+
+  /**
+   * Press highlight, 0..1: the body lifts toward a light grey as an iOS
+   * button's does while held. Set every frame by the host's press
+   * animation; independent of option transitions (a tint in flight keeps
+   * going).
+   */
+  setHighlight(value) {
+    const v = clamp(finiteNumber(value, 0), 0, 1);
+    if (v === this.highlightValue) return;
+    this.highlightValue = v;
+    this.surface.glass.requestRender();
+  }
   edgeFrost() { return clamp(finiteNumber(this._value('edgeFrost', 0), 0), 0, 1); }
   opacity() { return clamp(finiteNumber(this._value('opacity', 1), 1), 0, 1); }
 

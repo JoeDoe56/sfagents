@@ -12,8 +12,17 @@ const DETENTS = ['collapsed', 'medium', 'full'];
 // The message row's distance from the bar's top and bottom edges when
 // collapsed. The top leaves room for the handle (5 px down, 4 px tall, as in
 // Apple Maps) with a gap before the field.
-const ROW_TOP = 14;
-const ROW_BOTTOM = 10;
+// Apple Maps keeps the same space (about 13 pt) above, below and beside its
+// field; the handle sits in the space above.
+const ROW_TOP = 13;
+const ROW_BOTTOM = 13;
+const ROW_SIDE = 13;
+// Apple Maps' sheet spring, fitted to a screen recording at 60 fps: a
+// response of 0.39 s and a damping ratio of 0.81 (a little overshoot past
+// the detent and a soft settle), starting from the finger's speed.
+const SPRING = { response: 0.39, damping: 0.81 };
+// Past the full detent the sheet grows this many px per unit of t (overshoot and rubber band).
+const OVER = 1000;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const lerp = (a, b, k) => a + (b - a) * k;
 const smooth = (a, b, v) => {
@@ -62,6 +71,11 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
   }
 
   function at(g, v) {
+    if (v > 2) {
+      // Past full: the sheet's top rises a little further (the spring's overshoot).
+      const f = at(g, 2);
+      return { ...f, height: f.height + (v - 2) * OVER };
+    }
     const [a, b, k] = v <= 1 ? [g.C, g.M, v] : [g.M, g.F, v - 1];
     const e = k;
     return {
@@ -81,7 +95,7 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
   function apply() {
     const rowH = row.offsetHeight;
     const g = geometry(rowH);
-    const p = at(g, clamp(t, 0, 2));
+    const p = at(g, clamp(t, -0.2, 2.2));
     const pad = lerp(ROW_TOP, 22, smooth(0, 1, t));
     const opaque = smooth(1.15, 1.6, t);
     bar.style.left = `${p.left}px`;
@@ -91,7 +105,7 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     bar.style.borderRadius = `${p.radius}px`;
     bar.style.setProperty('--opaque', opaque.toFixed(3));
     row.style.top = `${pad}px`;
-    const inset = lerp(10, 12, smooth(0, 1, t));
+    const inset = lerp(ROW_SIDE, 13, smooth(0, 1, t));
     row.style.left = row.style.right = `${inset}px`;
     scroller.style.setProperty('--row-inset', `${inset}px`);
     scroller.style.top = `${pad + rowH + 10}px`;
@@ -109,35 +123,39 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     });
   }
 
+  /** Springs to a detent in pixel space (the sheet's top), from `velocity` px/ms (down positive). */
   function animateTo(target, velocity = 0) {
     if (anim) cancelAnimationFrame(anim.raf);
-    const from = t;
     const to = clamp(target, 0, 2);
     detent = Math.round(to);
     onDetent?.(DETENTS[detent]);
-    if (reduced.matches || Math.abs(to - from) < 0.001) {
+    if (reduced.matches || (Math.abs(to - t) < 0.001 && Math.abs(velocity) < 0.01)) {
       t = to;
       apply();
       return;
     }
-    const duration = clamp(240 + Math.abs(to - from) * 180 - Math.abs(velocity) * 60, 220, 460);
-    const start = performance.now();
-    // Ease out with a slight overshoot, like a damped spring.
-    const ease = (k) => {
-      const c1 = 1.2;
-      const c3 = c1 + 1;
-      return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2);
-    };
+    const g0 = geometry(row.offsetHeight);
+    const goal = topAt(g0, to);
+    let x = topAt(g0, t) - goal; // px from the goal
+    let v = velocity * 1000; // px/s
+    const w = (2 * Math.PI) / SPRING.response;
+    const z = SPRING.damping;
+    let last = performance.now();
     const step = (now) => {
-      const k = clamp((now - start) / duration, 0, 1);
-      t = from + (to - from) * ease(k);
-      apply();
-      if (k < 1) anim.raf = requestAnimationFrame(step);
-      else {
-        t = to;
-        apply();
-        anim = null;
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const n = Math.max(1, Math.ceil(dt / 0.004));
+      for (let i = 0; i < n; i++) {
+        const a = -w * w * x - 2 * z * w * v;
+        v += a * (dt / n);
+        x += v * (dt / n);
       }
+      const g = geometry(row.offsetHeight);
+      const settled = Math.abs(x) < 0.25 && Math.abs(v) < 8;
+      t = settled ? to : tForTop(g, topAt(g, to) + x, true);
+      apply();
+      if (!settled) anim.raf = requestAnimationFrame(step);
+      else anim = null;
     };
     anim = { raf: requestAnimationFrame(step) };
   }
@@ -156,12 +174,16 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
   let press = null; // pointer press that may become a drag
   let suppressClick = false;
 
-  function tForTop(g, top) {
+  function tForTop(g, top, free = false) {
     // topAt decreases as t grows; bisect.
     let lo = 0;
     let hi = 2;
-    if (top >= topAt(g, 0)) return 0 - Math.min(0.06, (top - topAt(g, 0)) / 2000);
-    if (top <= topAt(g, 2)) return 2;
+    if (top >= topAt(g, 0)) return 0 - Math.min(free ? 0.2 : 0.06, (top - topAt(g, 0)) / 2000);
+    if (top <= topAt(g, 2)) {
+      // Above full: the spring overshoots freely; a finger meets resistance.
+      const over = topAt(g, 2) - top;
+      return 2 + (free ? over : Math.pow(over, 0.7)) / OVER;
+    }
     for (let i = 0; i < 30; i++) {
       const mid = (lo + hi) / 2;
       if (topAt(g, mid) > top) lo = mid;
@@ -176,7 +198,7 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
       anim = null;
     }
     const g = geometry(row.offsetHeight);
-    drag = { y0: y, top0: topAt(g, clamp(t, 0, 2)), samples: [{ y, at: performance.now() }] };
+    drag = { y0: y, top0: topAt(g, t), samples: [{ y, at: performance.now() }] };
     bar.classList.add('dragging');
     suppressClick = true;
     // Keep a half-finished text selection from following the finger.
@@ -201,7 +223,7 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
     const last = d.samples[d.samples.length - 1];
     const v = last.at > first.at ? (last.y - first.y) / (last.at - first.at) : 0; // px/ms, + is down
     const g = geometry(row.offsetHeight);
-    const projected = topAt(g, clamp(t, 0, 2)) + v * 220;
+    const projected = topAt(g, t) + v * 220;
     let best = 0;
     let bestDist = Infinity;
     for (let i = 0; i < 3; i++) {

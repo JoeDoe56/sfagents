@@ -38,6 +38,7 @@
 .peek-head {
   flex: none;
   position: relative;
+  z-index: 5;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -60,14 +61,16 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: -4px;
-  padding: 4px 6px;
+  height: 34px;
+  padding: 0 12px 0 8px;
   border: 0;
-  border-radius: 10px;
-  background: none;
-  color: var(--blue);
+  border-radius: 17px;
+  /* A glass capsule (sfgl draws it; this is the look without WebGL). */
+  background: rgba(120, 120, 128, 0.32);
+  color: #fff;
   font: inherit;
-  font-size: 17px;
+  font-size: 15px;
+  font-weight: 500;
   cursor: pointer;
   max-width: 40vw;
 }
@@ -83,8 +86,8 @@
 .peek-title-icon i { width: 15px; height: 15px; }
 .peek-close {
   flex: none;
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   border: 0;
   border-radius: 50%;
   display: grid;
@@ -529,7 +532,8 @@
 .ms-close:focus-visible { outline: 2px solid rgba(10, 132, 255, 0.8); outline-offset: 2px; }
 .ms-edge {
   position: absolute;
-  z-index: 5;
+  /* Under the glass canvas (z 3), so the close button's glass stays on top of the fade. */
+  z-index: 2;
   left: 0;
   right: 0;
   top: 0;
@@ -668,3 +672,9 @@
 .ag-problem { margin: 0; padding: 12px 14px; border-radius: 14px; background: rgba(255, 69, 58, 0.16); color: #ff9f97; font-size: 14px; line-height: 19px; }
 .ag-reset { width: 100%; justify-content: center; }
 .ag-note { margin: 10px 4px 0; font-size: 12px; line-height: 16px; color: var(--label-3); }
+.ms-confirm.dirty { color: #fff; }
+.no-glass .ms-confirm.dirty, .ms-confirm.dirty:not([style*="transparent"]) { background: #4499f8; }
+
+/* Buttons without glass lighten while held (press.js scales them). */
+.press-css { filter: brightness(calc(1 + var(--press, 0) * 0.55)); }
+.press-css.ui-button, .press-css.ms-close, .press-css.fm-tool { filter: brightness(calc(1 + var(--press, 0) * 0.8)); }

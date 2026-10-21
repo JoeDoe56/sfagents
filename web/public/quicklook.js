@@ -10,6 +10,7 @@ import { getJson, postJson, rawUrl } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { alertDialog, showError } from './dialogs.js';
 import { bytesText, dateText } from './format.js';
+import { makeGlass } from './modalsheet.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
 
@@ -59,9 +60,32 @@ export function openQuickLook(options) {
   const next = iconButton('chevron.right', 'Next', () => go(1));
   prev.classList.add('ql-nav', 'prev');
   next.classList.add('ql-nav', 'next');
-  layer.append(stage, top, prev, next);
+  const shade = el('div', 'ql-shade');
+  layer.append(stage, shade, top, prev, next);
   document.body.append(layer);
   layer.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220 });
+  // The buttons are real Liquid Glass over the file being shown.
+  const glass = makeGlass({
+    host: layer,
+    scroller: stage,
+    background: '#000000',
+    edges: () => {
+      const r = shade.getBoundingClientRect();
+      return [{ from: 'top', top: r.top, height: r.height, opacity: 1, stops: [[0, 0.72], [1, 0]] }];
+    },
+  });
+  const glassBands = () => {
+    if (!glass) return;
+    const rects = [top, prev, next].map((n) => n.getBoundingClientRect()).filter((r) => r.height);
+    glass.setBands(rects.map((r) => ({ top: r.top, bottom: r.bottom })));
+    glass.invalidate();
+  };
+  if (glass) {
+    for (const b of [close, editBtn, more, share, prev, next]) glass.lens(b, 'control');
+    new ResizeObserver(glassBands).observe(layer);
+    stage.addEventListener('load', () => glass.repaint(), true);
+    glassBands();
+  }
 
   let editor = null;
   const current = () => items[index];
@@ -267,6 +291,7 @@ export function openQuickLook(options) {
     }
     window.removeEventListener('keydown', onKey, true);
     layer.querySelectorAll('video, audio').forEach((m) => m.pause());
+    glass?.destroy();
     layer.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, fill: 'forwards' }).onfinish = () => layer.remove();
   }
 

@@ -481,6 +481,7 @@ export class Surface {
     const contact = stepContact(lens.contact, context.contact, contactRect, context.now, context.reducedMotion);
     lens.contact = contact.state;
     set('u_contact', [contact.state.x, contact.state.y, contact.state.press, 0]);
+    set('u_highlight', lens.highlightValue || 0);
     set('u_scrollEdge', lens.edgeFrost());
     set('u_opacity', opacity);
 

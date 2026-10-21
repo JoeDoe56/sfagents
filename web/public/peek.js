@@ -7,6 +7,7 @@
  * downward swipe on its header, shrinking back into where it came from.
  */
 
+import { makeGlass } from './modalsheet.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -214,6 +215,35 @@ export function openPeek(options) {
     inner.animate([{ opacity: 0 }, { opacity: 0, offset: 0.25 }, { opacity: 1 }], { duration: OPEN_MS, easing: 'ease-out' });
     scrim.animate([{ opacity: 0 }, { opacity: 1 }], { duration: OPEN_MS * 0.8, easing: 'ease-out' });
   }
+  // The close and back buttons are real Liquid Glass (sfgl), refracting the window's content.
+  let glass = null;
+  let follow = 0;
+  const bands = () => {
+    if (!glass) return;
+    const r = head.getBoundingClientRect();
+    glass.setBands([{ top: r.top, bottom: r.bottom }]);
+    glass.invalidate();
+  };
+  /** Re-measures the glass every frame for `ms` (the card is moving). */
+  const track = (ms) => {
+    const until = performance.now() + ms;
+    cancelAnimationFrame(follow);
+    const step = () => {
+      bands();
+      if (performance.now() < until) follow = requestAnimationFrame(step);
+    };
+    step();
+  };
+  setTimeout(() => {
+    if (closed) return;
+    glass = makeGlass({ host: card, scroller: viewport, background: '#202022' });
+    if (!glass) return;
+    glass.lens(close, 'control');
+    glass.lens(back, 'control');
+    viewport.addEventListener('scroll', bands, { passive: true, capture: true });
+    new ResizeObserver(bands).observe(head);
+    bands();
+  }, reduced.matches ? 0 : OPEN_MS);
   options.from?.classList?.add('peek-source');
   openWindows++;
   window.dispatchEvent(new CustomEvent('peekchange', { detail: { open: openWindows } }));
@@ -228,7 +258,10 @@ export function openPeek(options) {
     const to = sourceRect();
     openWindows--;
     window.dispatchEvent(new CustomEvent('peekchange', { detail: { open: openWindows } }));
+    track(CLOSE_MS + 40);
     const done = () => {
+      cancelAnimationFrame(follow);
+      glass?.destroy();
       layer.remove();
       options.from?.classList?.remove('peek-source');
       options.onClose?.();
@@ -278,6 +311,7 @@ export function openPeek(options) {
     if (!drag || e.pointerId !== drag.id) return;
     drag.dy = Math.max(0, e.clientY - drag.y);
     card.style.transform = `translateY(${drag.dy}px) scale(${1 - Math.min(0.06, drag.dy / 3000)})`;
+    bands();
   });
   const endDrag = (e) => {
     if (!drag || e.pointerId !== drag.id) return;
@@ -290,6 +324,7 @@ export function openPeek(options) {
     } else {
       card.animate([{ transform: card.style.transform }, { transform: 'none' }], { duration: 220, easing: EASE });
       card.style.transform = '';
+      track(260);
     }
   };
   head.addEventListener('pointerup', endDrag);

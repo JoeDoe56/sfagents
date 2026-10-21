@@ -451,6 +451,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .icon-btn:hover { color: rgba(235, 235, 245, 0.85); }
 .icon-btn:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: -6px; border-radius: 14px; }
 #attach { margin-left: 2px; }
+/* The mic mirrors the plus: the same space between it and the end of the field. */
+#mic { margin-right: 2px; }
 #attach i { width: 18px; height: 18px; }
 #mic i { width: 17px; height: 17px; }
 #mic.listening { color: var(--danger); }

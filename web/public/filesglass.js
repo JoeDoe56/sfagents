@@ -15,6 +15,7 @@
 import { createGlass, imageBackdrop } from './vendor/sfgl/src/index.js';
 import { symbolUrl } from './vendor/sfgl/src/symbols.js';
 import { GLASS } from './glassvalues.js';
+import { registerGlass } from './press.js';
 
 const MATERIAL = GLASS;
 
@@ -22,13 +23,21 @@ const MATERIAL = GLASS;
 const UNITS = '.fm-row, .fm-tile, .fm-place, .fm-section-title, .fm-nav, .fm-title, .fm-info, .fm-path, .fm-search, .fm-empty, .fm-note, .fm-loading';
 const reach = 64;
 
+function rgbOf(color) {
+  const m = /^#([0-9a-f]{6})$/i.exec(color);
+  if (m) return [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+  const n = /rgba?\(([^)]+)\)/.exec(color);
+  return n ? n[1].split(',').slice(0, 3).map((v) => Number(v.trim())) : [28, 28, 30];
+}
+
 function transparent(color) {
   return !color || color === 'transparent' || /rgba\([^)]*,\s*0\)$/.test(color);
 }
 
-export function createFilesGlass({ host, scroller, quality, units = UNITS, background: bg = '#1c1c1e' }) {
+export function createFilesGlass({ host, scroller, quality, units = UNITS, background: bg = '#1c1c1e', edges = () => [] }) {
   const glass = createGlass({ quality: quality || 'auto' });
   const surface = glass.surface({ host, z: 3 });
+  const unregister = registerGlass(glass);
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
   let revision = 0;
@@ -130,7 +139,8 @@ export function createFilesGlass({ host, scroller, quality, units = UNITS, backg
     };
     const style = getComputedStyle(unit);
     if (!transparent(style.backgroundColor)) ops.push({ k: 'r', color: style.backgroundColor, radius: parseFloat(style.borderTopLeftRadius) || 0, x: 0, y: 0, w: r.width, h: r.height });
-    for (const child of unit.childNodes) walk(child);
+    if (unit.tagName === 'IMG' || unit.tagName === 'VIDEO') ops.push({ k: 'i', img: unit, radius: parseFloat(style.borderTopLeftRadius) || 0, x: 0, y: 0, w: r.width, h: r.height });
+    else for (const child of unit.childNodes) walk(child);
     return ops;
   }
 
@@ -177,7 +187,7 @@ export function createFilesGlass({ host, scroller, quality, units = UNITS, backg
         if (child.hidden) continue;
         const r = child.getBoundingClientRect();
         if (!r.height || r.bottom < top || r.top > bottom) continue;
-        if (child.matches(units) || ownText(child) || child.tagName === 'IMG' || child.tagName === 'INPUT') {
+        if (child.matches(units) || ownText(child) || child.tagName === 'IMG' || child.tagName === 'VIDEO' || child.tagName === 'INPUT') {
           out.push({ unit: child, r });
           continue;
         }
@@ -242,7 +252,7 @@ export function createFilesGlass({ host, scroller, quality, units = UNITS, backg
             roundRect(ox + op.x, oy + op.y, op.w, op.h, op.radius);
             ctx.fill();
           } else if (op.k === 'i') {
-            if (!op.img.complete || !op.img.naturalWidth) continue;
+            if (op.img.tagName === 'VIDEO' ? op.img.readyState < 2 : !op.img.complete || !op.img.naturalWidth) continue;
             ctx.save();
             roundRect(ox + op.x, oy + op.y, op.w, op.h, op.radius);
             ctx.clip();
@@ -269,6 +279,18 @@ export function createFilesGlass({ host, scroller, quality, units = UNITS, backg
         }
       }
       ctx.restore();
+    }
+    // The page's scroll-edge effect (the fade under the chrome) is in the
+    // backdrop too, so the glass shows what the eye sees around it rather
+    // than crisp rows the fade hides.
+    for (const e of edges()) {
+      if (!(e.opacity > 0) || !(e.height > 0)) continue;
+      const [r, g, b] = rgbOf(background);
+      const top = e.from === 'top';
+      const grad = ctx.createLinearGradient(0, top ? e.top : e.top + e.height, 0, top ? e.top + e.height : e.top);
+      for (const [at, a] of e.stops ?? [[0, 1], [0.45, 0.86], [1, 0]]) grad.addColorStop(at, `rgba(${r},${g},${b},${a * e.opacity})`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, e.top, W, e.height);
     }
     revision++;
     dirty = false;
@@ -317,10 +339,16 @@ export function createFilesGlass({ host, scroller, quality, units = UNITS, backg
       background = color;
       schedule();
     },
+    lensOf: (el) => surface.lenses.find((l) => l.el === el) ?? null,
     repaint: schedule,
+    setEdges(fn) {
+      edges = fn;
+      schedule();
+    },
     track,
     invalidate: () => glass.invalidate(true),
     destroy() {
+      unregister();
       cancelAnimationFrame(follow);
       mo.disconnect();
       try {
