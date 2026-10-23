@@ -122,6 +122,14 @@ export interface ArtifactRecord extends RecordBase {
   callId?: string;
   /** Media type of the backing file (model-created artifacts). */
   mime?: string;
+  /**
+   * The user's file the artifact shows (relative to the project directory
+   * with "/" separators, or absolute outside it). The artifact is the file:
+   * it changes when the file changes.
+   */
+  file?: string;
+  /** Application artifacts: the address of the app (served on this computer). */
+  url?: string;
 }
 
 /** A new revision of a model-created artifact (the old file is kept). */
@@ -135,6 +143,8 @@ export interface ArtifactUpdateRecord extends RecordBase {
   mime?: string;
   run?: string;
   callId?: string;
+  file?: string;
+  url?: string;
 }
 
 /** The user pinned or unpinned an artifact. */

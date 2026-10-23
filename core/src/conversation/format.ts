@@ -41,8 +41,8 @@ const KNOWN_FIELDS: Record<string, readonly string[]> = {
   tool_start: ['seq', 'time', 'run', 'callId', 'tool'],
   run_end: ['seq', 'time', 'run', 'status', 'error', 'turns', 'usage'],
   section: ['seq', 'time', 'op', 'section', 'rev', 'expected', 'title', 'parent', 'assign', 'unassign', 'current'],
-  artifact: ['seq', 'time', 'id', 'type', 'title', 'path', 'run', 'message', 'callId', 'mime'],
-  artifact_update: ['seq', 'time', 'artifact', 'rev', 'path', 'title', 'mime', 'run', 'callId'],
+  artifact: ['seq', 'time', 'id', 'type', 'title', 'path', 'run', 'message', 'callId', 'mime', 'file', 'url'],
+  artifact_update: ['seq', 'time', 'artifact', 'rev', 'path', 'title', 'mime', 'run', 'callId', 'file', 'url'],
   artifact_pin: ['seq', 'time', 'artifact', 'pinned'],
   context_reset: ['seq', 'time'],
   interrupted: ['seq', 'time', 'run', 'notStarted', 'unknown'],
@@ -95,6 +95,7 @@ export function decorationFor(record: ConversationRecord): string {
       if (record.op === 'add') return `<sub>New section: <b>${escapeHtml(record.title ?? '')}</b></sub>`;
       return `<sub>Section ${escapeHtml(record.section)} updated${record.title ? `: <b>${escapeHtml(record.title)}</b>` : ''}</sub>`;
     case 'artifact':
+      if (record.file || record.url) return `<sub>Artifact (${escapeHtml(record.type)}): <a href="${escapeHtml(record.url ?? record.file!)}">${escapeHtml(record.title)}</a></sub>`;
       return record.path
         ? `<sub>Artifact (${escapeHtml(record.type)}): <a href="${escapeHtml(record.path)}">${escapeHtml(record.title)}</a></sub>`
         : `<sub>Artifact (${escapeHtml(record.type)}): ${escapeHtml(record.title)}</sub>`;
@@ -376,6 +377,8 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         message: str(meta, 'message', false, p),
         callId: str(meta, 'callId', false, p),
         mime: str(meta, 'mime', false, p),
+        file: str(meta, 'file', false, p),
+        url: str(meta, 'url', false, p),
       };
       break;
     case 'artifact_update':
@@ -389,6 +392,8 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         mime: str(meta, 'mime', false, p),
         run: str(meta, 'run', false, p),
         callId: str(meta, 'callId', false, p),
+        file: str(meta, 'file', false, p),
+        url: str(meta, 'url', false, p),
       };
       break;
     case 'artifact_pin': {

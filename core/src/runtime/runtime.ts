@@ -136,12 +136,18 @@ You are "${node.id}", answering "${other}" in your persistent thread with it. It
 }
 
 export class AgentRuntime implements AgentMessenger {
-  readonly tree: AgentTree;
-  readonly mcp: McpManager;
+  /** The project's agents; replaced by reload() when their files change. */
+  tree: AgentTree;
+  mcp: McpManager;
   private readonly providerFactory: ProviderFactory;
   private readonly confirm?: ConfirmationHandler;
   private readonly approveAll: boolean;
-  private readonly secretEnvNames: readonly string[];
+  private secretEnvNames: readonly string[];
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly ownsMcp: boolean;
+  /** MCP managers replaced by reload(), closed once no run uses them. */
+  private retired: McpManager[] = [];
+  private activeRuns = 0;
   /** "Always allow" decisions, per agent id, for the life of the runtime. */
   private readonly sessionApprovals = new Map<string, Set<string>>();
   /** The persistent threads between agents. */
@@ -152,7 +158,9 @@ export class AgentRuntime implements AgentMessenger {
   constructor(options: RuntimeOptions) {
     this.tree = options.tree;
     const env = options.env ?? process.env;
+    this.env = env;
     this.secretEnvNames = credentialEnvNames([...this.tree.byId.values()].map((n) => n.definition));
+    this.ownsMcp = !options.mcpManager;
     this.mcp = options.mcpManager ?? new McpManager(this.tree.mcp, { secretEnvNames: this.secretEnvNames, env });
     this.providerFactory = options.providerFactory ?? createDefaultProviderFactory(env);
     this.confirm = options.confirm;
@@ -234,7 +242,11 @@ export class AgentRuntime implements AgentMessenger {
     // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
     if (conversation?.file) {
       for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
-      for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined)) tools.set(tool.name, tool);
+      const artifactWorkspace = node.roots.length
+        ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])])
+        : undefined;
+      const autoWrite = (d.tools?.autoApprove ?? []).includes(ToolNames.WRITE_FILE);
+      for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, artifactWorkspace, { autoWrite })) tools.set(tool.name, tool);
     }
     return tools;
   }
@@ -244,7 +256,42 @@ export class AgentRuntime implements AgentMessenger {
   }
 
   /** Runs one agent until it answers, fails, times out, runs out of turns or is cancelled. */
+  /**
+   * Takes newly loaded agents (their files or mcp.json changed). Runs in
+   * progress finish with what they started with; the next turn of every
+   * session uses the new definitions. MCP servers restart only when mcp.json
+   * changed, and the old connections close once no run uses them.
+   */
+  reload(tree: AgentTree): { mcpChanged: boolean } {
+    const mcpChanged = JSON.stringify(tree.mcp.servers) !== JSON.stringify(this.tree.mcp.servers);
+    this.tree = tree;
+    this.secretEnvNames = credentialEnvNames([...tree.byId.values()].map((n) => n.definition));
+    if (mcpChanged && this.ownsMcp) {
+      this.retired.push(this.mcp);
+      this.mcp = new McpManager(tree.mcp, { secretEnvNames: this.secretEnvNames, env: this.env });
+      this.closeRetired();
+    }
+    return { mcpChanged };
+  }
+
+  private closeRetired(): void {
+    if (this.activeRuns > 0 || !this.retired.length) return;
+    const old = this.retired;
+    this.retired = [];
+    for (const m of old) void m.dispose();
+  }
+
   async run(params: RunParams): Promise<AgentRunResult> {
+    this.activeRuns++;
+    try {
+      return await this.runAgent(params);
+    } finally {
+      this.activeRuns--;
+      this.closeRetired();
+    }
+  }
+
+  private async runAgent(params: RunParams): Promise<AgentRunResult> {
     const { node, agentPath, messages, emit, recorder } = params;
     const record = (write: (r: RunRecorder) => void) => {
       if (!recorder) return;
@@ -373,6 +420,8 @@ export class AgentRuntime implements AgentMessenger {
             emit({ type: 'text', agentPath, text: event.text });
           } else if (event.type === 'reasoning') {
             emit({ type: 'reasoning', agentPath, text: event.text });
+          } else if (event.type === 'notice') {
+            emit({ type: 'warning', agentPath, message: event.text });
           } else {
             done = event;
           }
@@ -468,9 +517,11 @@ export class AgentRuntime implements AgentMessenger {
     callId?: string;
     conversation?: ConversationService;
   }): Promise<{ result: AgentRunResult; thread: string; instance: number }> {
-    const { from, to, signal } = params;
-    if (from.grants.get(to.id) === undefined || this.tree.byId.get(to.id) !== to) {
-      throw new Error(`"${from.id}" may not message "${to.id}"`);
+    const { from, signal } = params;
+    // The newest definition of the agent written to (its file may have changed since the writer started).
+    const to = this.tree.byId.get(params.to.id);
+    if (from.grants.get(params.to.id) === undefined || !to) {
+      throw new Error(`"${from.id}" may not message "${params.to.id}"${to ? '' : ' (it is no longer in the agents folder)'}`);
     }
     const lease = await this.threads.acquire(from.id, to.id, params.max, signal, params.thread);
     try {
@@ -514,7 +565,7 @@ export class AgentRuntime implements AgentMessenger {
     if (this.disposed) return;
     this.disposed = true;
     this.threads.close();
-    await this.mcp.dispose();
+    await Promise.all([this.mcp.dispose(), ...this.retired.map((m) => m.dispose())]);
   }
 }
 
@@ -531,12 +582,24 @@ export class AgentSession {
   /** The root agent's most recent model request, as the provider reported it. */
   lastRequest: { usage: TokenUsage; at: number } | undefined;
 
+  private agentId: string;
+
   constructor(
     private readonly runtime: AgentRuntime,
-    /** The agent replying in the conversation (any of the project's agents; see setAgent). */
-    public node: AgentNode,
+    node: AgentNode,
     readonly conversation: ConversationService,
-  ) {}
+  ) {
+    this.agentId = node.id;
+  }
+
+  /**
+   * The agent replying in the conversation (any of the project's agents; see
+   * setAgent), in its newest definition. If its file was removed, the
+   * project's default agent takes over.
+   */
+  get node(): AgentNode {
+    return this.runtime.tree.byId.get(this.agentId) ?? this.runtime.tree.root;
+  }
 
   /**
    * Hands the conversation to another agent: later turns are its, with the
@@ -545,8 +608,8 @@ export class AgentSession {
   setAgent(name: string): AgentNode {
     const node = this.runtime.tree.byId.get(name);
     if (!node) throw new Error(`no agent named "${name}"`);
-    if (this.busy && node !== this.node) throw new Error('Cannot change the agent while a turn is running');
-    this.node = node;
+    if (this.busy && node.id !== this.node.id) throw new Error('Cannot change the agent while a turn is running');
+    this.agentId = node.id;
     return node;
   }
 
@@ -600,11 +663,13 @@ export class AgentSession {
     if (this.busy) throw new Error('A turn is already running in this session');
     this.busy = true;
     try {
-      const recorder = this.conversation.beginRootRun(this.node);
+      // One definition for the whole turn, even if the agent's file changes meanwhile.
+      const node = this.node;
+      const recorder = this.conversation.beginRootRun(node);
       recorder.user(input, options.attachments);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;
-      const definition = this.node.definition;
+      const definition = node.definition;
       const conversation = this.conversation;
       const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
       const prepareContext = (fixedText: string) =>
@@ -623,8 +688,8 @@ export class AgentSession {
       let failure: unknown;
       const running = this.runtime
         .run({
-          node: this.node,
-          agentPath: [this.node.id],
+          node,
+          agentPath: [node.id],
           messages,
           task: input,
           signal: options.signal ?? new AbortController().signal,

@@ -27,7 +27,7 @@ function project(agent: Record<string, unknown> = {}, files: Record<string, unkn
 }
 
 function open(dir: string) {
-  const tree = loadAgentTree(path.join(dir, 'agent.json'));
+  const tree = loadAgentTree(dir);
   return { tree, conversation: ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir }) };
 }
 
@@ -110,43 +110,83 @@ describe('artifacts: storage and records', () => {
 });
 
 describe('artifacts: model tools and grants', () => {
-  test('the root creates and updates artifacts; the index and guidance reach later turns', async () => {
-    const dir = project();
+  test('artifacts are the files themselves: created with or without content, they follow the file', async () => {
+    const dir = project({ tools: { allow: ['read_file', 'write_file'], autoApprove: ['write_file'] } });
+    fs.mkdirSync(path.join(dir, 'docs'));
+    fs.writeFileSync(path.join(dir, 'docs', 'existing.csv'), 'a,b\n1,2\n');
     const { tree, conversation } = open(dir);
     const script: Script = (req, call) => {
-      const last = req.messages[req.messages.length - 1]!;
-      if (call === 0) return { toolCalls: [{ name: 'create_artifact', args: { title: 'Haiku', filename: 'haiku.md', content: 'old pond' } }] };
-      if (call === 1) return { text: `Done: ${lastToolContent(req)}` };
-      const id = conversation.artifacts()[0]?.id;
-      if (call === 2) return { toolCalls: [{ name: 'update_artifact', args: { id, content: 'old pond\nfrog jumps in' } }] };
-      if (call === 3) return { toolCalls: [{ name: 'read_artifact', args: { id, revision: 1 } }] };
-      if (last.role === 'tool') return { text: 'ok' };
-      return { text: 'ok' };
+      const id = conversation.artifacts().find((v) => v.title.startsWith('Haiku'))?.id;
+      switch (call) {
+        case 0:
+          return { toolCalls: [{ name: 'create_artifact', args: { title: 'Haiku', path: 'haiku.md', content: 'old pond' } }] };
+        case 1:
+          return { toolCalls: [{ name: 'create_artifact', args: { title: 'Numbers', path: 'docs/existing.csv' } }] };
+        case 2:
+          return { text: `Done: ${lastToolContent(req)}` };
+        case 3:
+          return { toolCalls: [{ name: 'read_artifact', args: { id } }] };
+        case 4:
+          return { toolCalls: [{ name: 'update_artifact', args: { id, title: 'Haiku (two lines)' } }] };
+        case 5:
+          return { toolCalls: [{ name: 'create_artifact', args: { title: 'Outside', path: '../elsewhere.md', content: 'x' } }] };
+        default:
+          return { text: 'ok' };
+      }
     };
     const { factory, providers } = scriptedFactory(script);
     const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
     const session = runtime.createSession();
-    const r1 = await session.run('Write a haiku as an artifact');
-    assert.match(r1.text, /Created artifact a\d+ "Haiku"/);
-    const id = conversation.artifacts()[0]!.id;
+    const r1 = await session.run('Write a haiku and show the numbers');
+    assert.match(r1.text, /Created artifact a\d+ "Numbers" shows docs\/existing.csv/);
+    // The file is written where the agent said, and nothing is copied.
+    assert.equal(fs.readFileSync(path.join(dir, 'haiku.md'), 'utf8'), 'old pond');
+    assert.equal(fs.existsSync(path.join(dir, '.sfagents', 'artifacts')), false, 'no managed copies');
+    const haiku = conversation.artifacts().find((v) => v.title === 'Haiku')!;
+    assert.deepEqual([haiku.file, haiku.type, haiku.rev], ['haiku.md', 'document', 1]);
+    const numbers = conversation.artifacts().find((v) => v.title === 'Numbers')!;
+    assert.deepEqual([numbers.file, numbers.type], ['docs/existing.csv', 'data']);
+    // Editing the file is editing the artifact.
+    fs.writeFileSync(path.join(dir, 'haiku.md'), 'old pond\nfrog jumps in');
     await session.run('Add a second line');
-    const views = conversation.artifacts();
-    assert.equal(views.length, 1);
-    assert.equal(views[0]!.rev, 2);
-    assert.equal(views[0]!.run !== undefined, true);
-    const record = conversation.state.artifactById.get(id)!;
-    assert.ok(record.callId && record.message, 'artifact records link to the requesting call and message');
     const requests = providers.get('main')!.requests;
+    assert.match(JSON.stringify(requests[4]!.messages), /frog jumps in/);
+    const v = conversation.artifacts().find((x) => x.id === haiku.id)!;
+    assert.deepEqual([v.title, v.rev, v.file], ['Haiku (two lines)', 2, 'haiku.md']);
     const firstTools = (requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name);
-    for (const n of ['create_artifact', 'update_artifact', 'list_artifacts', 'read_artifact']) assert.ok(firstTools.includes(n), n);
+    for (const n of ['create_artifact', 'update_artifact', 'list_artifacts', 'read_artifact', 'create_app_artifact']) assert.ok(firstTools.includes(n), n);
     assert.match((requests[0]!.messages[0] as { content: string }).content, /<artifacts_guidance>/);
-    // The second turn's system prompt lists the artifact.
-    assert.match((requests[2]!.messages[0] as { content: string }).content, new RegExp(`<artifacts>\\n- \\[${id}\\] Haiku — haiku.md, document, revision 1`));
-    // read_artifact returns the requested revision.
-    assert.match(JSON.stringify(requests[4]!.messages), /old pond/);
-    assert.doesNotMatch(lastToolContent(requests[4]!.request) ?? '', /frog/);
+    assert.match((requests[3]!.messages[0] as { content: string }).content, new RegExp(`<artifacts>[\\s\\S]*\\[${haiku.id}\\] Haiku — haiku.md, document`));
+    // Outside the agent's workspace: refused.
+    await session.run('Write elsewhere');
+    assert.match(JSON.stringify(requests[requests.length - 1]!.messages), /outside this agent's permitted workspace roots/);
+    assert.equal(fs.existsSync(path.join(dir, '..', 'elsewhere.md')), false);
+    const record = conversation.state.artifactById.get(haiku.id)!;
+    assert.ok(record.callId && record.message, 'artifact records link to the requesting call and message');
     await runtime.dispose();
     conversation.close();
+  });
+
+  test('writing with create_artifact asks like write_file; app artifacts record the address', async () => {
+    const dir = project({ tools: { allow: ['read_file'] } });
+    const { tree, conversation } = open(dir);
+    let asked = 0;
+    const script: Script = (_req, call) =>
+      call === 0
+        ? { toolCalls: [{ name: 'create_artifact', args: { title: 'Plan', path: 'plan.md', content: '# Plan' } }, { name: 'create_app_artifact', args: { title: 'Prototype', port: 5173 } }] }
+        : { text: 'ok' };
+    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => (asked++, 'allow_once') });
+    await runtime.createSession().run('go');
+    assert.equal(asked, 1, 'only the write asks');
+    const app = conversation.artifacts().find((v) => v.type === 'app')!;
+    assert.equal(app.url, 'http://127.0.0.1:5173/');
+    assert.throws(() => conversation.artifactContent(app.id), /is an application/);
+    await runtime.dispose();
+    conversation.close();
+    // Reopening keeps the file and the address.
+    const again = open(dir).conversation;
+    assert.deepEqual(again.artifacts().map((v) => [v.title, v.file ?? v.url]).sort(), [['Plan', 'plan.md'], ['Prototype', 'http://127.0.0.1:5173/']]);
+    again.close();
   });
 
   test('agents in a thread have no artifact tools by default; "read" cannot create', async () => {

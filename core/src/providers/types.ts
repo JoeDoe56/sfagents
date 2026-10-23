@@ -74,6 +74,8 @@ export interface TokenUsage {
 
 export type ModelStreamEvent =
   | { type: 'text'; text: string }
+  /** Something the user should know, e.g. another account took over. */
+  | { type: 'notice'; text: string }
   | { type: 'reasoning'; text: string }
   | {
       type: 'done';

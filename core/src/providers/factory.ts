@@ -1,19 +1,42 @@
 /**
- * Builds a model provider from an agent definition. API keys come only from
- * the environment (or an untracked .env file loaded by the CLI), never from
- * agent JSON.
+ * Builds the model provider for an agent from its `provider` entries:
+ *
+ * - a provider added in Settings (looked up by name in the registry; its key
+ *   or sign-in comes from the OS keyring), or
+ * - "openrouter" / "openai-compatible", whose keys come from environment
+ *   variables (or the project's untracked .env), as before.
+ *
+ * With several entries the agent gets a failover provider: when the current
+ * account reports a limit (quota, rate limit, signed out, no credit), the
+ * next takes over for the same request, and stays current afterwards.
  */
 
-import type { AgentDefinition } from '../agents/definition.js';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { AgentDefinition, ProviderChoice } from '../agents/definition.js';
 import { OPENROUTER_BASE_URL, OpenAICompatibleProvider } from './openai-compatible.js';
-import type { ModelProvider } from './types.js';
+import { ProviderError, type ModelProvider, type ModelRequest, type ModelStreamEvent } from './types.js';
+import type { AnthropicSecret, CustomSecret, OpenAISecret, OpenRouterSecret, ProviderRecord, ProviderRegistry } from './registry.js';
+import { ChatGPTProvider, OpenAITokens, isAccountLimitStatus } from './openai-chatgpt.js';
+import { ClaudeSubscriptionProvider } from './claude-subscription.js';
+import { readJsonFile, writeFileAtomic } from '../settings/home.js';
+import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 export const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
 
 export class MissingCredentialError extends Error {
   constructor(readonly envName: string, agentId: string) {
-    super(`Environment variable ${envName} is not set (needed by agent "${agentId}"). Set it in your shell or in the project's .env file.`);
+    super(`Environment variable ${envName} is not set (needed by agent "${agentId}"). Set it in your shell or in the project's .env file, or add a provider in Settings and name it in the agent file.`);
     this.name = 'MissingCredentialError';
+  }
+}
+
+export class UnknownProviderError extends Error {
+  constructor(name: string, agentId: string, known: string[]) {
+    super(
+      `Agent "${agentId}" uses provider "${name}", which is not set up. ${known.length ? `Providers: ${known.map((k) => `"${k}"`).join(', ')}.` : 'No providers are set up yet.'} Add one in Settings → Providers (or with "sfagents providers add"), or use "openrouter" with OPENROUTER_API_KEY.`,
+    );
+    this.name = 'UnknownProviderError';
   }
 }
 
@@ -26,26 +49,220 @@ export function credentialEnvNames(definitions: Iterable<Readonly<AgentDefinitio
   return [...names];
 }
 
-export function createDefaultProviderFactory(env: NodeJS.ProcessEnv = process.env): ProviderFactory {
+/** Which entry of each agent's provider list is current (shared by the CLI and the web interface's session). */
+export class AccountState {
+  private readonly current = new Map<string, string>();
+  private readonly listeners = new Set<(agent: string, provider: string) => void>();
+
+  /** The provider name in use for `agent`, if one was chosen or failed over to. */
+  get(agent: string): string | undefined {
+    return this.current.get(agent);
+  }
+
+  set(agent: string, provider: string | undefined): void {
+    if (provider === undefined) this.current.delete(agent);
+    else this.current.set(agent, provider);
+    if (provider !== undefined) for (const l of this.listeners) l(agent, provider);
+  }
+
+  onChange(listener: (agent: string, provider: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  entries(): Array<[string, string]> {
+    return [...this.current];
+  }
+}
+
+interface FactoryOptions {
+  env?: NodeJS.ProcessEnv;
+  /** Providers added in Settings; without one, only the environment-variable providers work. */
+  registry?: ProviderRegistry;
+  accounts?: AccountState;
+  fetcher?: typeof fetch;
+}
+
+/** Errors after which another account may succeed. */
+export function shouldFailOver(error: unknown): boolean {
+  if (isAbortError(error)) return false;
+  if (error instanceof UnknownProviderError || error instanceof MissingCredentialError) return true;
+  if (error instanceof ProviderError) return isAccountLimitStatus(error.status) || /insufficient|quota|credit|usage limit|rate limit/i.test(error.message);
+  return false;
+}
+
+/** Tries each provider in order, starting with the current one; see the file comment. */
+export class FailoverProvider implements ModelProvider {
+  readonly id: string;
+
+  constructor(
+    private readonly agent: string,
+    private readonly choices: readonly ProviderChoice[],
+    private readonly build: (choice: ProviderChoice) => ModelProvider,
+    private readonly accounts: AccountState,
+  ) {
+    this.id = choices.map((c) => c.provider).join(' → ');
+  }
+
+  async *stream(request: ModelRequest): AsyncIterable<ModelStreamEvent> {
+    const current = this.accounts.get(this.agent);
+    const start = Math.max(0, this.choices.findIndex((c) => c.provider.toLowerCase() === current?.toLowerCase()));
+    const errors: string[] = [];
+    for (let k = 0; k < this.choices.length; k++) {
+      const choice = this.choices[(start + k) % this.choices.length]!;
+      let yielded = false;
+      try {
+        const provider = this.build(choice);
+        if (k > 0) yield { type: 'notice', text: `Switched to "${choice.provider}"${choice.model !== request.model ? ` (${choice.model})` : ''}: ${errors[errors.length - 1]}` };
+        for await (const event of provider.stream({ ...request, model: choice.model })) {
+          if (event.type === 'text' || event.type === 'reasoning') yielded = true;
+          yield event;
+        }
+        if (k > 0 || current === undefined) this.accounts.set(this.agent, choice.provider);
+        return;
+      } catch (error) {
+        // Once text was streamed the turn can't be retried silently elsewhere.
+        if (yielded || !shouldFailOver(error) || k === this.choices.length - 1) {
+          if (errors.length && !yielded) throw new ProviderError(`${getErrorMessage(error)} (also tried: ${errors.join('; ')})`, error instanceof ProviderError ? error.status : undefined);
+          throw error;
+        }
+        errors.push(`"${choice.provider}": ${getErrorMessage(error)}`);
+      }
+    }
+  }
+}
+
+/** A stable id for OpenAI's sign-in, per installation (not secret). */
+function openAIHostId(dir: string): string {
+  const file = path.join(dir, 'openai-host.json');
+  const existing = readJsonFile<{ id?: string }>(file, {});
+  if (existing.id) return existing.id;
+  const id = `urn:uuid:${randomUUID()}`;
+  writeFileAtomic(file, JSON.stringify({ id }));
+  return id;
+}
+
+export function chatGPTHostId(registry: ProviderRegistry): string {
+  return openAIHostId(registry.dir);
+}
+
+export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | FactoryOptions = process.env): ProviderFactory {
+  const options: FactoryOptions = 'registry' in envOrOptions || 'accounts' in envOrOptions || 'env' in envOrOptions || 'fetcher' in envOrOptions ? (envOrOptions as FactoryOptions) : { env: envOrOptions as NodeJS.ProcessEnv };
+  const env = options.env ?? process.env;
+  const accounts = options.accounts ?? new AccountState();
   const cache = new Map<string, ModelProvider>();
-  return (definition) => {
+  const tokens = new Map<string, OpenAITokens>();
+
+  const lazySecret = <T>(record: ProviderRecord): (() => Promise<T>) => {
+    return async () => {
+      const s = await options.registry!.secret<T & object>(record.id);
+      if (!s) throw new ProviderError(`The key or sign-in for provider "${record.name}" is missing from the keyring. Remove and add the provider again.`, 401);
+      return s as T;
+    };
+  };
+
+  const fromRecord = (record: ProviderRecord): ModelProvider => {
+    const key = `rec\0${record.id}\0${record.kind}\0${record.baseUrl ?? ''}`;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    let provider: ModelProvider;
+    switch (record.kind) {
+      case 'openrouter':
+      case 'custom': {
+        const secret = lazySecret<OpenRouterSecret | CustomSecret>(record);
+        const baseUrl = record.kind === 'openrouter' ? OPENROUTER_BASE_URL : record.baseUrl!;
+        let inner: OpenAICompatibleProvider | null = null;
+        provider = {
+          id: record.name,
+          async *stream(request) {
+            if (!inner) {
+              const s = await secret();
+              inner = new OpenAICompatibleProvider({ id: record.name, baseUrl, apiKey: s.apiKey || 'sk-no-key' });
+            }
+            yield* inner.stream(request);
+          },
+        };
+        break;
+      }
+      case 'openai': {
+        const secret = lazySecret<OpenAISecret>(record);
+        let inner: ChatGPTProvider | null = null;
+        provider = {
+          id: record.name,
+          async *stream(request) {
+            if (!inner) {
+              let t = tokens.get(record.id);
+              if (!t) {
+                t = new OpenAITokens(await secret(), (next) => options.registry!.setSecret(record.id, next), options.fetcher);
+                tokens.set(record.id, t);
+              }
+              inner = new ChatGPTProvider(record.name, t, options.fetcher);
+            }
+            yield* inner.stream(request);
+          },
+        };
+        break;
+      }
+      case 'anthropic': {
+        const secret = lazySecret<AnthropicSecret>(record);
+        provider = new ClaudeSubscriptionProvider(record.name, async () => (await secret()).token, path.join(options.registry!.dir, 'claude', record.id));
+        break;
+      }
+    }
+    cache.set(key, provider);
+    return provider;
+  };
+
+  const single = (choice: ProviderChoice, definition: Readonly<AgentDefinition>): ModelProvider => {
+    const record = options.registry?.find(choice.provider);
+    if (record) return fromRecord(record);
     let baseUrl: string;
     let envName: string;
-    if (definition.provider === 'openrouter') {
+    if (choice.provider === 'openrouter') {
       baseUrl = OPENROUTER_BASE_URL;
       envName = OPENROUTER_API_KEY_ENV;
+    } else if (choice.provider === 'openai-compatible' && definition.providerOptions) {
+      baseUrl = definition.providerOptions.baseUrl;
+      envName = definition.providerOptions.apiKeyEnv;
     } else {
-      baseUrl = definition.providerOptions!.baseUrl;
-      envName = definition.providerOptions!.apiKeyEnv;
+      throw new UnknownProviderError(choice.provider, definition.id, options.registry?.list().map((r) => r.name) ?? []);
     }
     const apiKey = env[envName];
     if (!apiKey) throw new MissingCredentialError(envName, definition.id);
-    const key = `${definition.provider}\0${baseUrl}\0${envName}`;
+    const key = `env\0${choice.provider}\0${baseUrl}\0${envName}`;
     let provider = cache.get(key);
     if (!provider) {
-      provider = new OpenAICompatibleProvider({ id: definition.provider, baseUrl, apiKey });
+      provider = new OpenAICompatibleProvider({ id: choice.provider, baseUrl, apiKey });
       cache.set(key, provider);
     }
     return provider;
   };
+
+  return (definition) => {
+    let choices = definition.providers?.length ? definition.providers : [{ provider: definition.provider, model: definition.model }];
+    const picked = accounts.get(definition.id);
+    // An account picked by hand that the agent file doesn't list goes first, with the agent's model.
+    if (picked && !choices.some((c) => c.provider.toLowerCase() === picked.toLowerCase()) && options.registry?.find(picked)) {
+      choices = [{ provider: picked, model: choices[0]!.model }, ...choices];
+    }
+    if (choices.length === 1) return single(choices[0]!, definition);
+    return new FailoverProvider(definition.id, choices, (c) => single(c, definition), accounts);
+  };
 }
+
+/** Whether an agent's providers can be built now (for early "not set up" errors). Returns the problems. */
+export function checkProviders(definition: Readonly<AgentDefinition>, registry: ProviderRegistry | undefined, env: NodeJS.ProcessEnv): string[] {
+  const problems: string[] = [];
+  const choices = definition.providers?.length ? definition.providers : [{ provider: definition.provider, model: definition.model }];
+  for (const c of choices) {
+    if (registry?.find(c.provider)) continue;
+    if (c.provider === 'openrouter') {
+      if (!env[OPENROUTER_API_KEY_ENV]) problems.push(new MissingCredentialError(OPENROUTER_API_KEY_ENV, definition.id).message);
+    } else if (c.provider === 'openai-compatible' && definition.providerOptions) {
+      if (!env[definition.providerOptions.apiKeyEnv]) problems.push(new MissingCredentialError(definition.providerOptions.apiKeyEnv, definition.id).message);
+    } else problems.push(new UnknownProviderError(c.provider, definition.id, registry?.list().map((r) => r.name) ?? []).message);
+  }
+  // One usable provider is enough to start.
+  return problems.length === choices.length ? problems : [];
+}
+

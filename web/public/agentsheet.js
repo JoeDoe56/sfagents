@@ -237,7 +237,7 @@ const CATEGORY_COLORS = {
 let current = null;
 
 /** Opens the sheet (or brings the open one forward). Returns a handle the app refreshes after each reply. */
-export function openAgentSheet({ agent, onSaved } = {}) {
+export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
   if (current) return current;
   let info = agent ?? null;
   let context = null;
@@ -246,7 +246,7 @@ export function openAgentSheet({ agent, onSaved } = {}) {
   const parts = {};
   // The project's agents (for the menu), what is saved, and what is staged.
   let agents = [];
-  let saved = { agent: info?.id ?? null, reasoning: info?.reasoning ?? null };
+  let saved = { agent: info?.id ?? null, reasoning: info?.reasoning ?? null, account: info?.account ?? null };
   const staged = { ...saved };
   const levelsOf = () => info?.levels ?? ['low', 'medium', 'high', 'xhigh', 'max'];
   const agentById = (id) => agents.find((a) => a.id === id);
@@ -256,10 +256,21 @@ export function openAgentSheet({ agent, onSaved } = {}) {
   }
 
   /** Shows the staged agent and effort, and marks the sheet changed when they differ from what is saved. */
+  const changed = () => staged.agent !== saved.agent || (staged.reasoning ?? null) !== (saved.reasoning ?? null) || (staged.account ?? null) !== (saved.account ?? null);
+
   function showStaged(animate = true) {
     const a = stagedAgent();
     parts.agentName.textContent = a?.name ?? a?.id ?? 'Agent';
-    parts.agentModel.textContent = a?.model ?? '';
+    // Accounts are the saved agent's (another agent's show once it is saved).
+    const sameAgent = staged.agent === saved.agent;
+    const accounts = sameAgent ? (info?.accounts ?? []) : [];
+    const account = accounts.find((x) => x.name === staged.account) ?? accounts[0];
+    parts.accountRow.hidden = !sameAgent || accounts.length === 0;
+    parts.accountName.textContent = account?.name ?? '';
+    parts.accountPicker.disabled = accounts.length < 2;
+    // The account row changes the medium height.
+    requestAnimationFrame(() => ctx.refresh());
+    parts.agentModel.textContent = (sameAgent ? account?.model : null) ?? a?.model ?? '';
     parts.agentDesc.textContent = a?.description ?? '';
     parts.agentDesc.hidden = !a?.description;
     const levels = levelsOf();
@@ -267,7 +278,25 @@ export function openAgentSheet({ agent, onSaved } = {}) {
     parts.level.textContent = staged.reasoning ? (LEVEL_NAMES[value] ?? value) : 'Default';
     if (animate) slider.set(value);
     parts.picker.disabled = agents.length < 2 && !!agents.length;
-    ctx.setDirty(staged.agent !== saved.agent || (staged.reasoning ?? null) !== (saved.reasoning ?? null));
+    ctx.setDirty(changed());
+  }
+
+  function pickAccount() {
+    const accounts = info?.accounts ?? [];
+    if (accounts.length < 2) return;
+    const listed = accounts.filter((a) => a.listed);
+    const others = accounts.filter((a) => !a.listed);
+    const item = (a) => ({
+      label: a.name,
+      detail: [a.model, a.available ? null : 'not set up'].filter(Boolean).join(' · '),
+      checked: a.name === (staged.account ?? accounts[0].name),
+      disabled: !a.available,
+      action: () => {
+        staged.account = a.name;
+        showStaged(false);
+      },
+    });
+    showMenu({ anchor: parts.accountPicker, align: 'end', title: listed.length > 1 ? 'In order: the next takes over at a limit' : undefined, groups: [listed.map(item), others.map(item)] });
   }
 
   function pickAgent() {
@@ -283,6 +312,7 @@ export function openAgentSheet({ agent, onSaved } = {}) {
           action: () => {
             if (a.id === staged.agent) return;
             staged.agent = a.id;
+            staged.account = a.id === saved.agent ? saved.account : null;
             // Each agent keeps its own effort.
             staged.reasoning = a.id === saved.agent ? saved.reasoning : (a.reasoning ?? null);
             showStaged();
@@ -292,10 +322,21 @@ export function openAgentSheet({ agent, onSaved } = {}) {
     });
   }
 
+  // The gear opens the agent's file in the file manager's editor.
+  const gear = el('button', 'ms-close ag-gear');
+  gear.type = 'button';
+  gear.dataset.glass = 'control';
+  gear.setAttribute('aria-label', 'Edit the agent file');
+  gear.append(sym('gear', 19));
+  gear.addEventListener('click', () => {
+    const a = stagedAgent();
+    if (a?.file) onEditFile?.(a.file);
+  });
   const ctx = openSheet({
     title: 'Agent',
     detents: ['medium', 'large'],
     className: 'ag-sheet',
+    trailing: gear,
     build(sheet) {
       const body = sheet.body;
       // The agent: a row with a pop-up button, as Calendar's are.
@@ -314,6 +355,20 @@ export function openAgentSheet({ agent, onSaved } = {}) {
       parts.picker.addEventListener('click', pickAgent);
       line.append(text, parts.picker);
       parts.agentModel = el('p', 'ag-model ag-unit', info?.model ?? '');
+      // The account (provider) it replies with: its file's list, failover order, or another of the same kind.
+      parts.accountRow = el('div', 'ag-agent ag-account ag-unit');
+      const accText = el('div', 'ag-agent-text');
+      accText.append(el('span', 'ag-agent-label', 'Account'));
+      parts.accountPicker = el('button', 'ag-picker');
+      parts.accountPicker.type = 'button';
+      parts.accountPicker.setAttribute('aria-haspopup', 'menu');
+      parts.accountName = el('span', 'ag-picker-name', info?.account ?? '');
+      const chev2 = el('span', 'ag-chevrons');
+      chev2.append(sym('chevron.up', 8), sym('chevron.down', 8));
+      parts.accountPicker.append(parts.accountName, chev2);
+      parts.accountPicker.addEventListener('click', pickAccount);
+      parts.accountRow.append(accText, parts.accountPicker);
+      parts.accountRow.hidden = true;
 
       const effort = el('div', 'ag-effort');
       const label = el('p', 'ag-label ag-unit');
@@ -340,18 +395,19 @@ export function openAgentSheet({ agent, onSaved } = {}) {
       marker.dataset.mediumEnd = '';
 
       parts.details = el('div', 'ag-details');
-      body.append(line, parts.agentModel, effort, bar.element, marker, parts.details);
+      body.append(line, parts.accountRow, parts.agentModel, effort, bar.element, marker, parts.details);
       // The slider's capsule is Liquid Glass, as ChatGPT's is.
       sheet.addGlass(slider.element.querySelector('.ag-track'), 'control');
     },
     onConfirm: async () => {
       const body = {};
       if (staged.agent && staged.agent !== saved.agent) body.agent = staged.agent;
+      else if ((staged.account ?? null) !== (saved.account ?? null) && staged.account) body.account = staged.account;
       if ((staged.reasoning ?? null) !== (saved.reasoning ?? null) || body.agent) body.reasoning = staged.reasoning;
       if (!Object.keys(body).length) return true;
       try {
         info = await postJson('/api/agent', body);
-        saved = { agent: info.id, reasoning: info.reasoning };
+        saved = { agent: info.id, reasoning: info.reasoning, account: info.account ?? null };
         onSaved?.(info);
         return true;
       } catch (error) {
@@ -377,10 +433,10 @@ export function openAgentSheet({ agent, onSaved } = {}) {
   async function loadAgent() {
     try {
       const [one, all] = await Promise.all([getJson('/api/agent'), getJson('/api/agents')]);
-      const untouched = staged.agent === saved.agent && (staged.reasoning ?? null) === (saved.reasoning ?? null);
+      const untouched = !changed();
       info = one;
       agents = all.agents;
-      saved = { agent: info.id, reasoning: info.reasoning };
+      saved = { agent: info.id, reasoning: info.reasoning, account: info.account ?? null };
       if (untouched) Object.assign(staged, saved);
       showStaged();
     } catch {
@@ -515,9 +571,9 @@ export function openAgentSheet({ agent, onSaved } = {}) {
     refresh: () => loadContext(),
     setAgent: (a) => {
       // Another window changed it: follow, unless this sheet has its own changes.
-      const untouched = staged.agent === saved.agent && (staged.reasoning ?? null) === (saved.reasoning ?? null);
+      const untouched = !changed();
       info = { ...info, ...a };
-      saved = { agent: info.id, reasoning: info.reasoning ?? null };
+      saved = { agent: info.id, reasoning: info.reasoning ?? null, account: info.account ?? null };
       if (untouched) {
         Object.assign(staged, saved);
         showStaged();

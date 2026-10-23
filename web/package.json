@@ -12,11 +12,25 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "public", "native/bin", "native/windows/*.cs", "native/windows/*.csproj", "native/windows/NuGet.Config", "native/windows/packages.lock.json", "native/linux", "native/NOTICE.md", "native/licenses"],
+  "files": [
+    "dist",
+    "public",
+    "native/bin",
+    "native/windows/*.cs",
+    "native/windows/*.csproj",
+    "native/windows/NuGet.Config",
+    "native/windows/packages.lock.json",
+    "native/linux",
+    "native/NOTICE.md",
+    "native/licenses"
+  ],
   "engines": {
     "node": ">=20.12"
   },
   "dependencies": {
     "@sfagents/core": "0.1.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "1.1.0"
   }
 }

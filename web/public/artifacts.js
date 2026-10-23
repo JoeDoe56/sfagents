@@ -6,6 +6,11 @@ import { renderMarkdown, escapeHtml } from './markdown.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 
 const ICONS = {
+  app: 'macwindow',
+  pdf: 'doc.richtext',
+  video: 'film',
+  audio: 'waveform',
+  genui: 'square.grid.2x2',
   document: 'doc.richtext',
   html: 'globe',
   image: 'photo',
@@ -31,13 +36,14 @@ export function relativeTime(iso) {
 }
 
 async function loadPreview(a) {
-  const key = `${a.id}:${a.rev}`;
+  const key = `${a.id}:${a.version ?? a.rev}`;
   if (previews.has(key)) return previews.get(key);
   let value = { kind: 'icon' };
   if (a.type === 'image') value = { kind: 'image' };
-  else if (a.type !== 'html') {
+  else if (a.type === 'app' || a.missing || !['document', 'code', 'data', 'text', 'genui'].includes(a.type)) value = { kind: 'icon' };
+  else {
     try {
-      const res = await fetch(`${a.url}?rev=${a.rev}`);
+      const res = await fetch(`${a.url}?rev=${a.version ?? a.rev}`);
       if (res.ok) {
         const text = (await res.text()).slice(0, 1200);
         value = { kind: a.type === 'document' ? 'prose' : 'code', text };
@@ -68,7 +74,7 @@ export function renderTiles(container, artifacts, { onOpen, onPin }) {
   const existing = new Map([...container.children].map((el) => [el.dataset.id, el]));
   const wanted = [];
   for (const a of artifacts) {
-    const sig = `${a.rev}|${a.pinned}|${a.title}|${a.updated}`;
+    const sig = `${a.version ?? a.rev}|${a.pinned}|${a.title}|${a.updated}|${a.missing ? 1 : 0}`;
     let tile = existing.get(a.id);
     if (!tile || tile.dataset.sig !== sig) {
       tile?.remove();
@@ -105,7 +111,7 @@ function buildTile(a, { onOpen, onPin }) {
   title.textContent = a.title;
   const meta = document.createElement('div');
   meta.className = 'tile-meta';
-  meta.textContent = `${a.filename}${a.rev > 1 ? ` · v${a.rev}` : ''} · ${relativeTime(a.updated)}`;
+  meta.textContent = `${a.missing ? 'File missing' : a.filename} · ${relativeTime(a.updated)}`;
   content.append(preview, title, meta);
   const pin = document.createElement('button');
   pin.type = 'button';
@@ -132,7 +138,7 @@ function buildTile(a, { onOpen, onPin }) {
       const img = document.createElement('img');
       img.alt = '';
       img.loading = 'lazy';
-      img.src = `${a.url}?rev=${a.rev}`;
+      img.src = `${a.url}?rev=${a.version ?? a.rev}`;
       preview.className = 'tile-preview image';
       preview.replaceChildren(img);
     } else if (p.kind === 'prose' || p.kind === 'code') {
@@ -166,7 +172,7 @@ export function chatCard(a, onOpen) {
   const title = document.createElement('strong');
   title.textContent = a.title;
   const meta = document.createElement('span');
-  meta.textContent = `${a.filename}${a.rev > 1 ? ` · v${a.rev}` : ''}`;
+  meta.textContent = a.missing ? `${a.filename} · file missing` : a.type === 'app' ? `App · ${a.filename}` : a.filename;
   text.append(title, meta);
   foot.append(small, text);
   card.append(preview, foot);
@@ -176,16 +182,16 @@ export function chatCard(a, onOpen) {
       const img = document.createElement('img');
       img.alt = '';
       img.loading = 'lazy';
-      img.src = `${a.url}?rev=${a.rev}`;
+      img.src = `${a.url}?rev=${a.version ?? a.rev}`;
       preview.className = 'art-card-preview image';
       preview.replaceChildren(img);
-    } else if (a.type === 'html') {
+    } else if (a.type === 'html' && !a.missing) {
       // A web page: a scaled, script-free render.
       const frame = document.createElement('iframe');
       frame.setAttribute('sandbox', '');
       frame.setAttribute('tabindex', '-1');
       frame.loading = 'lazy';
-      frame.src = `${a.url}?rev=${a.rev}`;
+      frame.src = `${a.url}?rev=${a.version ?? a.rev}`;
       preview.className = 'art-card-preview page';
       preview.replaceChildren(frame);
     } else if (p.kind === 'prose' || p.kind === 'code') {
@@ -214,7 +220,7 @@ export function createViewer({ root, title, meta, body, close, pin, open, downlo
     title.textContent = a.title;
     meta.textContent = `${a.filename} · revision ${a.rev} · ${relativeTime(a.updated)}`;
     updatePin(a.pinned);
-    const raw = `${a.url}?rev=${a.rev}`;
+    const raw = `${a.url}?rev=${a.version ?? a.rev}`;
     open.href = raw;
     download.href = `${raw}&download=1`;
     download.setAttribute('download', a.filename);

@@ -163,6 +163,9 @@ export function createSheetFrame(options = {}) {
         else {
           anim = null;
           resolve();
+          // Once still, glass inside the sheet measures and repaints from where things ended up.
+          requestAnimationFrame(() => options.onMove?.());
+          setTimeout(() => options.onMove?.(), 120);
         }
       };
       anim = { id: requestAnimationFrame(step), cancel() { cancelAnimationFrame(this.id); anim = null; resolve(); } };
@@ -278,7 +281,7 @@ export function createSheetFrame(options = {}) {
       if (e.touches.length !== 1 || drag) return;
       const t = e.touches[0];
       const scroller = options.scroller?.();
-      if (!scroller || !scroller.contains(e.target) || e.target.closest('[role="slider"], input[type="range"], textarea')) return;
+      if (!scroller || !scroller.contains(e.target) || e.target.closest('[role="slider"], input[type="range"], textarea, [data-no-sheet-drag]')) return;
       touch = { y: t.clientY, x: t.clientX, scroller, taken: false, decided: false };
     },
     { passive: true },
@@ -350,7 +353,10 @@ export function createSheetFrame(options = {}) {
     addDragArea,
     /** Re-reads the medium height (content changed). */
     refresh: () => {
-      if (open && detent === 'medium' && !drag && !anim) apply(offsetFor('medium'));
+      if (!open || detent !== 'medium' || drag) return;
+      // While opening, aim the running animation at the new height.
+      if (anim) settle('medium', { duration: 300 });
+      else apply(offsetFor('medium'));
     },
     get detent() {
       return detent;
@@ -424,6 +430,7 @@ export function openSheet(options) {
   const frame = createSheetFrame({
     detents: options.detents,
     className: options.className,
+    z: options.z,
     label: options.title,
     scroller: () => body,
     mediumHeight: () => (options.mediumHeight ? options.mediumHeight(ctx) : (body.querySelector('[data-medium-end]')?.offsetTop ?? body.scrollHeight) + 16 + safeBottom()),
@@ -464,6 +471,16 @@ export function openSheet(options) {
       frame.onMove = bands;
       body.addEventListener('scroll', bands, { passive: true });
       new ResizeObserver(bands).observe(body);
+      // Content shown, hidden or reflowed moves the glass controls inside the body.
+      let queued = false;
+      new MutationObserver(() => {
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(() => {
+          queued = false;
+          bands();
+        });
+      }).observe(body, { subtree: true, childList: true, attributes: true, attributeFilter: ['hidden', 'class'] });
       bands();
     } catch {
       glass = null;

@@ -45,7 +45,7 @@ const FORBIDDEN = /@qwen-code\/|qwen-code-core|packages\/(acp-bridge|browser-use
 
 for (const pkg of ['core', 'web', 'cli']) {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, pkg, 'package.json'), 'utf8'));
-  const declared = new Set([...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.devDependencies ?? {})]);
+  const declared = new Set([...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.devDependencies ?? {}), ...Object.keys(manifest.optionalDependencies ?? {})]);
   for (const dep of declared) if (FORBIDDEN.test(dep)) problems.push(`${pkg}/package.json declares forbidden dependency ${dep}`);
   for (const [name, script] of Object.entries(manifest.scripts ?? {})) {
     if (/\.\.\/\.\.\//.test(script)) problems.push(`${pkg}/package.json script "${name}" reaches outside the workspace: ${script}`);

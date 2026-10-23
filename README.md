@@ -1,13 +1,15 @@
 # SF Agents
 
-A small agent runtime and CLI. You define agents in JSON. Each agent talks to a model through OpenRouter (or any OpenAI-compatible endpoint), uses the built-in file, search and shell tools and the MCP tools it is allowed, and can message the other agents it is granted, in persistent threads, in parallel.
+A small agent runtime and CLI. You define agents in JSON. Each agent talks to a model through a provider you add once (an OpenRouter key, your ChatGPT or Claude plan, or any OpenAI-compatible endpoint such as llama.cpp), uses the built-in file, search and shell tools and the MCP tools it is allowed, and can message the other agents it is granted, in persistent threads, in parallel.
 
 SF Agents started as an extraction of the minimal runtime from Qwen Code's `packages/core` and `packages/cli` (see [PROVENANCE.md](PROVENANCE.md)). It has a terminal interface and a web interface (`sfagents web`), one persistent conversation per project, and artifacts the agent creates for you to keep.
 
 ## Requirements
 
 - Node.js 20.12 or newer (developed and tested on Node 22).
-- An OpenRouter API key, or another OpenAI-compatible endpoint.
+- A model provider: an OpenRouter API key, a ChatGPT plan, a Claude plan, or an OpenAI-compatible endpoint.
+- An operating-system keyring for provider keys and sign-ins: Windows Credential Manager and the macOS Keychain are built in; on Linux, a Secret Service (GNOME Keyring, KWallet or KeePassXC). Without one, providers can't be added (environment-variable keys still work).
+- The terminal uses node-pty: Windows and macOS get prebuilt binaries; on Linux `npm install` compiles it (needs `make`, a C++ compiler and Python).
 
 ## Install
 
@@ -20,15 +22,30 @@ npx sfagents --help
 
 `npm run build` rebuilds after changes. On any platform, `npm run sfagents -- <args>` also works.
 
-## Configure the API key
+## Providers and settings
 
-Set `OPENROUTER_API_KEY` in your shell, or put it in an untracked `.env` file in the project directory (next to the `agents` folder):
+Add providers in the web interface (**Settings → Providers → Add Provider**) or the terminal (`sfagents providers add …`). Each gets a name you choose, and agent files use that name as their `provider`. You can add several of the same kind, such as two Claude accounts or two OpenRouter keys:
 
-```sh
-cp .env.example .env    # then edit .env
+| Kind | What you do |
+| --- | --- |
+| OpenRouter | Paste an API key. |
+| OpenAI | **Continue with ChatGPT** signs in with your ChatGPT plan (OAuth; requests use the plan, not API billing). On this computer it finishes by itself; when you sign in from a phone, the last page doesn't load: paste its address into the sheet. |
+| Anthropic | **Continue with Claude** signs in with your Claude plan (Claude Code's `setup-token` flow, through the Claude Agent SDK bundled with SF Agents): paste the code Claude shows. |
+| Custom endpoint | An OpenAI-compatible base URL (`http://127.0.0.1:8080/v1` for llama.cpp, vLLM, LM Studio, Ollama…) and, if it needs one, a key. |
+
+Keys and sign-in tokens go only to the system keyring, never to a file, a model, or an agent's tools or shell. The list of providers (names, kinds, addresses) is `providers.json` in your user folder (`%APPDATA%\SF Agents`, `~/Library/Application Support/SF Agents`, or `~/.config/sfagents`; `SFAGENTS_HOME` overrides it).
+
+An agent may list several providers; when the current one reports that its account is out of quota, rate-limited, out of credit or signed out, the next takes over for the same request and stays current until it, too, runs out:
+
+```json
+{ "provider": ["Claude 1", "Claude 2", { "provider": "OpenRouter 1", "model": "anthropic/claude-sonnet-5.5" }], "model": "claude-sonnet-5-5" }
 ```
 
-Keys never go in agent JSON. `.env` is git-ignored. Variables already set in the environment take precedence over `.env`.
+The agent sheet's **Account** pop-up switches by hand, among the agent's providers and other accounts of the same kinds.
+
+The older environment-variable providers still work: `"provider": "openrouter"` with `OPENROUTER_API_KEY` (in your shell or an untracked `.env` next to the `agents` folder), and `"openai-compatible"` with `providerOptions`.
+
+**Settings** that aren't about agents or MCP servers are in the same sheet and in `sfagents settings`: the web server's port and listen address, the sensor source, the elevated sensor helper (Windows), and whether the terminal prints reasoning and context sizes. They are kept in `settings.json` in the same user folder; the port, address and sensor settings apply the next time SF Agents starts, and command-line flags override them for one run.
 
 ## Commands
 
@@ -39,6 +56,8 @@ Keys never go in agent JSON. `.env` is git-ignored. Variables already set in the
 | `sfagents web` | Serves the web interface at http://127.0.0.1:8093 (`--port`, `--host`). The same persistent conversation as `start`, with attachments, approvals in the page and the artifacts sheet. Ctrl+C stops it. See [Web interface](#web-interface). |
 | `sfagents conversation …` | Inspects the stored conversation without opening it for writing: `info`, `sections`, `show <section\|unassigned\|message id>`, `search <words>`, `artifacts`. `unlock` removes a stale lock after confirmation. |
 | `sfagents agents validate` | Reads the `agents` folder and prints each agent with its tools, grants, auto-approvals and roots, then the files it skipped and why. |
+| `sfagents providers` | Lists the providers; `providers add <openrouter\|openai\|anthropic\|custom> [--name N] [--url URL]` adds one (asks for the key without echoing it, or prints the sign-in address), `rename <name> <new>`, `remove <name>`. |
+| `sfagents settings` | Lists the app settings; `settings set <key> <value>` and `settings reset <key>`. |
 | `sfagents mcp list` | Connects to each server in `mcp.json` and shows its status, tools and which agents may use it. |
 
 Common options: `--config <dir|file>` (the project directory, its `agents` folder or one agent file; defaults to the current directory), `--agent <name>` / `-a` (the agent that replies), `--mcp <file>`, `--yes` (approve every call that would ask), `--show-reasoning`, `--show-context` (one line per turn: estimated context size, recent exchanges sent, older ones left out), `--conversation <file>`, `--page N` (for `conversation` listings).
@@ -95,7 +114,7 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | Field | Notes |
 | --- | --- |
 | `name` | Optional display name. The file name is the agent's identity (an older `id` field that differs from it is shown as the name). |
-| `provider` | `openrouter`, or `openai-compatible` with `"providerOptions": { "baseUrl": "...", "apiKeyEnv": "MY_KEY_VAR" }`. |
+| `provider` | The name of a provider you added ("Claude 1"), or a list of them in failover order (entries may be `{ "provider": "…", "model": "…" }` with their own model). Also `openrouter` (key from `OPENROUTER_API_KEY`) or `openai-compatible` with `"providerOptions": { "baseUrl": "...", "apiKeyEnv": "MY_KEY_VAR" }`. |
 | `model` | Any model ID the provider accepts. Nothing is hardcoded. |
 | `reasoning` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Sent as OpenRouter's `reasoning.effort` (or `reasoning_effort` for other endpoints). Reasoning blocks are passed back across tool calls. |
 | `workspace.roots` | Directories the file tools may touch, relative to the project directory. Default `["."]`. |
@@ -138,9 +157,17 @@ Threads are listed as artifacts of the conversation (`type: "agent_transcript"`)
 
 ## Artifacts
 
-Artifacts are things the agent makes for you to keep rather than say in a message: a document (`.md`), a self-contained web page (`.html`), an SVG drawing, a code or data file. The agent creates one with `create_artifact` (title, file name, content) and changes it with `update_artifact`, which writes a new revision and keeps the old ones. The file extension decides how it is shown. The agent sees an index of recent artifacts in its system prompt, and can `list_artifacts` and `read_artifact`.
+An artifact is something the agent makes for you to keep rather than say in a message: a document, a web page, an SVG drawing, code, data, a PDF, an image, or a running web app. **An artifact is the file itself**, not a copy: the agent writes a file in its workspace (or lets `create_artifact` write it, which asks like `write_file`) and `create_artifact` shows it. From then on the artifact is whatever the file is: edit the file (the agent with its tools, or you in the file manager) and the chat's preview and the tile update. `update_artifact` only retitles an artifact or points it at another file. The agent sees an index of recent artifacts in its system prompt, and can `list_artifacts` and `read_artifact`.
 
-Artifact content is stored under `.sfagents/artifacts/` and recorded in the conversation (`artifact`, `artifact_update` and `artifact_pin` records), so the list survives restarts. You pin artifacts in the web interface; `sfagents conversation artifacts` lists them with their latest revision and pins.
+Where a file is decides how it is shown:
+
+- `.sfagents/threads/` holds the threads between agents: they open as conversations, also from the file manager.
+- `genui/` in the project is reserved for GenUI components (structured, interactive pieces shown inline in the chat); their format is still to be defined, so for now they show like other files.
+- Everything else shows by its type, with a preview, and opens in the file manager's Quick Look.
+
+**Application artifacts**: when the agent starts a web app (a dev server on a port of this computer), `create_app_artifact` with the port makes it an artifact. It opens inside SF Agents, served through SF Agents' own address under `/apps/<id>/`, so you can try a prototype from your phone over whatever already reaches SF Agents (your LAN, Tailscale Serve) without exposing another port. The app's absolute paths (`/src/…`, `/@vite/client`, its own `/api/…`), redirects and live-reload sockets are routed back to it. It works while the app runs.
+
+Artifacts are recorded in the conversation (`artifact`, `artifact_update` and `artifact_pin` records, with the file's path or the app's address), so the list survives restarts. Artifacts from before this version, whose contents were copied into `.sfagents/artifacts/`, still open. You pin artifacts in the web interface; `sfagents conversation artifacts` lists them.
 
 ## Web interface
 
@@ -156,9 +183,15 @@ The page is one conversation in the style of iMessage, with a bottom bar in the 
 - **The bar** holds the message field. **+** opens the file and photo picker (you can also drop or paste files), the microphone dictates where the browser supports it, and the circle on the right sends (or stops a running turn). The field grows with the text and then scrolls, as in iMessage. Return sends on a desktop (Shift+Return adds a line); this is a setting.
 - **Swipe anywhere on the bar** (or tap the handle, or use the arrow keys on it) and it becomes a glass sheet; swipe further and it becomes an opaque sheet. Swipe down to close it; in the full sheet, pulling down at the top of the list closes it, as in Maps. Below the field: the **resource monitor**, aligned with the field: CPU (use, temperature, cores), GPU (use, temperature, VRAM used/total), memory, disk read and write activity, network down and up, process count with PSU-reported system wattage when available, the computer's and SF Agents' uptimes, and a bar per drive with used/total and how full it is (three share the width; swipe sideways for more). It reads the machine only while the sheet is open, every two seconds. Windows uses a bundled [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) library adapter, started and stopped by SF Agents; no separate app or web server is needed. Linux uses bundled [LibreHardwareMonitor-Linux](https://github.com/insight-it-gmbh/LibreHardwareMonitor-Linux) collectors and a private Python runtime, supplemented by native OS readers; macOS keeps its native readers. See [Linux sensors](docs/LINUX-SENSORS.md) for coverage, optional tools and packaging. CPU temperatures on Windows require the signed PawnIO driver and `--sensor-admin`, which elevates only the read-only sensor worker. See [Windows sensors](docs/WINDOWS-SENSORS.md) for building, one-time driver setup, packaging and permissions. `--lhm <url>` or `SFAGENTS_LHM_URL` explicitly selects an external LHM server; `--lhm off` uses OS readings only. Drive sizes always come from the file system, per volume. Tap any reading to open its **window** (it grows out of the reading, like a held notification): live graphs and details in the spirit of Windows Task Manager — CPU (per-core graphs, speed, power, temperatures), GPU (sensors, VRAM), memory (composition, committed, swap), disks (per-disk activity, volumes), network (per adapter, addresses), system (sensors), SF Agents itself, and **Processes**: search, sort, a per-process view (PID, parent, user, CPU and memory over time, command line, children), End Task, Force Quit, End Process Tree and priority, plus Users, Services (start, stop, restart) and Startup items. Windows stack like a navigation view; swipe down, tap outside or press Escape to close.
 
-The monitor's expand button opens **Files**, an opaque sheet that slides up from the bottom and stops just under the status bar, as the Claude app's sheets do (no medium height; drag its top or pull down at the top of the list to close it): a glass close button at the top left, the readings as glass chips beside it (each still opens its window), a ⋯ button at the top right, and the drives as Liquid Glass bars along the bottom, each with its name, used/total and percentage on one line (tap one to open it; the monitor's drive bars open it too). Browse lists your folders, the SF Agents project, the Trash, drives and favorites; folders show as a list or icons, sorted by name, date, size or kind, with hidden files on request, breadcrumbs and search (this folder at once, the folders inside after a pause). Hold an item (or right-click it) for a menu like Apple's: Share, Download and Info, Quick Look, Rename, Duplicate, Move, Copy to…, Compress or Uncompress (ZIP), Copy, Cut, Copy Path, Ask SF Agents (attaches the file to your message), favorites, Delete (to the system Trash, with Undo) and Put Back. ⋯ has Upload (the browser's file and media picker, into the open folder; dropping files works too), New Folder, Select (with a toolbar for many items), New Text File, Paste, view and sort options, Get Info, Copy Path, Download as ZIP and Empty Trash. Quick Look previews images, video, audio, PDFs, Markdown, HTML (without scripts), text and code, with an editor for text files; swipe or use the arrow keys between files. Name clashes ask whether to keep both, replace or skip; long operations show progress and can be cancelled. Keyboard: arrows, Space (Quick Look), F2, ⌘/Ctrl+A, C, X, V, Delete, ⌘/Ctrl+I and ⌘/Ctrl+↑. Next to it are two round buttons under the send button: **Settings** (a sheet with a medium and a large height: glass quality and whether Return sends) and a placeholder.
+The monitor's expand button opens **Files**, an opaque sheet that slides up from the bottom and stops just under the status bar, as the Claude app's sheets do (no medium height; drag its top or pull down at the top of the list to close it): a glass close button at the top left, the readings as glass chips beside it (each still opens its window), a ⋯ button at the top right, and the drives as Liquid Glass bars along the bottom, each with its name, used/total and percentage on one line (tap one to open it; the monitor's drive bars open it too). Browse lists your folders, the SF Agents project, the Trash, drives and favorites; folders show as a list or icons, sorted by name, date, size or kind, with hidden files on request, breadcrumbs and search (this folder at once, the folders inside after a pause). Hold an item (or right-click it) for a menu like Apple's: Share, Download and Info, Quick Look, Rename, Duplicate, Move, Copy to…, Compress or Uncompress (ZIP), Copy, Cut, Copy Path, Ask SF Agents (attaches the file to your message), favorites, Delete (to the system Trash, with Undo) and Put Back. ⋯ has Upload (the browser's file and media picker, into the open folder; dropping files works too), New Folder, Select (with a toolbar for many items), New Text File, Paste, view and sort options, Get Info, Copy Path, Download as ZIP and Empty Trash. Quick Look previews images, video, audio, PDFs, Markdown, HTML (without scripts), text and code, with an editor for text files; swipe or use the arrow keys between files. Name clashes ask whether to keep both, replace or skip; long operations show progress and can be cancelled. Keyboard: arrows, Space (Quick Look), F2, ⌘/Ctrl+A, C, X, V, Delete, ⌘/Ctrl+I and ⌘/Ctrl+↑. Next to it, three round buttons spread evenly down the monitor's height under the send button: **Settings** (providers, this device's glass quality and Return key, and the settings kept on the computer; see [Providers and settings](#providers-and-settings)), **Terminal** and **Search**.
 
-The round button at the right of the field is the **agent button** when there is nothing to send: it shows the app icon's character, and its glass refracts a moving gradient made from the model's name (the same model always gets the same gradient; another model gets a different one). With text it becomes the blue send button, and while a reply runs, stop. Tap it with nothing to send, or hold it (right-click with a mouse) at any time, for the agent sheet: at medium height the **agent** (a pop-up button: tap it for a menu of the project's agents, with each one's model), a **reasoning effort** slider (Low, Medium, High, Extra High, Max; kept per agent in `.sfagents/web-agent.json` and sent with every request instead of the agent's `reasoning` setting) and a **context** bar (how much of the working-context budget the next request uses). Drag it up for the breakdown: a bar and list of the system prompt, built-in, MCP, agent and conversation tools, the section index and notes, the messages, the share kept free for each turn and what is left; each tool family's tools and their sizes; the budget, the model's own context window when the provider lists it, the exchanges and sections kept, and the provider's figures for the last request. **Start a Fresh Context** makes later replies start without the earlier messages (they stay stored and searchable). Changes in the agent sheet and in Settings are saved by the check button at the top right; the close button at the top left, a swipe down or Escape leave without saving. All sheets and windows put their close button at the top left.
+**Terminal** is a full terminal emulator (xterm.js) on real shells (your login shell on macOS and Linux; PowerShell 7, else Windows PowerShell, on Windows), started in the project folder. Tabs keep running when the sheet closes or the page reloads, and any device can attach to them; the last 512 KB of output is replayed on attach. On touch screens a key bar adds Esc, Tab, Ctrl, the arrows and a few symbols. Provider keys are removed from the shells' environment.
+
+**Search** looks through every message of the conversation (also ones not loaded yet) and the artifacts' titles and text; a message result jumps to it in the chat, an artifact result opens it.
+
+Quick Look's editor: the glass pen button starts editing; the close button at the top left leaves the editor (the preview stays), and the check at the top right saves and returns to the updated preview. Agent files and `mcp.json` are reloaded as soon as they change, here or in any editor: new agents appear in the menu, changed ones are used from the next turn, and a file with an error is skipped (with a note) while the others keep working.
+
+The round button at the right of the field is the **agent button** when there is nothing to send: it shows the app icon's character, and its glass refracts a moving gradient made from the model's name (the same model always gets the same gradient; another model gets a different one). With text it becomes the blue send button, and while a reply runs, stop. Tap it with nothing to send, or hold it (right-click with a mouse) at any time, for the agent sheet: at medium height the **agent** (a pop-up button: tap it for a menu of the project's agents, with each one's model), its **account** (the provider it replies with; see [Providers and settings](#providers-and-settings)), a gear at the top that opens the agent's file in the editor, a **reasoning effort** slider (Low, Medium, High, Extra High, Max; kept per agent in `.sfagents/web-agent.json` and sent with every request instead of the agent's `reasoning` setting) and a **context** bar (how much of the working-context budget the next request uses). Drag it up for the breakdown: a bar and list of the system prompt, built-in, MCP, agent and conversation tools, the section index and notes, the messages, the share kept free for each turn and what is left; each tool family's tools and their sizes; the budget, the model's own context window when the provider lists it, the exchanges and sections kept, and the provider's figures for the last request. **Start a Fresh Context** makes later replies start without the earlier messages (they stay stored and searchable). Changes in the agent sheet and in Settings are saved by the check button at the top right; the close button at the top left, a swipe down or Escape leave without saving. All sheets and windows put their close button at the top left.
 
 In the chat, a message one agent sends another shows as a line with a chevron: tap it to open their **thread** in a sheet, as a conversation, following it live. An artifact the agent creates or updates shows as a **card with a preview** right after the call that made it; tapping it (or its tile) opens it in the file manager's Quick Look. Then **Pinned** artifacts, a divider, and all artifacts, newest first, as glass tiles. Tap a tile to open it; the pin button pins or unpins it.
 - **Approvals** appear as a card in the conversation (Allow Once, Always Allow, Don't Allow). `--yes` skips them.
@@ -168,7 +201,7 @@ It is also a simple installable web app (manifest, icons, standalone display): u
 
 The glass is [sfgl](https://github.com/JoeDoe56/sfgl) (vendored in `web/public/vendor/sfgl`; refresh it with `npm run vendor:sfgl -- <path to sfgl>`), and the font is Host Grotesk. Add `?quality=superfluid|glass|lite|frost|static` to the URL to force a glass quality tier.
 
-Security: the server listens on 127.0.0.1 only, accepts only requests addressed to this host and port, and refuses cross-site writes. Artifacts and uploads are served in a sandbox, so a page the agent wrote cannot call the API. `--host 0.0.0.0` exposes the agent and its tools (with your permissions) to your network; there is no login.
+Security: the server listens on 127.0.0.1 only, accepts only requests addressed to this host and port, and refuses cross-site writes (and cross-site terminal connections). Artifacts and uploads are served in a sandbox, so a page the agent wrote cannot call the API. Application artifacts are the exception: an app runs as it would on its own port, on SF Agents' origin, so treat it like any program you run. `--host 0.0.0.0` exposes the agent and its tools (with your permissions) to your network; there is no login.
 
 Behind a reverse proxy such as Tailscale Serve, keep the loopback bind and set
 `--public-origin https://your-service.example.ts.net`. This accepts that exact
@@ -183,7 +216,8 @@ cross-origin writes. The proxy is responsible for controlling access.
 - **Shell** runs commands with your user's full permissions (a path allowlist cannot confine arbitrary commands, and there is no OS sandbox), so grant it deliberately. Every command asks for approval unless you auto-approve `shell`.
 - **Writes, edits, shell and MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag. In `run` mode without a terminal, calls that need approval are denied and the model is told why.
 - **MCP servers are not workspace-confined.** A server can reach anything its own process can. Grant servers per agent, preferably limited to specific tools.
-- **Conversation state** (`.sfagents/`, including artifacts and uploads) is invisible to all file tools; it changes only through the conversation service and the web server.
+- **Provider keys and sign-ins** live in the system keyring; no file tool, shell command, MCP server or terminal tab gets them in its environment, and they are never sent to a model.
+- **Conversation state** (`.sfagents/`, including threads and uploads) is invisible to all file tools; it changes only through the conversation service and the web server.
 - **Secrets:** the configuration directory's `.env` cannot be read, searched or written by any file tool (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model. Approved shell commands could still read `.env`, so approve shell commands with care.
 
 ## MCP servers
@@ -231,6 +265,9 @@ tests/          node:test suites and fixtures
 Core has no terminal or web code; the CLI and the web server use only Core's public exports.
 
 ## Known limitations
+
+- The ChatGPT and Claude sign-ins follow the flows of LLM-Proxy and Claude Code's `setup-token`; their end-to-end use with real accounts has not been run in this repository's tests (the flows up to the sign-in page and the request adapters are tested). Claude requests go through the Claude Agent SDK and carry the whole conversation each time, as LLM-Proxy's do.
+- App artifacts share SF Agents' origin. Paths are routed to the app by the page that asked for them; an app that loads a path SF Agents also serves (for example `/app.js`) from a page outside `/apps/` may get SF Agents' file.
 
 - Search is lexical (all query words must appear); there is no semantic or embedding search yet, and no section summaries.
 - Section deletion and merging are not supported yet.

@@ -754,6 +754,7 @@ export function createFileManager(options) {
   }
 
   function quickLook(item) {
+    if (openAsThread(item.path)) return;
     const siblings = (state.results ?? visibleEntries()).filter((e) => e.kind !== 'folder');
     openQuickLook({
       item,
@@ -1598,10 +1599,20 @@ export function createFileManager(options) {
   });
 
   /** Quick Look for one file, from outside the file manager (an artifact in the chat). */
-  async function quickLookFile(p) {
+  /** A thread between agents is a file in .sfagents/threads: it opens as a conversation. */
+  function openAsThread(p) {
+    const m = /[\\/]\.sfagents[\\/]threads[\\/]([^\\/]+)\.md$/.exec(p);
+    if (!m || !options.openThread) return false;
+    options.openThread(m[1]);
+    return true;
+  }
+
+  async function quickLookFile(p, { edit = false } = {}) {
+    if (!edit && openAsThread(p)) return;
     const item = await getJson('/api/files/info', { path: p });
     openQuickLook({
       item,
+      edit,
       items: [item],
       iconFor,
       actions: {

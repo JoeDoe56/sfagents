@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
+import { baseAgent, makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
 
 let mock: Awaited<ReturnType<typeof startMockOpenAI>>;
 let handler: MockChatHandler = () => ({ text: 'unset' });
@@ -176,5 +176,41 @@ describe('sfagents CLI', () => {
     assert.match(r.stdout, /tools: echo, add, fail/);
     assert.match(r.stdout, /granted to: main/);
     assert.match(r.stdout, /broken\s+\[stdio\]\s+error/);
+  });
+});
+
+describe('sfagents settings and providers', () => {
+  test('settings are listed, set (validated) and reset, in the per-user folder', async () => {
+    const home = makeTempDir();
+    const env = { SFAGENTS_HOME: home };
+    const set = await runCli(['settings', 'set', 'web.port', '9100'], { env });
+    assert.equal(set.code, 0, set.stderr);
+    assert.match(set.stdout, /web.port = 9100 \(takes effect on the next start\)/);
+    const list = await runCli(['settings'], { env });
+    assert.match(list.stdout, /web\.port\s+9100/);
+    assert.match(list.stdout, /web\.host\s+127\.0\.0\.1 \(default\)/);
+    const bad = await runCli(['settings', 'set', 'web.port', 'abc'], { env });
+    assert.equal(bad.code, 2);
+    assert.match(bad.stderr, /whole number/);
+    assert.equal((await runCli(['settings', 'reset', 'web.port'], { env })).code, 0);
+    assert.match((await runCli(['settings'], { env })).stdout, /web\.port\s+8093 \(default\)/);
+  });
+
+  test('providers: an empty list explains how to add one; unknown kinds are refused', async () => {
+    const env = { SFAGENTS_HOME: makeTempDir() };
+    const list = await runCli(['providers'], { env });
+    assert.equal(list.code, 0);
+    assert.match(list.stdout, /No providers yet/);
+    const bad = await runCli(['providers', 'add', 'gemini'], { env });
+    assert.equal(bad.code, 2);
+    assert.match(bad.stderr, /Usage: sfagents providers add <openrouter\|openai\|anthropic\|custom>/);
+  });
+
+  test('an agent naming a provider that is not set up gets a clear error before any model call', async () => {
+    const dir = makeTempDir();
+    writeAgent(dir, baseAgent('main', { provider: 'Claude 1' }));
+    const r = await runCli(['run', 'hi'], { cwd: dir, env: { SFAGENTS_HOME: makeTempDir() } });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /uses provider "Claude 1", which is not set up/);
   });
 });

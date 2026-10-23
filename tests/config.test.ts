@@ -120,7 +120,9 @@ describe('agents folder', () => {
     dir = setup({});
     skippedError(dir, /agent grants name a file in the agents folder/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['1-../x.json'] } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
-    skippedError(dir, /unsupported provider "qwen-oauth"/, { 'agents/a.json': baseAgent('a', { provider: 'qwen-oauth' }), 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /\[provider\]: must name at least one provider/, { 'agents/a.json': baseAgent('a', { provider: [] }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[provider\[1\]\]: duplicate entry/, { 'agents/a.json': baseAgent('a', { provider: ['Claude 1', 'claude 1'] }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
     skippedError(dir, /\[reasoning\]: must be one of/, { 'agents/a.json': baseAgent('a', { reasoning: 'extreme' }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});

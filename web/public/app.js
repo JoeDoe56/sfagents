@@ -22,6 +22,10 @@ import { createFileManager } from './files.js';
 import { openSheet, sheetOpen, setSheetGlass } from './modalsheet.js';
 import { createFilesGlass } from './filesglass.js';
 import { openAgentSheet, agentSheetOpen } from './agentsheet.js';
+import { openSettingsSheet, settingsEvent } from './settingssheet.js';
+import { openTerminal, terminalsChanged } from './terminal.js';
+import { openSearch } from './searchsheet.js';
+import { openApp } from './appview.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installPress, registerGlass } from './press.js';
@@ -127,7 +131,8 @@ surface.lens($('monitor'), { ...GLASS.tile, clip: sheetScroll });
 // The expand button is a small glass circle on top of the monitor's glass.
 surface.lens($('monExpand'), { ...GLASS.control, layer: 2, clip: sheetScroll });
 surface.lens($('settingsBtn'), { ...GLASS.control, clip: sheetScroll });
-surface.lens($('spareBtn'), { ...GLASS.control, clip: sheetScroll });
+surface.lens($('terminalBtn'), { ...GLASS.control, clip: sheetScroll });
+surface.lens($('searchBtn'), { ...GLASS.control, clip: sheetScroll });
 window.sfagents = { glass: glassApi.glass, surface, barLens };
 
 function syncTileLenses() {
@@ -178,9 +183,11 @@ const monitor = createMonitor({
 /** Read the machine only while the sheet (and so the monitor) is open. */
 function updateMonitor() {
   // Paused under a window: the window reads the same things in more detail.
-  monitor.setActive(sheet.detent !== 'collapsed' && !document.hidden && !peekOpen() && !document.body.classList.contains('files-open'));
+  // Also paused under a modal sheet: its numbers changing would animate over the sheet.
+  monitor.setActive(sheet.detent !== 'collapsed' && !document.hidden && !peekOpen() && !sheetOpen() && !document.body.classList.contains('files-open'));
 }
 document.addEventListener('visibilitychange', updateMonitor);
+window.addEventListener('sheetchange', () => updateMonitor());
 window.addEventListener('peekchange', updateMonitor);
 window.sfagents.monitor = monitor;
 
@@ -454,6 +461,27 @@ function anchorFor(section) {
   return thread.querySelector(`[data-key="${CSS.escape(section.first.id)}"]`);
 }
 
+/** Scrolls the conversation to a message (a search result), loading older messages if needed. */
+async function jumpToMessage(id) {
+  const find = () => thread.querySelector(`[data-key="${CSS.escape(id)}"]`);
+  let el = find();
+  for (let i = 0; !el && state.more && i < 200; i++) {
+    await loadEarlier();
+    await nextFrame();
+    await nextFrame();
+    el = find();
+  }
+  if (!el) return notice('That message is not in the conversation any more.');
+  if (sheet.detent !== 'collapsed') sheet.set('collapsed');
+  const safeTop = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--safe-top')) || 0;
+  stick = false;
+  chat.scrollTo({ top: Math.max(0, el.offsetTop - chat.clientHeight * 0.3 - safeTop), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  el.classList.remove('found');
+  void el.offsetWidth;
+  el.classList.add('found');
+  setTimeout(() => el.classList.remove('found'), 1800);
+}
+
 /** Scrolls the conversation to a section's first message, loading older messages if needed. */
 async function jumpToSection(section) {
   let el = anchorFor(section);
@@ -656,6 +684,8 @@ function connect() {
   });
   es.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
   es.addEventListener('threads', () => refreshTranscript());
+  for (const name of ['signin', 'providers', 'settings']) es.addEventListener(name, (e) => settingsEvent(name, JSON.parse(e.data)));
+  es.addEventListener('terminals', () => terminalsChanged());
   es.addEventListener('sections', (e) => setSections(JSON.parse(e.data).sections));
   es.addEventListener('run_end', (e) => {
     const data = JSON.parse(e.data);
@@ -713,7 +743,8 @@ function setArtifacts(list) {
 
 /** A file artifact opens in the file manager's Quick Look; without a file on disk, in the artifact viewer. */
 function openArtifact(a) {
-  if (!a.file) return viewer.show(a);
+  if (a.type === 'app') return openApp(a);
+  if (!a.file || a.missing) return viewer.show(a);
   fileManager.quickLookFile(a.file).catch(() => viewer.show(a));
 }
 
@@ -823,6 +854,7 @@ function showAgentSheet() {
       state.agent = { ...(state.agent ?? {}), ...info };
       setGradientSeed(info.model);
     },
+    onEditFile: (file) => fileManager.quickLookFile(file, { edit: true }).catch((error) => notice(error.message, 'error')),
   });
 }
 
@@ -1094,17 +1126,6 @@ mic.addEventListener('click', () => {
 
 // Settings ----------------------------------------------------------------
 
-let settingsSheet = null;
-let qualityButtons = [];
-
-function showQuality() {
-  if (!settingsSheet) return;
-  for (const b of qualityButtons) b.setAttribute('aria-checked', String(b.dataset.value === settings.quality));
-  const tier = glassApi.tier();
-  settingsSheet.body.querySelector('#qualityHint').textContent =
-    settings.quality === 'auto' ? `Chosen for this device: ${tier}. Lowers itself if frames get slow.` : `Drawing with: ${tier}.`;
-}
-
 function setQuality(q, persist = true) {
   settings.quality = q;
   if (persist) writeSetting('quality', q);
@@ -1120,55 +1141,42 @@ function setQuality(q, persist = true) {
     );
   }
   glass.invalidate(true);
-  requestAnimationFrame(showQuality);
 }
 
-/**
- * Settings: a sheet with a medium and a large detent. Changes are a draft
- * (glass quality previews at once) until the check button saves them; the
- * close button or a swipe down puts everything back.
- */
+let settingsSheet = null;
+/** Settings: this device's look, the providers, and the app settings kept on the computer (see settingssheet.js). */
 function openSettings() {
   if (settingsSheet) return;
-  const saved = { quality: settings.quality, enterSends: settings.enterSends };
-  const draft = { ...saved };
-  settingsSheet = openSheet({
-    title: 'Settings',
-    detents: ['medium', 'large'],
-    mediumHeight: () => Math.round(innerHeight * 0.52),
-    build(ctx) {
-      ctx.body.append($('settingsTemplate').content.cloneNode(true));
-      for (const i of ctx.body.querySelectorAll('i[data-symbol]')) applySymbol(i, i.dataset.symbol);
-      const dirty = () => ctx.setDirty(draft.quality !== saved.quality || draft.enterSends !== saved.enterSends);
-      qualityButtons = [...ctx.body.querySelectorAll('#qualityChoice button')];
-      for (const b of qualityButtons)
-        b.addEventListener('click', () => {
-          draft.quality = b.dataset.value;
-          setQuality(draft.quality, false);
-          dirty();
-        });
-      const enter = ctx.body.querySelector('#enterSends');
-      enter.checked = draft.enterSends;
-      enter.addEventListener('change', (e) => {
-        draft.enterSends = e.target.checked;
-        dirty();
-      });
+  settingsSheet = openSettingsSheet({
+    qualities: QUALITIES,
+    quality: () => settings.quality,
+    previewQuality: (q) => setQuality(q, false),
+    qualityHint: () => {
+      const tier = glassApi.tier();
+      return settings.quality === 'auto' ? `Chosen for this device: ${tier}. Lowers itself if frames get slow.` : `Drawing with: ${tier}.`;
     },
-    onConfirm: () => {
-      writeSetting('quality', draft.quality);
-      settings.enterSends = draft.enterSends;
-      writeSetting('enterSends', draft.enterSends);
+    enterSends: () => settings.enterSends,
+    save: (local) => {
+      setQuality(local.quality, true);
+      settings.enterSends = local.enterSends;
+      writeSetting('enterSends', local.enterSends);
     },
-    onClose: (confirmed) => {
-      if (!confirmed && settings.quality !== saved.quality) setQuality(saved.quality, false);
-      settingsSheet = null;
-      qualityButtons = [];
-    },
+    onClose: () => (settingsSheet = null),
   });
-  showQuality();
 }
 
 $('settingsBtn').addEventListener('click', openSettings);
+$('terminalBtn').addEventListener('click', () => openTerminal().catch((error) => notice(error.message, 'error')));
+$('searchBtn').addEventListener('click', () =>
+  openSearch({
+    onMessage: (id) => jumpToMessage(id),
+    onArtifact: (id) => {
+      const a = state.artifacts.find((x) => x.id === id);
+      if (a) openArtifact(a);
+    },
+    agentName: (id) => id ?? 'Agent',
+  }),
+);
 
 // Keys --------------------------------------------------------------------
 
@@ -1211,6 +1219,7 @@ const fileManager = createFileManager({
   quality: () => settings.quality,
   openWindow: (key, from, openInFiles) => openMonitorWindow(key, { from, openInFiles }),
   attach: (ref) => addAttachmentRef(ref),
+  openThread: (key) => openTranscript(key, { me: state.agent?.id }),
   onOpenChange: (open) => {
     document.body.classList.toggle('files-open', open);
     updateMonitor();

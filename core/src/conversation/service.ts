@@ -74,6 +74,22 @@ export interface CreateArtifactInput {
   callId?: string;
 }
 
+/** An artifact that is a user's file, or an application on this computer. */
+export interface LinkArtifactInput {
+  title: string;
+  /** Absolute path of the file (file artifacts). */
+  file?: string;
+  /** The application's address (application artifacts). */
+  url?: string;
+  /** Defaults from the file (document, code, image, …; "genui" in the GenUI folder) or "app". */
+  type?: string;
+  run?: string;
+  callId?: string;
+}
+
+/** Project folder whose files are GenUI components (rendered inline in the chat; schema to come). */
+export const GENUI_DIR_NAME = 'genui';
+
 export interface UpdateArtifactInput {
   content: string | Buffer;
   title?: string;
@@ -362,6 +378,66 @@ export class ConversationService {
     return this.state.artifactViews.get(id)!;
   }
 
+  /** Where a file artifact's path is recorded: relative to the project when inside it. */
+  private recordedPath(abs: string): string {
+    const rel = path.relative(this.configDir, abs);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/');
+    return abs;
+  }
+
+  /** Resolves a recorded file path. */
+  resolveArtifactFile(recorded: string): string {
+    return path.isAbsolute(recorded) ? recorded : path.join(this.configDir, ...recorded.split('/'));
+  }
+
+  /** The display type of a file artifact: by its folder (GenUI), else by its extension. */
+  fileArtifactType(abs: string): string {
+    const rel = path.relative(this.configDir, abs).split(path.sep);
+    if (rel.length > 1 && rel[0] === GENUI_DIR_NAME) return 'genui';
+    return artifactTypeFor(abs);
+  }
+
+  /** Records an artifact that is a user's file (shown as it is on disk) or an app on this computer. Nothing is copied. */
+  linkArtifact(input: LinkArtifactInput): ArtifactView {
+    this.assertOpen();
+    if (!input.file === !input.url) throw new ArtifactError('An artifact is either a file or an application address.');
+    const title = input.title.trim().slice(0, 200) || 'Untitled';
+    const id = `a${this.state.nextSeq}`;
+    const run = input.run;
+    const message = run && input.callId ? this.state.runs.get(run)?.requested.get(input.callId)?.messageId : undefined;
+    this.main.append({
+      kind: 'artifact',
+      id,
+      type: input.type ?? (input.file ? this.fileArtifactType(input.file) : 'app'),
+      title,
+      ...(input.file ? { file: this.recordedPath(input.file), mime: mimeForFilename(input.file) } : { url: input.url }),
+      ...(run ? { run } : {}),
+      ...(message ? { message } : {}),
+      ...(input.callId ? { callId: input.callId } : {}),
+    });
+    return this.state.artifactViews.get(id)!;
+  }
+
+  /** Retitles or repoints a linked artifact. */
+  relinkArtifact(id: string, input: { title?: string; file?: string; url?: string; run?: string; callId?: string }): ArtifactView {
+    this.assertOpen();
+    const view = this.requireArtifact(id);
+    if (view.type === 'agent_transcript') throw new ArtifactError(`Artifact ${id} is a thread between agents and cannot be changed.`);
+    const title = input.title?.trim().slice(0, 200);
+    const file = input.file ? this.recordedPath(input.file) : undefined;
+    this.main.append({
+      kind: 'artifact_update',
+      artifact: id,
+      rev: view.rev + 1,
+      ...(title ? { title } : {}),
+      ...(file ? { file, mime: mimeForFilename(input.file!) } : {}),
+      ...(input.url ? { url: input.url } : {}),
+      ...(input.run ? { run: input.run } : {}),
+      ...(input.callId ? { callId: input.callId } : {}),
+    });
+    return this.state.artifactViews.get(id)!;
+  }
+
   /** Writes a new revision of a model artifact and records it. */
   updateArtifact(id: string, input: UpdateArtifactInput): ArtifactView {
     this.assertOpen();
@@ -411,6 +487,17 @@ export class ConversationService {
   /** The bytes of an artifact revision (latest by default). */
   artifactContent(id: string, rev?: number): ArtifactContent {
     const view = this.requireArtifact(id);
+    if (view.url && !view.file) throw new ArtifactError(`Artifact ${id} is an application (${view.url}), not a file.`);
+    if (view.file) {
+      const abs = this.resolveArtifactFile(view.file);
+      let data: Buffer;
+      try {
+        data = fs.readFileSync(abs);
+      } catch {
+        throw new ArtifactError(`The file of artifact ${id} is missing: ${abs}`);
+      }
+      return { view, rev: view.rev, filename: path.basename(abs), mime: mimeForFilename(abs), data };
+    }
     const rel = this.artifactRevisionPath(id, rev);
     if (!rel) throw new ArtifactError(`Artifact ${id} has no stored content.`);
     const data = this.readManaged(rel);
@@ -421,6 +508,9 @@ export class ConversationService {
 
   /** Where an artifact's latest revision is stored on disk (undefined for in-memory conversations). */
   artifactFile(id: string): string | undefined {
+    const view = this.requireArtifact(id);
+    if (view.file) return this.resolveArtifactFile(view.file);
+    if (view.url) return undefined;
     if (!this.dir) return undefined;
     const rel = this.artifactRevisionPath(id);
     return rel ? this.managedPath(rel) ?? undefined : undefined;

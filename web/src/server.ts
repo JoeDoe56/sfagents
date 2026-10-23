@@ -22,6 +22,7 @@ import {
   AgentRuntime,
   AgentTerminateMode,
   ArtifactError,
+  OPENROUTER_BASE_URL,
   getErrorMessage,
   threadKey,
   type AgentRunResult,
@@ -34,7 +35,19 @@ import {
   type ConversationService,
   type ProviderFactory,
   type RuntimeEvent,
+  AccountState,
+  AppSettings,
+  credentialEnvNames,
+  searchConversation,
+  loadAgentTree,
+  watchProject,
+  type ProjectWatcher,
+  ProviderRegistry,
+  createDefaultProviderFactory,
 } from '@sfagents/core';
+import { ApiError, ProvidersApi } from './providers-api.js';
+import { AppProxy } from './apps.js';
+import { TerminalError, TerminalManager } from './terminal.js';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
 import { FileError, FileService, INLINE_MIME, type Conflict } from './files.js';
@@ -64,6 +77,8 @@ const MAX_MESSAGE_CHARS = 400_000;
 const MAX_ATTACHMENTS = 20;
 const MAX_ATTACH_FROM_FILES = 50 * 1024 * 1024;
 
+const options_watch = (o: { watchAgents?: boolean }) => o.watchAgents !== false;
+
 export const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 export interface WebServerOptions {
@@ -80,6 +95,14 @@ export interface WebServerOptions {
   approveAll?: boolean;
   /** Tests inject a scripted provider. */
   providerFactory?: ProviderFactory;
+  /** Providers added in Settings (default: the per-user list, with keys in the OS keyring). */
+  registry?: ProviderRegistry;
+  /** Which account each agent is on (shared with the CLI process that started the server). */
+  accounts?: AccountState;
+  /** App settings (default: the per-user settings.json). */
+  settings?: AppSettings;
+  /** Reload the agent files and mcp.json when they change (default true). */
+  watchAgents?: boolean;
   publicDir?: string;
   maxUploadBytes?: number;
   log?: (line: string) => void;
@@ -205,6 +228,15 @@ export class WebServer {
   private cpuMark = { at: Date.now(), usage: process.cpuUsage() };
   private readonly agentSettings: AgentSettingsStore;
   private readonly windows = new ModelWindows();
+  readonly registry: ProviderRegistry;
+  private projectWatcher: ProjectWatcher | undefined;
+  private fileWatch: NodeJS.Timeout | undefined;
+  private readonly apps: AppProxy;
+  private readonly terminals: TerminalManager;
+  private readonly ownNames: Set<string>;
+  private readonly mcpFile: string;
+  readonly accounts: AccountState;
+  private readonly providersApi: ProvidersApi;
 
   constructor(private readonly options: WebServerOptions) {
     if (!options.conversation.dir || !options.conversation.file) throw new Error('The web interface needs a persistent conversation.');
@@ -214,16 +246,56 @@ export class WebServer {
     this.publicOrigin = options.publicOrigin === undefined ? undefined : parsePublicOrigin(options.publicOrigin);
     this.publicHost = this.publicOrigin === undefined ? undefined : new URL(this.publicOrigin).host;
     this.publicDir = options.publicDir ?? PUBLIC_DIR;
+    // The first path segments SF Agents serves itself; everything else may belong to an open app.
+    this.ownNames = new Set(['', 'api', 'apps', ...(() => {
+      try {
+        return fs.readdirSync(this.publicDir);
+      } catch {
+        return [];
+      }
+    })()]);
+    this.apps = new AppProxy(
+      (id) => {
+        const v = this.conversation.state.artifactViews.get(id);
+        return v?.type === 'app' && v.url ? v.url : undefined;
+      },
+      (pathname) => this.ownNames.has(decodeURIComponent(pathname.split('/')[1] ?? '')),
+    );
     this.log = options.log ?? (() => {});
+    this.registry = options.registry ?? new ProviderRegistry();
+    this.mcpFile = options.tree.mcp.file ?? path.join(options.tree.configDir, 'mcp.json');
+    this.terminals = new TerminalManager({
+      cwd: options.tree.configDir,
+      hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
+      onChange: () => this.broadcast('terminals', { terminals: this.terminals.list() }),
+      log: (line) => this.log(line),
+    });
+    this.accounts = options.accounts ?? new AccountState();
     this.runtime = new AgentRuntime({
       tree: options.tree,
       conversation: options.conversation,
       approveAll: options.approveAll,
-      providerFactory: options.providerFactory,
+      providerFactory: options.providerFactory ?? createDefaultProviderFactory({ registry: this.registry, accounts: this.accounts }),
       confirm: (request, signal) => this.confirm(request, signal),
     });
     this.session = this.runtime.createSession();
     this.agentSettings = new AgentSettingsStore(options.conversation.dir);
+    for (const [agent, provider] of Object.entries(this.agentSettings.get().accounts ?? {})) this.accounts.set(agent, provider);
+    this.accounts.onChange((agent, provider) => {
+      const settings = this.agentSettings.get();
+      if (settings.accounts?.[agent] !== provider) this.agentSettings.set({ ...settings, accounts: { ...(settings.accounts ?? {}), [agent]: provider } });
+      if (agent === this.session.node.id) this.broadcast('agent', this.agentInfo());
+    });
+    this.providersApi = new ProvidersApi({
+      registry: this.registry,
+      settings: options.settings ?? new AppSettings(),
+      running: { 'web.port': this.port, 'web.host': this.host },
+      broadcast: (event, data) => {
+        this.broadcast(event, data);
+        if (event === 'providers') this.broadcast('agent', this.agentInfo());
+      },
+      log: this.log,
+    });
     // The agent picked last time keeps replying (when it still exists).
     const saved = this.agentSettings.get().agent;
     this.selectAgent(saved && options.tree.byId.has(saved) ? saved : this.session.node.id, false);
@@ -240,6 +312,7 @@ export class WebServer {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((error: unknown) => this.fail(res, error));
     });
+    this.server.on('upgrade', (req, socket, head) => this.upgrade(req, socket, head));
     // Long uploads and event streams must not be cut by Node's defaults.
     this.server.requestTimeout = 0;
     this.server.headersTimeout = 60_000;
@@ -268,6 +341,12 @@ export class WebServer {
     const address = this.server.address();
     if (address && typeof address === 'object') this.port = address.port;
     this.heartbeat = setInterval(() => this.broadcastRaw(': keep-alive\n\n'), 25_000);
+    // Artifacts are the files themselves: when one changes on disk, the page updates.
+    this.fileWatch = setInterval(() => {
+      if (this.clients.size) this.publishArtifacts();
+    }, 2000);
+    this.fileWatch.unref?.();
+    if (options_watch(this.options)) this.projectWatcher = watchProject({ configDir: this.runtime.tree.configDir, mcpFile: this.mcpFile, onChange: () => this.reloadAgents() });
     const shown = this.host === '0.0.0.0' || this.host === '::' ? 'localhost' : this.host.includes(':') ? `[${this.host}]` : this.host;
     return `http://${shown}:${this.port}/`;
   }
@@ -278,6 +357,7 @@ export class WebServer {
 
   async close(): Promise<void> {
     if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.fileWatch) clearInterval(this.fileWatch);
     await this.system.close();
     this.processes.close();
     this.live?.controller.abort(new Error('server stopping'));
@@ -285,9 +365,15 @@ export class WebServer {
     await this.runPromise?.catch(() => undefined);
     for (const c of this.clients) c.end();
     this.clients.clear();
+    this.terminals.dispose();
+    for (const sock of this.upgraded) sock.destroy();
+    this.upgraded.clear();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
     this.server.closeAllConnections?.();
     await this.up2k.close();
+    this.providersApi.close();
+    this.projectWatcher?.close();
+    this.terminals.dispose();
     await this.runtime.dispose();
   }
 
@@ -329,12 +415,39 @@ export class WebServer {
     if (error instanceof ProcessError) return sendJson(res, error.status, { error: error.message });
     if (error instanceof FileError) return sendJson(res, error.status, { error: error.message, ...(error.details && typeof error.details === 'object' ? error.details : {}) });
     if (error instanceof ArtifactError) return sendJson(res, 404, { error: error.message });
+    if (error instanceof ApiError) return sendJson(res, error.status, { error: error.message });
+    if (error instanceof TerminalError) return sendJson(res, error.status, { error: error.message });
     this.log(`web: ${getErrorMessage(error)}`);
     sendJson(res, 500, { error: getErrorMessage(error) });
   }
 
+  /** WebSocket upgrades: the terminal, and apps' live-reload sockets. */
+  private readonly upgraded = new Set<import('node:stream').Duplex>();
+
+  private upgrade(req: IncomingMessage, socket: import('node:stream').Duplex, head: Buffer): void {
+    socket.on('error', () => socket.destroy());
+    // Upgraded sockets are not closed by the HTTP server: track them for close().
+    this.upgraded.add(socket);
+    socket.on('close', () => this.upgraded.delete(socket));
+    if (!this.allowedHost(req)) return void socket.destroy();
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    if (url.pathname === '/api/terminal') {
+      try {
+        this.checkWrite(req);
+      } catch {
+        return void socket.destroy();
+      }
+      return this.terminals.upgrade(req, socket, head);
+    }
+    const app = this.apps.routeUpgrade(req);
+    if (app) return this.apps.upgrade(req, socket, head, app);
+    socket.destroy();
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!this.allowedHost(req)) throw new HttpError(421, 'Unexpected Host header.');
+    const app = this.apps.route(req);
+    if (app) return this.apps.handle(req, res, app);
     const url = new URL(req.url ?? '/', 'http://localhost');
     const p = url.pathname;
     const method = req.method ?? 'GET';
@@ -370,6 +483,33 @@ export class WebServer {
           if (parts[2] === 'priority') return sendJson(res, 200, this.processes.setPriority(parts[1], body.level));
           throw new HttpError(404, 'Not found.');
         }
+        case 'GET settings':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, this.providersApi.settings());
+        case 'POST settings':
+          return sendJson(res, 200, this.providersApi.saveSettings(((await readJson(req)) ?? {}) as Record<string, unknown>));
+        case 'GET providers':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, await this.providersApi.handle('GET', parts, {}));
+        case 'POST providers':
+          return sendJson(res, 200, await this.providersApi.handle('POST', parts, ((await readJson(req)) ?? {}) as Record<string, unknown>));
+        case 'GET search':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, this.search(url.searchParams.get('q') ?? ''));
+        case 'GET terminals':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, { terminals: this.terminals.list() });
+        case 'POST terminals': {
+          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+          if (!parts[1]) {
+            if (body.action !== 'create') throw new HttpError(400, '"action" must be "create".');
+            return sendJson(res, 200, await this.terminals.create({ cols: Number(body.cols), rows: Number(body.rows), cwd: typeof body.cwd === 'string' ? body.cwd : undefined }));
+          }
+          if (body.action === 'close') this.terminals.close(parts[1]);
+          else if (body.action === 'rename') this.terminals.rename(parts[1], body.title);
+          else throw new HttpError(400, '"action" must be "close" or "rename".');
+          return sendJson(res, 200, { terminals: this.terminals.list() });
+        }
         case 'GET agents':
           this.checkFetchSite(req);
           return sendJson(res, 200, this.agentsInfo());
@@ -396,9 +536,14 @@ export class WebServer {
           }
           // A new agent first, so a reasoning effort in the same request is that agent's.
           if (body.agent !== undefined) {
-            if (typeof body.agent !== 'string' || !this.options.tree.byId.has(body.agent)) throw new HttpError(400, `No agent named "${String(body.agent)}".`);
+            if (typeof body.agent !== 'string' || !this.runtime.tree.byId.has(body.agent)) throw new HttpError(400, `No agent named "${String(body.agent)}".`);
             if (body.agent !== this.session.node.id && (this.session.running || this.live)) throw new HttpError(409, 'Wait for the current reply to finish before changing the agent.');
             this.selectAgent(body.agent);
+          }
+          if (body.account !== undefined) {
+            const choice = this.accountChoices(this.session.node).find((a) => typeof body.account === 'string' && a.name.toLowerCase() === body.account.toLowerCase());
+            if (!choice) throw new HttpError(400, `"${String(body.account)}" is not a provider this agent can use.`);
+            this.accounts.set(this.session.node.id, choice.name);
           }
           if ('reasoning' in body) {
             let effort;
@@ -533,7 +678,7 @@ export class WebServer {
       arch: process.arch,
       url: `http://${this.host.includes(':') ? `[${this.host}]` : this.host}:${this.port}`,
       publicOrigin: this.publicOrigin ?? null,
-      agent: { id: this.session.node.id, model: root.model, provider: root.provider, agents: this.options.tree.byId.size },
+      agent: { id: this.session.node.id, model: root.model, provider: root.provider, agents: this.runtime.tree.byId.size },
       conversation: {
         file: this.conversation.file,
         size,
@@ -785,6 +930,36 @@ export class WebServer {
   // ---------------------------------------------------------------------------
   // State and events
 
+  /**
+   * The agent files or mcp.json changed: load them again and use them from the
+   * next turn on. A broken edit keeps the previous agents and says why.
+   */
+  reloadAgents(): void {
+    let tree: AgentTree;
+    try {
+      tree = loadAgentTree(this.runtime.tree.configDir, { mcpConfigFile: this.mcpFile });
+    } catch (error) {
+      this.broadcast('notice', { text: `The agent files could not be loaded, so the previous agents stay in use: ${getErrorMessage(error)}`, level: 'error' });
+      return;
+    }
+    const before = this.runtime.tree;
+    const previousAgent = this.session.node.id;
+    const { mcpChanged } = this.runtime.reload(tree);
+    const added = [...tree.byId.keys()].filter((k) => !before.byId.has(k));
+    const removed = [...before.byId.keys()].filter((k) => !tree.byId.has(k));
+    const newlySkipped = tree.skipped.filter((sk) => !before.skipped.some((b) => b.file === sk.file && b.error === sk.error));
+    this.log(`web: agents reloaded (${tree.byId.size} agents${mcpChanged ? ', MCP servers restarted' : ''})`);
+    const parts: string[] = [];
+    if (added.length) parts.push(`added ${added.map((a) => `"${a}"`).join(', ')}`);
+    if (removed.length) parts.push(`removed ${removed.map((a) => `"${a}"`).join(', ')}`);
+    if (mcpChanged) parts.push('MCP servers reloaded');
+    if (parts.length) this.broadcast('notice', { text: `Agents updated: ${parts.join('; ')}.`, level: 'info' });
+    for (const sk of newlySkipped) this.broadcast('notice', { text: `${path.basename(sk.file)} was skipped: ${sk.error}`, level: 'error' });
+    if (!tree.byId.has(previousAgent)) this.selectAgent(this.session.node.id);
+    this.broadcast('agent', this.agentInfo());
+    this.broadcast('agents', this.agentsInfo());
+  }
+
   /** Hands the conversation to `name`, with the reasoning effort chosen for it. */
   private selectAgent(name: string, save = true): void {
     this.session.setAgent(name);
@@ -802,15 +977,45 @@ export class WebServer {
       model: d.model,
       provider: d.provider,
       configuredReasoning: d.reasoning ?? null,
+      file: node.file,
       grants: [...node.grants].map(([agent, max]) => ({ agent, max })),
     };
   }
 
   /** The agent replying now and the session's reasoning effort (the send button's sheet). */
+  /**
+   * The accounts an agent can reply with: its own provider entries (failover
+   * order), then the other added providers of the same kinds, which can be
+   * picked by hand with the agent's model.
+   */
+  private accountChoices(node: AgentNode) {
+    const d = node.definition;
+    const entries = d.providers?.length ? d.providers : [{ provider: d.provider, model: d.model }];
+    const out: Array<{ name: string; model: string; kind: string | null; listed: boolean; available: boolean }> = [];
+    const kinds = new Set<string>();
+    for (const e of entries) {
+      const record = this.registry.find(e.provider);
+      if (record) kinds.add(record.kind);
+      const legacy = e.provider === 'openrouter' || e.provider === 'openai-compatible';
+      out.push({ name: record?.name ?? e.provider, model: e.model, kind: record?.kind ?? (legacy ? e.provider : null), listed: true, available: !!record || legacy });
+    }
+    for (const r of this.registry.list()) {
+      if (!kinds.has(r.kind) || out.some((o) => o.name.toLowerCase() === r.name.toLowerCase())) continue;
+      out.push({ name: r.name, model: entries[0]!.model, kind: r.kind, listed: false, available: true });
+    }
+    return out;
+  }
+
   private agentInfo() {
     const node = this.session.node;
+    const accounts = this.accountChoices(node);
+    const picked = this.accounts.get(node.id);
+    const current = accounts.find((a) => a.name.toLowerCase() === picked?.toLowerCase()) ?? accounts[0]!;
     return {
       ...this.describeAgent(node),
+      model: current.model,
+      account: current.name,
+      accounts,
       reasoning: this.session.reasoning ?? node.definition.reasoning ?? null,
       levels: EFFORT_LEVELS,
     };
@@ -820,9 +1025,9 @@ export class WebServer {
   private agentsInfo() {
     return {
       current: this.session.node.id,
-      agents: [...this.options.tree.byId.values()].map((n) => ({ ...this.describeAgent(n), reasoning: this.agentSettings.get().efforts?.[n.id] ?? n.definition.reasoning ?? null })),
-      skipped: this.options.tree.skipped,
-      warnings: this.options.tree.warnings,
+      agents: [...this.runtime.tree.byId.values()].map((n) => ({ ...this.describeAgent(n), reasoning: this.agentSettings.get().efforts?.[n.id] ?? n.definition.reasoning ?? null })),
+      skipped: this.runtime.tree.skipped,
+      warnings: this.runtime.tree.warnings,
     };
   }
 
@@ -830,9 +1035,13 @@ export class WebServer {
   private async contextInfo() {
     const d = this.session.node.definition;
     // A custom provider factory (tests, embedding) may not talk to the configured provider at all.
-    const lookup = this.options.providerFactory ? Promise.resolve(null) : this.windows.lookup(d).catch(() => null);
+    const account = this.agentInfo();
+    const record = this.registry.find(account.account);
+    const base = record?.kind === 'openrouter' ? OPENROUTER_BASE_URL : record?.kind === 'custom' ? record.baseUrl : undefined;
+    const lookup =
+      this.options.providerFactory || (record && !base) ? Promise.resolve(null) : this.windows.lookup({ ...d, model: account.model }, process.env, base).catch(() => null);
     const [usage, window] = await Promise.all([this.session.contextUsage(), lookup]);
-    return { ...usage, model: d.model, modelWindow: window, running: this.session.running };
+    return { ...usage, model: account.model, account: account.account, modelWindow: window, running: this.session.running };
   }
 
   private snapshot() {
@@ -872,10 +1081,22 @@ export class WebServer {
     this.broadcastRaw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
+  /** Changes when an artifact is added, changed or pinned, or when the file it shows changes. */
   private signature(): string {
     return this.conversation
       .artifacts()
-      .map((a) => `${a.id}:${a.rev}:${a.pinned ? 1 : 0}`)
+      .map((a) => {
+        let v = '';
+        if (a.file) {
+          try {
+            const st = fs.statSync(this.conversation.resolveArtifactFile(a.file));
+            v = `${st.mtimeMs}:${st.size}`;
+          } catch {
+            v = 'missing';
+          }
+        }
+        return `${a.id}:${a.rev}:${a.pinned ? 1 : 0}:${v}`;
+      })
       .join(',');
   }
 
@@ -894,12 +1115,54 @@ export class WebServer {
     this.broadcast('sections', { sections: displaySections(this.conversation.state) });
   }
 
+  /** The search sheet: words in the conversation's messages, and in the artifacts' titles and text. */
+  private search(query: string) {
+    const q = query.trim().slice(0, 200);
+    if (!q) return { query: q, messages: [], artifacts: [] };
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const result = searchConversation(this.conversation.state, q, { pageSize: 50 });
+    const messages = result.hits
+      .filter((h) => h.role === 'user' || h.role === 'assistant')
+      .map((h) => ({ id: h.messageId, seq: h.seq, role: h.role, agent: h.agent, time: h.time, excerpt: h.excerpt, section: h.sectionTitle ?? null }));
+    const artifacts: Array<{ id: string; title: string; type: string; excerpt: string }> = [];
+    for (const a of this.displayArtifacts()) {
+      const title = a.title.toLowerCase();
+      let text = '';
+      if (a.type !== 'app' && a.type !== 'image') {
+        try {
+          const content = this.conversation.artifactContent(a.id);
+          if (content.data.length < 2_000_000) text = content.data.toString('utf8');
+        } catch {
+          text = '';
+        }
+      }
+      const lower = text.toLowerCase();
+      if (!words.every((w) => title.includes(w) || lower.includes(w))) continue;
+      const at = words.map((w) => lower.indexOf(w)).filter((i) => i >= 0).sort((x, y) => x - y)[0];
+      const excerpt = at === undefined ? '' : `${at > 60 ? '…' : ''}${text.slice(Math.max(0, at - 60), at + 140).replace(/\s+/g, ' ').trim()}…`;
+      artifacts.push({ id: a.id, title: a.title, type: a.type, excerpt });
+      if (artifacts.length >= 30) break;
+    }
+    return { query: q, messages, artifacts };
+  }
+
   /** The conversation's artifacts as the page shows them (threads between agents are listed apart). */
   private displayArtifacts() {
     return this.conversation
       .artifacts()
       .filter((a) => a.type !== 'agent_transcript')
-      .map((a) => displayArtifact(a, this.conversation.artifactFile(a.id)));
+      .map((a) => {
+        const file = this.conversation.artifactFile(a.id);
+        let stat: fs.Stats | null = null;
+        if (file) {
+          try {
+            stat = fs.statSync(file);
+          } catch {
+            stat = null;
+          }
+        }
+        return displayArtifact(a, file, stat);
+      });
   }
 
   /** The threads between agents (the chat links to them; the sheet shows them). */
@@ -1010,12 +1273,17 @@ export class WebServer {
         if (seg) seg.status = status;
         // A new or changed artifact shows in the chat where it was made.
         let artifact: string | undefined;
-        if (seg && event.ok && (event.name === 'create_artifact' || event.name === 'update_artifact')) {
+        if (seg && event.ok && (event.name === 'create_artifact' || event.name === 'update_artifact' || event.name === 'create_app_artifact')) {
           if (event.name === 'update_artifact') artifact = seg.artifact;
           else {
-            // Call ids repeat across runs with some providers: the newest match is this call's.
-            const made = this.conversation.artifacts().filter((a) => a.callId === event.callId).sort((a, b) => b.createdSeq - a.createdSeq)[0];
-            artifact = made?.id;
+            // The record this call wrote (an artifact, or an update when the file or app was shown before); call ids can repeat across runs.
+            const records = this.conversation.state.records;
+            for (let i = records.length - 1; i >= 0; i--) {
+              const r = records[i]!;
+              if (r.kind === 'artifact' && r.callId === event.callId) artifact = r.id;
+              else if (r.kind === 'artifact_update' && r.callId === event.callId) artifact = r.artifact;
+              if (artifact) break;
+            }
           }
           if (artifact) seg.artifact = artifact;
         }

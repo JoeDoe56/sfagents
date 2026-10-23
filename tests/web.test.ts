@@ -18,9 +18,9 @@ function project(agent: Record<string, unknown> = {}) {
 
 async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string } = {}) {
   const dir = project(agent);
-  const tree = loadAgentTree(path.join(dir, 'agent.json'));
+  const tree = loadAgentTree(dir);
   const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
-  const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(script).factory, ...extra });
+  const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(script).factory, watchAgents: false, ...extra });
   const url = await server.start();
   const base = url.replace(/\/$/, '');
   return {
@@ -274,10 +274,10 @@ describe('web server', () => {
 
   test('a message streams over SSE, creates an artifact, and the artifact can be pinned and served sandboxed', async () => {
     const script: Script = (req, call) => {
-      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'create_artifact', args: { title: 'Page', filename: 'index.html', content: '<h1>hi</h1>' } }] };
+      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'create_artifact', args: { title: 'Page', path: 'index.html', content: '<h1>hi</h1>' } }] };
       return { text: `Done (${lastToolContent(req)?.slice(0, 20)})` };
     };
-    const s = await startServer(script);
+    const s = await startServer(script, { tools: { allow: ['write_file'], autoApprove: ['write_file'] } });
     const ev = events(s.base);
     try {
       await ev.wait((e) => e.event === 'state');

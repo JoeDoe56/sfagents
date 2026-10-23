@@ -11,10 +11,17 @@
 import readline from 'node:readline';
 import { parseArgs } from 'node:util';
 import {
+  AccountState,
   AgentRuntime,
   AgentTerminateMode,
+  AppSettings,
+  checkProviders,
   ConfigError,
   createDefaultProviderFactory,
+  ProviderRegistry,
+  UnknownProviderError,
+  watchProject,
+  type ProviderFactory,
   describeTree,
   getErrorMessage,
   mcpGrants,
@@ -39,6 +46,7 @@ import {
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
 import { DEFAULT_HOST, DEFAULT_PORT, WebServer, parsePublicOrigin } from '@sfagents/web';
+import { providersCommand, settingsCommand } from './providers.js';
 
 export const VERSION = '0.1.0';
 
@@ -55,6 +63,11 @@ Usage:
   sfagents agents validate [options]    Check the agents folder: every agent, its tools, and skipped files
   sfagents mcp list [options]           Show configured MCP servers, status and tools
   sfagents web [options]                Serve the web interface (default http://127.0.0.1:${DEFAULT_PORT})
+  sfagents providers [list|add <openrouter|openai|anthropic|custom>|rename|remove]
+                                        Model providers: API keys and ChatGPT/Claude sign-ins (kept in
+                                        the system keyring); agent files name them in "provider"
+  sfagents settings [list|set <key> <value>|reset <key>]
+                                        App settings (web port and address, sensors, terminal output)
   sfagents conversation [info|sections|show <id>|search <words>|artifacts|unlock]
                                         Inspect the stored conversation (or remove a stale lock)
 
@@ -69,7 +82,9 @@ Options:
       --conversation <file> Use this conversation file (default: <config dir>/.sfagents/conversation.md)
       --ephemeral           (start) Keep this session in memory only; nothing is stored
       --persist             (run) Record the request in the persistent conversation
-      --port <n>            (web) Port to listen on (default ${DEFAULT_PORT})
+      --name <name>         (providers add) The new provider's name
+      --url <url>           (providers add custom) The endpoint's base URL
+      --port <n>            (web) Port to listen on (default: the web.port setting, ${DEFAULT_PORT})
       --public-origin <url> (web) Accept this exact external origin behind a reverse proxy
       --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
                             the agent and its tools to your network)
@@ -81,6 +96,7 @@ Options:
 
 Environment:
   OPENROUTER_API_KEY        API key for provider "openrouter" (may be set in <config dir>/.env)
+  SFAGENTS_HOME             Folder for settings.json and providers.json (default: the per-user app folder)
   SFAGENTS_LHM_URL          Same as --lhm
   SFAGENTS_DEBUG=1          Debug logging to stderr`;
 
@@ -91,15 +107,26 @@ interface Streams {
 
 function printConfigError(error: unknown, streams: Streams): number {
   const style = createStyle(streams.stderr as NodeJS.WriteStream);
-  const message = error instanceof ConfigError || error instanceof MissingCredentialError ? error.message : getErrorMessage(error);
+  const message = error instanceof ConfigError || error instanceof MissingCredentialError || error instanceof UnknownProviderError ? error.message : getErrorMessage(error);
   streams.stderr.write(`${style.red('Configuration error:')} ${message}\n`);
   return EXIT_CONFIG;
 }
 
-/** Fails early, before any model call, when a provider credential is missing. */
+/** The providers added in Settings, and which account each agent is on (shared by every run in this process). */
+let providerContext: { registry: ProviderRegistry; accounts: AccountState; factory: ProviderFactory } | null = null;
+function providers(env: NodeJS.ProcessEnv = process.env) {
+  if (!providerContext) {
+    const registry = new ProviderRegistry();
+    const accounts = new AccountState();
+    providerContext = { registry, accounts, factory: createDefaultProviderFactory({ env, registry, accounts }) };
+  }
+  return providerContext;
+}
+
+/** Fails early, before any model call, when the replying agent has no usable provider. */
 function checkCredentials(tree: AgentTree, env: NodeJS.ProcessEnv): void {
-  const factory = createDefaultProviderFactory(env);
-  for (const node of tree.byId.values()) factory(node.definition);
+  const problems = checkProviders(tree.root.definition, providers(env).registry, env);
+  if (problems.length) throw new ConfigError(tree.root.file, 'provider', problems[0]!.replace(/^Agent "[^"]+" uses /, 'uses '));
 }
 
 export async function main(argv: string[], streams: Streams = { stdout: process.stdout, stderr: process.stderr }): Promise<number> {
@@ -125,6 +152,8 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         host: { type: 'string' },
         lhm: { type: 'string' },
         'sensor-admin': { type: 'boolean', default: false },
+        name: { type: 'string' },
+        url: { type: 'string' },
         version: { type: 'boolean', short: 'v', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -143,6 +172,19 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
     streams.stdout.write(`${USAGE}\n`);
     return command || values.help ? EXIT_OK : EXIT_CONFIG;
   }
+  // Provider and settings commands don't need a project.
+  if (command === 'providers') return providersCommand(positionals.slice(1), streams, { name: values.name, url: values.url });
+  if (command === 'settings') return settingsCommand(positionals.slice(1), streams);
+  const appSettings = new AppSettings();
+  let stored: ReturnType<AppSettings['stored']> = {};
+  try {
+    stored = appSettings.stored();
+  } catch (error) {
+    streams.stderr.write(`warning: ${getErrorMessage(error)}\n`);
+  }
+  const setting = <T,>(key: string, fallback: T): T => (key in stored ? (stored[key] as unknown as T) : fallback);
+  const showReasoning = values['show-reasoning'] || setting('cli.showReasoning', false);
+  const showContext = values['show-context'] || setting('cli.showContext', false);
 
   let location;
   let tree: AgentTree;
@@ -195,7 +237,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       }
       const conv = openSelected('run', values, tree, streams);
       if (conv instanceof Error) return EXIT_CONFIG;
-      return runOnce(tree, task, { yes: values.yes, json: values.json, showReasoning: values['show-reasoning'], showContext: values['show-context'], conversation: conv }, streams);
+      return runOnce(tree, task, { yes: values.yes, json: values.json, showReasoning, showContext, conversation: conv }, streams);
     }
     case 'start': {
       if (sub !== undefined) {
@@ -215,14 +257,30 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         approveAll: values.yes,
         confirm: (request, signal) => (bound ? bound(request, signal) : Promise.resolve('deny')),
         conversation,
+        providerFactory: providers().factory,
       });
       registerCleanup(() => runtime.dispose());
       if (conversation) registerCleanup(() => conversation.close());
+      // Edits to agent files or mcp.json apply from the next turn.
+      const watcher = watchProject({
+        configDir: tree.configDir,
+        mcpFile: location.mcpFile,
+        onChange: () => {
+          try {
+            const next = loadConfig(location!);
+            const { mcpChanged } = runtime.reload(next);
+            streams.stderr.write(`\n${createStyle(streams.stderr as NodeJS.WriteStream).dim(`Agents reloaded (${next.byId.size}${next.skipped.length ? `, ${next.skipped.length} skipped` : ''}${mcpChanged ? ', MCP servers restarted' : ''}).`)}\n`);
+          } catch (error) {
+            streams.stderr.write(`\n${createStyle(streams.stderr as NodeJS.WriteStream).yellow('note:')} the agent files could not be reloaded (${getErrorMessage(error)}); the previous agents stay in use.\n`);
+          }
+        },
+      });
+      registerCleanup(() => watcher.close());
       try {
         return await startRepl({
           runtime,
-          showReasoning: values['show-reasoning'],
-          showContext: values['show-context'],
+          showReasoning,
+          showContext,
           notices: conversation ? conversation.notices.map((n) => n.message) : ['Ephemeral session: nothing is stored.'],
           bindConfirm: (handler) => {
             bound = handler;
@@ -241,12 +299,13 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         streams.stderr.write('The web interface always uses a persistent conversation; --ephemeral is not available.\n');
         return EXIT_CONFIG;
       }
-      const port = values.port === undefined ? DEFAULT_PORT : Number(values.port);
+      const port = values.port === undefined ? setting('web.port', DEFAULT_PORT) : Number(values.port);
       if (!Number.isInteger(port) || port < 0 || port > 65535) {
         streams.stderr.write(`--port must be a number from 0 to 65535, got "${values.port}".\n`);
         return EXIT_CONFIG;
       }
-      const lhmSetting = values.lhm ?? process.env.SFAGENTS_LHM_URL;
+      const storedLhm = setting<string>('sensors.lhm', 'auto');
+      const lhmSetting = values.lhm ?? process.env.SFAGENTS_LHM_URL ?? (storedLhm === 'auto' ? undefined : storedLhm);
       let lhmUrl: string | null | undefined;
       if (lhmSetting !== undefined && lhmSetting !== '') {
         if (lhmSetting === 'off') lhmUrl = null;
@@ -277,7 +336,12 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       }
       const conversation = openSelected('start', values, tree, streams);
       if (conversation instanceof Error || !conversation) return EXIT_CONFIG;
-      return serveWeb(tree, conversation, { port, host: values.host ?? DEFAULT_HOST, publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] }, streams);
+      return serveWeb(
+        tree,
+        conversation,
+        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] || setting('sensors.admin', false), settings: appSettings },
+        streams,
+      );
     }
     default:
       streams.stderr.write(`Unknown command "${command}".\n\n${USAGE}\n`);
@@ -325,6 +389,7 @@ async function runOnce(
     approveAll: opts.yes,
     confirm: rl ? createTerminalConfirm(rl, streams.stderr, renderer) : undefined,
     conversation: opts.conversation,
+    providerFactory: providers().factory,
   });
   registerCleanup(() => runtime.dispose());
   if (opts.conversation) {
@@ -368,7 +433,7 @@ async function runOnce(
 async function serveWeb(
   tree: AgentTree,
   conversation: ConversationService,
-  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; lhmUrl?: string | null; sensorAdmin?: boolean },
+  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; lhmUrl?: string | null; sensorAdmin?: boolean; settings: AppSettings },
   streams: Streams,
 ): Promise<number> {
   const style = createStyle(streams.stderr as NodeJS.WriteStream);
@@ -381,6 +446,9 @@ async function serveWeb(
     approveAll: opts.yes,
     lhmUrl: opts.lhmUrl,
     sensorAdmin: opts.sensorAdmin,
+    registry: providers().registry,
+    accounts: providers().accounts,
+    settings: opts.settings,
     log: (line) => streams.stderr.write(`${line}\n`),
   });
   // Cleanups run in reverse: stop the server (and any run) before closing the conversation.

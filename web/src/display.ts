@@ -35,6 +35,12 @@ export interface DisplayArtifact {
   url: string;
   /** The file on disk, for the file manager's Quick Look. */
   file?: string;
+  /** Changes whenever the file does (previews and caches key on it). */
+  version: number;
+  /** The file is gone (moved or deleted). */
+  missing?: boolean;
+  /** Application artifacts: the app's own address on the computer (opened through `url`). */
+  target?: string;
 }
 
 export interface DisplayApproval {
@@ -95,6 +101,8 @@ export function describeCall(name: string, argsJson: string): string {
       return `Messaged ${str(args['agent']) ?? 'an agent'}${str(args['message']) ? `: ${clip(String(args['message']), 60)}` : ''}`;
     case 'create_artifact':
       return `Created ${str(args['title']) ? `“${clip(String(args['title']), 60)}”` : 'an artifact'}`;
+    case 'create_app_artifact':
+      return `Opened ${str(args['title']) ? `“${clip(String(args['title']), 60)}”` : 'an app'}${typeof args['port'] === 'number' ? ` (port ${args['port']})` : ''}`;
     case 'update_artifact':
       return `Updated ${str(args['id']) ?? 'an artifact'}${str(args['title']) ? ` “${clip(String(args['title']), 50)}”` : ''}`;
     case 'read_artifact':
@@ -135,7 +143,7 @@ function threadOf(name: string, argsJson: string, from: string): { thread?: stri
 
 /** The artifact a create_artifact or update_artifact call made or changed. */
 function artifactOf(name: string, argsJson: string, created: string | undefined): { artifact?: string } {
-  if (name === 'create_artifact') return created ? { artifact: created } : {};
+  if (name === 'create_artifact' || name === 'create_app_artifact') return created ? { artifact: created } : {};
   if (name !== 'update_artifact') return {};
   try {
     const id = (JSON.parse(argsJson) as { id?: unknown }).id;
@@ -152,8 +160,12 @@ export function displayItems(
   const items: DisplayItem[] = [];
   const results = new Map<string, string | undefined>();
   for (const m of state.messages) if (m.role === 'tool' && m.callId) results.set(`${m.run}:${m.callId}`, m.status);
+  // The artifact each call made or changed, by run and call id.
   const created = new Map<string, string>();
-  for (const a of state.artifacts) if (a.message && a.callId && a.type !== 'agent_transcript') created.set(`${a.message}:${a.callId}`, a.id);
+  for (const r of state.records) {
+    if (r.kind === 'artifact' && r.run && r.callId && r.type !== 'agent_transcript') created.set(`${r.run}:${r.callId}`, r.id);
+    else if (r.kind === 'artifact_update' && r.run && r.callId) created.set(`${r.run}:${r.callId}`, r.artifact);
+  }
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
@@ -163,7 +175,7 @@ export function displayItems(
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {
         if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent });
         for (const c of m.toolCalls ?? []) {
-          items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.id}:${c.id}`)) });
+          items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
         }
       }
     } else if (record.kind === 'context_reset') {
@@ -180,8 +192,23 @@ export function displayItems(
   return { items: more ? items.slice(items.length - limit) : items, more };
 }
 
-export function displayArtifact(v: ArtifactView, file?: string): DisplayArtifact {
-  const filename = v.path ? path.posix.basename(v.path) : v.title;
+export function displayArtifact(v: ArtifactView, file?: string, stat?: { mtimeMs: number; size: number } | null): DisplayArtifact {
+  if (v.url) {
+    return {
+      id: v.id,
+      title: v.title,
+      type: 'app',
+      filename: v.url.replace(/^https?:\/\//, ''),
+      rev: v.rev,
+      pinned: v.pinned,
+      created: v.createdTime,
+      updated: v.updatedTime,
+      url: `/apps/${encodeURIComponent(v.id)}/`,
+      target: v.url,
+      version: v.rev,
+    };
+  }
+  const filename = file ? path.basename(file) : v.path ? path.posix.basename(v.path) : v.title;
   return {
     id: v.id,
     title: v.title,
@@ -191,9 +218,11 @@ export function displayArtifact(v: ArtifactView, file?: string): DisplayArtifact
     rev: v.rev,
     pinned: v.pinned,
     created: v.createdTime,
-    updated: v.updatedTime,
+    updated: stat ? new Date(stat.mtimeMs).toISOString() : v.updatedTime,
     url: `/api/artifacts/${encodeURIComponent(v.id)}/raw`,
     ...(file ? { file } : {}),
+    version: stat ? Math.round(stat.mtimeMs) * 1000 + v.rev : v.rev,
+    ...(v.file && !stat ? { missing: true } : {}),
   };
 }
 

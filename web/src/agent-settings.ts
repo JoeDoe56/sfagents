@@ -17,6 +17,8 @@ export interface AgentSettings {
   agent?: string;
   /** Reasoning effort chosen per agent. */
   efforts?: Record<string, ReasoningEffort>;
+  /** The provider account each agent is on (picked by hand, or failed over to). */
+  accounts?: Record<string, string>;
 }
 
 export class AgentSettingsStore {
@@ -35,6 +37,11 @@ export class AgentSettingsStore {
       // Earlier files held one effort for the agent of the time.
       if (typeof raw.reasoning === 'string' && (REASONING_EFFORTS as readonly string[]).includes(raw.reasoning) && this.value.agent && !efforts[this.value.agent]) efforts[this.value.agent] = raw.reasoning as ReasoningEffort;
       if (Object.keys(efforts).length) this.value.efforts = efforts;
+      if (raw.accounts && typeof raw.accounts === 'object') {
+        const accounts: Record<string, string> = {};
+        for (const [k, v] of Object.entries(raw.accounts as Record<string, unknown>)) if (typeof v === 'string') accounts[k] = v;
+        if (Object.keys(accounts).length) this.value.accounts = accounts;
+      }
     } catch {
       // none saved yet
     }
@@ -76,8 +83,9 @@ export class ModelWindows {
 
   constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
-  async lookup(definition: Readonly<AgentDefinition>, env: NodeJS.ProcessEnv = process.env): Promise<number | null> {
-    const base = definition.provider === 'openrouter' ? OPENROUTER_BASE_URL : definition.providerOptions?.baseUrl;
+  /** `base` overrides the provider's base URL (a provider added in Settings). */
+  async lookup(definition: Readonly<AgentDefinition>, env: NodeJS.ProcessEnv = process.env, baseOverride?: string): Promise<number | null> {
+    const base = baseOverride ?? (definition.provider === 'openrouter' ? OPENROUTER_BASE_URL : definition.provider === 'openai-compatible' ? definition.providerOptions?.baseUrl : undefined);
     if (!base) return null;
     const key = `${base}\0${definition.model}`;
     const hit = this.cache.get(key);
@@ -103,7 +111,7 @@ export class ModelWindows {
   private async fetchWindow(base: string, definition: Readonly<AgentDefinition>, env: NodeJS.ProcessEnv): Promise<number | null> {
     const headers: Record<string, string> = { Accept: 'application/json' };
     // OpenRouter's model list is public; other servers may want their key.
-    const keyEnv = definition.provider === 'openrouter' ? undefined : definition.providerOptions?.apiKeyEnv;
+    const keyEnv = definition.provider === 'openai-compatible' ? definition.providerOptions?.apiKeyEnv : undefined;
     if (keyEnv && env[keyEnv]) headers.Authorization = `Bearer ${env[keyEnv]}`;
     const res = await this.fetchImpl(`${base.replace(/\/+$/, '')}/models`, { headers, signal: AbortSignal.timeout(6000) });
     if (!res.ok) return null;

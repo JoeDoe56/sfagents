@@ -6,6 +6,8 @@ export * from './agents/definition.js';
 export * from './agents/loader.js';
 export { MessageAgentTool, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE } from './agents/message-agent.js';
 export type { AgentReplyPayload, MessageAgentParams, AgentMessenger } from './agents/message-agent.js';
+export { watchProject } from './agents/watch.js';
+export type { ProjectWatcher } from './agents/watch.js';
 export { ThreadService, ThreadRecorder, ThreadBusyError, threadKey, threadPair, threadMessages, THREADS_DIR_NAME } from './agents/threads.js';
 export type { ThreadInfo, ThreadLease } from './agents/threads.js';
 export * from './runtime/events.js';
@@ -16,9 +18,24 @@ export { OpenAICompatibleProvider, OPENROUTER_BASE_URL, isOpenRouterHostname, me
 export {
   createDefaultProviderFactory,
   credentialEnvNames,
+  checkProviders,
+  chatGPTHostId,
+  shouldFailOver,
+  AccountState,
+  FailoverProvider,
   MissingCredentialError,
+  UnknownProviderError,
   OPENROUTER_API_KEY_ENV,
 } from './providers/factory.js';
+export * from './providers/registry.js';
+export { KeyringSecretStore, MemorySecretStore, KeyringUnavailableError, KEYRING_SERVICE } from './providers/secrets.js';
+export type { SecretStore } from './providers/secrets.js';
+export { OpenAISignIn, OpenAITokens, ChatGPTProvider, SignInError, listChatGPTModels, toResponsesInput, OPENAI_RESOURCE } from './providers/openai-chatgpt.js';
+export type { OpenAISignInResult } from './providers/openai-chatgpt.js';
+export { ClaudeSignIn, ClaudeSubscriptionProvider, CLAUDE_MODELS, CLAUDE_MODEL_ALIASES, claudeExecutable, findAuthUrl, prepareClaudeRequest } from './providers/claude-subscription.js';
+export { sfagentsHome, writeFileAtomic, readJsonFile } from './settings/home.js';
+export { AppSettings, SETTINGS, SettingsError, parseSetting, settingSpec } from './settings/settings.js';
+export type { SettingSpec, SettingValue } from './settings/settings.js';
 export type { ProviderFactory } from './providers/factory.js';
 export * from './mcp/config.js';
 export { McpManager } from './mcp/manager.js';
@@ -61,7 +78,9 @@ export type {
   ReplayTarget,
   ServiceOptions,
   UpdateArtifactInput,
+  LinkArtifactInput,
 } from './conversation/service.js';
+export { GENUI_DIR_NAME } from './conversation/service.js';
 export { replayTarget } from './runtime/runtime.js';
 export { PersistenceFailure } from './runtime/recorder.js';
 export type { RunRecorder } from './runtime/recorder.js';

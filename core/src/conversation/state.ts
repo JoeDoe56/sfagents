@@ -51,6 +51,10 @@ export interface ArtifactView {
   run?: string;
   message?: string;
   callId?: string;
+  /** A user file the artifact shows (see ArtifactRecord.file). */
+  file?: string;
+  /** An application's address (application artifacts). */
+  url?: string;
 }
 
 export class SemanticError extends Error {}
@@ -275,6 +279,8 @@ export class ConversationState {
           run: record.run,
           message: record.message,
           callId: record.callId,
+          ...(record.file ? { file: record.file } : {}),
+          ...(record.url ? { url: record.url } : {}),
         });
         break;
       case 'artifact_update': {
@@ -283,6 +289,8 @@ export class ConversationState {
         if (record.path !== undefined) view.path = record.path;
         if (record.title !== undefined) view.title = record.title;
         if (record.mime !== undefined) view.mime = record.mime;
+        if (record.file !== undefined) view.file = record.file;
+        if (record.url !== undefined) view.url = record.url;
         view.updatedSeq = record.seq;
         view.updatedTime = record.time;
         break;

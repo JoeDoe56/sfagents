@@ -1,7 +1,7 @@
 {
   "name": "@sfagents/core",
   "version": "0.1.0",
-  "description": "SF Agents core runtime: model turns, tools, MCP, permissions and child agents",
+  "description": "SF Agents core runtime: model turns, providers, tools, MCP, permissions and agents",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=20.12"
   },
@@ -23,6 +25,11 @@
     "diff": "^8.0.2",
     "glob": "^10.5.0",
     "jsonrepair": "^3.15.0",
-    "openai": "^5.23.2"
+    "openai": "^5.23.2",
+    "@napi-rs/keyring": "2.1.2"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.296",
+    "node-pty": "1.1.0"
   }
 }

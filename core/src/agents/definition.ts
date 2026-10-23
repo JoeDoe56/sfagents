@@ -8,8 +8,16 @@
 import { BUILTIN_TOOL_IDS, MCP_TOOL_PREFIX, ToolNames } from '../tools/tool-names.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../providers/types.js';
 
+/** Providers an agent file can name without adding one in Settings (keys from environment variables). */
 export const SUPPORTED_PROVIDERS = ['openrouter', 'openai-compatible'] as const;
-export type ProviderName = (typeof SUPPORTED_PROVIDERS)[number];
+/** "openrouter", "openai-compatible", or the name of a provider added in Settings ("OpenRouter 1", "Claude work"). */
+export type ProviderName = string;
+
+/** One provider (account) an agent may use, with the model to ask it for. */
+export interface ProviderChoice {
+  provider: string;
+  model: string;
+}
 
 export interface McpServerGrant {
   /** Server name from mcp.json. */
@@ -34,7 +42,14 @@ export interface AgentDefinition {
   /** Display name, when it differs from the file name. */
   name?: string;
   description?: string;
+  /** The first provider (the one shown); `providers` has them all, in failover order. */
   provider: ProviderName;
+  /**
+   * Every provider the agent may use, in order. When one reports that its
+   * account is out of quota, signed out or rate-limited, the next takes over
+   * (and stays current until it, too, runs out).
+   */
+  providers: ProviderChoice[];
   /** Only for provider "openai-compatible". */
   providerOptions?: {
     baseUrl: string;
@@ -217,13 +232,40 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
   if (!AGENT_NAME_PATTERN.test(id)) c.fail('id', 'must not contain path separators or control characters (max 100 characters)');
   const description = c.optionalString(raw['description'], 'description', { maxLength: 2000 });
 
-  const provider = c.string(raw['provider'], 'provider', { nonEmpty: true });
-  if (!(SUPPORTED_PROVIDERS as readonly string[]).includes(provider)) {
-    c.fail('provider', `unsupported provider "${provider}". Supported: ${SUPPORTED_PROVIDERS.join(', ')}`);
+  const model = c.string(raw['model'], 'model', { nonEmpty: true, maxLength: 200 });
+  // "provider": a name, a list of names (failover order), or objects with their own model.
+  const rawProvider = raw['provider'];
+  const providers: ProviderChoice[] = [];
+  const providerName = (v: unknown, field: string): string => {
+    const n = c.string(v, field, { nonEmpty: true, maxLength: 60 });
+    if (/[\x00-\x1f]/.test(n)) c.fail(field, 'must not contain control characters');
+    return n.trim();
+  };
+  if (Array.isArray(rawProvider)) {
+    if (!rawProvider.length) c.fail('provider', 'must name at least one provider');
+    if (rawProvider.length > 20) c.fail('provider', 'lists at most 20 providers');
+    rawProvider.forEach((entry, i) => {
+      const field = `provider[${i}]`;
+      if (typeof entry === 'string') providers.push({ provider: providerName(entry, field), model });
+      else {
+        const o = c.object(entry, field, ['provider', 'model']);
+        providers.push({ provider: providerName(o['provider'], `${field}.provider`), model: o['model'] === undefined ? model : c.string(o['model'], `${field}.model`, { nonEmpty: true, maxLength: 200 }) });
+      }
+    });
+    const seen = new Set<string>();
+    providers.forEach((p, i) => {
+      const k = `${p.provider.toLowerCase()}\0${p.model}`;
+      if (seen.has(k)) c.fail(`provider[${i}]`, 'duplicate entry');
+      seen.add(k);
+    });
+  } else {
+    providers.push({ provider: providerName(rawProvider, 'provider'), model });
   }
+  const provider = providers[0]!.provider;
+  const usesCompatible = providers.some((p) => p.provider === 'openai-compatible');
   let providerOptions: AgentDefinition['providerOptions'];
   if (raw['providerOptions'] !== undefined) {
-    if (provider !== 'openai-compatible') {
+    if (!usesCompatible) {
       c.fail('providerOptions', 'is only supported with provider "openai-compatible"');
     }
     const po = c.object(raw['providerOptions'], 'providerOptions', ['baseUrl', 'apiKeyEnv']);
@@ -239,11 +281,10 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       c.fail('providerOptions.apiKeyEnv', 'must be an environment variable name (the key itself never goes in agent JSON)');
     }
     providerOptions = { baseUrl, apiKeyEnv };
-  } else if (provider === 'openai-compatible') {
+  } else if (usesCompatible) {
     c.fail('providerOptions', 'is required for provider "openai-compatible" (baseUrl and apiKeyEnv)');
   }
 
-  const model = c.string(raw['model'], 'model', { nonEmpty: true, maxLength: 200 });
   const systemPrompt = c.string(raw['systemPrompt'], 'systemPrompt', { nonEmpty: true, maxLength: 200_000 });
 
   let reasoning: ReasoningEffort | undefined;
@@ -391,7 +432,8 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     id,
     ...(name ? { name } : {}),
     description,
-    provider: provider as ProviderName,
+    provider,
+    providers,
     providerOptions,
     model,
     systemPrompt,

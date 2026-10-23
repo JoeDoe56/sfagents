@@ -113,6 +113,8 @@ Older conversations may hold `transcript` files under `transcripts/<run>.md` fro
 
 An `artifact` record references displayable content; it does not contain it. `path` is relative to the `.sfagents` directory for managed content (threads, artifacts), or to the configuration directory for project files.
 
+File artifacts record `file`: the user's file the artifact shows, relative to the project directory with `/` separators (or absolute outside it). Nothing is copied; the artifact is the file as it is now. Application artifacts record `url`, the address of an app on this computer (`http://127.0.0.1:<port>/…`). An `artifact_update` may change `title`, `file` or `url`. Older artifacts with a `path` under `artifacts/<id>/r<rev>/` are managed copies and still read.
+
 - A missing backing file is reported as a missing artifact. The conversation still loads.
 - Artifact records grant no filesystem or execution permissions.
 

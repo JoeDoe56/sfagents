@@ -11,6 +11,7 @@ import { renderMarkdown } from './markdown.js';
 import { alertDialog, showError } from './dialogs.js';
 import { bytesText, dateText } from './format.js';
 import { makeGlass } from './modalsheet.js';
+import { GLASS, SEND_TINT } from './glassvalues.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
 
@@ -50,11 +51,14 @@ export function openQuickLook(options) {
   const title = el('h2', '');
   const meta = el('span', 'ql-meta');
   titleWrap.append(title, meta);
-  const close = iconButton('xmark', 'Close', () => dismiss());
-  const editBtn = iconButton('square.and.pencil', 'Edit', () => startEdit());
+  // While editing, the close button leaves the editor (the preview stays) and the check saves.
+  const close = iconButton('xmark', 'Close', () => (editor ? leaveEdit() : dismiss()));
+  const editBtn = iconButton('pencil', 'Edit', () => startEdit());
+  const checkBtn = iconButton('checkmark', 'Save', () => editor?.save());
+  checkBtn.hidden = true;
   const more = iconButton('ellipsis', 'More', (e) => options.actions.menu?.(current(), e.currentTarget));
   const share = iconButton('square.and.arrow.up', 'Share', () => options.actions.share(current()));
-  top.append(close, titleWrap, editBtn, share, more);
+  top.append(close, titleWrap, editBtn, share, more, checkBtn);
   const stage = el('div', 'ql-stage');
   const prev = iconButton('chevron.left', 'Previous', () => go(-1));
   const next = iconButton('chevron.right', 'Next', () => go(1));
@@ -81,7 +85,7 @@ export function openQuickLook(options) {
     glass.invalidate();
   };
   if (glass) {
-    for (const b of [close, editBtn, more, share, prev, next]) glass.lens(b, 'control');
+    for (const b of [close, editBtn, more, share, prev, next, checkBtn]) glass.lens(b, 'control');
     new ResizeObserver(glassBands).observe(layer);
     stage.addEventListener('load', () => glass.repaint(), true);
     glassBands();
@@ -90,9 +94,37 @@ export function openQuickLook(options) {
   let editor = null;
   const current = () => items[index];
 
+  /** The chrome for previewing or for editing. */
+  function setEditing(on) {
+    checkBtn.hidden = !on;
+    share.hidden = on;
+    more.hidden = on;
+    if (on) editBtn.hidden = true;
+    close.setAttribute('aria-label', on ? 'Stop editing' : 'Close');
+    close.title = on ? 'Stop editing' : 'Close';
+    layer.classList.toggle('editing', on);
+    requestAnimationFrame(glassBands);
+  }
+
+  function setSaveReady(on) {
+    checkBtn.classList.toggle('dirty', on);
+    const lens = glass?.lensOf?.(checkBtn);
+    lens?.transition({ tint: on ? SEND_TINT : GLASS.control.tint }, { duration: 220, easing: 'easeInOut' });
+  }
+
+  async function leaveEdit() {
+    if (editor?.dirty()) {
+      const { action } = await alertDialog({ title: 'Discard your changes?', actions: [{ label: 'Keep Editing', role: 'cancel', value: 'keep' }, { label: 'Discard', role: 'destructive', value: 'discard' }] });
+      if (action !== 'discard') return;
+    }
+    show();
+  }
+
   async function show() {
     const item = current();
     editor = null;
+    setEditing(false);
+    setSaveReady(false);
     title.textContent = item.name;
     meta.textContent = [item.type, item.size !== null ? bytesText(item.size, false) : null, dateText(item.modified, true)].filter(Boolean).join(' · ');
     prev.hidden = index <= 0;
@@ -188,30 +220,26 @@ export function openQuickLook(options) {
     area.value = data.text;
     area.spellcheck = item.kind === 'text';
     area.setAttribute('autocapitalize', 'off');
-    const bar = el('div', 'ql-editbar');
-    const status = el('span', 'ql-status', '');
-    const cancel = el('button', 'ui-button', 'Cancel');
-    const save = el('button', 'ui-button primary', 'Save');
-    cancel.type = save.type = 'button';
-    bar.append(status, cancel, save);
-    box.append(area, bar);
+    box.append(area);
     stage.append(box);
     area.focus();
-    editBtn.hidden = true;
+    setEditing(true);
     let modified = data.modified;
     let dirty = false;
     area.addEventListener('input', () => {
+      if (!dirty) setSaveReady(true);
       dirty = true;
-      status.textContent = 'Edited';
     });
+    // The check saves and, once it is saved, leaves the editor for the updated preview.
     const doSave = async (force = false) => {
+      checkBtn.disabled = true;
       try {
         const saved = await postJson('/api/files/text', { path: item.path, text: area.value, modified, force });
         modified = saved.modified;
         Object.assign(item, saved);
         dirty = false;
-        status.textContent = 'Saved';
         options.onSaved?.(item);
+        show();
       } catch (error) {
         if (error.status === 409) {
           const { action } = await alertDialog({
@@ -224,23 +252,17 @@ export function openQuickLook(options) {
           });
           if (action === 'replace') await doSave(true);
         } else await showError(error.message, `Couldn't save "${item.name}"`);
+      } finally {
+        checkBtn.disabled = false;
       }
     };
-    save.addEventListener('click', () => doSave());
-    cancel.addEventListener('click', async () => {
-      if (dirty) {
-        const { action } = await alertDialog({ title: 'Discard your changes?', actions: [{ label: 'Keep Editing', role: 'cancel', value: 'keep' }, { label: 'Discard', role: 'destructive', value: 'discard' }] });
-        if (action !== 'discard') return;
-      }
-      show();
-    });
     area.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         doSave();
       }
     });
-    editor = { dirty: () => dirty };
+    editor = { dirty: () => dirty, save: () => (dirty ? doSave() : show()) };
   }
 
   function go(step) {
@@ -272,8 +294,8 @@ export function openQuickLook(options) {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      if (editor?.dirty()) return;
-      dismiss();
+      if (editor) leaveEdit();
+      else dismiss();
     } else if (!editor && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
       e.preventDefault();
       go(e.key === 'ArrowRight' ? 1 : -1);
@@ -295,6 +317,8 @@ export function openQuickLook(options) {
     layer.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, fill: 'forwards' }).onfinish = () => layer.remove();
   }
 
-  show();
+  show().then(() => {
+    if (options.edit && !editBtn.hidden) startEdit();
+  });
   return { close: dismiss };
 }

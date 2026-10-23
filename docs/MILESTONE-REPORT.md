@@ -223,3 +223,34 @@ Agents are now peers rather than a tree. Every valid `.json` file in `agents/` i
 | Messaging with the replier's own (wider) tools; one thread per pair across selection changes; three replies running at once; deadlock and ungranted refusals | `threads` tests |
 | Thread files and artifact link survive a restart; the writer's context holds only the reply | `conversation-persistence` tests |
 | Agent menu, staging, X discards, check saves, gradient follows the agent; thread sheet; artifact card to Quick Look | Headless Chromium at phone size against a scripted three-agent project |
+
+# Providers, settings, file artifacts, apps, terminal and search
+
+## Result
+
+Providers are set up in the app: OpenRouter keys, ChatGPT and Claude plan sign-ins and custom OpenAI-compatible endpoints, each named, several of a kind, with keys and tokens only in the OS keyring. Agents name providers in failover order. App settings (port and the like) are in the Settings sheet and `sfagents settings`. Artifacts are the files themselves; web apps the agent starts become artifacts served through SF Agents. The web interface has a terminal and a search, Quick Look's editor works like iOS's, and agent and MCP files reload live.
+
+## What was built
+
+| Area | Delivered |
+| --- | --- |
+| Keyring | `KeyringSecretStore` (@napi-rs/keyring; Secret Service only on Linux, chunked for Windows' size limit), refusal with an explanation when there is none. |
+| Providers | `ProviderRegistry` (`providers.json`, names only), `ChatGPTProvider` (Responses API) with OAuth sign-in and refresh, `ClaudeSubscriptionProvider` (Claude Agent SDK, tool calls captured over an in-process MCP server) with `setup-token` sign-in in a pseudo-terminal, custom endpoints, `FailoverProvider` and `AccountState`. |
+| Agent files | `provider` as a name, a list or entries with their own model. |
+| Settings | `AppSettings` (`settings.json`): port, address, sensors, terminal output; restart-only settings marked. |
+| CLI | `sfagents providers …`, `sfagents settings …`, settings as defaults for flags, live reload in `start`. |
+| Web | Settings sheet with providers and server settings; Add Provider sheet (four kinds, sign-in from another device by pasting); agent sheet account picker and gear (agent file in the editor); Quick Look editor with pen, close and check; terminal (xterm.js, node-pty, persistent tabs, WebSocket); search (messages and artifact text); application artifacts proxied under `/apps/<id>/` with absolute paths, redirects and sockets; file artifacts that follow their files; live reload of agents and MCP. |
+
+## Verification
+
+| Check | Evidence |
+| --- | --- |
+| Registry, keyring refusal, failover, adapters, settings | `providers` tests; the real Secret Service keyring (GNOME Keyring in a D-Bus session) for add, read back (2,500-character value, chunked) and remove |
+| Settings and providers API, account picker | `web-extras` tests |
+| App proxy: page, absolute paths, own `/api`, cookie routing, redirect, WebSocket, app down | `web-extras` tests |
+| File artifacts follow their files; missing files; search | `artifacts` and `web-extras` tests |
+| Terminal: shell I/O, replay on reattach, cross-site refusal | `web-extras` tests |
+| Live reload: new, changed and broken agent files | `web-extras` tests |
+| `providers`, `settings` and unknown-provider errors in the CLI | `cli` tests |
+| Claude sign-in starts and shows the sign-in address | `claude setup-token` run in a pseudo-terminal here |
+| Layout | Headless Chromium at phone size: Settings, Add Provider, Claude sign-in, terminal, search, app artifact, editor |

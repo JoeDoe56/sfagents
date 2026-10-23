@@ -20,6 +20,13 @@ import type {
   RuntimeEvent,
 } from '@sfagents/core';
 
+// Tests never touch the user's settings, provider list or keyring entries.
+if (!process.env['SFAGENTS_TEST_HOME_SET']) {
+  process.env['SFAGENTS_HOME'] = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-home-')));
+  process.env['SFAGENTS_KEYRING_SERVICE'] = 'SF Agents test';
+  process.env['SFAGENTS_TEST_HOME_SET'] = '1';
+}
+
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const MCP_SERVER_SCRIPT = path.join(REPO_ROOT, 'tests', 'fixtures', 'test-mcp-server.mjs');
 export const CLI_ENTRY = path.join(REPO_ROOT, 'cli', 'bin', 'sfagents.js');
