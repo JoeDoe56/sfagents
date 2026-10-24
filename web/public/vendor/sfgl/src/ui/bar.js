@@ -39,6 +39,7 @@ const fadeSpring = spring(0.26, 1);
  * @property {HTMLElement | {el: HTMLElement}} node
  * @property {'fill'|number} [size]       width: a share of what is left, or points
  * @property {number} [height]            default 44
+ * @property {'start'|'center'|'end'} [align]   where a shorter item sits in a taller row (visually; unset: against the bar's edge)
  * @property {'bar'|'control'|'tile'|false} [glass]   for a wrapped node (default 'bar')
  * @property {number} [grow]              share of the free width when size is 'fill' (default 1)
  * @property {string} [from]              the shape this one grows out of when it appears
@@ -146,7 +147,11 @@ export function createBar(o) {
       let x = pad;
       for (const it of row) {
         const w = typeof it.size === 'number' ? it.size : (free * (it.grow ?? 1)) / share;
-        out.set(it.id, {x, y, w, h: it.height ?? h});
+        const ih = it.height ?? h;
+        // y runs from the anchored edge; 'end' means the bottom of the row, 'start' the top, whichever edge the bar is on.
+        const slack = h - ih;
+        const dy = it.align === 'center' ? slack / 2 : it.align === 'end' ? (edge === 'bottom' ? 0 : slack) : it.align === 'start' ? (edge === 'bottom' ? slack : 0) : 0;
+        out.set(it.id, {x, y: y + dy, w, h: ih});
         x += w + gap;
       }
       y += h + rowGap;
@@ -233,7 +238,7 @@ export function createBar(o) {
       s.left = `${e.x.x}px`;
       s.width = `${Math.max(0, e.w.x)}px`;
       s.height = `${Math.max(0, e.h.x)}px`;
-      s.borderRadius = `${Math.max(0, e.h.x) / 2}px`;
+      s.borderRadius = e.group.classList.contains('plain') ? '0px' : `${Math.max(0, e.h.x) / 2}px`;
       if (edge === 'bottom') {
         s.bottom = `${e.y.x}px`;
         s.top = '';
@@ -320,10 +325,10 @@ export function createBar(o) {
       o.onLayout?.(name);
     },
     /** Changes the items of a layout (a new button, a different mini player). */
-    setItems(name, items) {
+    setItems(name, items, {animate = false} = {}) {
       layouts.set(name, Array.isArray(items[0]) ? items : [items]);
       for (const row of layouts.get(name)) for (const it of row) entryFor(name, it);
-      retarget(false);
+      retarget(animate);
     },
     /** Total height of the shapes now (for scroll insets). */
     get height() {

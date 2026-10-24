@@ -108,6 +108,7 @@ export function createField(o = {}) {
       api.focus();
     }
   });
+  api.fit = fit;
   requestAnimationFrame(fit);
   new ResizeObserver(() => fit()).observe(node);
   return api;

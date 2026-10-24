@@ -378,117 +378,16 @@ button { -webkit-tap-highlight-color: transparent; }
 
 /* ------------------------------------------------------------------ bar / sheet */
 
-.bar {
-  position: absolute;
-  left: 20px;
-  bottom: 20px;
-  width: 300px;
-  height: 64px;
-  border-radius: 32px;
-  overflow: hidden;
-  overflow: clip;
-  touch-action: none;
-}
-.bar-fill { position: absolute; inset: 0; background: var(--sheet); opacity: 0; pointer-events: none; }
-/* CSS tiers draw the glass with backdrop-filter; the fully expanded sheet needs a real fill there. */
-.bar[data-sf-tier] .bar-fill { opacity: var(--opaque, 0); }
+/* ------------------------------------------------------------------ composer (the main bar's header: sfgl bar, field, buttons) */
 
-.grabber {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  width: 96px;
-  height: 18px;
-  margin-left: -48px;
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: grab;
-  touch-action: none;
-  z-index: 6;
-}
-/* Apple Maps' handle: a long thin bar 5 px below the top edge of the bar
-   or sheet, wherever the sheet is. */
-.grabber span {
-  position: absolute;
-  left: 19px;
-  top: 5px;
-  width: 58px;
-  height: 4px;
-  border-radius: 2px;
-  background: rgba(235, 235, 245, 0.32);
-}
-.grabber:focus-visible { outline: none; }
-.grabber:focus-visible span { background: rgba(235, 235, 245, 0.7); }
-.bar.dragging .grabber { cursor: grabbing; }
-
-.row {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  top: 10px;
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-/* The inner pill (Maps' search field); grows like iMessage's text field. */
-.field {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
-  border-radius: 22px;
-  min-height: 44px;
-}
-.field-line {
-  display: flex;
-  align-items: flex-end;
-  min-height: 44px;
-}
-.icon-btn {
-  flex: none;
-  width: 40px;
-  height: 44px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: rgba(235, 235, 245, 0.6);
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-}
-.icon-btn:hover { color: rgba(235, 235, 245, 0.85); }
-.icon-btn:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: -6px; border-radius: 14px; }
-#attach { margin-left: 2px; }
-/* The mic mirrors the plus: the same space between it and the end of the field. */
-#mic { margin-right: 2px; }
-#attach i { width: 18px; height: 18px; }
-#mic i { width: 17px; height: 17px; }
+.composer-field { color: #fff; padding-block: 0; }
+.composer-field .sf-field-input { padding: 11px 0; line-height: 22px; max-height: none; caret-color: var(--send); touch-action: pan-y; }
+.composer-field .sf-field-input::placeholder { color: rgba(235, 235, 245, 0.45); }
+.composer-icon { color: rgba(235, 235, 245, 0.6); }
+.composer-icon:hover { color: rgba(235, 235, 245, 0.85); }
 #mic.listening { color: var(--danger); }
 #mic.unavailable { opacity: 0.45; }
-
-.input {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 22px;
-  max-height: var(--input-max, 40vh);
-  margin: 11px 0;
-  padding: 0 2px;
-  border: 0;
-  outline: none;
-  resize: none;
-  background: transparent;
-  color: #fff;
-  font-size: 17px;
-  line-height: 22px;
-  overflow-y: hidden;
-  caret-color: var(--send);
-  scrollbar-width: thin;
-}
-.input::placeholder { color: rgba(235, 235, 245, 0.45); }
-.input { touch-action: none; }
-.input.scrolling { overflow-y: auto; touch-action: pan-y; }
-.bar.dragging, .bar.dragging * { user-select: none; -webkit-user-select: none; }
+.sf-sheet[data-kind="bar"].dragging, .sf-sheet[data-kind="bar"].dragging * { user-select: none; -webkit-user-select: none; }
 
 /* Composer attachments (inside the field, above the text, like iMessage) */
 .attachments {
@@ -557,18 +456,6 @@ button { -webkit-tap-highlight-color: transparent; }
 .pending .label { position: absolute; left: 4px; right: 4px; bottom: 3px; font-size: 10px; line-height: 12px; text-align: center; color: #fff; text-shadow: 0 1px 2px #000; pointer-events: none; }
 
 /* The circle on the right: blank glass, a send button when there is text, stop while running */
-.circle {
-  position: relative;
-  flex: none;
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  cursor: pointer;
-}
-.circle:disabled { cursor: default; }
 .send-icon {
   position: absolute;
   inset: 0;
@@ -602,30 +489,17 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 .stop-disc { background: rgba(255, 255, 255, 0.92); color: #000; }
 .stop-disc i { width: 12px; height: 12px; }
-.circle.can-stop:not(.can-send) .stop-disc { transform: scale(1); opacity: 1; }
-.circle:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: 2px; }
+.composer-send.can-stop:not(.can-send) .stop-disc { transform: scale(1); opacity: 1; }
 
 /* Expanded sheet content */
-.sheet-scroll {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  top: 80px;
-  padding: 6px 16px calc(24px + var(--safe-bottom));
-  overflow: hidden;
-  overscroll-behavior: contain;
-  scrollbar-width: none;
-  touch-action: none;
-}
-.bar[data-state="full"] .sheet-scroll { touch-action: pan-y; }
-.bar[data-state="full"] .sheet-scroll { overflow-y: auto; }
+/* The sheet's content scrolls inside sfgl's sheet body, which supplies the top inset below the field. */
+.sheet-scroll { padding: 6px 16px calc(24px + var(--safe-bottom)); }
 /* The monitor's edges line up with the text field; the side buttons sit under the send circle. */
 .tools-row {
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  margin: 0 calc(var(--row-inset, 12px) - 16px) 22px;
+  margin: 0 -3px 22px;
 }
 .monitor {
   container-type: inline-size;
@@ -651,21 +525,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .mon-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 15px; line-height: 20px; font-weight: 600; color: #fff; }
 .mon-title i { width: 15px; height: 15px; color: var(--mon-secondary); flex: none; }
 .mon-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mon-expand {
-  position: relative;
-  flex: none;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: rgba(235, 235, 245, 0.85);
-  cursor: pointer;
-}
-.mon-expand > span { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
-.mon-expand i { width: 12px; height: 12px; }
-.mon-expand:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.8); outline-offset: 2px; }
+.mon-expand.sf-button { width: 28px; height: 28px; border-radius: 14px; color: rgba(235, 235, 245, 0.85); }
+.mon-expand.sf-button i { width: 12px; height: 12px; }
 
 /* Stats: a flat list of cells (label, value, a smaller line), four to a row here. */
 .mon-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 10px; }
@@ -738,10 +599,7 @@ button { -webkit-tap-highlight-color: transparent; }
   align-self: stretch;
   gap: 8px;
 }
-.circle.side { display: grid; place-items: center; color: rgba(235, 235, 245, 0.85); }
-.circle.side:disabled { cursor: default; }
-.side-icon { display: grid; place-items: center; pointer-events: none; }
-.side-icon i { width: 22px; height: 22px; }
+.side-buttons .sf-button { color: rgba(235, 235, 245, 0.85); }
 .section-head {
   display: flex;
   align-items: center;
@@ -1083,3 +941,6 @@ button { -webkit-tap-highlight-color: transparent; }
 .rd-progress { width: min(320px, 80%); height: 6px; border-radius: 3px; background: rgba(120, 120, 128, 0.3); overflow: hidden; }
 .rd-progress span { display: block; height: 100%; background: var(--blue, #0a84ff); transition: width 0.25s; }
 .rd-panel.over { background: #000; z-index: 1; }
+
+/* The plus and the mic sit inside the field with no glass of their own. */
+.sf-button.composer-icon { background: transparent; box-shadow: none; }

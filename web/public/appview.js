@@ -7,6 +7,7 @@
 
 import { openSheet } from './modalsheet.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
+import { createButton } from './vendor/sfgl/src/ui/index.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -16,16 +17,7 @@ function el(tag, className, text) {
 }
 
 function glassButton(symbol, label, onClick) {
-  const b = el('button', 'ms-close');
-  b.type = 'button';
-  b.dataset.glass = 'control';
-  b.setAttribute('aria-label', label);
-  b.title = label;
-  const i = el('i');
-  applySymbol(i, symbol, { size: 17 });
-  b.append(i);
-  b.addEventListener('click', onClick);
-  return b;
+  return createButton({ symbol, aria: label, size: 'large', onClick }).el;
 }
 
 export function openApp(a) {

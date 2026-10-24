@@ -247,7 +247,7 @@ describe('web server', () => {
       const index = await request(s.base, '/');
       assert.equal(index.status, 200);
       assert.match(String(index.headers['content-security-policy']), /default-src 'self'/);
-      assert.match(index.body.toString(), /<textarea class="input above" id="input"/);
+      assert.match(index.body.toString(), /<script type="module" src="app.js">/);
       const vendor = await request(s.base, '/vendor/sfgl/src/index.js');
       assert.equal(vendor.status, 200);
       assert.equal((await request(s.base, '/../package.json')).status, 404);

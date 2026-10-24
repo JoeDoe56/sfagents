@@ -120,6 +120,7 @@ export function standardHeader(o = {}) {
  * @property {number} [headerTop]                   px from the top of the sheet to the header (button sheets, default 18)
  * @property {() => Element | null} [closeSource]   the element the discard popover grows from (default: the header's close button)
  * @property {(detent: string) => void} [onDetent]
+ * @property {(o: object) => any} [layerGlass]     a glass factory for what is behind this sheet (a chat); it may offer `setSheet({left, top, width, height, radius, opaque})`
  * @property {() => boolean | void} [onEscape]    handle Escape yourself (return true to keep the sheet open)
  * @property {(confirmed?: boolean) => void} [onClose]
  * @property {() => void} [onMove]
@@ -147,7 +148,7 @@ export function createSheet(o = {}) {
 
   // ---------------------------------------------------------------- dom
 
-  const layer = createLayer();
+  const layer = createLayer({glass: o.layerGlass});
   const root = layer.el;
   root.classList.add('sf-sheet-layer');
   const scrim = el('div', 'sf-sheet-scrim');
@@ -334,7 +335,8 @@ export function createSheet(o = {}) {
     if (state !== panel.dataset.state) panel.dataset.state = state;
     panel.dataset.opaque = opaque > 0.95 ? 'true' : 'false';
     coverBands();
-    o.onMove?.({t, rect});
+    layer.host?.glass?.setSheet?.({...rect, top: rect.top + shift, opaque});
+    o.onMove?.({t, rect, clearance: edge === 'bottom' ? H - k[0].top : k[0].top + k[0].height});
     window.dispatchEvent(new CustomEvent('sfsheet', {detail: {sheet: api, t, rect}}));
   }
 
@@ -839,6 +841,14 @@ export function createSheet(o = {}) {
     },
     get dirty() {
       return dirty;
+    },
+    /** Asks the sheet's glass to redraw (content that moved or resized on its own). */
+    invalidate() {
+      glassHost?.invalidate();
+    },
+    /** The glass host of the sheet's content (null until it is presented). */
+    get glass() {
+      return glassHost;
     },
     /** Re-reads the medium height (the content changed). */
     refresh() {

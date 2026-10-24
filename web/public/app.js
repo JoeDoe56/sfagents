@@ -8,9 +8,9 @@ import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { createContentTransitions } from './vendor/sfgl/src/transitions/content.js';
 import { initialTier } from './vendor/sfgl/src/core/quality.js';
 import { renderMarkdown, looksLikeMarkdown, escapeHtml } from './markdown.js';
-import { setupGlass } from './glass.js';
-import { GLASS, SEND_TINT } from './glassvalues.js';
-import { createSheet } from './sheet.js';
+import { chatGlass } from './glass.js';
+import { createComposer } from './composer.js';
+import { SEND_TINT } from './glassvalues.js';
 import { renderTiles, createViewer, chatCard } from './artifacts.js';
 import { openTranscript, refreshTranscript } from './transcript.js';
 import { UploadJob } from './up2k.js';
@@ -19,8 +19,7 @@ import { createMonitor } from './monitor.js';
 import { openMonitorWindow } from './windows.js';
 import { peekOpen } from './peek.js';
 import { createFileManager } from './files.js';
-import { openSheet, sheetOpen, setSheetGlass } from './modalsheet.js';
-import { createFilesGlass } from './filesglass.js';
+import { sheetOpen } from './modalsheet.js';
 import { openAgentSheet, agentSheetOpen } from './agentsheet.js';
 import { openSettingsSheet, settingsEvent } from './settingssheet.js';
 import { openTerminal, terminalsChanged } from './terminal.js';
@@ -31,8 +30,7 @@ import { goToSignIn } from './api.js';
 import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
-import { installPress, registerGlass } from './press.js';
-import { configure as configureUi } from './vendor/sfgl/src/ui/index.js';
+import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
 configureUi({ scheme: 'dark' });
 
@@ -40,15 +38,14 @@ const $ = (id) => document.getElementById(id);
 const stage = $('stage');
 const chat = $('chat');
 const thread = $('thread');
-const bar = $('bar');
-const row = $('row');
-const field = $('field');
-const input = $('input');
-const send = $('send');
-const attachBtn = $('attach');
-const mic = $('mic');
+// The composer is the main bar's header (see composer.js): sfgl's bar, field and buttons.
+const composer = createComposer();
+const input = composer.input;
+const send = composer.send.el;
+const attachBtn = composer.attach.el;
+const mic = composer.mic.el;
+const attachmentsEl = composer.attachments;
 const picker = $('picker');
-const attachmentsEl = $('attachments');
 const sheetScroll = $('sheetScroll');
 
 for (const el of document.querySelectorAll('i[data-symbol]')) applySymbol(el, el.dataset.symbol, el.dataset.size ? { size: Number(el.dataset.size) } : {});
@@ -125,66 +122,76 @@ const settings = {
 };
 
 configureUi({ quality: settings.quality });
-const glassApi = setupGlass({ stage, chat, thread, quality: settings.quality });
-registerGlass(glassApi.glass);
-installPress();
-const { surface } = glassApi;
-setSheetGlass((o) => createFilesGlass({ ...o, quality: settings.quality, units: '.ui-row, .ag-unit, .settings-group > *' }));
-const SEND_FADE = { duration: 260, easing: 'easeInOut' };
-const barLens = surface.lens(bar, GLASS.bar);
-surface.lens(field, GLASS.control);
-const sendLens = surface.lens(send, GLASS.control);
-surface.lens($('monitor'), { ...GLASS.tile, clip: sheetScroll });
-// The expand button is a small glass circle on top of the monitor's glass.
-surface.lens($('monExpand'), { ...GLASS.control, layer: 2, clip: sheetScroll });
-surface.lens($('settingsBtn'), { ...GLASS.control, clip: sheetScroll });
-surface.lens($('terminalBtn'), { ...GLASS.control, clip: sheetScroll });
-surface.lens($('remoteBtn'), { ...GLASS.control, clip: sheetScroll });
-surface.lens($('searchBtn'), { ...GLASS.control, clip: sheetScroll });
-window.sfagents = { glass: glassApi.glass, surface, barLens };
-
-function syncTileLenses() {
-  const tiles = [...document.querySelectorAll('.tiles .tile')];
-  surface.syncGroup('tiles', tiles, { ...GLASS.tile, clip: sheetScroll });
-  glassApi.glass.requestRender();
-}
+// Every button in the app presses like iOS's (the rows and tiles keep their own highlight).
+installPress({
+  exclude: '.fm-row, .fm-tile, .fm-place, .ui-row, .menu-item, .menu-quick-item, .fm-crumb, .proc-row, .user-row, .tile, .stat, .drive, .ag-slider, .dialog-button, .toast-cancel, .fm-back, .fm-textbtn, .peek-back, summary',
+});
+const SEND_FADE = { duration: 260 };
 
 // ------------------------------------------------------------------ sheet
 
 let clearance = 100;
-let rail = null; // created below; the sheet lays out first
+let rail = null; // created below
 const railEl = $('rail');
+sheetScroll.hidden = false;
+
+// The buttons beside the monitor: the same circles as everywhere.
+function sideButton(id, label, symbol, size) {
+  const button = createButton({ symbol, aria: label, glass: 'control' });
+  button.el.id = id;
+  button.el.classList.add('side');
+  button.el.setAttribute('aria-haspopup', 'dialog');
+  if (!symbol) button.el.insertAdjacentHTML('afterbegin', TERMINAL_GLYPH);
+  else if (size) button.setSymbol(symbol, size);
+  $('sideButtons').append(button.el);
+  return button;
+}
+const TERMINAL_GLYPH = '<svg class="term-glyph" viewBox="0 0 24 24" width="22" height="22"><rect x="2.5" y="4" width="19" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M7 9.5l3 2.5-3 2.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M12.5 15h4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
+sideButton('settingsBtn', 'Settings', 'gear', 23);
+sideButton('terminalBtn', 'Terminal', null);
+sideButton('remoteBtn', 'Remote Desktop', 'desktopcomputer', 22);
+sideButton('searchBtn', 'Search messages and artifacts', 'magnifyingglass', 21);
+// The expand button on the monitor is a small circle of glass on the monitor's glass.
+const expandButton = createButton({ symbol: 'arrow.up.left.and.arrow.down.right', aria: 'Open Files', glass: 'control', className: 'mon-expand' });
+expandButton.setSymbol('arrow.up.left.and.arrow.down.right', 12);
+expandButton.el.id = 'monExpand';
+$('monExpand').replaceWith(expandButton.el);
+
 const sheet = createSheet({
-  bar,
-  row,
-  grabber: $('grabber'),
-  scroller: sheetScroll,
-  onLayout: ({ t, opaque, rect, collapsedClearance }) => {
-    glassApi.setSheet({ ...rect, opaque });
+  kind: 'bar',
+  detents: ['collapsed', 'medium', 'large'],
+  label: 'Message and artifacts',
+  // The glass behind the bar bends the conversation (see glass.js).
+  layerGlass: chatGlass({ chat, thread }),
+  header: composer.bar,
+  content: sheetScroll,
+  onMove: ({ t, clearance: next }) => {
     // The topic rail sits above the collapsed bar and hides while the sheet is up.
-    railEl.style.bottom = `${Math.round(collapsedClearance + 12)}px`;
+    railEl.style.bottom = `${Math.round(next + 12)}px`;
     railEl.classList.toggle('covered', t > 0.03);
-    if (Math.abs(collapsedClearance - clearance) > 0.5) {
+    if (Math.abs(next - clearance) > 0.5) {
       const atBottom = nearBottom();
-      clearance = collapsedClearance;
+      clearance = next;
       thread.style.setProperty('--chat-bottom', `${Math.round(clearance + 18)}px`);
       if (atBottom) scrollToBottom();
     }
   },
-  onDetent: (name) => {
-    if (name !== 'collapsed') syncTileLenses();
-    updateMonitor();
+  onDetent: () => {
+    if (monitor) updateMonitor();
   },
 });
-sheetScroll.addEventListener('scroll', () => glassApi.glass.requestRender(), { passive: true });
+/** The chat-refracting glass behind the bar (glass.js), once the sheet is up. */
+const barApi = () => sheet.layer.host?.glass ?? null;
+window.sfagents = { sheet, composer };
 
 // ------------------------------------------------------------------ resource monitor
 
-const monitor = createMonitor({
+let monitor = null;
+monitor = createMonitor({
   root: $('monitor'),
   expandButton: $('monExpand'),
   // Drives arriving or leaving change the monitor's height.
-  onDrivesChange: () => glassApi.glass.requestRender(),
+  onDrivesChange: () => sheet.invalidate(),
   // A stat opens its window straight from the sheet.
   onOpen: (key, cell) => openMonitorWindow(key, { from: cell, openInFiles: (path, opts) => openFiles(path, opts) }),
 });
@@ -198,6 +205,7 @@ document.addEventListener('visibilitychange', updateMonitor);
 window.addEventListener('sheetchange', () => updateMonitor());
 window.addEventListener('peekchange', updateMonitor);
 window.sfagents.monitor = monitor;
+sheet.present('collapsed');
 
 // ------------------------------------------------------------------ time stamps
 
@@ -480,7 +488,7 @@ async function jumpToMessage(id) {
     el = find();
   }
   if (!el) return notice('That message is not in the conversation any more.');
-  if (sheet.detent !== 'collapsed') sheet.set('collapsed');
+  if (sheet.detent !== 'collapsed') sheet.setDetent('collapsed');
   const safeTop = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--safe-top')) || 0;
   stick = false;
   chat.scrollTo({ top: Math.max(0, el.offsetTop - chat.clientHeight * 0.3 - safeTop), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
@@ -754,7 +762,6 @@ function setArtifacts(list) {
   renderTiles($('pinned'), state.artifacts.filter((a) => a.pinned), handlers);
   renderTiles($('allArtifacts'), state.artifacts, handlers);
   viewer.refresh(state.artifacts);
-  syncTileLenses();
   render(); // the chat's artifact cards
 }
 
@@ -769,16 +776,9 @@ function openArtifact(a) {
 
 const pending = []; // { job, el, url }
 
-function inputMax() {
-  return Math.max(66, Math.min(innerHeight * (sheet.detent === 'collapsed' ? 0.45 : 0.3), 440));
-}
-
+/** Fits the field to its text after the text was changed by code. */
 function autosize() {
-  input.style.height = '0px';
-  const max = inputMax();
-  const h = Math.max(22, Math.min(input.scrollHeight, max));
-  input.style.height = `${h}px`;
-  input.classList.toggle('scrolling', input.scrollHeight > max + 1);
+  composer.field.fit();
 }
 
 function canSend() {
@@ -793,6 +793,9 @@ const contentTransitions = createContentTransitions({ root: send, include: '.sen
 contentTransitions.start();
 let shownSendable = false;
 let shownIcon = 'agent';
+/** The send circle's lens and the sfgl glass it lives in (the sheet's own glass host, a moment after the bar starts). */
+const sendGlass = () => lensFor(send);
+const renderSend = () => sendGlass()?.glass.requestRender();
 
 // The model's own gradient, refracted by the circle while it is the agent
 // button (sfgl's gradient underlay: drawn as if under the glass, over the
@@ -805,7 +808,7 @@ function setGradientSeed(model) {
   if (!model || model === gradientSeed) return;
   gradientSeed = model;
   modelGradient.setSeed(model);
-  glassApi.glass.requestRender();
+  renderSend();
 }
 function gradientWanted() {
   return !shownSendable && !document.hidden && !document.body.classList.contains('files-open') && !sheetOpen();
@@ -821,11 +824,12 @@ function updateGradient() {
   const step = (now) => {
     const t = Math.min(1, (now - start) / 260);
     modelGradient.setStrength(from + (target - from) * t);
-    glassApi.glass.requestRender();
+    renderSend();
     if (t < 1) gradientFade = requestAnimationFrame(step);
   };
   gradientFade = requestAnimationFrame(step);
-  if (want && !stopGradient) stopGradient = modelGradient.animate(glassApi.glass, 24);
+  const found = sendGlass();
+  if (want && !stopGradient && found) stopGradient = modelGradient.animate(found.glass, 24);
   else if (!want && stopGradient) {
     stopGradient();
     stopGradient = null;
@@ -835,7 +839,14 @@ document.addEventListener('visibilitychange', updateGradient);
 // The underlay stays attached: at strength 0 it draws nothing. (Changing lens
 // options with setOptions would cancel the tint's running transition, which
 // left the circle blue after a send.)
-sendLens.setOptions({ underlay: modelGradient });
+function whenSendLens(tries = 0) {
+  const found = sendGlass();
+  if (found) {
+    found.lens.setOptions({ underlay: modelGradient });
+    updateGradient();
+  } else if (tries < 240) requestAnimationFrame(() => whenSendLens(tries + 1));
+}
+whenSendLens();
 updateGradient();
 window.addEventListener('sheetchange', updateGradient);
 
@@ -844,7 +855,7 @@ function updateComposer() {
   const sendable = canSend();
   if (sendable !== shownSendable) {
     shownSendable = sendable;
-    sendLens.transition({ tint: sendable ? SEND_TINT : GLASS.control.tint }, SEND_FADE);
+    composer.send.setTint(sendable ? SEND_TINT.color : null, { duration: SEND_FADE.duration });
     updateGradient();
   }
   // One icon at a time: the arrow to send, the agent mascot otherwise (the stop disc covers it while running).
@@ -860,7 +871,7 @@ function updateComposer() {
   send.classList.toggle('can-stop', running && !sendable);
   send.disabled = false;
   send.setAttribute('aria-label', sendable ? (running ? 'Send when the agent finishes' : 'Send') : running ? 'Stop' : 'Agent and context');
-  attachmentsEl.hidden = pending.length === 0;
+  composer.showAttachments(pending.length > 0);
 }
 
 let agentSheet = null;
@@ -875,10 +886,7 @@ function showAgentSheet() {
   });
 }
 
-input.addEventListener('input', () => {
-  autosize();
-  updateComposer();
-});
+input.addEventListener('input', () => updateComposer());
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.isComposing && settings.enterSends) {
     e.preventDefault();
@@ -892,9 +900,6 @@ send.addEventListener('click', () => {
 });
 // Holding the circle (or right-clicking it) opens the agent sheet even when it would send or stop.
 onHold(send, () => showAgentSheet());
-field.addEventListener('click', (e) => {
-  if (e.target === field || e.target.classList.contains('field-line')) input.focus();
-});
 
 function submitFromComposer() {
   const text = input.value;
@@ -1118,7 +1123,8 @@ function setQuality(q, persist = true) {
   settings.quality = q;
   configureUi({ quality: q });
   if (persist) writeSetting('quality', q);
-  const glass = glassApi.glass;
+  const glass = barApi()?.glass;
+  if (!glass) return;
   glass.options.quality = q;
   if (q === 'auto') {
     glass.setTier(
@@ -1141,7 +1147,7 @@ function openSettings() {
     quality: () => settings.quality,
     previewQuality: (q) => setQuality(q, false),
     qualityHint: () => {
-      const tier = glassApi.tier();
+      const tier = barApi()?.tier() ?? 'glass';
       return settings.quality === 'auto' ? `Chosen for this device: ${tier}. Lowers itself if frames get slow.` : `Drawing with: ${tier}.`;
     },
     enterSends: () => settings.enterSends,
@@ -1171,10 +1177,8 @@ $('searchBtn').addEventListener('click', () =>
 // Keys --------------------------------------------------------------------
 
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !e.defaultPrevented && !viewer.open && !sheetOpen() && sheet.detent !== 'collapsed') sheet.set('collapsed');
+  if (e.key === 'Escape' && !e.defaultPrevented && !viewer.open && !sheetOpen() && sheet.detent !== 'collapsed') sheet.setDetent('collapsed');
 });
-
-addEventListener('resize', autosize);
 
 // Keep the bar above on-screen keyboards that overlay the page (iOS Safari):
 // size the stage to the visual viewport.
@@ -1191,10 +1195,14 @@ if (vv) {
     stage.style.height = follow ? `${vv.height}px` : '';
     stage.style.bottom = follow ? 'auto' : '';
     // A keyboard (not a toolbar or a small resize) takes the bottom inset's place.
+    // The bar's layer follows the visible part of the page the same way.
+    const layer = sheet.layer.el;
+    layer.style.top = follow ? `${vv.offsetTop}px` : '';
+    layer.style.height = follow ? `${vv.height}px` : '';
+    layer.style.bottom = follow ? 'auto' : '';
     sheet.setKeyboard(!zoomed && innerHeight - vv.height > 120);
-    glassApi.glass.invalidate();
-    sheet.relayout();
-    glassApi.repaint();
+    barApi()?.invalidate();
+    barApi()?.repaint();
   };
   vv.addEventListener('resize', fit);
   vv.addEventListener('scroll', fit);
@@ -1224,8 +1232,6 @@ function openFiles(path, opts = {}) {
 }
 
 const expand = $('monExpand');
-expand.removeAttribute('aria-disabled');
-expand.setAttribute('aria-label', 'Open Files');
 expand.addEventListener('click', () => fileManager.open({ from: $('monitor') }));
 // A drive bar opens that drive.
 const drivesEl = $('monitor').querySelector('.mon-drives');
@@ -1245,7 +1251,7 @@ drivesEl.addEventListener('keydown', openDrive);
 {
   const toolsRow = document.querySelector('.tools-row');
   const align = () => {
-    const buttons = [...document.querySelectorAll('.side-buttons .circle.side')].map((b) => b.getBoundingClientRect());
+    const buttons = [...document.querySelectorAll('.side-buttons .sf-button')].map((b) => b.getBoundingClientRect());
     const field = $('send').getBoundingClientRect();
     if (buttons.length < 2 || !buttons[0].height || !field.height) return;
     const between = buttons[1].top - buttons[0].bottom;

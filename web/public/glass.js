@@ -17,12 +17,24 @@
  */
 
 import { createGlass, imageBackdrop } from './vendor/sfgl/src/index.js';
+import { registerGlass, materials } from './vendor/sfgl/src/ui/index.js';
 
 const SHEET_RGB = [26, 25, 28];
 
-export function setupGlass({ stage, chat, thread, quality }) {
+/**
+ * The glass factory for the main bar sheet: it bends the conversation behind
+ * it. The framework asks for one glass per layer, so this returns a function
+ * that builds it (see `createSheet({layerGlass})`).
+ * @param {{chat: HTMLElement, thread: HTMLElement}} where
+ */
+export function chatGlass({ chat, thread }) {
+  return (options) => create({ chat, thread, ...options });
+}
+
+function create({ host, chat, thread, quality }) {
   const glass = createGlass({ quality: quality || 'auto' });
-  const surface = glass.surface({ host: stage, z: 3 });
+  const surface = glass.surface({ host, z: 3 });
+  const unregister = registerGlass(glass);
 
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
@@ -192,12 +204,11 @@ export function setupGlass({ stage, chat, thread, quality }) {
     // viewport's top-left (an iOS keyboard pans the visual viewport), and the
     // sheet rect is relative to the stage, which follows the visible area.
     const origin = surface.canvas.getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
     const chatRect = chat.getBoundingClientRect();
     const dy = chatRect.top - chat.scrollTop - origin.top;
     const dx = chatRect.left - origin.left;
-    const sheetTop = sheet ? sheet.top + stageRect.top - origin.top : 0;
-    const sheetLeft = sheet ? sheet.left + stageRect.left - origin.left : 0;
+    const sheetTop = sheet ? sheet.top - origin.top : 0;
+    const sheetLeft = sheet ? sheet.left - origin.left : 0;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, cw, ch);
@@ -261,9 +272,28 @@ export function setupGlass({ stage, chat, thread, quality }) {
   if (document.fonts) document.fonts.addEventListener('loadingdone', invalidateLayout);
   schedule();
 
+  let bands = [];
   return {
     glass,
     surface,
+    lens: (el, kind = 'control', extra = {}) => surface.lens(el, { ...materials()[kind], ...extra }),
+    group: (name, els, kind = 'control', extra = {}) => {
+      surface.syncGroup(name, els, { ...materials()[kind], ...extra });
+      glass.invalidate(true);
+    },
+    /** The chrome's bands: the chat is painted around the sheet itself, so these only ask for a repaint. */
+    setBands(next) {
+      bands = next;
+      schedule();
+    },
+    setBackground() {},
+    setEdges() {},
+    lensOf: (el) => surface.lenses.find((l) => l.el === el) ?? null,
+    track() {
+      glass.invalidate(true);
+      schedule();
+    },
+    invalidate: () => glass.invalidate(true),
     /** Tells the backdrop where the sheet is and how opaque it should look. */
     setSheet(next) {
       const was = sheet;
@@ -274,5 +304,13 @@ export function setupGlass({ stage, chat, thread, quality }) {
     },
     repaint: invalidateLayout,
     tier: () => glass.tier().name,
+    destroy() {
+      unregister();
+      try {
+        glass.destroy();
+      } catch {
+        // already gone
+      }
+    },
   };
 }

@@ -10,6 +10,7 @@ import { openSheet } from './modalsheet.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showError } from './dialogs.js';
 import { showMenu } from './menu.js';
+import { createButton } from './vendor/sfgl/src/ui/index.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -85,13 +86,7 @@ export async function openTerminal() {
     detents: ['large'],
     className: 'tm-sheet',
     trailing: (() => {
-      const add = el('button', 'ms-close tm-add');
-      add.type = 'button';
-      add.dataset.glass = 'control';
-      add.setAttribute('aria-label', 'New tab');
-      add.append(sym('plus', 17));
-      add.addEventListener('click', () => newTab());
-      return add;
+      return createButton({ symbol: 'plus', aria: 'New tab', size: 'large', onClick: () => newTab() }).el;
     })(),
     build(sheet) {
       strip = el('div', 'tm-tabs');

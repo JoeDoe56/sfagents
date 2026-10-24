@@ -10,7 +10,7 @@
 
 import { getJson, postJson } from './api.js';
 import { openSheet } from './modalsheet.js';
-import { createRow, createSection, createGroup, icon as sfIcon } from './vendor/sfgl/src/ui/index.js';
+import { createRow, createSection, createGroup, createButton, icon as sfIcon } from './vendor/sfgl/src/ui/index.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showError, confirmDialog, toast } from './dialogs.js';
 import { showMenu } from './menu.js';
@@ -324,20 +324,20 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
   }
 
   // The gear opens the agent's file in the file manager's editor.
-  const gear = el('button', 'ms-close ag-gear');
-  gear.type = 'button';
-  gear.dataset.glass = 'control';
-  gear.setAttribute('aria-label', 'Edit the agent file');
-  gear.append(sym('gear', 19));
-  gear.addEventListener('click', () => {
-    const a = stagedAgent();
-    if (a?.file) onEditFile?.(a.file);
+  const gear = createButton({
+    symbol: 'gear',
+    aria: 'Edit the agent file',
+    size: 'large',
+    onClick: () => {
+      const a = stagedAgent();
+      if (a?.file) onEditFile?.(a.file);
+    },
   });
   const ctx = openSheet({
     title: 'Agent',
     detents: ['medium', 'large'],
     className: 'ag-sheet',
-    trailing: gear,
+    trailing: gear.el,
     build(sheet) {
       const body = sheet.body;
       // The agent and its account: rows with a pop-up value, as Calendar's are.

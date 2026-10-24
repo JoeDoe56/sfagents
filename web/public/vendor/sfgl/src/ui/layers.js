@@ -25,7 +25,7 @@ let stack = 0;
 
 /**
  * A new layer above the earlier ones (below the shared popover layer).
- * @param {{z?: number}} [o]
+ * @param {{z?: number, glass?: (o: object) => any}} [o]   `glass`: a glass factory for what is behind (the default repaints the page's DOM)
  * @returns {{el: HTMLElement, host: ReturnType<typeof createGlassHost>, cover: (owner: object, rects?: {top: number, bottom: number}[]) => void, destroy: () => void}}
  */
 export function createLayer(o = {}) {
@@ -38,6 +38,7 @@ export function createLayer(o = {}) {
     background: pageBackground(),
     quality: settings.quality,
     observe: false,
+    make: o.glass,
     skip: (n) => n === root || n.hasAttribute('data-sf-nopaint'),
   });
   const bandsBy = new Map();

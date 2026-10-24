@@ -14,6 +14,7 @@ import { openSheet } from './modalsheet.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showMenu } from './menu.js';
 import { showError } from './dialogs.js';
+import { createButton } from './vendor/sfgl/src/ui/index.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -54,18 +55,13 @@ export async function openRemoteDesktop() {
   let streaming = false;
   let installAsked = false;
 
-  const more = el('button', 'ms-close rd-more');
-  more.type = 'button';
-  more.dataset.glass = 'control';
-  more.setAttribute('aria-label', 'Remote Desktop options');
-  more.append(sym('ellipsis', 17));
-  more.addEventListener('click', () => showMenu({ anchor: more, align: 'end', groups: menuGroups() }));
+  const more = createButton({ symbol: 'ellipsis', aria: 'Remote Desktop options', size: 'large', onClick: () => showMenu({ anchor: more.el, align: 'end', groups: menuGroups() }) });
 
   const ctx = openSheet({
     title: 'Remote Desktop',
     detents: ['large'],
     className: 'rd-sheet',
-    trailing: more,
+    trailing: more.el,
     build(sheet) {
       stage = el('div', 'rd-stage');
       stage.dataset.noSheetDrag = '';

@@ -25,7 +25,8 @@ export function tintOf(value) {
 
 /**
  * @param {{host: HTMLElement, scroller?: HTMLElement|null, background?: string, units?: string, quality?: string,
- *   edges?: () => any[], clip?: HTMLElement|null, observe?: boolean}} options
+ *   edges?: () => any[], clip?: HTMLElement|null, observe?: boolean, make?: (o: object) => any}} options
+ *   `make`: this host's own glass factory (a chat behind a bar), instead of the app-wide `configure({glass})`
  *   `observe: false`: only elements given to `adopt`/`adoptOne` get glass (the shared popup layer, where sheets have hosts of their own)
  * @returns {{glass: any, adopt: (root: Element, o?: {clip?: Element}) => void, release: (node: Element) => void, bands: (rects: {top: number, bottom: number}[]) => void,
  *   adoptOne: (node: Element, o?: object, kind?: string) => void, invalidate: () => void, repaint: () => void, setBackground: (c: string) => void, destroy: () => void} | null}
@@ -33,7 +34,7 @@ export function tintOf(value) {
 export function createGlassHost(options) {
   let glass = null;
   try {
-    const make = settings.glass ?? ((o) => createDomGlass(o));
+    const make = options.make ?? settings.glass ?? ((o) => createDomGlass(o));
     glass = make({...options, scroller: options.scroller ?? options.host, quality: options.quality ?? settings.quality});
   } catch {
     glass = null;

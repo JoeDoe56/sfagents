@@ -94,6 +94,7 @@ export function renderTiles(container, artifacts, { onOpen, onPin }) {
 function buildTile(a, { onOpen, onPin }) {
   const tile = document.createElement('div');
   tile.className = 'tile';
+  tile.dataset.glass = 'tile';
   tile.dataset.id = a.id;
   tile.tabIndex = 0;
   tile.setAttribute('role', 'button');
