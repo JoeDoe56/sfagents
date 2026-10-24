@@ -26,6 +26,13 @@
   --safe-right: env(safe-area-inset-right, 0px);
 }
 
+/* sfgl/ui tokens in SF Agents' dark theme. */
+:root, :root[data-sf-scheme="dark"] {
+  --sf-sheet: #1a191c;
+  --sf-bg: #000;
+  --sf-card: #2c2c2e;
+}
+
 * { box-sizing: border-box; }
 html, body {
   margin: 0;

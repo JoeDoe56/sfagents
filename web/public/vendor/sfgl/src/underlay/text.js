@@ -13,6 +13,7 @@
  * @property {string} [fadeVariable="--underlay-text-fade"] CSS variable holding the fade width.
  * @property {number} [fadeDefaultPx=18] Fade width used when the variable is empty.
  * @property {(host: Element) => boolean} [leftFade] Whether the host fades on the left.
+ * @property {(el: Element, style: CSSStyleDeclaration) => string | null} [textColor] Colour to draw an element's text and symbols in (the underlay only shows through a lens, so this is how a lens shows a "selected" rendition: the DOM keeps its own colour outside it).
  */
 
 /**
@@ -61,6 +62,33 @@ export function createTextUnderlay(config, env = {}) {
   const fadeVariable = config.fadeVariable || "--underlay-text-fade";
   const fadeDefaultPx = Number.isFinite(config.fadeDefaultPx) ? config.fadeDefaultPx : 18;
   const leftFadeOf = typeof config.leftFade === "function" ? config.leftFade : () => false;
+  const colorOf = typeof config.textColor === "function" ? config.textColor : () => null;
+  // SF Symbol masks (icons in a tab bar) drawn as tinted images.
+  const symbolImages = new Map();
+  const symbolTinted = new Map();
+  function symbolCanvas(url, color) {
+    const key = url + "|" + color;
+    if (symbolTinted.has(key)) return symbolTinted.get(key);
+    let img = symbolImages.get(url);
+    if (!img) {
+      img = new win.Image();
+      img.decoding = "async";
+      img.addEventListener("load", () => { dirty = true; }, {once: true});
+      img.src = url;
+      symbolImages.set(url, img);
+    }
+    if (!img.complete || !img.naturalWidth) return null;
+    const c = doc.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const g = c.getContext("2d");
+    g.drawImage(img, 0, 0);
+    g.globalCompositeOperation = "source-in";
+    g.fillStyle = color;
+    g.fillRect(0, 0, c.width, c.height);
+    symbolTinted.set(key, c);
+    return c;
+  }
   const clipped = new Map();
   let canvas = null;
   let context = null;
@@ -180,6 +208,17 @@ export function createTextUnderlay(config, env = {}) {
     const memo = new Map();
     const range = doc.createRange();
     elements.forEach(el => {
+      if (el.classList && el.classList.contains("sf-symbol")) {
+        const style = win.getComputedStyle(el);
+        if (style.visibility === "hidden" || style.display === "none") return;
+        const mask = style.webkitMaskImage || style.maskImage || "";
+        const found = /url\("?([^")]+)"?\)/.exec(mask);
+        if (!found) return;
+        const rect = el.getBoundingClientRect();
+        const box = el.getBoundingClientRect();
+        runs.push({symbol: found[1], node: el, value: found[1], rect, style, color: colorOf(el, style) || style.backgroundColor, alpha: ancestorOpacity(el, memo), fadeRect: box, fadePx: 0, leftFade: false});
+        return;
+      }
       const walker = doc.createTreeWalker(el, SHOW_TEXT);
       // Fade data belongs to the element, so it is read once for all its runs.
       let fade = null;
@@ -198,7 +237,7 @@ export function createTextUnderlay(config, env = {}) {
           const fadeValue = fadeStyle.getPropertyValue ? fadeStyle.getPropertyValue(fadeVariable) : "";
           fade = {rect: fadeHost.getBoundingClientRect(), px: fadeMatch ? Math.max(0, Number.parseFloat(fadeValue) || fadeDefaultPx) : 0, left: !!fadeMatch && !!leftFadeOf(fadeHost)};
         }
-        runs.push({node, value: node.nodeValue, rect, style, alpha: ancestorOpacity(node.parentElement || el, memo), fadeRect: fade.rect, fadePx: fade.px, leftFade: fade.left});
+        runs.push({node, value: node.nodeValue, rect, style, color: colorOf(node.parentElement || el, style) || style.color, alpha: ancestorOpacity(node.parentElement || el, memo), fadeRect: fade.rect, fadePx: fade.px, leftFade: fade.left});
       }
     });
     if (range.detach) range.detach();
@@ -208,7 +247,7 @@ export function createTextUnderlay(config, env = {}) {
   function textSignature(runs) {
     return JSON.stringify(runs.map(run => {
       const r = run.rect, f = run.fadeRect, s = run.style;
-      return [run.value, r.left, r.top, r.width, r.height, f.left, f.top, f.width, f.height, run.fadePx, run.leftFade, run.alpha, s.font, s.color, s.opacity, s.letterSpacing];
+      return [run.value, r.left, r.top, r.width, r.height, f.left, f.top, f.width, f.height, run.fadePx, run.leftFade, run.alpha, s.font, s.color, run.color, s.opacity, s.letterSpacing, run.symbol || ""];
     }));
   }
 
@@ -223,6 +262,18 @@ export function createTextUnderlay(config, env = {}) {
     canvas.height = Math.max(1, Math.ceil(bounds.height * scale));
     context.setTransform(scale, 0, 0, scale, -bounds.left * scale, -bounds.top * scale);
     runs.forEach(run => {
+      if (run.symbol) {
+        const tinted = symbolCanvas(run.symbol, run.color);
+        if (tinted) {
+          const k = Math.min(run.rect.width / tinted.width, run.rect.height / tinted.height);
+          const w = tinted.width * k, h = tinted.height * k;
+          context.save();
+          context.globalAlpha = run.alpha;
+          context.drawImage(tinted, run.rect.left + (run.rect.width - w) / 2, run.rect.top + (run.rect.height - h) / 2, w, h);
+          context.restore();
+        }
+        return;
+      }
       const style = run.style, textRect = run.rect, fadeRect = run.fadeRect;
       const size = Number.parseFloat(style.fontSize) || 16;
       context.save();
@@ -233,16 +284,16 @@ export function createTextUnderlay(config, env = {}) {
       context.rect(fadeRect.left, textRect.top - padding, fadeRect.width, textRect.height + padding * 2);
       context.clip();
       context.font = style.font || (style.fontWeight + " " + style.fontSize + " " + style.fontFamily);
-      context.fillStyle = style.color;
+      context.fillStyle = run.color;
       context.globalAlpha = run.alpha;
       context.textBaseline = "alphabetic";
       if ("letterSpacing" in context) context.letterSpacing = style.letterSpacing || "0px";
       const gradient = typeof context.createLinearGradient === "function" ? context.createLinearGradient(fadeRect.left, 0, fadeRect.right, 0) : null;
       if (gradient) {
         const width = Math.max(1, fadeRect.width), left = run.leftFade ? Math.min(1, run.fadePx / width) : 0, right = Math.max(left, 1 - Math.min(1, run.fadePx / width));
-        if (run.leftFade) { gradient.addColorStop(0, "transparent"); gradient.addColorStop(left, style.color); }
-        else gradient.addColorStop(0, style.color);
-        gradient.addColorStop(right, style.color);
+        if (run.leftFade) { gradient.addColorStop(0, "transparent"); gradient.addColorStop(left, run.color); }
+        else gradient.addColorStop(0, run.color);
+        gradient.addColorStop(right, run.color);
         gradient.addColorStop(1, "transparent");
         context.fillStyle = gradient;
       }

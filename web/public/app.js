@@ -32,6 +32,9 @@ import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installPress, registerGlass } from './press.js';
+import { configure as configureUi } from './vendor/sfgl/src/ui/index.js';
+
+configureUi({ scheme: 'dark' });
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
@@ -121,6 +124,7 @@ const settings = {
   enterSends: readSetting('enterSends', !coarse) === true,
 };
 
+configureUi({ quality: settings.quality });
 const glassApi = setupGlass({ stage, chat, thread, quality: settings.quality });
 registerGlass(glassApi.glass);
 installPress();
@@ -1112,6 +1116,7 @@ setupDictation({
 
 function setQuality(q, persist = true) {
   settings.quality = q;
+  configureUi({ quality: q });
   if (persist) writeSetting('quality', q);
   const glass = glassApi.glass;
   glass.options.quality = q;

@@ -391,125 +391,85 @@ function bezier(css) {
   };
 }
 
+// ------------------------------------------------------------------ the standard sheet (sfgl/ui)
+
+import { createSheet, standardHeader } from './vendor/sfgl/src/ui/index.js';
+
+// The button that was pressed last: a sheet grows out of it and folds back into it.
+let lastSource = { el: null, at: 0 };
+document.addEventListener(
+  'click',
+  (e) => {
+    const b = e.target?.closest?.('button, [role="button"], a');
+    if (b) lastSource = { el: b, at: performance.now() };
+  },
+  true,
+);
+const recentSource = () => (lastSource.el?.isConnected && performance.now() - lastSource.at < 2500 ? lastSource.el : null);
+
 /**
  * A standard sheet: close button on the left, a centred title, an optional
- * trailing control, and a scrolling body.
- * @param {{title: string, detents?: ('medium'|'large')[], className?: string, trailing?: Node,
- *   mediumHeight?: (ctx: object) => number, build: (ctx: object) => void, onClose?: () => void, onDetent?: (d: string) => void,
- *   glass?: (opts: {host: HTMLElement, scroller: HTMLElement}) => any}} options
+ * trailing control, and a scrolling body. It is a sfgl/ui sheet that grows
+ * out of the button that opened it.
+ * @param {{title: string, detents?: ('medium'|'large')[], className?: string, trailing?: Node, from?: Element,
+ *   mediumHeight?: (ctx: object) => number, build: (ctx: object) => void, onClose?: (confirmed: boolean) => void, onDetent?: (d: string) => void,
+ *   onConfirm?: (ctx: object) => Promise<boolean | void> | boolean | void, confirmLabel?: string}} options
  */
 export function openSheet(options) {
-  const head = el('header', 'ms-head');
-  const closeBtn = el('button', 'ms-close');
-  closeBtn.type = 'button';
-  closeBtn.setAttribute('aria-label', 'Close');
-  const x = el('i');
-  applySymbol(x, 'xmark', { size: 15 });
-  closeBtn.append(x);
-  const title = el('h2', 'ms-title', options.title);
-  const trailing = el('div', 'ms-trailing');
-  if (options.trailing) trailing.append(options.trailing);
-  // A sheet that edits something has a check button: it saves and closes.
-  // The close button, a swipe down, the scrim and Escape close without saving.
-  let confirmBtn = null;
-  if (options.onConfirm) {
-    confirmBtn = el('button', 'ms-close ms-confirm');
-    confirmBtn.type = 'button';
-    confirmBtn.setAttribute('aria-label', options.confirmLabel ?? 'Done');
-    confirmBtn.dataset.glass = 'control';
-    const check = el('i');
-    applySymbol(check, 'checkmark', { size: 16 });
-    confirmBtn.append(check);
-    trailing.append(confirmBtn);
-  }
-  let confirmed = false;
-  head.append(closeBtn, title, trailing);
-  const body = el('div', 'ms-body');
-  const edge = el('div', 'ms-edge');
+  const header = standardHeader({
+    title: options.title,
+    confirm: options.onConfirm ? { aria: options.confirmLabel ?? 'Done' } : false,
+    trailing: options.trailing ? [options.trailing] : [],
+  });
   let ctx;
-  const frame = createSheetFrame({
-    detents: options.detents,
-    className: options.className,
-    z: options.z,
+  let confirmed = false;
+  openSheets++;
+  window.dispatchEvent(new CustomEvent('sheetchange'));
+  const sheet = createSheet({
+    kind: 'button',
+    source: options.from ?? recentSource() ?? undefined,
+    detents: options.detents?.length ? options.detents : ['large'],
+    header,
     label: options.title,
-    scroller: () => body,
-    mediumHeight: () => (options.mediumHeight ? options.mediumHeight(ctx) : (body.querySelector('[data-medium-end]')?.offsetTop ?? body.scrollHeight) + 16 + safeBottom()),
-    onDetent: (d) => options.onDetent?.(d),
-    onClosed: () => {
-      glass?.destroy();
-      frame.layer.remove();
+    mediumHeight: () => (options.mediumHeight ? options.mediumHeight(ctx) : (sheet.body.querySelector('[data-medium-end]')?.offsetTop ?? sheet.body.scrollHeight) + 16 + safeBottom()),
+    onDetent: (d) => d && options.onDetent?.(d),
+    onDirty: (on) => header.buttons.confirm?.setTint(on ? 'action' : null),
+    onClose: () => {
+      openSheets--;
+      window.dispatchEvent(new CustomEvent('sheetchange'));
       options.onClose?.(confirmed);
     },
-    onMove: () => frame?.onMove?.(),
   });
-  frame.panel.append(head, edge, body);
-  frame.addDragArea(head);
-  // The close button is Liquid Glass with the main sheet's control values.
-  let glass = null;
-  const extraGlass = [];
-  const setupGlass = () => {
-    const factory = options.glass ?? defaultGlass;
-    if (glass || !factory) return;
-    try {
-      glass = factory({
-        host: frame.panel,
-        scroller: body,
-        // The fade under the header is part of what the close button refracts.
-        edges: () => {
-          const r = edge.getBoundingClientRect();
-          return [{ from: 'top', top: r.top, height: r.height, opacity: frame.panel.classList.contains('ms-scrolled') ? 1 : 0, stops: [[0, 1], [0.5, 0.85], [1, 0]] }];
-        },
-      });
-      glass.lens(closeBtn, 'control');
-      for (const node of trailing.querySelectorAll('[data-glass]')) glass.lens(node, node.dataset.glass || 'control');
-      for (const [node, kind] of extraGlass) glass.lens(node, kind, { clip: body });
-      const bands = () => {
-        const rects = [head, ...extraGlass.map(([n]) => n)].map((n) => n.getBoundingClientRect()).filter((r) => r.height);
-        glass.setBands(rects.map((r) => ({ top: r.top, bottom: r.bottom })));
-        glass.invalidate();
-      };
-      frame.onMove = bands;
-      body.addEventListener('scroll', bands, { passive: true });
-      new ResizeObserver(bands).observe(body);
-      // Content shown, hidden or reflowed moves the glass controls inside the body.
-      let queued = false;
-      new MutationObserver(() => {
-        if (queued) return;
-        queued = true;
-        requestAnimationFrame(() => {
-          queued = false;
-          bands();
-        });
-      }).observe(body, { subtree: true, childList: true, attributes: true, attributeFilter: ['hidden', 'class'] });
-      bands();
-    } catch {
-      glass = null;
-      frame.panel.classList.add('no-glass');
-    }
-  };
-  closeBtn.addEventListener('click', () => frame.close());
-  confirmBtn?.addEventListener('click', async () => {
-    confirmBtn.disabled = true;
+  sheet.el.classList.add(...(options.className ?? '').split(/\s+/).filter(Boolean));
+  sheet.body.classList.add('ms-content');
+  header.buttons.confirm?.el.addEventListener('click', async () => {
+    const button = header.buttons.confirm;
+    button.setDisabled(true);
     try {
       if ((await options.onConfirm(ctx)) === false) return;
       confirmed = true;
-      frame.close();
+      sheet.close();
     } finally {
-      confirmBtn.disabled = false;
+      button.setDisabled(false);
     }
   });
-  body.addEventListener('scroll', () => frame.panel.classList.toggle('ms-scrolled', body.scrollTop > 2), { passive: true });
   ctx = {
-    /** Marks the sheet as changed: the check button turns blue, as Apple's Done does. */
-    setDirty(on) {
-      if (!confirmBtn) return;
-      confirmBtn.classList.toggle('dirty', !!on);
-      const lens = glass?.lensOf?.(confirmBtn);
-      lens?.transition({ tint: on ? SEND_TINT : GLASS.control.tint }, { duration: 220, easing: 'easeInOut' });
+    setDirty: (on) => sheet.setDirty(on),
+    invalidateGlass: () => sheet.layer.host?.invalidate(),
+    addGlass(node, kind = 'control') {
+      node.dataset.glass = kind;
     },
-    invalidateGlass: () => glass?.invalidate(), addGlass: (node, kind = 'control') => (extraGlass.push([node, kind]), glass?.lens(node, kind, { clip: body })), body, head, title, frame, close: () => frame.close(), set: (d) => frame.set(d), setTitle: (t) => (title.textContent = t), refresh: () => frame.refresh() };
+    body: sheet.body,
+    head: sheet.header.el,
+    title: header.title,
+    frame: { panel: sheet.el, layer: sheet.layer.el },
+    sheet,
+    close: () => sheet.requestClose(),
+    set: (d) => sheet.setDetent(d),
+    setTitle: (t) => (header.title.textContent = t),
+    refresh: () => sheet.refresh(),
+  };
   options.build(ctx);
-  frame.show(options.detents?.[0] ?? 'large');
-  setupGlass();
+  sheet.present(options.detents?.[0] ?? 'large');
   return ctx;
 }

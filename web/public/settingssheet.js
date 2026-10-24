@@ -14,6 +14,7 @@ import { openSheet } from './modalsheet.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showMenu } from './menu.js';
 import { confirmDialog, promptDialog, showError, toast } from './dialogs.js';
+import { createRow, createSection, createButton } from './vendor/sfgl/src/ui/index.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -45,44 +46,21 @@ function listen(fn) {
   return () => listeners.delete(fn);
 }
 
-function field({ label, value = '', type = 'text', placeholder = '', autocomplete = 'off', inputmode, onInput }) {
-  const row = el('label', 'ui-row ui-field');
-  const name = el('span', 'ui-field-label', label);
-  const input = el('input', 'ui-field-input');
-  input.type = type;
-  input.value = value;
-  input.placeholder = placeholder;
-  input.autocomplete = autocomplete;
-  input.spellcheck = false;
-  input.setAttribute('autocapitalize', 'off');
-  if (inputmode) input.inputMode = inputmode;
-  input.addEventListener('input', () => onInput?.(input.value));
-  row.append(name, input);
-  return { row, input };
+const KIND_COLOR = { openrouter: '#6466f1', openai: '#10a37f', anthropic: '#d97757', custom: '#636366' };
+
+/** A row with a text input at its end (Name, API Key, a port). */
+function field({ label, value = '', type = 'text', placeholder = '', autocomplete = 'off', inputmode, onInput, hint }) {
+  const row = createRow({ title: label, subtitle: hint, wrap: true, input: { value, type, placeholder, autocomplete, inputMode: inputmode, onInput } });
+  return { row: row.el, input: row.input, api: row };
 }
 
 function switchRow(label, hint, checked, onChange) {
-  const row = el('label', 'ui-row st-switch');
-  const text = el('span', 'ui-row-label');
-  text.append(el('span', '', label));
-  if (hint) text.append(el('small', 'ui-row-hint', hint));
-  const input = el('input', 'ui-switch');
-  input.type = 'checkbox';
-  input.setAttribute('role', 'switch');
-  input.checked = checked;
-  input.addEventListener('change', () => onChange(input.checked));
-  row.append(text, input);
-  return { row, input };
+  const row = createRow({ title: label, subtitle: hint, wrap: true, toggle: { checked, onChange } });
+  return { row: row.el, api: row };
 }
 
 function section(title, nodes, footer) {
-  const s = el('section', 'ui-section');
-  if (title) s.append(el('h3', 'ui-section-title', title));
-  const g = el('div', 'ui-group');
-  g.append(...nodes);
-  s.append(g);
-  if (footer) s.append(el('p', 'ui-caption', footer));
-  return s;
+  return createSection({ title: title ?? undefined, rows: nodes, note: footer || undefined }).el;
 }
 
 /**
@@ -97,8 +75,8 @@ export function openSettingsSheet(device) {
   let providersBox = null;
   let serverBox = null;
   let signInBox = null;
-  let qualityButtons = [];
-  let qualityHint = null;
+  let qualityRow = null;
+  let deviceSection = null;
 
   const ctx = openSheet({
     title: 'Settings',
@@ -108,42 +86,33 @@ export function openSettingsSheet(device) {
     build(sheet) {
       const body = sheet.body;
       // This device.
-      const seg = el('div', 'segmented');
-      seg.setAttribute('role', 'radiogroup');
-      seg.setAttribute('aria-label', 'Glass quality');
       const names = { auto: 'Auto', superfluid: 'Superfluid', glass: 'Glass', lite: 'Lite', frost: 'Frost', static: 'Solid' };
-      for (const q of device.qualities) {
-        const b = el('button', '', names[q] ?? q);
-        b.type = 'button';
-        b.setAttribute('role', 'radio');
-        b.dataset.value = q;
-        b.addEventListener('click', () => {
+      qualityRow = createRow({
+        title: 'Glass Quality',
+        choices: device.qualities.map((q) => ({ value: q, label: names[q] ?? q })),
+        selected: local.quality,
+        onChange: (q) => {
           local.quality = q;
           device.previewQuality(q);
           showQuality();
           dirty();
-        });
-        seg.append(b);
-        qualityButtons.push(b);
-      }
-      qualityHint = el('p', 'ui-caption');
-      const quality = el('section', 'ui-section');
-      quality.append(el('h3', 'ui-section-title', 'Glass Quality'), seg, qualityHint);
+        },
+      });
       const enter = switchRow('Return sends', 'On a keyboard, Return sends and Shift+Return adds a line.', local.enterSends, (v) => {
         local.enterSends = v;
         dirty();
       });
+      deviceSection = createSection({ title: 'This Device', rows: [qualityRow, enter.row], note: '' });
       const marker = el('div');
       marker.dataset.mediumEnd = '';
       providersBox = el('div');
       serverBox = el('div');
       signInBox = el('div');
       body.append(
-        el('p', 'ui-caption st-note', 'Agents and MCP servers are set up in their own files (the gear in the agent sheet opens an agent’s file).'),
+        el('p', 'sf-section-note st-note', 'Agents and MCP servers are set up in their own files (the gear in the agent sheet opens an agent’s file).'),
         providersBox,
         marker,
-        quality,
-        section('This Device', [enter.row]),
+        deviceSection.el,
         signInBox,
         serverBox,
       );
@@ -170,8 +139,7 @@ export function openSettingsSheet(device) {
   });
 
   function showQuality() {
-    for (const b of qualityButtons) b.setAttribute('aria-checked', String(b.dataset.value === local.quality));
-    if (qualityHint) requestAnimationFrame(() => (qualityHint.textContent = device.qualityHint()));
+    if (deviceSection) requestAnimationFrame(() => deviceSection.setNote(device.qualityHint()));
   }
 
   function dirty() {
@@ -184,37 +152,32 @@ export function openSettingsSheet(device) {
     try {
       renderProviders(await getJson('/api/providers'));
     } catch (error) {
-      providersBox.replaceChildren(section('Providers', [el('div', 'ui-row', error.message)]));
+      providersBox.replaceChildren(section('Providers', [createRow({ title: error.message, wrap: true })]));
     }
   }
 
   function renderProviders(data) {
     const rows = [];
     for (const p of data?.providers ?? []) {
-      const row = el('button', 'ui-row tappable st-provider');
-      row.type = 'button';
-      const icon = el('span', `st-kind ${p.kind}`);
-      icon.append(sym(KIND_SYMBOL[p.kind] ?? 'cpu', 15));
-      const text = el('span', 'ui-row-label st-two');
-      text.append(el('span', '', p.name), el('small', 'ui-row-hint', [p.kindLabel, p.account ?? p.baseUrl].filter(Boolean).join(' · ')));
-      row.append(icon, text, sym('ellipsis', 15));
-      row.addEventListener('click', () =>
-        showMenu({
-          anchor: row,
-          align: 'end',
-          groups: [
-            [{ label: 'Rename', symbol: 'pencil', action: () => renameProvider(p) }],
-            [{ label: 'Remove', symbol: 'trash', role: 'destructive', action: () => removeProvider(p) }],
-          ],
-        }),
-      );
+      const row = createRow({
+        icon: KIND_SYMBOL[p.kind] ?? 'cpu',
+        iconTint: KIND_COLOR[p.kind] ?? KIND_COLOR.custom,
+        title: p.name,
+        subtitle: [p.kindLabel, p.account ?? p.baseUrl].filter(Boolean).join(' · '),
+        accessory: 'ellipsis',
+        onTap: () =>
+          showMenu({
+            anchor: row.el,
+            align: 'end',
+            groups: [
+              [{ label: 'Rename', symbol: 'pencil', action: () => renameProvider(p) }],
+              [{ label: 'Remove', symbol: 'trash', role: 'destructive', action: () => removeProvider(p) }],
+            ],
+          }),
+      });
       rows.push(row);
     }
-    const add = el('button', 'ui-row tappable st-add');
-    add.type = 'button';
-    add.append(sym('plus.circle.fill', 19), el('span', 'ui-row-label', 'Add Provider'));
-    add.addEventListener('click', () => openAddProvider(data));
-    rows.push(add);
+    rows.push(createRow({ icon: 'plus.circle.fill', title: 'Add Provider', tintTitle: true, onTap: () => openAddProvider(data) }));
     const note = data && !data.keyring.available
       ? data.keyring.reason
       : `Keys and sign-ins are kept in the ${data?.keyring.label ?? 'system keyring'}, never in a file. Agent files name a provider in "provider", e.g. "${data?.providers?.[0]?.name ?? 'OpenRouter 1'}".`;
@@ -251,7 +214,7 @@ export function openSettingsSheet(device) {
       server = await getJson('/api/settings');
       renderServer();
     } catch (error) {
-      serverBox.replaceChildren(section('On This Computer', [el('div', 'ui-row', error.message)]));
+      serverBox.replaceChildren(section('On This Computer', [createRow({ title: error.message, wrap: true })]));
     }
   }
 
@@ -260,24 +223,21 @@ export function openSettingsSheet(device) {
     for (const s of server.settings) {
       if (!groups.has(s.group)) groups.set(s.group, []);
       const value = s.key in draft ? draft[s.key] : s.value;
+      const pending = s.restart && String(s.value) !== String(s.running) ? `Now ${s.running}; ${s.value} after a restart` : '';
+      const hint = [s.hint, pending].filter(Boolean).join('\n');
       let node;
       if (s.type === 'boolean') {
-        node = switchRow(s.label, s.hint, value === true, (v) => setDraft(s, v)).row;
+        node = switchRow(s.label, hint, value === true, (v) => setDraft(s, v)).row;
       } else {
-        const f = field({
+        node = field({
           label: s.label,
+          hint,
           value: String(value),
-          type: s.type === 'port' ? 'text' : 'text',
           inputmode: s.type === 'port' ? 'numeric' : undefined,
           onInput: (v) => setDraft(s, s.type === 'port' && /^\d+$/.test(v) ? Number(v) : v),
-        });
-        node = el('div', 'st-field-wrap');
-        node.append(f.row, el('small', 'ui-row-hint st-field-hint', s.hint));
+        }).row;
       }
-      if (s.restart && String(s.value) !== String(s.running)) {
-        node.classList.add('st-pending');
-        node.append(el('small', 'st-restart', `Now ${s.running}; ${s.value} after a restart`));
-      }
+      if (pending) node.classList.add('st-pending');
       groups.get(s.group).push(node);
     }
     const boxes = [];
@@ -313,55 +273,53 @@ export function openSettingsSheet(device) {
     const when = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'never');
     for (const d of list.devices) {
       const mine = d.id === status.device?.id;
-      const row = el('button', 'ui-row tappable st-provider');
-      row.type = 'button';
-      const icon = el('span', 'st-kind custom');
-      icon.append(sym(/iPhone|Android/.test(d.name) ? 'phone' : 'desktopcomputer', 15));
-      const text = el('span', 'ui-row-label st-two');
-      text.append(el('span', '', mine ? `${d.name} (this device)` : d.name), el('small', 'ui-row-hint', `Signed in ${when(d.created)} · last seen ${when(d.lastSeen)}`));
-      row.append(icon, text, sym('ellipsis', 15));
-      row.addEventListener('click', () =>
-        showMenu({
-          anchor: row,
-          align: 'end',
-          groups: [[{ label: mine ? 'Sign Out' : 'Sign Out Device', symbol: 'xmark', role: 'destructive', action: () => (mine ? signOut() : removeDevice(d)) }]],
-        }),
-      );
+      const row = createRow({
+        icon: /iPhone|Android/.test(d.name) ? 'phone' : 'desktopcomputer',
+        iconTint: KIND_COLOR.custom,
+        title: mine ? `${d.name} (this device)` : d.name,
+        subtitle: `Signed in ${when(d.created)} · last seen ${when(d.lastSeen)}`,
+        wrap: true,
+        accessory: 'ellipsis',
+        onTap: () =>
+          showMenu({
+            anchor: row.el,
+            align: 'end',
+            groups: [[{ label: mine ? 'Sign Out' : 'Sign Out Device', symbol: 'xmark', role: 'destructive', action: () => (mine ? signOut() : removeDevice(d)) }]],
+          }),
+      });
       rows.push(row);
     }
     for (const k of list.passkeys) {
-      const row = el('button', 'ui-row tappable st-provider');
-      row.type = 'button';
-      const icon = el('span', 'st-kind openai');
-      icon.append(sym('lock.shield', 15));
-      const text = el('span', 'ui-row-label st-two');
-      text.append(el('span', '', `Passkey · ${k.name}`), el('small', 'ui-row-hint', `Added ${when(k.created)} · last used ${when(k.lastUsed)}`));
-      row.append(icon, text, sym('ellipsis', 15));
-      row.addEventListener('click', () =>
-        showMenu({ anchor: row, align: 'end', groups: [[{ label: 'Remove Passkey', symbol: 'trash', role: 'destructive', action: () => removePasskey(k) }]] }),
-      );
+      const row = createRow({
+        icon: 'lock.shield',
+        iconTint: KIND_COLOR.openai,
+        title: `Passkey · ${k.name}`,
+        subtitle: `Added ${when(k.created)} · last used ${when(k.lastUsed)}`,
+        wrap: true,
+        accessory: 'ellipsis',
+        onTap: () => showMenu({ anchor: row.el, align: 'end', groups: [[{ label: 'Remove Passkey', symbol: 'trash', role: 'destructive', action: () => removePasskey(k) }]] }),
+      });
       rows.push(row);
     }
     if (passkeysWork() && status.secureContext && !status.devicePasskey) {
-      const add = el('button', 'ui-row tappable st-add');
-      add.type = 'button';
-      add.append(sym('plus.circle.fill', 19), el('span', 'ui-row-label', 'Add a Passkey for This Device'));
-      add.addEventListener('click', async () => {
-        try {
-          await registerPasskey(authPost);
-          toast('Passkey added', { symbol: 'checkmark' });
-          loadSignIn();
-        } catch (error) {
-          if (!cancelled(error)) showError(error.message, "Couldn't add the passkey");
-        }
-      });
-      rows.push(add);
+      rows.push(
+        createRow({
+          icon: 'plus.circle.fill',
+          title: 'Add a Passkey for This Device',
+          tintTitle: true,
+          onTap: async () => {
+            try {
+              await registerPasskey(authPost);
+              toast('Passkey added', { symbol: 'checkmark' });
+              loadSignIn();
+            } catch (error) {
+              if (!cancelled(error)) showError(error.message, "Couldn't add the passkey");
+            }
+          },
+        }),
+      );
     }
-    const out = el('button', 'ui-row tappable st-signout');
-    out.type = 'button';
-    out.append(el('span', 'ui-row-label', 'Sign Out'));
-    out.addEventListener('click', signOut);
-    rows.push(out);
+    rows.push(createRow({ title: 'Sign Out', destructive: true, center: true, onTap: signOut }));
     const note = status.secureContext
       ? 'Devices stay signed in for 90 days after they were last used. “sfagents web --new-token” replaces the token and signs every device out.'
       : 'Passkeys need HTTPS (for example Tailscale Serve, with --public-origin) or localhost. “sfagents web --new-token” replaces the token and signs every device out.';
@@ -441,20 +399,12 @@ export function openAddProvider(data) {
     finish = null;
     ctx.setTitle('Add Provider');
     ctx.setDirty(false);
-    const rows = KINDS.map((k) => {
-      const row = el('button', 'ui-row tappable st-provider');
-      row.type = 'button';
-      const icon = el('span', `st-kind ${k.kind}`);
-      icon.append(sym(KIND_SYMBOL[k.kind], 15));
-      const text = el('span', 'ui-row-label st-two');
-      text.append(el('span', '', k.title), el('small', 'ui-row-hint', k.detail));
-      row.append(icon, text, sym('chevron.right', 12));
-      row.addEventListener('click', () => renderKind(k));
-      return row;
-    });
+    const rows = KINDS.map((k) =>
+      createRow({ icon: KIND_SYMBOL[k.kind], iconTint: KIND_COLOR[k.kind], title: k.title, subtitle: k.detail, wrap: true, accessory: 'chevron', onTap: () => renderKind(k) }),
+    );
     const parts = [section(null, rows)];
     if (data && !data.keyring.available) parts.unshift(el('p', 'ag-problem st-problem', data.keyring.reason));
-    else parts.push(el('p', 'ui-caption', 'You can add several of each, like two Claude accounts; give each its own name. When one reaches its limit, an agent that lists both continues with the other.'));
+    else parts.push(el('p', 'sf-section-note', 'You can add several of each, like two Claude accounts; give each its own name. When one reaches its limit, an agent that lists both continues with the other.'));
     ctx.body.replaceChildren(...parts);
     ctx.refresh();
   }
@@ -463,17 +413,19 @@ export function openAddProvider(data) {
     step = k.kind;
     ctx.setTitle(k.title);
     const name = field({ label: 'Name', value: suggestions[k.kind] ?? k.title, autocomplete: 'off' });
-    const back = el('button', 'ui-row tappable st-back');
-    back.type = 'button';
-    back.append(sym('chevron.left', 13), el('span', 'ui-row-label', 'All Providers'));
-    back.addEventListener('click', () => {
-      if (signIn) postJson(`/api/providers/signin/${signIn.id}`, { action: 'cancel' }).catch(() => {});
-      signIn = null;
-      stop();
-      renderKinds();
+    const back = createRow({
+      icon: 'chevron.left',
+      title: 'All Providers',
+      tintTitle: true,
+      onTap: () => {
+        if (signIn) postJson(`/api/providers/signin/${signIn.id}`, { action: 'cancel' }).catch(() => {});
+        signIn = null;
+        stop();
+        renderKinds();
+      },
     });
-    const nodes = [back];
-    const status = el('p', 'ui-caption st-status');
+    const nodes = [section(null, [back])];
+    const status = el('p', 'sf-section-note st-status');
     if (k.kind === 'openrouter' || k.kind === 'custom') {
       const url = k.kind === 'custom' ? field({ label: 'Endpoint', placeholder: 'http://127.0.0.1:8080/v1', inputmode: 'url' }) : null;
       const key = field({ label: 'API Key', type: 'password', placeholder: k.kind === 'custom' ? 'Optional' : 'sk-or-…', autocomplete: 'new-password' });
@@ -496,32 +448,31 @@ export function openAddProvider(data) {
       setTimeout(() => (k.kind === 'custom' ? url.input : key.input).focus(), 350);
     } else {
       const openai = k.kind === 'openai';
-      const start = el('button', 'ui-button primary st-signin', openai ? 'Continue with ChatGPT' : 'Continue with Claude');
-      start.type = 'button';
+      const start = createRow({ title: openai ? 'Continue with ChatGPT' : 'Continue with Claude', tintTitle: true, center: true, onTap: () => startSignIn() });
       const finishBox = el('div');
       nodes.push(
         section(null, [name.row], openai ? 'Signs in with your ChatGPT plan; usage counts against the plan, not API billing.' : 'Signs in with your Claude plan (Pro or Max) and keeps a long-lived token in the keyring.'),
-        start,
+        section(null, [start]),
         status,
         finishBox,
       );
       ctx.body.replaceChildren(...nodes);
       finish = null;
       ctx.setDirty(false);
-      start.addEventListener('click', async () => {
+      const startSignIn = async () => {
         if (signIn) {
           window.open(signIn.url, '_blank', 'noopener');
           return;
         }
         // Open the tab now, while the tap still counts as one (pop-up blockers).
         const tab = window.open('about:blank', '_blank');
-        start.disabled = true;
+        start.setDisabled(true);
         status.textContent = 'Starting…';
         try {
           signIn = await postJson('/api/providers/signin', { kind: k.kind, name: name.input.value });
         } catch (error) {
           tab?.close();
-          start.disabled = false;
+          start.setDisabled(false);
           status.textContent = '';
           showError(error.message, "Couldn't start the sign-in");
           return;
@@ -535,10 +486,10 @@ export function openAddProvider(data) {
           tab.location.href = signIn.url;
         }
         name.input.disabled = true;
-        start.textContent = 'Open the Sign-in Page Again';
-        start.disabled = false;
+        start.setTitle('Open the Sign-in Page Again');
+        start.setDisabled(false);
         renderFinish(openai, finishBox, status);
-      });
+      };
     }
     ctx.refresh();
   }

@@ -1,0 +1,490 @@
+/* sfgl/ui: tokens and component styles.
+ *
+ * Measurements are from iOS 26 (Calendar's event sheet, Apple Music's bars),
+ * in points; one point is one CSS pixel here. Light is the default, dark
+ * follows prefers-color-scheme, and data-sf-scheme="light|dark" on <html>
+ * (set by configure({scheme})) overrides both.
+ */
+
+:root {
+  --sf-font: var(--sf-font-sans, -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif);
+  --sf-blue: #007aff;
+  --sf-red: #ff3b30;
+  --sf-green: #34c759;
+  --sf-orange: #ff9500;
+
+  --sf-bg: #ffffff;
+  --sf-bg-grouped: #f2f2f7;
+  --sf-card: #ffffff;
+  --sf-sheet: #f2f2f7;
+  --sf-label: #000000;
+  --sf-label-2: rgba(60, 60, 67, 0.6);
+  --sf-label-3: rgba(60, 60, 67, 0.3);
+  --sf-separator: rgba(60, 60, 67, 0.2);
+  --sf-fill: rgba(120, 120, 128, 0.16);
+  --sf-fill-2: rgba(120, 120, 128, 0.12);
+  --sf-fill-strong: rgba(120, 120, 128, 0.32);
+  --sf-highlight: rgba(120, 120, 128, 0.14);
+  --sf-menu: rgba(255, 255, 255, 0.72);
+  --sf-hairline: rgba(0, 0, 0, 0.1);
+
+  --sf-radius-group: 26px;
+  --sf-radius-sheet: 40px;
+  --sf-row-height: 52px;
+  --sf-safe-top: env(safe-area-inset-top, 0px);
+  --sf-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --sf-safe-left: env(safe-area-inset-left, 0px);
+  --sf-safe-right: env(safe-area-inset-right, 0px);
+  --sf-ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --sf-ease-spring: cubic-bezier(0.34, 1.45, 0.5, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-sf-scheme="light"]) { color-scheme: dark; }
+  :root:not([data-sf-scheme="light"]) {
+    --sf-blue: #0a84ff;
+    --sf-red: #ff453a;
+    --sf-green: #30d158;
+    --sf-orange: #ff9f0a;
+    --sf-bg: #000000;
+    --sf-bg-grouped: #000000;
+    --sf-card: #2c2c2e;
+    --sf-sheet: #1c1c1e;
+    --sf-label: #ffffff;
+    --sf-label-2: rgba(235, 235, 245, 0.6);
+    --sf-label-3: rgba(235, 235, 245, 0.3);
+    --sf-separator: rgba(84, 84, 88, 0.6);
+    --sf-fill: rgba(120, 120, 128, 0.36);
+    --sf-fill-2: rgba(120, 120, 128, 0.24);
+    --sf-fill-strong: rgba(120, 120, 128, 0.5);
+    --sf-highlight: rgba(120, 120, 128, 0.28);
+    --sf-menu: rgba(40, 40, 42, 0.72);
+    --sf-hairline: rgba(255, 255, 255, 0.14);
+  }
+}
+:root[data-sf-scheme="dark"] {
+  color-scheme: dark;
+  --sf-blue: #0a84ff;
+  --sf-red: #ff453a;
+  --sf-green: #30d158;
+  --sf-orange: #ff9f0a;
+  --sf-bg: #000000;
+  --sf-bg-grouped: #000000;
+  --sf-card: #2c2c2e;
+  --sf-sheet: #1c1c1e;
+  --sf-label: #ffffff;
+  --sf-label-2: rgba(235, 235, 245, 0.6);
+  --sf-label-3: rgba(235, 235, 245, 0.3);
+  --sf-separator: rgba(84, 84, 88, 0.6);
+  --sf-fill: rgba(120, 120, 128, 0.36);
+  --sf-fill-2: rgba(120, 120, 128, 0.24);
+  --sf-fill-strong: rgba(120, 120, 128, 0.5);
+  --sf-highlight: rgba(120, 120, 128, 0.28);
+  --sf-menu: rgba(40, 40, 42, 0.72);
+  --sf-hairline: rgba(255, 255, 255, 0.14);
+}
+
+[class^="sf-"], [class*=" sf-"], [class^="sf-"] *, [class*=" sf-"] * { box-sizing: border-box; }
+
+/* ------------------------------------------------------------------ button */
+
+/* A circular glass button (44 pt), or a capsule when it has a label. The
+ * glass is drawn by sfgl over this element; the styles are the look without
+ * WebGL, and what the glass sits on. */
+.sf-button {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  grid-auto-flow: column;
+  gap: 6px;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 22px;
+  background: var(--sf-card);
+  color: var(--sf-label);
+  box-shadow: 0 0 0 0.5px var(--sf-hairline), 0 2px 10px rgba(0, 0, 0, 0.06);
+  font: 500 17px/22px var(--sf-font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  touch-action: manipulation;
+}
+.sf-button.has-glass { background: transparent; box-shadow: none; }
+.sf-button.capsule { width: auto; min-width: 44px; padding: 0 16px; }
+.sf-button.small { width: 34px; height: 34px; border-radius: 17px; }
+.sf-button.small.capsule { width: auto; padding: 0 12px; font-size: 15px; }
+.sf-button.large { width: 56px; height: 56px; border-radius: 28px; }
+.sf-button.tinted, .sf-button.tinted i { color: #fff; }
+.sf-button.tinted:not(.has-glass) { background: var(--sf-tint, var(--sf-blue)); }
+.sf-button.destructive { color: var(--sf-red); }
+.sf-button:disabled, .sf-button[aria-disabled="true"] { opacity: 0.4; pointer-events: none; }
+.sf-button:focus-visible { outline: 2px solid var(--sf-blue); outline-offset: 2px; }
+.sf-button.press-css { filter: brightness(calc(1 - var(--press, 0) * 0.06)); }
+.sf-button i { color: inherit; }
+
+/* ------------------------------------------------------------------ panel & status */
+
+.sf-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 20px;
+  border-radius: var(--sf-radius-group);
+  background: var(--sf-card);
+  color: var(--sf-label);
+  text-align: center;
+  font-family: var(--sf-font);
+}
+.sf-panel.plain { background: transparent; padding: 0; border-radius: 0; }
+.sf-panel[hidden] { display: none; }
+.sf-panel .sf-panel-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 28px;
+  background: var(--sf-fill-2);
+  color: var(--sf-label-2);
+  margin-bottom: 4px;
+}
+.sf-panel .sf-panel-icon.tinted { background: var(--sf-tint, var(--sf-blue)); color: #fff; }
+.sf-panel-title { margin: 0; font-size: 17px; line-height: 22px; font-weight: 600; }
+.sf-panel-text { margin: 0; font-size: 15px; line-height: 20px; color: var(--sf-label-2); max-width: 36ch; overflow-wrap: anywhere; }
+.sf-panel-progress { width: min(240px, 100%); height: 4px; border-radius: 2px; background: var(--sf-fill-2); overflow: hidden; margin-top: 6px; }
+.sf-panel-progress > span { display: block; height: 100%; width: 0; border-radius: 2px; background: var(--sf-blue); transition: width 0.25s linear; }
+.sf-panel-progress.indeterminate > span { width: 40%; animation: sf-indeterminate 1.2s ease-in-out infinite; }
+@keyframes sf-indeterminate { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.sf-panel-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 8px; }
+.sf-panel-actions .sf-button { height: 44px; padding: 0 20px; }
+
+/* ------------------------------------------------------------------ rows and groups */
+
+.sf-section { margin: 0 0 22px; font-family: var(--sf-font); color: var(--sf-label); }
+.sf-section-title { margin: 0 20px 7px; font-size: 15px; line-height: 20px; font-weight: 600; color: var(--sf-label-2); }
+.sf-section-note { margin: 7px 20px 0; font-size: 13px; line-height: 18px; color: var(--sf-label-2); }
+.sf-group { border-radius: var(--sf-radius-group); background: var(--sf-card); overflow: hidden; }
+.sf-group:empty { display: none; }
+.sf-group.glass { background: transparent; }
+.sf-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: var(--sf-row-height);
+  padding: 8px 20px;
+  border: 0;
+  background: none;
+  color: var(--sf-label);
+  font: 400 17px/22px var(--sf-font);
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+button.sf-row, .sf-row.tappable { cursor: pointer; }
+/* Hairline between rows: from the text (rows with an icon) or 16 pt in. */
+.sf-row + .sf-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 16px;
+  height: 0.5px;
+  background: var(--sf-separator);
+}
+.sf-row.has-icon + .sf-row.has-icon::before, .sf-row.has-icon + .sf-row::before, .sf-row + .sf-row.has-icon::before { left: 52px; }
+.sf-row.pressed, .sf-row.tappable:active { background: var(--sf-highlight); }
+.sf-row-icon { display: grid; place-items: center; width: 24px; height: 24px; flex: none; color: var(--sf-label-2); margin-left: -2px; }
+.sf-row-icon.tinted { width: 30px; height: 30px; margin-left: -6px; border-radius: 8px; background: var(--sf-tint, var(--sf-blue)); color: #fff; }
+.sf-row-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.sf-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-row-subtitle { font-size: 13px; line-height: 17px; color: var(--sf-label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-row.wrap .sf-row-title, .sf-row.wrap .sf-row-subtitle { white-space: normal; }
+.sf-row-value { flex: none; max-width: 55%; color: var(--sf-label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.sf-row-value i { color: var(--sf-label-2); }
+.sf-row-value .sf-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sf-tint, var(--sf-blue)); flex: none; }
+.sf-row.destructive .sf-row-title { color: var(--sf-red); }
+.sf-row.disabled { opacity: 0.4; pointer-events: none; }
+.sf-row.center { justify-content: center; text-align: center; }
+.sf-row.center .sf-row-text { flex: none; }
+.sf-row.tint-title .sf-row-title { color: var(--sf-blue); }
+
+/* Date and time capsules, as in Calendar's Starts / Ends rows. */
+.sf-chips { display: flex; gap: 8px; flex: none; }
+.sf-chip {
+  height: 33px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 17px;
+  background: var(--sf-fill);
+  color: var(--sf-label);
+  font: 400 17px/33px var(--sf-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sf-chip small { font-size: 13px; font-weight: 500; letter-spacing: 0.01em; }
+
+/* iOS 26 switch: 63 x 28, the knob a 39 x 24 capsule. */
+.sf-toggle {
+  position: relative;
+  flex: none;
+  width: 63px;
+  height: 28px;
+  border: 0;
+  padding: 0;
+  border-radius: 14px;
+  background: var(--sf-fill-strong);
+  transition: background-color 0.3s var(--sf-ease-out);
+  cursor: pointer;
+}
+.sf-toggle::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 39px;
+  height: 24px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 2px 5px rgba(0, 0, 0, 0.18);
+  transition: transform 0.45s var(--sf-ease-spring), width 0.2s ease;
+}
+.sf-toggle[aria-checked="true"] { background: var(--sf-green); }
+.sf-toggle[aria-checked="true"]::after { transform: translateX(20px); }
+.sf-toggle:active::after { width: 45px; }
+.sf-toggle[aria-checked="true"]:active::after { transform: translateX(14px); }
+.sf-toggle:focus-visible { outline: 2px solid var(--sf-blue); outline-offset: 2px; }
+
+/* ------------------------------------------------------------------ text input */
+
+/* The message box: a capsule that grows with its text, with room for
+ * buttons at either end. `.card` is the white row of a sheet; `.glass` sits
+ * inside a bar and has no fill of its own. */
+.sf-field {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 6px 4px 16px;
+  border-radius: 22px;
+  color: var(--sf-label);
+  font: 400 17px/22px var(--sf-font);
+}
+.sf-field.card { background: var(--sf-card); min-height: 55px; border-radius: 28px; padding: 6px 12px 6px 20px; align-items: center; }
+.sf-field.glass { background: transparent; }
+.sf-field-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: center;
+  margin: 0;
+  padding: 8px 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  caret-color: var(--sf-red);
+  max-height: 140px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.sf-field-input::-webkit-scrollbar { display: none; }
+.sf-field-input::placeholder { color: var(--sf-label-3); }
+.sf-field-lead, .sf-field-trail { display: flex; align-items: center; gap: 4px; flex: none; align-self: flex-end; height: 44px; }
+.sf-field.card .sf-field-lead, .sf-field.card .sf-field-trail { align-self: center; height: auto; color: var(--sf-label-2); }
+.sf-field-lead { margin-left: -6px; margin-right: -4px; }
+.sf-field .sf-button { width: 36px; height: 36px; border-radius: 18px; }
+
+/* ------------------------------------------------------------------ tabs */
+
+/* The track is a glass capsule; 'segment' is Calendar's 48 pt control, 'bar'
+ * Apple Music's 61 pt tab bar. --lift (0..1) is how far the pill is held up. */
+.sf-tabs {
+  --lift: 0;
+  position: relative;
+  z-index: 4; /* above the glass canvas, always: scaling it must not sink the labels under it */
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 48px;
+  padding: 4px;
+  border-radius: 24px;
+  background: var(--sf-fill-2);
+  box-shadow: 0 0 0 0.5px var(--sf-hairline);
+  font-family: var(--sf-font);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+.sf-tabs.bar { height: 61px; padding: 5px; border-radius: 31px; }
+.sf-tabs.has-glass { background: transparent; box-shadow: none; }
+/* The track turns white as the pill lifts. */
+.sf-tabs:not(.has-glass)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--sf-card);
+  opacity: calc(var(--lift) * 0.9);
+  pointer-events: none;
+}
+.sf-tabs-thumb {
+  position: absolute;
+  z-index: 1;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.sf-tabs-thumb::before, .sf-tabs-thumb::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+/* Without glass: the flat fill gives way to a white pill with a shadow. */
+.sf-tabs-thumb::before { background: var(--sf-fill); opacity: calc(1 - var(--lift)); }
+.sf-tabs-thumb::after { background: var(--sf-card); box-shadow: 0 0 0 0.5px var(--sf-hairline), 0 3px 12px rgba(0, 0, 0, 0.14); opacity: var(--lift); }
+.sf-tabs.bar .sf-tabs-thumb::before { background: var(--sf-fill-2); }
+.sf-tabs-thumb.has-glass::after, .sf-tabs-thumb.glass-thumb.has-glass::before { display: none; }
+.sf-tab {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sf-label);
+  font: 500 17px/22px var(--sf-font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.sf-tabs.bar .sf-tab { font-size: 11px; line-height: 13px; font-weight: 600; gap: 3px; }
+.sf-tab:focus-visible { outline: 2px solid var(--sf-blue); outline-offset: -2px; border-radius: 999px; }
+.sf-tab:disabled { opacity: 0.4; }
+.sf-tab-label { white-space: nowrap; }
+.sf-tabs.bar .sf-tab.selected { color: var(--sf-tab-tint, var(--sf-blue)); }
+
+/* ------------------------------------------------------------------ bars */
+
+.sf-bar { position: relative; z-index: 4; width: 100%; pointer-events: none; font-family: var(--sf-font); }
+.sf-bar > * { pointer-events: auto; }
+.sf-bar-shape { box-sizing: border-box; }
+.sf-bar-shape[hidden] { display: none; }
+.sf-bar-item { display: flex; align-items: center; min-width: 0; overflow: hidden; color: var(--sf-label); }
+.sf-bar-item.has-glass { background: transparent; }
+.sf-bar-item.plain { background: none !important; box-shadow: none !important; }
+.sf-bar-item:not(.has-glass):not(.plain) { background: var(--sf-card); box-shadow: 0 0 0 0.5px var(--sf-hairline); }
+.sf-bar-box { position: absolute; pointer-events: none; }
+.sf-bar-box:not(.has-glass) { background: var(--sf-card); box-shadow: 0 0 0 0.5px var(--sf-hairline); }
+/* Our own components, placed by the bar. */
+.sf-bar .sf-button.sf-bar-shape, .sf-bar .sf-tabs.sf-bar-shape, .sf-bar .sf-field.sf-bar-shape { margin: 0; }
+.sf-bar .sf-tabs.sf-bar-shape { flex: none; }
+
+/* ------------------------------------------------------------------ layers and popovers */
+
+.sf-layers { position: fixed; inset: 0; z-index: 2000; pointer-events: none; }
+.sf-pop-catcher { position: fixed; inset: 0; pointer-events: auto; background: transparent; touch-action: none; }
+.sf-pop {
+  position: fixed; z-index: 4; overflow: hidden; pointer-events: auto;
+  font: 17px/22px var(--sf-font); color: var(--sf-label);
+  -webkit-user-select: none; user-select: none;
+}
+/* Without WebGL: the same shape in plain CSS. */
+.sf-pop:not(.has-glass) {
+  background: var(--sf-menu);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6); backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow: 0 0 0 0.5px var(--sf-hairline), 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+.sf-pop-body { position: absolute; left: 0; overflow: hidden; scrollbar-width: none; overscroll-behavior: contain; }
+.sf-pop-body::-webkit-scrollbar { display: none; }
+
+/* Menus */
+.sf-menu { position: relative; padding: 8px; }
+.sf-menu-hl { position: absolute; left: 8px; right: 8px; top: 0; height: 0; border-radius: 22px; background: var(--sf-highlight); opacity: 0; pointer-events: none; }
+.sf-menu-title { padding: 8px 14px 4px; font: 600 13px/18px var(--sf-font); color: var(--sf-label-2); }
+.sf-menu-item {
+  position: relative; display: flex; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 0 14px 0 8px;
+  border: 0; border-radius: 22px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: default;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.sf-menu-item.destructive { color: var(--sf-red); }
+.sf-menu-item:disabled { opacity: 0.4; }
+.sf-menu-lead { flex: none; display: grid; place-items: center; width: 22px; height: 22px; color: inherit; }
+.sf-menu-text { flex: 1; min-width: 0; display: grid; }
+.sf-menu-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-menu-detail { font-size: 13px; line-height: 16px; color: var(--sf-label-2); }
+.sf-menu-item > i { flex: none; opacity: 0.9; }
+.sf-menu-sep { height: 0.5px; margin: 4px 14px; background: var(--sf-separator); }
+.sf-menu-sep.thick { height: 8px; margin: 4px -8px; background: var(--sf-fill-2); }
+.sf-menu-quick { display: flex; gap: 4px; padding: 2px 0 2px; }
+.sf-menu-quick-item {
+  flex: 1; display: grid; justify-items: center; gap: 4px; padding: 10px 4px 8px; border: 0; border-radius: 18px; background: transparent;
+  color: inherit; font: 500 12px/14px var(--sf-font); cursor: default; -webkit-tap-highlight-color: transparent;
+}
+.sf-menu-quick-item:disabled { opacity: 0.4; }
+.sf-menu-dim { position: fixed; inset: 0; z-index: 1999; background: rgba(0, 0, 0, 0.22); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); pointer-events: none; }
+.sf-menu-preview { position: fixed; z-index: 2001; overflow: hidden; border-radius: 22px; background: var(--sf-card); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25); pointer-events: none; }
+
+/* Dialogs */
+.sf-dialog { padding: 22px 20px 20px; }
+.sf-dialog-title { font: 400 19px/25px var(--sf-font); letter-spacing: -0.2px; padding: 0 2px 18px; }
+.sf-dialog-message { font: 400 14px/19px var(--sf-font); color: var(--sf-label-2); padding: 0 2px 18px; margin-top: -10px; }
+.sf-dialog-actions { display: grid; gap: 8px; margin: 0 -6px -6px; }
+.sf-dialog-action {
+  height: 47px; padding: 0 16px; border: 0; border-radius: 24px; background: var(--sf-fill); color: var(--sf-blue);
+  font: 400 19px/24px var(--sf-font); letter-spacing: -0.2px; -webkit-tap-highlight-color: transparent;
+}
+.sf-dialog-action.destructive { color: var(--sf-red); }
+.sf-dialog-action.cancel { background: transparent; font-weight: 600; }
+
+/* ------------------------------------------------------------------ sheets */
+
+.sf-sheet-scrim { position: fixed; inset: 0; z-index: 2; background: #000; opacity: 0; }
+.sf-sheet {
+  position: fixed; z-index: 4; overflow: hidden; isolation: isolate; box-sizing: border-box;
+  color: var(--sf-label); font: 17px/22px var(--sf-font);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.16);
+  touch-action: none;
+}
+.sf-sheet:not(.has-glass) { backdrop-filter: blur(30px) saturate(1.6); -webkit-backdrop-filter: blur(30px) saturate(1.6); }
+.sf-sheet[data-opaque="true"] { backdrop-filter: none; -webkit-backdrop-filter: none; }
+.sf-sheet-inner { position: absolute; overflow: hidden; }
+.sf-sheet-body {
+  position: absolute; inset: 0; z-index: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+  padding: var(--sf-sheet-top, 0px) 0 var(--sf-sheet-bottom, 0px); box-sizing: border-box; touch-action: pan-y;
+}
+.sf-sheet-body::-webkit-scrollbar { display: none; }
+.sf-sheet-body.locked { overflow: hidden; touch-action: none; }
+.sf-sheet-edge { position: absolute; left: 0; right: 0; z-index: 2; pointer-events: none; background: linear-gradient(to bottom, var(--sf-sheet) 0%, color-mix(in srgb, var(--sf-sheet) 85%, transparent) 50%, transparent 100%); }
+.sf-sheet-head, .sf-sheet-foot { position: absolute; left: 0; right: 0; z-index: 4; padding: 0 16px; box-sizing: border-box; }
+.sf-sheet-foot { bottom: 0; }
+.sf-sheet-title { text-align: center; font: 600 17px/22px var(--sf-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: grid; align-content: center; height: 100%; padding: 0 8px; }
+.sf-sheet-grab { position: absolute; top: 0; left: 50%; width: 120px; height: 22px; margin-left: -60px; z-index: 5; cursor: grab; touch-action: none; outline: none; }
+.sf-sheet-grab[hidden] { display: none; }
+.sf-sheet-handle { width: 36px; height: 5px; margin: 5px auto 0; border-radius: 3px; background: var(--sf-label-3); }
+.sf-sheet.dragging .sf-sheet-grab { cursor: grabbing; }
+
+.sf-sheet-scrim[data-blur] { -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+.sf-sheet[data-kind="window"] { box-shadow: 0 12px 50px rgba(0, 0, 0, 0.28); }
+
+/* Windows */
+.sf-window-title { display: flex; justify-content: center; align-items: center; gap: 7px; }
+.sf-window-title-icon { display: inline-flex; color: var(--sf-label-2); }
+.sf-window-title-icon[hidden] { display: none; }
+.sf-window-viewport { position: relative; }
+.sf-window-view { position: relative; padding: 0 16px 24px; }
+.sf-window-view:not(.current) { position: absolute; inset: 0; }
+
+.sf-bar-item.plain > * { flex: 1; min-width: 0; }
+
+.sf-row-input { flex: 1 1 0; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--sf-label); font: inherit; text-align: right; padding: 0; }
+.sf-row-input::placeholder { color: var(--sf-label-3); }
+.sf-row.has-input .sf-row-text { flex: none; max-width: 45%; }
+.sf-row.tint-title .sf-row-icon { color: var(--sf-blue); }
+.sf-row.center .sf-row-title { text-align: center; }
