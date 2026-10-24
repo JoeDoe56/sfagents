@@ -20,7 +20,7 @@ import { alertDialog, confirmDialog, promptDialog, showError, toast } from './di
 import { openPeek, group, row, button as peekButton, el as peekEl } from './peek.js';
 import { openQuickLook } from './quicklook.js';
 import { UploadJob } from './up2k.js';
-import { createSheet, createButton, createField, standardHeader } from './vendor/sfgl/src/ui/index.js';
+import { createSheet, createButton, createField, createRow, createSection, createGroup, standardHeader } from './vendor/sfgl/src/ui/index.js';
 import { DASH, bytesText, dateText, fullDate, formatUsedTotal, percentText, rateText, temperature, formatDuration, plural } from './format.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -476,28 +476,19 @@ export function createFileManager(options) {
     content.replaceChildren(box);
   }
 
-  function section(titleText, nodes, cls = '') {
-    const s = el('section', `fm-section ${cls}`);
-    if (titleText) s.append(el('h2', 'fm-section-title', titleText));
-    const list = el('div', 'fm-group');
-    list.append(...nodes);
-    s.append(list);
-    return s;
+  /** A titled card of framework rows (`rows` are createRow objects or nodes). */
+  function section(titleText, rows, cls = '') {
+    const s = createSection({ title: titleText ?? '', rows });
+    s.el.classList.add('fm-section');
+    if (cls) s.el.classList.add(...cls.split(/\s+/).filter(Boolean));
+    return s.el;
   }
 
+  /** A place: a tinted icon, its name, an optional second line (a node) and a disclosure chevron. */
   function placeRow(name, symbol, color, onClick, detail, holdItem) {
-    const b = el('button', 'fm-place');
-    b.type = 'button';
-    const icon = el('span', 'fm-place-icon');
-    icon.style.color = color;
-    icon.append(sym(symbol, 20));
-    const text = el('span', 'fm-place-text');
-    text.append(el('span', 'fm-place-name', name));
-    if (detail) text.append(detail);
-    b.append(icon, text, sym('chevron.right', 13));
-    b.addEventListener('click', onClick);
-    if (holdItem) onHold(b, (_t, how) => itemMenu(holdItem, b, how));
-    return b;
+    const row = createRow({ icon: symbol, iconTint: color, title: name, subtitleContent: detail ?? undefined, accessory: 'chevron', onTap: () => onClick() });
+    if (holdItem) onHold(row.el, (_t, how) => itemMenu(holdItem, row.el, how));
+    return row;
   }
 
   const PLACE_ICONS = { home: 'house.fill', desktop: 'desktopcomputer', documents: 'doc.text.fill', downloads: 'arrow.down.circle', pictures: 'photo.on.rectangle', music: 'music.note.list', videos: 'tv' };
@@ -568,8 +559,14 @@ export function createFileManager(options) {
       content.replaceChildren(box);
       return;
     }
-    const container = el('div', state.view === 'grid' ? 'fm-grid' : 'fm-list');
-    for (const item of entries) container.append(state.view === 'grid' ? tile(item) : listRow(item));
+    let container;
+    if (state.view === 'grid') {
+      container = el('div', 'fm-grid');
+      for (const item of entries) container.append(tile(item));
+    } else {
+      container = createGroup(entries.map(listRow)).el;
+      container.classList.add('fm-list');
+    }
     content.replaceChildren(container);
     if (l.truncated) content.append(el('p', 'fm-note', 'Showing the first 10,000 items.'));
     if (state.pendingSelect) {
@@ -625,30 +622,34 @@ export function createFileManager(options) {
   }
 
   function listRow(item) {
-    const node = el('button', `fm-row${state.selection.has(item.path) ? ' selected' : ''}`);
-    node.type = 'button';
+    const lead = el('span', 'fm-row-lead');
     if (state.selecting) {
       const check = el('span', 'fm-check');
       check.append(sym(state.selection.has(item.path) ? 'checkmark.circle.fill' : 'circle', 22));
-      node.append(check);
+      lead.append(check);
     }
-    node.append(iconFor(item, 40));
-    const text = el('span', 'fm-row-text');
-    text.append(el('span', 'fm-row-name', item.name));
-    const sub = el('span', 'fm-row-sub', state.results ? `${baseName(parentOf(item.path) ?? '')} · ${subtitle(item)}` : subtitle(item));
-    text.append(sub);
-    node.append(text);
+    lead.append(iconFor(item, 40));
+    let more = null;
     if (!state.selecting) {
-      const more = el('span', 'fm-row-more');
+      more = el('span', 'fm-row-more');
       more.setAttribute('role', 'button');
       more.setAttribute('aria-label', `More for ${item.name}`);
       more.append(sym('ellipsis', 16));
-      more.addEventListener('click', (e) => {
-        e.stopPropagation();
-        itemMenu(item, node, null);
-      });
-      node.append(more);
     }
+    const row = createRow({
+      leadingNode: lead,
+      title: item.name,
+      subtitle: state.results ? `${baseName(parentOf(item.path) ?? '')} · ${subtitle(item)}` : subtitle(item),
+      accessoryNode: more ?? undefined,
+      onTap: () => {}, // taps are handled with the rest of an item's gestures (bindItem)
+    });
+    const node = row.el;
+    node.classList.add('fm-row');
+    node.classList.toggle('selected', state.selection.has(item.path));
+    more?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      itemMenu(item, node, null);
+    });
     node.setAttribute('aria-label', `${item.name}, ${item.type}, ${subtitle(item)}`);
     bindItem(node, item);
     return node;
@@ -1300,19 +1301,7 @@ export function createFileManager(options) {
         }
       });
       picker.present('large');
-      const line = (name, symbol, color, onClick, detail) => {
-        const b = el('button', 'fm-place');
-        b.type = 'button';
-        const icon = el('span', 'fm-place-icon');
-        icon.style.color = color;
-        icon.append(sym(symbol, 20));
-        const text = el('span', 'fm-place-text');
-        text.append(el('span', 'fm-place-name', name));
-        if (detail) text.append(el('span', 'fm-place-detail', detail));
-        b.append(icon, text, sym('chevron.right', 13));
-        b.addEventListener('click', onClick);
-        return b;
-      };
+      const line = (name, symbol, color, onClick, detail) => createRow({ icon: symbol, iconTint: color, title: name, subtitle: detail || undefined, accessory: 'chevron', onTap: () => onClick() });
       async function show(p) {
         cur = p;
         go.setDisabled?.(!p);
@@ -1336,7 +1325,7 @@ export function createFileManager(options) {
           go.setDisabled?.(!l.writable);
           if (!l.writable) where.textContent = `${p} (read-only)`;
         } catch (error) {
-          list.replaceChildren(el('p', 'ui-empty', error.message), line('Browse', 'chevron.left', '#0a84ff', () => show(null)));
+          list.replaceChildren(el('p', 'ui-empty', error.message), section(null, [line('Browse', 'chevron.left', '#0a84ff', () => show(null))]));
           go.setDisabled?.(true);
         }
       }
@@ -1401,7 +1390,7 @@ export function createFileManager(options) {
       e.preventDefault();
       getInfo(item);
     } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !mod) {
-      const nodes = [...content.querySelectorAll('.fm-row, .fm-tile, .fm-place')];
+      const nodes = [...content.querySelectorAll('.fm-row, .fm-tile, .sf-row.tappable')];
       if (!nodes.length) return;
       const i = nodes.indexOf(document.activeElement);
       const cols = state.view === 'grid' && content.querySelector('.fm-grid') ? Math.max(1, Math.round(content.querySelector('.fm-grid').clientWidth / (nodes[0].getBoundingClientRect().width + 8))) : 1;
