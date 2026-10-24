@@ -6,7 +6,7 @@
 
 import { getJson } from './api.js';
 import { openSheet } from './modalsheet.js';
-import { applySymbol } from './vendor/sfgl/src/symbols.js';
+import { createField, createRow, createSection, icon as sfIcon } from './vendor/sfgl/src/ui/index.js';
 import { relativeTime } from './artifacts.js';
 
 function el(tag, className, text) {
@@ -51,28 +51,31 @@ export function openSearch(hooks) {
     detents: ['large'],
     className: 'sr-sheet',
     build(sheet) {
-      const box = el('label', 'ui-search sr-field');
-      const icon = el('i');
-      applySymbol(icon, 'magnifyingglass', { size: 14 });
-      input = el('input');
-      input.type = 'search';
-      input.placeholder = 'Messages and artifacts';
-      input.setAttribute('enterkeyhint', 'search');
-      input.autocomplete = 'off';
-      input.addEventListener('input', () => {
-        clearTimeout(timer);
-        timer = setTimeout(run, 220);
-      });
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
+      const field = createField({
+        placeholder: 'Messages and artifacts',
+        look: 'card',
+        multiline: false,
+        maxRows: 1,
+        inputMode: 'search',
+        autocapitalize: 'off',
+        aria: 'Search',
+        leading: [sfIcon('magnifyingglass', 15)],
+        onInput: () => {
+          clearTimeout(timer);
+          timer = setTimeout(run, 220);
+        },
+        onSubmit: () => {
           clearTimeout(timer);
           run();
-        }
+        },
       });
-      box.append(icon, input);
+      input = field.input;
+      input.setAttribute('enterkeyhint', 'search');
+      input.autocomplete = 'off';
+      const box = field.el;
       results = el('div', 'sr-results');
       sheet.body.append(box, results);
-      results.append(el('p', 'ui-empty', 'Search every message in the conversation and the text of every artifact.'));
+      results.append(el('p', 'sf-section-note sr-empty', 'Search every message in the conversation and the text of every artifact.'));
     },
     onClose: () => {
       clearTimeout(timer);
@@ -85,68 +88,50 @@ export function openSearch(hooks) {
     const q = input.value.trim();
     const mine = ++seq;
     if (!q) {
-      results.replaceChildren(el('p', 'ui-empty', 'Search every message in the conversation and the text of every artifact.'));
+      results.replaceChildren(el('p', 'sf-section-note sr-empty', 'Search every message in the conversation and the text of every artifact.'));
       return;
     }
     let data;
     try {
       data = await getJson('/api/search', { q });
     } catch (error) {
-      if (mine === seq) results.replaceChildren(el('p', 'ui-empty', error.message));
+      if (mine === seq) results.replaceChildren(el('p', 'sf-section-note sr-empty', error.message));
       return;
     }
     if (mine !== seq) return;
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
     const parts = [];
     if (data.artifacts.length) {
-      const s = el('section', 'ui-section');
-      s.append(el('h3', 'ui-section-title', `Artifacts (${data.artifacts.length})`));
-      const g = el('div', 'ui-group');
-      for (const a of data.artifacts) {
-        const row = el('button', 'ui-row tappable sr-row');
-        row.type = 'button';
-        const text = el('span', 'ui-row-label sr-text');
-        const title = el('strong');
+      const rows = data.artifacts.map((a) => {
+        const title = el('span');
         title.append(highlighted(a.title, words));
-        text.append(title);
-        if (a.excerpt) {
-          const ex = el('small', 'ui-row-hint');
-          ex.append(highlighted(a.excerpt, words));
-          text.append(ex);
-        }
-        row.append(text);
-        row.addEventListener('click', () => {
-          ctx.close();
-          hooks.onArtifact(a.id);
-        });
-        g.append(row);
-      }
-      s.append(g);
-      parts.push(s);
+        const sub = el('span');
+        if (a.excerpt) sub.append(highlighted(a.excerpt, words));
+        return createRow({ titleContent: title, subtitleContent: a.excerpt ? sub : undefined, wrap: true, onTap: () => { ctx.close(); hooks.onArtifact(a.id); } });
+      });
+      parts.push(createSection({ title: `Artifacts (${data.artifacts.length})`, rows }).el);
     }
-    const s = el('section', 'ui-section');
-    s.append(el('h3', 'ui-section-title', data.messages.length ? `Messages (${data.messages.length})` : 'Messages'));
-    if (data.messages.length) {
-      const g = el('div', 'ui-group');
-      for (const m of data.messages) {
-        const row = el('button', 'ui-row tappable sr-row');
-        row.type = 'button';
-        const text = el('span', 'ui-row-label sr-text');
-        const who = m.role === 'user' ? 'You' : hooks.agentName(m.agent);
-        text.append(el('small', 'sr-meta', [who, m.section, relativeTime(m.time)].filter(Boolean).join(' · ')));
-        const ex = el('span', 'sr-excerpt');
-        ex.append(highlighted(m.excerpt, words));
-        text.append(ex);
-        row.append(text);
-        row.addEventListener('click', () => {
+    const rows = data.messages.map((m) => {
+      const who = m.role === 'user' ? 'You' : hooks.agentName(m.agent);
+      const ex = el('span');
+      ex.append(highlighted(m.excerpt, words));
+      return createRow({
+        titleContent: ex,
+        subtitle: [who, m.section, relativeTime(m.time)].filter(Boolean).join(' · '),
+        wrap: true,
+        onTap: () => {
           ctx.close();
           hooks.onMessage(m.id);
-        });
-        g.append(row);
-      }
-      s.append(g);
-    } else s.append(el('p', 'ui-caption', 'No messages contain all of these words.'));
-    parts.push(s);
+        },
+      });
+    });
+    parts.push(
+      createSection({
+        title: data.messages.length ? `Messages (${data.messages.length})` : 'Messages',
+        rows,
+        note: data.messages.length ? '' : 'No messages contain all of these words.',
+      }).el,
+    );
     results.replaceChildren(...parts);
     ctx.refresh();
   }

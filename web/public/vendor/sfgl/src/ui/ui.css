@@ -456,7 +456,7 @@ button.sf-row, .sf-row.tappable { cursor: pointer; }
 .sf-sheet[data-opaque="true"] { backdrop-filter: none; -webkit-backdrop-filter: none; }
 .sf-sheet-inner { position: absolute; overflow: hidden; }
 .sf-sheet-body {
-  position: absolute; inset: 0; z-index: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+  position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
   padding: var(--sf-sheet-top, 0px) 0 var(--sf-sheet-bottom, 0px); box-sizing: border-box; touch-action: pan-y;
 }
 .sf-sheet-body::-webkit-scrollbar { display: none; }
@@ -488,3 +488,7 @@ button.sf-row, .sf-row.tappable { cursor: pointer; }
 .sf-row.has-input .sf-row-text { flex: none; max-width: 45%; }
 .sf-row.tint-title .sf-row-icon { color: var(--sf-blue); }
 .sf-row.center .sf-row-title { text-align: center; }
+.sf-row-lead { display: inline-flex; align-items: center; flex: none; margin-right: 12px; }
+.sf-row.has-lead-chevron .sf-row-chevron { transition: transform 0.25s var(--sf-ease, ease); }
+.sf-row .sf-row-chevron.open { transform: rotate(90deg); }
+.sf-row.nested { padding-left: 40px; }

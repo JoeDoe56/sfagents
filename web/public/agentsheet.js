@@ -10,6 +10,7 @@
 
 import { getJson, postJson } from './api.js';
 import { openSheet } from './modalsheet.js';
+import { createRow, createSection, createGroup, icon as sfIcon } from './vendor/sfgl/src/ui/index.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showError, confirmDialog, toast } from './dialogs.js';
 import { showMenu } from './menu.js';
@@ -260,24 +261,23 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
 
   function showStaged(animate = true) {
     const a = stagedAgent();
-    parts.agentName.textContent = a?.name ?? a?.id ?? 'Agent';
+    parts.agentRow.setValue(a?.name ?? a?.id ?? 'Agent');
     // Accounts are the saved agent's (another agent's show once it is saved).
     const sameAgent = staged.agent === saved.agent;
     const accounts = sameAgent ? (info?.accounts ?? []) : [];
     const account = accounts.find((x) => x.name === staged.account) ?? accounts[0];
-    parts.accountRow.hidden = !sameAgent || accounts.length === 0;
-    parts.accountName.textContent = account?.name ?? '';
-    parts.accountPicker.disabled = accounts.length < 2;
+    parts.accountRow.el.hidden = !sameAgent || accounts.length === 0;
+    parts.accountRow.setValue(account?.name ?? '');
+    parts.accountRow.update({ accessory: accounts.length < 2 ? 'none' : 'menu', disabled: accounts.length < 2 });
     // The account row changes the medium height.
     requestAnimationFrame(() => ctx.refresh());
-    parts.agentModel.textContent = (sameAgent ? account?.model : null) ?? a?.model ?? '';
-    parts.agentDesc.textContent = a?.description ?? '';
-    parts.agentDesc.hidden = !a?.description;
+    parts.agentSection.setNote((sameAgent ? account?.model : null) ?? a?.model ?? '');
+    parts.agentRow.setSubtitle(a?.description ?? '');
     const levels = levelsOf();
     const value = staged.reasoning && levels.includes(staged.reasoning) ? staged.reasoning : 'medium';
     parts.level.textContent = staged.reasoning ? (LEVEL_NAMES[value] ?? value) : 'Default';
     if (animate) slider.set(value);
-    parts.picker.disabled = agents.length < 2 && !!agents.length;
+    parts.agentRow.update({ accessory: agents.length < 2 && !!agents.length ? 'none' : 'menu', disabled: agents.length < 2 && !!agents.length });
     ctx.setDirty(changed());
   }
 
@@ -296,14 +296,15 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
         showStaged(false);
       },
     });
-    showMenu({ anchor: parts.accountPicker, align: 'end', title: listed.length > 1 ? 'In order: the next takes over at a limit' : undefined, groups: [listed.map(item), others.map(item)] });
+    showMenu({ anchor: parts.accountRow.anchor, align: 'end', placement: 'cover', title: listed.length > 1 ? 'In order: the next takes over at a limit' : undefined, groups: [listed.map(item), others.map(item)] });
   }
 
   function pickAgent() {
     if (!agents.length) return;
     showMenu({
-      anchor: parts.picker,
+      anchor: parts.agentRow.anchor,
       align: 'end',
+      placement: 'cover',
       groups: [
         agents.map((a) => ({
           label: a.name ?? a.id,
@@ -339,36 +340,12 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     trailing: gear,
     build(sheet) {
       const body = sheet.body;
-      // The agent: a row with a pop-up button, as Calendar's are.
-      const line = el('div', 'ag-agent ag-unit');
-      const text = el('div', 'ag-agent-text');
-      parts.agentDesc = el('span', 'ag-agent-desc', '');
-      parts.agentDesc.hidden = true;
-      text.append(el('span', 'ag-agent-label', 'Agent'), parts.agentDesc);
-      parts.picker = el('button', 'ag-picker');
-      parts.picker.type = 'button';
-      parts.picker.setAttribute('aria-haspopup', 'menu');
-      parts.agentName = el('span', 'ag-picker-name', info?.name ?? info?.id ?? 'Agent');
-      const chevrons = el('span', 'ag-chevrons');
-      chevrons.append(sym('chevron.up', 8), sym('chevron.down', 8));
-      parts.picker.append(parts.agentName, chevrons);
-      parts.picker.addEventListener('click', pickAgent);
-      line.append(text, parts.picker);
-      parts.agentModel = el('p', 'ag-model ag-unit', info?.model ?? '');
-      // The account (provider) it replies with: its file's list, failover order, or another of the same kind.
-      parts.accountRow = el('div', 'ag-agent ag-account ag-unit');
-      const accText = el('div', 'ag-agent-text');
-      accText.append(el('span', 'ag-agent-label', 'Account'));
-      parts.accountPicker = el('button', 'ag-picker');
-      parts.accountPicker.type = 'button';
-      parts.accountPicker.setAttribute('aria-haspopup', 'menu');
-      parts.accountName = el('span', 'ag-picker-name', info?.account ?? '');
-      const chev2 = el('span', 'ag-chevrons');
-      chev2.append(sym('chevron.up', 8), sym('chevron.down', 8));
-      parts.accountPicker.append(parts.accountName, chev2);
-      parts.accountPicker.addEventListener('click', pickAccount);
-      parts.accountRow.append(accText, parts.accountPicker);
-      parts.accountRow.hidden = true;
+      // The agent and its account: rows with a pop-up value, as Calendar's are.
+      parts.agentRow = createRow({ title: 'Agent', value: info?.name ?? info?.id ?? 'Agent', accessory: 'menu', wrap: true, onTap: pickAgent });
+      parts.accountRow = createRow({ title: 'Account', value: info?.account ?? '', accessory: 'menu', onTap: pickAccount });
+      parts.accountRow.el.hidden = true;
+      parts.agentSection = createSection({ rows: [parts.agentRow, parts.accountRow], note: info?.model ?? '' });
+      const line = parts.agentSection.el;
 
       const effort = el('div', 'ag-effort');
       const label = el('p', 'ag-label ag-unit');
@@ -395,7 +372,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       marker.dataset.mediumEnd = '';
 
       parts.details = el('div', 'ag-details');
-      body.append(line, parts.accountRow, parts.agentModel, effort, bar.element, marker, parts.details);
+      body.append(line, effort, bar.element, marker, parts.details);
       // The slider's capsule is Liquid Glass, as ChatGPT's is.
       sheet.addGlass(slider.element.querySelector('.ag-track'), 'control');
     },
@@ -426,7 +403,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       context = await getJson('/api/agent/context');
       render();
     } catch (error) {
-      parts.details.replaceChildren(el('p', 'ui-empty', error.message));
+      parts.details.replaceChildren(el('p', 'sf-section-note', error.message));
     }
   }
 
@@ -472,92 +449,100 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     const head = el('div', 'ag-summary ag-unit');
     head.append(el('strong', '', `${tokensText(c.used)} of ${tokensText(total)} tokens`), el('span', '', `${pct(c.used / total)} used · ${tokensText(c.free)} free`));
 
-    const legend = el('div', 'ui-group');
-    const legendRow = (color, label, tokens, extra, cls = '') => {
-      const r = el('div', `ui-row ag-legend ${cls}`);
+    const key = (color) => {
       const dot = el('span', 'ag-dot-key');
       dot.style.background = color;
-      r.append(dot, el('span', 'ui-row-label', label), el('span', 'ui-row-value', `${tokensText(tokens)}${extra ? ` · ${extra}` : ''}`));
-      return r;
+      return dot;
     };
+    const legendRow = (color, label, tokens, extra) =>
+      createRow({ leadingNode: key(color), title: label, value: `${tokensText(tokens)}${extra ? ` · ${extra}` : ''}` });
+    const legend = [];
     for (const cat of c.categories) {
       if (cat.tokens <= 0 && cat.id !== 'messages') continue;
-      legend.append(legendRow(CATEGORY_COLORS[cat.id], cat.label, cat.tokens, pct(cat.tokens / total)));
+      legend.push(legendRow(CATEGORY_COLORS[cat.id], cat.label, cat.tokens, pct(cat.tokens / total)));
     }
-    legend.append(legendRow('repeating-linear-gradient(135deg, rgba(235,235,245,0.5) 0 2px, transparent 2px 4px)', 'Reserved for the turn', c.reserve, pct(c.reserve / total)));
-    legend.append(legendRow('rgba(120,120,128,0.35)', 'Free', c.free, pct(c.free / total)));
+    legend.push(legendRow('repeating-linear-gradient(135deg, rgba(235,235,245,0.5) 0 2px, transparent 2px 4px)', 'Reserved for the turn', c.reserve, pct(c.reserve / total)));
+    legend.push(legendRow('rgba(120,120,128,0.35)', 'Free', c.free, pct(c.free / total)));
 
-    const sections = [section('Usage', [strip, head, legend])];
+    const usage = createSection({ title: 'Usage', rows: [], note: '' });
+    usage.el.querySelector('.sf-group').before(strip, head);
+    usage.group.add(...legend);
+    const sections = [usage.el];
 
-    if (c.problem) sections.push(section(null, [el('p', 'ag-problem', c.problem)]));
+    if (c.problem) sections.push(createSection({ rows: [createRow({ title: c.problem, wrap: true, destructive: true })] }).el);
 
     // Tools, per family, expandable like Qwen Code's per-tool lists.
     const families = c.categories.filter((cat) => cat.items?.length);
     if (families.length) {
-      const list = el('div', 'ui-group');
+      const group = createGroup();
       for (const cat of families) {
-        const det = el('details', 'ag-family');
-        const sum = el('summary', 'ui-row');
-        const dot = el('span', 'ag-dot-key');
-        dot.style.background = CATEGORY_COLORS[cat.id];
-        sum.append(dot, el('span', 'ui-row-label', `${cat.label} (${cat.items.length})`), el('span', 'ui-row-value', tokensText(cat.tokens)), sym('chevron.right', 11));
-        det.append(sum);
-        for (const it of cat.items) {
-          const r = el('div', 'ui-row ag-item');
-          r.append(el('span', 'ui-row-label', it.name), el('span', 'ui-row-value', `${it.detail ? `${it.detail} · ` : ''}${tokensText(it.tokens)}`));
-          det.append(r);
-        }
-        list.append(det);
+        const kids = cat.items.map((it) =>
+          createRow({ title: it.name, value: `${it.detail ? `${it.detail} · ` : ''}${tokensText(it.tokens)}` }),
+        );
+        for (const k of kids) k.el.classList.add('nested');
+        const chevron = sfIcon('chevron.right', 12);
+        chevron.classList.add('sf-row-chevron');
+        let openFamily = false;
+        const head = createRow({
+          leadingNode: key(CATEGORY_COLORS[cat.id]),
+          title: `${cat.label} (${cat.items.length})`,
+          value: tokensText(cat.tokens),
+          accessoryNode: chevron,
+          onTap: () => {
+            openFamily = !openFamily;
+            chevron.classList.toggle('open', openFamily);
+            if (openFamily) {
+              let after = head.el;
+              for (const k of kids) {
+                after.after(k.el);
+                after = k.el;
+              }
+            } else for (const k of kids) k.el.remove();
+            ctx.refresh();
+          },
+        });
+        group.add(head);
       }
-      sections.push(section('Tools', [list]));
+      sections.push(createSection({ title: 'Tools', group }).el);
     }
 
     // The window itself.
-    const facts = el('div', 'ui-group');
-    const fact = (label, value) => {
-      const r = el('div', 'ui-row');
-      r.append(el('span', 'ui-row-label', label), el('span', 'ui-row-value', value));
-      return r;
-    };
-    facts.append(
+    const fact = (label, value) => createRow({ title: label, value, wrap: true });
+    const facts = [
       fact('Model', c.model),
       fact("Model's context window", c.modelWindow ? `${tokensText(c.modelWindow)} tokens` : 'Not reported'),
       fact('Working budget', `${tokensText(c.budget)} tokens`),
       fact('Kept free for each turn', `${tokensText(c.reserve)} tokens`),
       fact('Recent exchanges kept', `${c.exchanges.included} of ${c.exchanges.sinceReset} (up to ${c.exchanges.recentLimit})`),
       fact('Sections in the index', `${c.sections.shown} of ${c.sections.total}`),
-    );
+    ];
     if (c.lastRequest) {
       const u = c.lastRequest.usage;
-      facts.append(fact('Last request', `${tokensText(u.promptTokens)} in · ${tokensText(u.completionTokens)} out`));
-      if (Number.isFinite(u.cost)) facts.append(fact('Last request cost', `$${u.cost.toFixed(u.cost < 0.01 ? 4 : 3)}`));
+      facts.push(fact('Last request', `${tokensText(u.promptTokens)} in · ${tokensText(u.completionTokens)} out`));
+      if (Number.isFinite(u.cost)) facts.push(fact('Last request cost', `$${u.cost.toFixed(u.cost < 0.01 ? 4 : 3)}`));
     }
-    sections.push(section('Window', [facts]));
+    sections.push(createSection({ title: 'Window', rows: facts }).el);
 
-    const reset = el('button', 'ui-button destructive ag-reset', 'Start a Fresh Context');
-    reset.type = 'button';
-    reset.disabled = !!c.running;
-    reset.addEventListener('click', async () => {
-      const ok = await confirmDialog('Start a fresh context?', 'Later replies will not see the earlier messages. They stay stored, and the agent can still search and fetch them.', 'Start Fresh', true);
-      if (!ok) return;
-      try {
-        context = await postJson('/api/agent', { action: 'reset-context' });
-        render();
-        toast('The next reply starts from a fresh context', { symbol: 'sparkles', timeout: 2200 });
-      } catch (error) {
-        showError(error.message, "Couldn't start a fresh context");
-      }
+    const reset = createRow({
+      title: 'Start a Fresh Context',
+      destructive: true,
+      center: true,
+      disabled: !!c.running,
+      onTap: async () => {
+        const ok = await confirmDialog('Start a fresh context?', 'Later replies will not see the earlier messages. They stay stored, and the agent can still search and fetch them.', 'Start Fresh', true);
+        if (!ok) return;
+        try {
+          context = await postJson('/api/agent', { action: 'reset-context' });
+          render();
+          toast('The next reply starts from a fresh context', { symbol: 'sparkles', timeout: 2200 });
+        } catch (error) {
+          showError(error.message, "Couldn't start a fresh context");
+        }
+      },
     });
-    sections.push(section(null, [reset, el('p', 'ag-note', 'Token counts are estimates (about four characters per token); the last request shows what the provider reported.')]));
+    sections.push(createSection({ rows: [reset], note: 'Token counts are estimates (about four characters per token); the last request shows what the provider reported.' }).el);
     d.append(...sections);
     ctx.refresh();
-  }
-
-  function section(title, nodes) {
-    const s = el('section', 'ui-section');
-    if (title) s.append(el('h3', 'ui-section-title', title));
-    s.append(...nodes);
-    return s;
   }
 
   loadAgent();

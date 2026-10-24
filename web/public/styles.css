@@ -1040,7 +1040,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .tm-key:active { background: rgba(235, 235, 245, 0.35); }
 
 /* ---- search ---- */
-.sr-field { margin: 0 0 16px; height: 40px; }
+.sr-results { margin-top: 12px; }
+.sr-results mark { background: rgba(255, 214, 10, 0.35); color: inherit; border-radius: 3px; padding: 0 1px; }
 .sr-row { width: 100%; }
 .sr-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sr-text strong { font-weight: 600; }

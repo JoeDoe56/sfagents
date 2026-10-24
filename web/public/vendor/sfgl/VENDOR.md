@@ -1,6 +1,6 @@
 # Vendored sfgl
 
-Copied by `scripts/vendor-sfgl.mjs` from sfgl commit `39ac2c5feaec5165641e20b7f1a2698fb215d548`.
+Copied by `scripts/vendor-sfgl.mjs` from sfgl commit `04512763aaa7f2032424209c87f139143d91c206`.
 Do not edit these files here; change sfgl and run the script again.
 
 - `src/`, `fonts/host-grotesk/`, `LICENSE`, `NOTICE.md`, `licenses/`: as in sfgl (MIT; the font is SIL OFL 1.1).

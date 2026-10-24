@@ -22,6 +22,9 @@ import {showMenu} from './menu.js';
  * @property {'menu'|'chevron'|'check'|'ellipsis'|'none'} [accessory]   `menu`: up-down chevrons after the value, `chevron`: disclosure, `check`: a check mark
  * @property {{checked: boolean, onChange?: (checked: boolean) => void}} [toggle]
  * @property {{value?: string, placeholder?: string, type?: string, inputMode?: string, autocomplete?: string, onInput?: (value: string) => void}} [input]   a text input at the end (the label on the left, the text right-aligned)
+ * @property {Node} [leadingNode]         your own content before the text (a colour key)
+ * @property {Node} [titleContent]        a node (highlighted text) in place of `title`
+ * @property {Node} [subtitleContent]     likewise for the subtitle
  * @property {boolean} [tintTitle]          the title in the tint colour (an action row: Add Provider)
  * @property {{label: string, small?: string, onClick?: (anchor: HTMLElement) => void}[]} [chips]
  * @property {Node} [accessoryNode]         your own end content
@@ -68,12 +71,19 @@ export function createRow(o = {}) {
       holder.append(icon(state.icon, state.iconTint ? 17 : 18));
       node.append(holder);
     }
+    if (state.leadingNode) {
+      const lead = el('span', 'sf-row-lead');
+      lead.append(state.leadingNode);
+      node.append(lead);
+    }
     const text = el('span', 'sf-row-text');
-    titleNode = el('span', 'sf-row-title', state.title ?? '');
+    titleNode = el('span', 'sf-row-title', state.titleContent ? '' : state.title ?? '');
+    if (state.titleContent) titleNode.append(state.titleContent);
     text.append(titleNode);
     subtitleNode = null;
-    if (state.subtitle) {
-      subtitleNode = el('span', 'sf-row-subtitle', state.subtitle);
+    if (state.subtitle || state.subtitleContent) {
+      subtitleNode = el('span', 'sf-row-subtitle', state.subtitleContent ? '' : state.subtitle);
+      if (state.subtitleContent) subtitleNode.append(state.subtitleContent);
       text.append(subtitleNode);
     }
     node.append(text);
