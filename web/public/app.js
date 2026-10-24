@@ -27,6 +27,7 @@ import { openTerminal, terminalsChanged } from './terminal.js';
 import { openSearch } from './searchsheet.js';
 import { openApp } from './appview.js';
 import { goToSignIn } from './api.js';
+import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installPress, registerGlass } from './press.js';
@@ -679,6 +680,7 @@ function connect() {
     setGradientSeed(info.model);
     agentSheet?.setAgent?.(info);
   });
+  es.addEventListener('dictation', (e) => dictationEvent(JSON.parse(e.data)));
   es.addEventListener('notice', (e) => {
     const { text, level } = JSON.parse(e.data);
     notice(text, level === 'error' ? 'error' : '');
@@ -1093,43 +1095,14 @@ addEventListener('drop', (e) => {
 
 // Dictation -------------------------------------------------------------
 
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-if (!Recognition) {
-  mic.classList.add('unavailable');
-  mic.title = 'Dictation is not available in this browser';
-}
-mic.addEventListener('click', () => {
-  if (!Recognition) {
-    notice('Dictation is not available in this browser.');
-    return;
-  }
-  if (recognition) {
-    recognition.stop();
-    return;
-  }
-  recognition = new Recognition();
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  const base = input.value ? `${input.value.replace(/\s+$/, '')} ` : '';
-  recognition.onresult = (e) => {
-    let text = '';
-    for (const r of e.results) text += r[0].transcript;
-    input.value = base + text;
+setupDictation({
+  mic,
+  input,
+  notice,
+  changed: () => {
     autosize();
     updateComposer();
-  };
-  recognition.onerror = (e) => {
-    if (e.error !== 'aborted' && e.error !== 'no-speech') notice(`Dictation stopped: ${e.error}`, 'error');
-  };
-  recognition.onend = () => {
-    recognition = null;
-    mic.classList.remove('listening');
-    mic.setAttribute('aria-label', 'Dictate');
-  };
-  mic.classList.add('listening');
-  mic.setAttribute('aria-label', 'Stop dictation');
-  recognition.start();
+  },
 });
 
 // Settings ----------------------------------------------------------------

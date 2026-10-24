@@ -48,6 +48,7 @@ import {
 import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
 import { AuthError, WebAuth } from './auth.js';
+import { Dictation } from './dictation.js';
 import { TerminalError, TerminalManager } from './terminal.js';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
@@ -109,6 +110,8 @@ export interface WebServerOptions {
    * the OS keyring. `false` turns it off (tests and embedding only).
    */
   auth?: WebAuth | false;
+  /** Speech to text for the mic button (default: llama.cpp + Qwen3-ASR, downloaded on first use). */
+  dictation?: Dictation;
   publicDir?: string;
   maxUploadBytes?: number;
   log?: (line: string) => void;
@@ -182,6 +185,27 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(data);
 }
 
+/** About ten minutes of 16 kHz mono speech. */
+const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
+
+function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > max) {
+        reject(new HttpError(413, 'Request body too large.'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 function readJson(req: IncomingMessage): Promise<unknown> {
   const type = String(req.headers['content-type'] ?? '');
   if (!/^application\/json\b/i.test(type)) return Promise.reject(new HttpError(415, 'Expected Content-Type: application/json.'));
@@ -239,6 +263,7 @@ export class WebServer {
   private fileWatch: NodeJS.Timeout | undefined;
   private readonly apps: AppProxy;
   readonly auth: WebAuth | null;
+  readonly dictation: Dictation;
   private readonly terminals: TerminalManager;
   private readonly ownNames: Set<string>;
   private readonly mcpFile: string;
@@ -272,6 +297,13 @@ export class WebServer {
     this.registry = options.registry ?? new ProviderRegistry();
     this.auth = options.auth === false ? null : (options.auth ?? new WebAuth());
     this.mcpFile = options.tree.mcp.file ?? path.join(options.tree.configDir, 'mcp.json');
+    this.dictation =
+      options.dictation ??
+      new Dictation({
+        hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
+        log: (line) => this.log(line),
+        onChange: (status) => this.broadcast('dictation', status),
+      });
     this.terminals = new TerminalManager({
       cwd: options.tree.configDir,
       hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
@@ -374,6 +406,7 @@ export class WebServer {
     for (const c of this.clients) c.end();
     this.clients.clear();
     this.terminals.dispose();
+    this.dictation.close();
     for (const sock of this.upgraded) sock.destroy();
     this.upgraded.clear();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
@@ -546,6 +579,32 @@ export class WebServer {
           if (parts[2] === 'end') return sendJson(res, 200, await this.processes.end(parts[1], { force: body.force === true, tree: body.tree === true }));
           if (parts[2] === 'priority') return sendJson(res, 200, this.processes.setPriority(parts[1], body.level));
           throw new HttpError(404, 'Not found.');
+        }
+        case 'GET dictation':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, this.dictation.status());
+        case 'POST dictation': {
+          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+          if (body['action'] === 'install') {
+            // Long: progress arrives as "dictation" events.
+            this.dictation.install().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
+          } else if (body['action'] === 'start') {
+            this.dictation.start().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
+          } else if (body['action'] === 'stop') {
+            this.dictation.stop();
+          } else throw new HttpError(400, 'Unknown action.');
+          return sendJson(res, 200, this.dictation.status());
+        }
+        case 'POST transcribe': {
+          const type = String(req.headers['content-type'] ?? '');
+          if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
+          const wav = await readBody(req, MAX_AUDIO_BYTES);
+          const language = url.searchParams.get('language') || undefined;
+          try {
+            return sendJson(res, 200, { text: await this.dictation.transcribe(wav, language) });
+          } catch (error) {
+            throw new HttpError(503, getErrorMessage(error));
+          }
         }
         case 'GET settings':
           this.checkFetchSite(req);
