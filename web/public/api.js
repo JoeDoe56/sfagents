@@ -9,8 +9,15 @@ export class ApiError extends Error {
   }
 }
 
+/** The session ended (signed out elsewhere, or the token was replaced): back to the sign-in page. */
+export function goToSignIn() {
+  const here = location.pathname + location.search + location.hash;
+  location.replace(`/login.html${here && here !== '/' ? `?next=${encodeURIComponent(here)}` : ''}`);
+}
+
 async function parse(res) {
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && data.signIn) goToSignIn();
   if (!res.ok) throw new ApiError(data.error || `HTTP ${res.status}`, res.status, data);
   return data;
 }

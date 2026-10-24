@@ -47,6 +47,7 @@ import {
 } from '@sfagents/core';
 import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
+import { AuthError, WebAuth } from './auth.js';
 import { TerminalError, TerminalManager } from './terminal.js';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
@@ -103,6 +104,11 @@ export interface WebServerOptions {
   settings?: AppSettings;
   /** Reload the agent files and mcp.json when they change (default true). */
   watchAgents?: boolean;
+  /**
+   * The sign-in gate (token and passkeys). Default: on, with the token hash in
+   * the OS keyring. `false` turns it off (tests and embedding only).
+   */
+  auth?: WebAuth | false;
   publicDir?: string;
   maxUploadBytes?: number;
   log?: (line: string) => void;
@@ -232,6 +238,7 @@ export class WebServer {
   private projectWatcher: ProjectWatcher | undefined;
   private fileWatch: NodeJS.Timeout | undefined;
   private readonly apps: AppProxy;
+  readonly auth: WebAuth | null;
   private readonly terminals: TerminalManager;
   private readonly ownNames: Set<string>;
   private readonly mcpFile: string;
@@ -263,6 +270,7 @@ export class WebServer {
     );
     this.log = options.log ?? (() => {});
     this.registry = options.registry ?? new ProviderRegistry();
+    this.auth = options.auth === false ? null : (options.auth ?? new WebAuth());
     this.mcpFile = options.tree.mcp.file ?? path.join(options.tree.configDir, 'mcp.json');
     this.terminals = new TerminalManager({
       cwd: options.tree.configDir,
@@ -416,6 +424,7 @@ export class WebServer {
     if (error instanceof FileError) return sendJson(res, error.status, { error: error.message, ...(error.details && typeof error.details === 'object' ? error.details : {}) });
     if (error instanceof ArtifactError) return sendJson(res, 404, { error: error.message });
     if (error instanceof ApiError) return sendJson(res, error.status, { error: error.message });
+    if (error instanceof AuthError) return sendJson(res, error.status, { error: error.message });
     if (error instanceof TerminalError) return sendJson(res, error.status, { error: error.message });
     this.log(`web: ${getErrorMessage(error)}`);
     sendJson(res, 500, { error: getErrorMessage(error) });
@@ -431,6 +440,8 @@ export class WebServer {
     socket.on('close', () => this.upgraded.delete(socket));
     if (!this.allowedHost(req)) return void socket.destroy();
     const url = new URL(req.url ?? '/', 'http://localhost');
+    // Sockets need a signed-in device too (the cookie comes with the upgrade).
+    if (this.auth && !this.auth.device(req)) return void socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
     if (url.pathname === '/api/terminal') {
       try {
         this.checkWrite(req);
@@ -444,14 +455,67 @@ export class WebServer {
     socket.destroy();
   }
 
+  /** How the browser sees this server: the public origin behind a proxy, else the Host. */
+  private browserOrigin(req: IncomingMessage): { origin: string; rpId: string; secure: boolean } {
+    const host = String(req.headers.host ?? '').toLowerCase();
+    if (this.publicOrigin && host === this.publicHost) {
+      const u = new URL(this.publicOrigin);
+      return { origin: u.origin, rpId: u.hostname, secure: u.protocol === 'https:' };
+    }
+    const u = new URL(`http://${host || 'localhost'}`);
+    return { origin: u.origin, rpId: u.hostname, secure: false };
+  }
+
+  /** Files the sign-in page needs before anyone is signed in. */
+  private static readonly PUBLIC_FILES = /^\/(login\.html|login\.js|login\.css|webauthn\.js|icons\/[\w.-]+|manifest\.webmanifest|favicon\.ico|vendor\/sfgl\/fonts\/.*)$/;
+
+  /** The sign-in gate: everything but the sign-in page needs a signed-in device. */
+  private gate(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
+    if (!this.auth) return true;
+    const p = url.pathname;
+    if (p.startsWith('/api/auth/') || WebServer.PUBLIC_FILES.test(p)) return true;
+    if (this.auth.device(req)) return true;
+    if (p.startsWith('/api/')) {
+      sendJson(res, 401, { error: 'Sign in first.', signIn: '/login.html' });
+      return false;
+    }
+    const accept = String(req.headers.accept ?? '');
+    if ((req.method === 'GET' || req.method === 'HEAD') && (p === '/' || p === '/index.html' || accept.includes('text/html'))) {
+      const next = p === '/' || p === '/index.html' ? '' : `?next=${encodeURIComponent(p + url.search)}`;
+      res.writeHead(303, { Location: `/login.html${next}`, 'Cache-Control': 'no-store' });
+      res.end();
+      return false;
+    }
+    sendJson(res, 401, { error: 'Sign in first.' });
+    return false;
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!this.allowedHost(req)) throw new HttpError(421, 'Unexpected Host header.');
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    if (!this.gate(req, res, url)) return;
     const app = this.apps.route(req);
     if (app) return this.apps.handle(req, res, app);
-    const url = new URL(req.url ?? '/', 'http://localhost');
     const p = url.pathname;
     const method = req.method ?? 'GET';
     if (method !== 'GET' && method !== 'HEAD') this.checkWrite(req);
+    if (p.startsWith('/api/auth/')) {
+      if (!this.auth) throw new HttpError(404, 'Sign-in is off.');
+      const action = p.slice('/api/auth/'.length);
+      const ctx = this.browserOrigin(req);
+      if (method === 'GET' && action === 'status') {
+        this.checkFetchSite(req);
+        return sendJson(res, 200, { ...this.auth.status(req, ctx.rpId), secureContext: ctx.secure || ctx.rpId === 'localhost' });
+      }
+      if (method === 'GET' && action === 'list') {
+        this.checkFetchSite(req);
+        if (!this.auth.device(req)) throw new HttpError(401, 'Sign in first.');
+        return sendJson(res, 200, this.auth.list(ctx.rpId));
+      }
+      if (method !== 'POST') throw new HttpError(405, 'Method not allowed.');
+      const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+      return sendJson(res, 200, await this.auth.handle(action, body, req, res, ctx));
+    }
 
     if (p.startsWith('/api/')) {
       const parts = p.split('/').slice(2).map(decodeURIComponent);

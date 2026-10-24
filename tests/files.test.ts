@@ -244,7 +244,7 @@ describe('files: HTTP API', () => {
     writeAgent(dir, baseAgent('main'));
     const agents = loadAgentTree(path.join(dir, 'agent.json'));
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: agents.configDir });
-    const server = new WebServer({ tree: agents, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, lhmUrl: null });
+    const server = new WebServer({ tree: agents, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, lhmUrl: null, auth: false });
     const base = (await server.start()).replace(/\/$/, '');
     try {
       const work = path.join(dir, 'work');

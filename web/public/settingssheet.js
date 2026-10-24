@@ -8,7 +8,8 @@
  * own action and happens at once.
  */
 
-import { getJson, postJson } from './api.js';
+import { getJson, postJson, goToSignIn } from './api.js';
+import { passkeysWork, registerPasskey, cancelled } from './webauthn.js';
 import { openSheet } from './modalsheet.js';
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showMenu } from './menu.js';
@@ -95,6 +96,7 @@ export function openSettingsSheet(device) {
   const draft = {}; // key → value
   let providersBox = null;
   let serverBox = null;
+  let signInBox = null;
   let qualityButtons = [];
   let qualityHint = null;
 
@@ -135,12 +137,14 @@ export function openSettingsSheet(device) {
       marker.dataset.mediumEnd = '';
       providersBox = el('div');
       serverBox = el('div');
+      signInBox = el('div');
       body.append(
         el('p', 'ui-caption st-note', 'Agents and MCP servers are set up in their own files (the gear in the agent sheet opens an agent’s file).'),
         providersBox,
         marker,
         quality,
         section('This Device', [enter.row]),
+        signInBox,
         serverBox,
       );
     },
@@ -291,6 +295,113 @@ export function openSettingsSheet(device) {
     dirty();
   }
 
+  // ---------------------------------------------------------------- signing in
+
+  const authPost = (action, body) => postJson(`/api/auth/${action}`, body);
+
+  async function loadSignIn() {
+    let status;
+    let list;
+    try {
+      status = await getJson('/api/auth/status');
+      list = await getJson('/api/auth/list');
+    } catch {
+      signInBox.replaceChildren(); // sign-in is off (or unreachable)
+      return;
+    }
+    const rows = [];
+    const when = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'never');
+    for (const d of list.devices) {
+      const mine = d.id === status.device?.id;
+      const row = el('button', 'ui-row tappable st-provider');
+      row.type = 'button';
+      const icon = el('span', 'st-kind custom');
+      icon.append(sym(/iPhone|Android/.test(d.name) ? 'phone' : 'desktopcomputer', 15));
+      const text = el('span', 'ui-row-label st-two');
+      text.append(el('span', '', mine ? `${d.name} (this device)` : d.name), el('small', 'ui-row-hint', `Signed in ${when(d.created)} · last seen ${when(d.lastSeen)}`));
+      row.append(icon, text, sym('ellipsis', 15));
+      row.addEventListener('click', () =>
+        showMenu({
+          anchor: row,
+          align: 'end',
+          groups: [[{ label: mine ? 'Sign Out' : 'Sign Out Device', symbol: 'xmark', role: 'destructive', action: () => (mine ? signOut() : removeDevice(d)) }]],
+        }),
+      );
+      rows.push(row);
+    }
+    for (const k of list.passkeys) {
+      const row = el('button', 'ui-row tappable st-provider');
+      row.type = 'button';
+      const icon = el('span', 'st-kind openai');
+      icon.append(sym('lock.shield', 15));
+      const text = el('span', 'ui-row-label st-two');
+      text.append(el('span', '', `Passkey · ${k.name}`), el('small', 'ui-row-hint', `Added ${when(k.created)} · last used ${when(k.lastUsed)}`));
+      row.append(icon, text, sym('ellipsis', 15));
+      row.addEventListener('click', () =>
+        showMenu({ anchor: row, align: 'end', groups: [[{ label: 'Remove Passkey', symbol: 'trash', role: 'destructive', action: () => removePasskey(k) }]] }),
+      );
+      rows.push(row);
+    }
+    if (passkeysWork() && status.secureContext && !status.devicePasskey) {
+      const add = el('button', 'ui-row tappable st-add');
+      add.type = 'button';
+      add.append(sym('plus.circle.fill', 19), el('span', 'ui-row-label', 'Add a Passkey for This Device'));
+      add.addEventListener('click', async () => {
+        try {
+          await registerPasskey(authPost);
+          toast('Passkey added', { symbol: 'checkmark' });
+          loadSignIn();
+        } catch (error) {
+          if (!cancelled(error)) showError(error.message, "Couldn't add the passkey");
+        }
+      });
+      rows.push(add);
+    }
+    const out = el('button', 'ui-row tappable st-signout');
+    out.type = 'button';
+    out.append(el('span', 'ui-row-label', 'Sign Out'));
+    out.addEventListener('click', signOut);
+    rows.push(out);
+    const note = status.secureContext
+      ? 'Devices stay signed in for 90 days after they were last used. “sfagents web --new-token” replaces the token and signs every device out.'
+      : 'Passkeys need HTTPS (for example Tailscale Serve, with --public-origin) or localhost. “sfagents web --new-token” replaces the token and signs every device out.';
+    signInBox.replaceChildren(section('Signed-In Devices', rows, note));
+    ctx.refresh();
+  }
+
+  async function signOut() {
+    const ok = await confirmDialog('Sign out of this device?', 'You will need the access token or a passkey to sign in again.', 'Sign Out', true);
+    if (!ok) return;
+    try {
+      await authPost('logout', {});
+    } catch {
+      // signed out anyway
+    }
+    goToSignIn();
+  }
+
+  async function removeDevice(d) {
+    const ok = await confirmDialog(`Sign out “${d.name}”?`, 'That device will need the access token or a passkey to sign in again.', 'Sign Out', true);
+    if (!ok) return;
+    try {
+      await authPost('remove-device', { id: d.id });
+      loadSignIn();
+    } catch (error) {
+      showError(error.message, "Couldn't sign the device out");
+    }
+  }
+
+  async function removePasskey(k) {
+    const ok = await confirmDialog('Remove this passkey?', 'It can no longer sign in here. Delete it from your password manager too.', 'Remove', true);
+    if (!ok) return;
+    try {
+      await authPost('remove-passkey', { id: k.id });
+      loadSignIn();
+    } catch (error) {
+      showError(error.message, "Couldn't remove the passkey");
+    }
+  }
+
   const stop = listen((name) => {
     if (name === 'providers' || name === 'signin') loadProviders();
   });
@@ -298,6 +409,7 @@ export function openSettingsSheet(device) {
   renderProviders(null);
   loadProviders();
   loadServer();
+  loadSignIn();
   return ctx;
 }
 

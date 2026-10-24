@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="robots" content="noindex">
+<title>Sign In · SF Agents</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="vendor/sfgl/fonts/host-grotesk/host-grotesk.css">
+<link rel="stylesheet" href="login.css">
+</head>
+<body>
+<main class="lg">
+  <img class="lg-icon" src="icons/icon.svg" alt="" width="72" height="72">
+  <h1>SF Agents</h1>
+
+  <section id="signin">
+    <p class="lg-sub">Paste the access token that <code>sfagents web</code> printed when SF Agents first started.</p>
+    <button class="lg-btn lg-primary" id="passkeyBtn" type="button" hidden>Sign In with Passkey</button>
+    <div class="lg-or" id="orLine" hidden><span>or</span></div>
+    <form id="tokenForm" autocomplete="off">
+      <label class="lg-field">
+        <span class="lg-visually-hidden">Access token</span>
+        <input id="token" name="token" type="password" placeholder="Access token" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+      </label>
+      <button class="lg-btn" id="tokenBtn" type="submit">Sign In</button>
+    </form>
+    <p class="lg-error" id="error" role="alert" hidden></p>
+    <p class="lg-foot">Lost the token? Run <code>sfagents web --new-token</code> on the computer for a new one. That signs every device out.</p>
+  </section>
+
+  <section id="offer" hidden>
+    <p class="lg-sub">You're signed in. Add a passkey so this device can sign in with Face ID, Touch ID, Windows Hello or your password manager instead of the token.</p>
+    <button class="lg-btn lg-primary" id="addPasskey" type="button">Add a Passkey</button>
+    <button class="lg-btn lg-plain" id="skip" type="button">Not Now</button>
+    <p class="lg-error" id="offerError" role="alert" hidden></p>
+  </section>
+</main>
+<script type="module" src="login.js"></script>
+</body>
+</html>

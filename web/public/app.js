@@ -26,6 +26,7 @@ import { openSettingsSheet, settingsEvent } from './settingssheet.js';
 import { openTerminal, terminalsChanged } from './terminal.js';
 import { openSearch } from './searchsheet.js';
 import { openApp } from './appview.js';
+import { goToSignIn } from './api.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installPress, registerGlass } from './press.js';
@@ -706,6 +707,13 @@ function connect() {
   });
   es.onerror = () => {
     state.connected = false;
+    // A dropped stream may mean this device was signed out.
+    fetch('/api/auth/status', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (s && s.signedIn === false) goToSignIn();
+      })
+      .catch(() => {});
   };
 }
 

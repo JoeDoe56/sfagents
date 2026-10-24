@@ -53,7 +53,7 @@ The older environment-variable providers still work: `"provider": "openrouter"` 
 | --- | --- |
 | `sfagents start` | Opens (or creates) this project's persistent conversation and talks to the selected agent (`--agent <name>`, else `main`). Streams answers, shows tool activity and messages between agents, asks before risky calls. Ctrl+C cancels the running turn; `/exit` or Ctrl+D quits; `/clear` resets the working context (history is kept); `/sections` shows the topic tree; `/tree` shows the agents; `/agent <name>` hands the conversation to another agent. `--ephemeral` keeps the session in memory only. |
 | `sfagents run "<task>"` | One request, ephemeral unless `--persist` (or `--conversation <file>`) records it in the conversation. The answer goes to stdout and activity to stderr. `-` reads the task from stdin. `--json` prints the structured result. Exit code: 0 done, 1 failed, 2 configuration error, 130 cancelled. |
-| `sfagents web` | Serves the web interface at http://127.0.0.1:8093 (`--port`, `--host`). The same persistent conversation as `start`, with attachments, approvals in the page and the artifacts sheet. Ctrl+C stops it. See [Web interface](#web-interface). |
+| `sfagents web` | Serves the web interface at http://127.0.0.1:8093 (`--port`, `--host`). Prints the sign-in token the first time; `--new-token` replaces it. The same persistent conversation as `start`, with attachments, approvals in the page and the artifacts sheet. Ctrl+C stops it. See [Web interface](#web-interface). |
 | `sfagents conversation …` | Inspects the stored conversation without opening it for writing: `info`, `sections`, `show <section\|unassigned\|message id>`, `search <words>`, `artifacts`. `unlock` removes a stale lock after confirmation. |
 | `sfagents agents validate` | Reads the `agents` folder and prints each agent with its tools, grants, auto-approvals and roots, then the files it skipped and why. |
 | `sfagents providers` | Lists the providers; `providers add <openrouter\|openai\|anthropic\|custom> [--name N] [--url URL]` adds one (asks for the key without echoing it, or prints the sign-in address), `rename <name> <new>`, `remove <name>`. |
@@ -176,6 +176,8 @@ npx sfagents web            # http://127.0.0.1:8093
 npx sfagents web --port 9000
 ```
 
+**Signing in.** The first time `sfagents web` starts, it prints an access token (`sfa_…`) once. Keep it somewhere safe, such as a password manager: SF Agents stores only a scrypt fingerprint of it in the OS keyring (Windows Credential Manager, macOS Keychain or the Secret Service keyring), so neither the token nor anything that would let an agent sign in is in a file, and without a keyring the web interface does not start. Every device opens on a sign-in page; paste the token there. Afterwards the page offers to add a **passkey** (Face ID, Touch ID, Windows Hello or a password manager) so that device can sign in without the token. Passkeys need a secure origin: `localhost`, or HTTPS through a reverse proxy such as Tailscale Serve with `--public-origin`. A device stays signed in for 90 days after it was last used; Settings → Signed-In Devices lists the devices and passkeys, signs devices out and removes passkeys. `sfagents web --new-token` replaces the token, signs every device out and removes the passkeys. Wrong tokens are limited to ten per ten minutes.
+
 The page is one conversation in the style of iMessage, with a bottom bar in the style of Apple Maps:
 
 - **Messages** use iMessage's dark-mode bubble shapes and colours. Assistant replies render Markdown. Tool use appears as small grey lines ("Read src/app.ts"), and a typing bubble shows while the agent works.
@@ -201,12 +203,12 @@ It is also a simple installable web app (manifest, icons, standalone display): u
 
 The glass is [sfgl](https://github.com/JoeDoe56/sfgl) (vendored in `web/public/vendor/sfgl`; refresh it with `npm run vendor:sfgl -- <path to sfgl>`), and the font is Host Grotesk. Add `?quality=superfluid|glass|lite|frost|static` to the URL to force a glass quality tier.
 
-Security: the server listens on 127.0.0.1 only, accepts only requests addressed to this host and port, and refuses cross-site writes (and cross-site terminal connections). Artifacts and uploads are served in a sandbox, so a page the agent wrote cannot call the API. Application artifacts are the exception: an app runs as it would on its own port, on SF Agents' origin, so treat it like any program you run. `--host 0.0.0.0` exposes the agent and its tools (with your permissions) to your network; there is no login.
+Security: the server listens on 127.0.0.1 only, accepts only requests addressed to this host and port, and refuses cross-site writes (and cross-site terminal connections). Artifacts and uploads are served in a sandbox, so a page the agent wrote cannot call the API. Application artifacts are the exception: an app runs as it would on its own port, on SF Agents' origin, so treat it like any program you run. `--host 0.0.0.0` exposes the sign-in page to your network; once signed in, a device has the agent and its tools (with your permissions). Plain HTTP on a LAN sends the session cookie unencrypted, so prefer HTTPS through a reverse proxy.
 
 Behind a reverse proxy such as Tailscale Serve, keep the loopback bind and set
 `--public-origin https://your-service.example.ts.net`. This accepts that exact
 external Host and browser origin while continuing to reject unrelated hosts and
-cross-origin writes. The proxy is responsible for controlling access.
+cross-origin writes. The sign-in gate still applies, and the session cookie is marked Secure.
 
 ## Permissions (enforced in code, not in prompts)
 
@@ -275,7 +277,7 @@ Core has no terminal or web code; the CLI and the web server use only Core's pub
 - If SF Agents itself is force-killed, a shell command it started keeps running; the next start reports that call's outcome as unknown.
 - No OS sandbox: any agent granted `shell` runs commands as your user.
 - Model output is text only; MCP image and audio results are summarized, not shown to the model. Attached images are shown to the model (if it supports images); other binary attachments are only named.
-- The web interface has one conversation, no login and no multi-user support. The file manager works with the files of the account SF Agents runs as; anyone who can reach the web interface can read, change and delete those files, so keep it on a trusted network.
+- The web interface has one conversation and one user: every signed-in device has the same access. The file manager works with the files of the account SF Agents runs as; any signed-in device can read, change and delete those files.
 - No MCP OAuth flow; use headers with environment variables.
 - Windows: the first milestone was verified on Windows; the conversation features were developed and tested on Linux, and run their deterministic tests on Windows through `scripts/windows-smoke.ps1`.
 

@@ -24,6 +24,7 @@ import {
   type ProviderFactory,
   describeTree,
   getErrorMessage,
+  KeyringUnavailableError,
   mcpGrants,
   MissingCredentialError,
   stripAnsiAndControl,
@@ -45,7 +46,7 @@ import {
   type ConversationFlags,
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
-import { DEFAULT_HOST, DEFAULT_PORT, WebServer, parsePublicOrigin } from '@sfagents/web';
+import { DEFAULT_HOST, DEFAULT_PORT, WebAuth, WebServer, parsePublicOrigin } from '@sfagents/web';
 import { providersCommand, settingsCommand } from './providers.js';
 
 export const VERSION = '0.1.0';
@@ -84,6 +85,7 @@ Options:
       --persist             (run) Record the request in the persistent conversation
       --name <name>         (providers add) The new provider's name
       --url <url>           (providers add custom) The endpoint's base URL
+      --new-token           (web) Replace the access token for signing in (signs every device out)
       --port <n>            (web) Port to listen on (default: the web.port setting, ${DEFAULT_PORT})
       --public-origin <url> (web) Accept this exact external origin behind a reverse proxy
       --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
@@ -152,6 +154,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         host: { type: 'string' },
         lhm: { type: 'string' },
         'sensor-admin': { type: 'boolean', default: false },
+        'new-token': { type: 'boolean', default: false },
         name: { type: 'string' },
         url: { type: 'string' },
         version: { type: 'boolean', short: 'v', default: false },
@@ -339,7 +342,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       return serveWeb(
         tree,
         conversation,
-        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] || setting('sensors.admin', false), settings: appSettings },
+        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] || setting('sensors.admin', false), settings: appSettings, newToken: values['new-token'] },
         streams,
       );
     }
@@ -433,11 +436,47 @@ async function runOnce(
 async function serveWeb(
   tree: AgentTree,
   conversation: ConversationService,
-  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; lhmUrl?: string | null; sensorAdmin?: boolean; settings: AppSettings },
+  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; lhmUrl?: string | null; sensorAdmin?: boolean; settings: AppSettings; newToken?: boolean },
   streams: Streams,
 ): Promise<number> {
   const style = createStyle(streams.stderr as NodeJS.WriteStream);
+  // The login gate: an access token whose hash is kept in the OS keyring.
+  let auth: WebAuth | false = false;
+  if (process.env['SFAGENTS_WEB_NO_LOGIN'] === '1') {
+    streams.stderr.write(`${style.yellow('warning:')} SFAGENTS_WEB_NO_LOGIN=1: the web interface has no login (for automated tests only).\n`);
+  } else {
+    auth = new WebAuth();
+    try {
+      if (opts.newToken || !(await auth.hasToken())) {
+        const replacing = opts.newToken && (await auth.hasToken());
+        const token = await auth.createToken();
+        const out = createStyle(streams.stdout as NodeJS.WriteStream);
+        streams.stdout.write(
+          [
+            '',
+            out.bold(replacing ? 'New access token for the web interface' : 'Access token for the web interface'),
+            '',
+            `    ${out.bold(token)}`,
+            '',
+            "Copy it and keep it somewhere safe (a password manager). It is shown only this once:",
+            'SF Agents keeps just a fingerprint of it in the keyring. Paste it on the sign-in page of',
+            'each device you use; after signing in you can add a passkey so you need not paste it again.',
+            replacing ? 'Every device was signed out and the passkeys were removed.' : 'Lost it? Run `sfagents web --new-token` for a new one (this signs every device out).',
+            '',
+          ].join('\n'),
+        );
+      }
+    } catch (error) {
+      const message = error instanceof KeyringUnavailableError ? error.message : getErrorMessage(error);
+      streams.stderr.write(
+        `${style.red('The web interface needs the OS keyring to keep its access token, and the keyring is not available.')}\n${message}\n`,
+      );
+      await runExitCleanup();
+      return EXIT_FAILURE;
+    }
+  }
   const server = new WebServer({
+    auth,
     tree,
     conversation,
     port: opts.port,

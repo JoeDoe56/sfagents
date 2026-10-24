@@ -23,6 +23,7 @@ async function start(options: { agent?: Record<string, unknown>; keyring?: boole
     registry,
     settings: new AppSettings(home),
     watchAgents: options.watch === true,
+    auth: false,
   });
   const base = (await server.start()).replace(/\/$/, '');
   return {

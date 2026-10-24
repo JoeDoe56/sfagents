@@ -194,7 +194,7 @@ Totals: **147 deterministic tests** passing; import audit and `npm audit` clean.
 
 - Not yet tried on a real iPad or Windows browser. On iOS the stage follows the visual viewport (offset and height) when the keyboard opens, and sfgl places lenses relative to its canvas' real position, which fixed the glass jumping away from the bar in the first iPhone recording; the fix is checked in Chromium with a simulated visual viewport, not yet on the phone.
 - Headless testing used SwiftShader, so glass performance on real GPUs is unmeasured. sfgl lowers its tier automatically when frames are slow.
-- One conversation, no login. `--host` other than localhost exposes the agent to the network.
+- One conversation, one user (a token and passkeys sign devices in). `--host` other than localhost exposes the sign-in page to the network.
 - The model-slug gradient is not started. The Windows paths of the process list, services, startup items and the Recycle Bin are written against PowerShell and .NET APIs but have not been run on Windows yet.
 - Dictation uses the browser's Web Speech API (Chrome, Safari); Firefox shows the mic as unavailable.
 - SF Symbols are Apple's artwork (see `web/public/vendor/sfgl/symbols/PROVENANCE.md`).

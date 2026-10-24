@@ -20,7 +20,7 @@ async function startServer(script: Script, agent: Record<string, unknown> = {}, 
   const dir = project(agent);
   const tree = loadAgentTree(dir);
   const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
-  const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(script).factory, watchAgents: false, ...extra });
+  const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(script).factory, watchAgents: false, auth: false, ...extra });
   const url = await server.start();
   const base = url.replace(/\/$/, '');
   return {
@@ -156,7 +156,7 @@ describe('up2k uploads', () => {
     // Restart on the same state directory: the upload resumes with only the missing chunks.
     const tree = loadAgentTree(path.join(s.dir, 'agent.json'));
     const conversation = ConversationService.open(path.join(s.dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
-    const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory });
+    const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, auth: false });
     const base = (await server.start()).replace(/\/$/, '');
     try {
       const resumed = await upload(base, 'data.bin', data);
@@ -449,7 +449,7 @@ describe('web server', () => {
 describe('sfagents web (CLI)', () => {
   test('starts on the requested port, serves the page, and stops cleanly on SIGINT', async () => {
     const dir = project();
-    const child = spawn(process.execPath, [CLI_ENTRY, 'web', '--port', '0', '--config', dir], { env: { ...process.env, OPENROUTER_API_KEY: 'test-key' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [CLI_ENTRY, 'web', '--port', '0', '--config', dir], { env: { ...process.env, OPENROUTER_API_KEY: 'test-key', SFAGENTS_WEB_NO_LOGIN: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     child.stdout.on('data', (d: Buffer) => (out += d.toString()));
