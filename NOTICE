@@ -1,9 +1,10 @@
 SF Agents
+Licensed under the GNU General Public License, version 3 (see LICENSE).
 
 This product includes software derived from Qwen Code
 (https://github.com/QwenLM/qwen-code), packages/core and packages/cli at
 commit 97925919acb92b089d817991bfefe4545601c8f6, licensed under the Apache
-License, Version 2.0.
+License, Version 2.0 (licenses/Apache-2.0.txt).
 
 Qwen Code was originally based on Gemini CLI
 (https://github.com/google-gemini/gemini-cli), Copyright 2025 Google LLC,
@@ -40,3 +41,16 @@ Copyright 2026 Insight-IT GmbH, Berlin — Dominic Ballenthin, under the MIT
 License, with a private CPython runtime. See web/native/linux/vendor/LICENSE,
 web/native/linux/vendor/UPSTREAM.json and web/native/NOTICE.md for source,
 versions and runtime notices. macOS uses native OS readers.
+
+Remote Desktop works with MoonlightWeb (https://github.com/linckosz/moonlight-web),
+Copyright 2026 Bruno Martin, licensed under the GNU General Public License,
+version 3 or later. SF Agents does not include MoonlightWeb's binaries: it uses
+an installed copy or downloads an official release. web/public/remote/
+moonlight-embed.js and the edits in web/src/remote-embed.ts change MoonlightWeb's
+web page as SF Agents serves it; the same change is in
+third_party/moonlight-web/sfagents-embed.patch.
+
+Dictation downloads, on first use, a llama.cpp release
+(https://github.com/ggml-org/llama.cpp, MIT License) and Qwen3-ASR-1.7B in
+unsloth's GGUF conversion (https://huggingface.co/unslothai/Qwen3-ASR-1.7B-GGUF,
+Apache License 2.0). Neither is included in SF Agents.

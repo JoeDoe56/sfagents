@@ -15,8 +15,8 @@ export interface SettingSpec {
   label: string;
   /** One line shown under the control. */
   hint: string;
-  group: 'Web server' | 'Hardware sensors' | 'Terminal output';
-  type: 'port' | 'host' | 'boolean' | 'lhm';
+  group: 'Web server' | 'Remote Desktop' | 'Hardware sensors' | 'Terminal output';
+  type: 'port' | 'host' | 'boolean' | 'lhm' | 'server';
   default: SettingValue;
   /** Applies on the next start of `sfagents web` (or `start`), not at once. */
   restart: boolean;
@@ -34,6 +34,15 @@ export const SETTINGS: readonly SettingSpec[] = [
     type: 'host',
     default: '127.0.0.1',
     restart: true,
+  },
+  {
+    key: 'remote.server',
+    label: 'MoonlightWeb',
+    hint: '"auto" finds MoonlightWeb on this computer (or starts the one installed); or the local address of a MoonlightWeb server, such as http://127.0.0.1:8080.',
+    group: 'Remote Desktop',
+    type: 'server',
+    default: 'auto',
+    restart: false,
   },
   {
     key: 'sensors.lhm',
@@ -85,6 +94,17 @@ export function parseSetting(key: string, value: unknown): SettingValue {
       const s = typeof value === 'string' ? value.trim() : '';
       if (!s || s.length > 255 || /[\s/@]/.test(s)) throw new SettingsError(`${spec.label} must be an IP address or host name.`);
       return s;
+    }
+    case 'server': {
+      const s = typeof value === 'string' ? value.trim() : '';
+      if (s === 'auto') return s;
+      try {
+        const u = new URL(s);
+        if ((u.protocol === 'http:' || u.protocol === 'https:') && u.pathname === '/') return u.origin;
+      } catch {
+        // fall through
+      }
+      throw new SettingsError(`${spec.label} must be "auto" or an http(s) address with no path.`);
     }
     case 'lhm': {
       const s = typeof value === 'string' ? value.trim() : '';

@@ -4,4 +4,4 @@ Copied by `scripts/vendor-sfgl.mjs` from sfgl commit `b2b4578d290cfe1102f6cd2e37
 Do not edit these files here; change sfgl and run the script again.
 
 - `src/`, `fonts/host-grotesk/`, `LICENSE`, `NOTICE.md`, `licenses/`: as in sfgl (MIT; the font is SIL OFL 1.1).
-- `symbols/glyphs/`: only the 113 SF Symbols the web client uses. **These are Apple's artwork, not covered by any license in this repository.** Read `symbols/PROVENANCE.md` before distributing them.
+- `symbols/glyphs/`: only the 115 SF Symbols the web client uses. **These are Apple's artwork, not covered by any license in this repository.** Read `symbols/PROVENANCE.md` before distributing them.

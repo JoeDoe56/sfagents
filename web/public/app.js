@@ -26,6 +26,7 @@ import { openSettingsSheet, settingsEvent } from './settingssheet.js';
 import { openTerminal, terminalsChanged } from './terminal.js';
 import { openSearch } from './searchsheet.js';
 import { openApp } from './appview.js';
+import { openRemoteDesktop, remoteEvent } from './remotesheet.js';
 import { goToSignIn } from './api.js';
 import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
@@ -134,6 +135,7 @@ surface.lens($('monitor'), { ...GLASS.tile, clip: sheetScroll });
 surface.lens($('monExpand'), { ...GLASS.control, layer: 2, clip: sheetScroll });
 surface.lens($('settingsBtn'), { ...GLASS.control, clip: sheetScroll });
 surface.lens($('terminalBtn'), { ...GLASS.control, clip: sheetScroll });
+surface.lens($('remoteBtn'), { ...GLASS.control, clip: sheetScroll });
 surface.lens($('searchBtn'), { ...GLASS.control, clip: sheetScroll });
 window.sfagents = { glass: glassApi.glass, surface, barLens };
 
@@ -681,6 +683,7 @@ function connect() {
     agentSheet?.setAgent?.(info);
   });
   es.addEventListener('dictation', (e) => dictationEvent(JSON.parse(e.data)));
+  es.addEventListener('remote', (e) => remoteEvent(JSON.parse(e.data)));
   es.addEventListener('notice', (e) => {
     const { text, level } = JSON.parse(e.data);
     notice(text, level === 'error' ? 'error' : '');
@@ -1148,6 +1151,7 @@ function openSettings() {
 
 $('settingsBtn').addEventListener('click', openSettings);
 $('terminalBtn').addEventListener('click', () => openTerminal().catch((error) => notice(error.message, 'error')));
+$('remoteBtn').addEventListener('click', () => openRemoteDesktop().catch((error) => notice(error.message, 'error')));
 $('searchBtn').addEventListener('click', () =>
   openSearch({
     onMessage: (id) => jumpToMessage(id),

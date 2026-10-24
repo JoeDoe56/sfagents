@@ -22,6 +22,8 @@
   --bubble-max: 75%;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-top: env(safe-area-inset-top, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
 * { box-sizing: border-box; }
@@ -724,7 +726,7 @@ button { -webkit-tap-highlight-color: transparent; }
   flex: none;
   display: flex;
   flex-direction: column;
-  /* Settings, terminal and search, spread evenly down the monitor's height. */
+  /* Settings, terminal, Remote Desktop and search, spread evenly down the monitor's height. */
   justify-content: space-between;
   align-self: stretch;
   gap: 8px;
@@ -1055,3 +1057,21 @@ button { -webkit-tap-highlight-color: transparent; }
 #mic.transcribing i { animation: mic-pulse 0.7s ease-in-out infinite; color: rgba(235, 235, 245, 0.85); }
 @keyframes mic-pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { #mic.listening i, #mic.transcribing i { animation: none; } }
+
+/* ---- Remote Desktop ---- */
+.rd-sheet .ms-panel { --ms-bg: #000; }
+.rd-body { display: flex; flex-direction: column; overflow: hidden !important; padding: 64px 0 0 !important; }
+/* The frame keeps clear of the rounded corners and the home indicator. */
+.rd-stage { position: relative; flex: 1 1 auto; min-height: 0; margin: 0 var(--safe-right, 0px) var(--safe-bottom, 0px) var(--safe-left, 0px); }
+.rd-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; display: block; }
+.rd-panel { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; }
+.rd-panel[hidden] { display: none; }
+.rd-icon { color: rgba(235, 235, 245, 0.6); margin-bottom: 4px; }
+.rd-icon i { width: 34px; height: 34px; }
+.rd-title { margin: 0; font-size: 20px; font-weight: 600; color: #fff; }
+.rd-text { margin: 0 0 8px; max-width: 420px; color: rgba(235, 235, 245, 0.6); font-size: 15px; line-height: 1.4; }
+.rd-btn { min-width: 220px; height: 44px; padding: 0 20px; border: 0; border-radius: 12px; background: rgba(120, 120, 128, 0.24); color: var(--blue, #0a84ff); font: inherit; font-weight: 600; cursor: pointer; }
+.rd-btn.primary { background: var(--blue, #0a84ff); color: #fff; }
+.rd-progress { width: min(320px, 80%); height: 6px; border-radius: 3px; background: rgba(120, 120, 128, 0.3); overflow: hidden; }
+.rd-progress span { display: block; height: 100%; background: var(--blue, #0a84ff); transition: width 0.25s; }
+.rd-panel.over { background: #000; z-index: 1; }

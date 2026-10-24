@@ -2,7 +2,7 @@
   "name": "@sfagents/cli",
   "version": "0.1.0",
   "description": "SF Agents command-line interface",
-  "license": "Apache-2.0",
+  "license": "GPL-3.0-only",
   "type": "module",
   "bin": {
     "sfagents": "bin/sfagents.js"

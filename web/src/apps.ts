@@ -34,12 +34,41 @@ function cookieValue(header: string | undefined, name: string): string | undefin
   return undefined;
 }
 
+/** What an app's files may need on their way through (Remote Desktop's page, remote-embed.ts). */
+export interface AppHooks {
+  /** A file SF Agents answers itself instead of the app. */
+  local?: (route: AppRoute, pathname: string) => { type: string; body: string } | null;
+  /** Changes a text file's contents; returns null to leave it as it is. */
+  transform?: (route: AppRoute, pathname: string) => ((text: string) => string | null) | null;
+  /** An app that owns these socket paths whatever the browser opened last. */
+  claimUpgrade?: (pathname: string) => string | undefined;
+}
+
+/**
+ * The app's security policy, as SF Agents serves it: it may be framed by SF
+ * Agents (not by anyone else), and its sockets go to SF Agents' address.
+ */
+export function rewriteCsp(csp: string, host: string): string {
+  return csp
+    .split(';')
+    .map((d) => d.trim())
+    .filter(Boolean)
+    .map((d) => {
+      const name = d.split(/\s+/)[0]!.toLowerCase();
+      if (name === 'frame-ancestors') return "frame-ancestors 'self'";
+      if (name === 'connect-src') return `connect-src 'self' ws://${host} wss://${host}`;
+      return d;
+    })
+    .join('; ');
+}
+
 export class AppProxy {
   constructor(
     /** The app's address for an artifact id, if it is an application artifact. */
     private readonly target: (id: string) => string | undefined,
     /** Paths SF Agents itself serves ("/", "/api/…", its static files). */
     private readonly isOwnPath: (pathname: string) => boolean,
+    private readonly hooks: AppHooks = {},
   ) {}
 
   route(req: IncomingMessage): AppRoute | null {
@@ -79,6 +108,12 @@ export class AppProxy {
    * upgrade from a browser that opened an app (live reload at "/") is the app's.
    */
   routeUpgrade(req: IncomingMessage): AppRoute | null {
+    const claimed = this.hooks.claimUpgrade?.(new URL(req.url ?? '/', 'http://x').pathname);
+    const ct = claimed ? this.target(claimed) : undefined;
+    if (claimed && ct) {
+      const u = new URL(req.url ?? '/', 'http://x');
+      return { id: claimed, target: new URL(ct), path: `${u.pathname}${u.search}`, prefixed: false };
+    }
     const direct = this.route(req);
     if (direct) return direct;
     const id = cookieValue(req.headers.cookie, APP_COOKIE);
@@ -114,11 +149,32 @@ export class AppProxy {
   }
 
   handle(req: IncomingMessage, res: ServerResponse, route: AppRoute): void {
+    const pathname = new URL(route.path, 'http://x').pathname;
+    const isGet = req.method === 'GET' || req.method === 'HEAD';
+    const local = isGet ? this.hooks.local?.(route, pathname) : null;
+    if (local) {
+      const body = Buffer.from(local.body);
+      res.writeHead(200, { 'Content-Type': local.type, 'Content-Length': body.length, 'Cache-Control': 'no-cache' });
+      res.end(req.method === 'HEAD' ? undefined : body);
+      return;
+    }
+    const transform = isGet ? this.hooks.transform?.(route, pathname) : null;
+    const reqHeaders = this.headers(req, route);
+    if (transform) {
+      // Plain text, whole, so it can be changed; and not from the browser's cache.
+      reqHeaders['accept-encoding'] = 'identity';
+      delete reqHeaders['if-none-match'];
+      delete reqHeaders['if-modified-since'];
+    }
     const upstream = http.request(
       // No connection pooling: a dev server that restarts must not leave stale sockets.
-      { host: route.target.hostname, port: route.target.port || 80, method: req.method, path: route.path, headers: this.headers(req, route), agent: false },
+      { host: route.target.hostname, port: route.target.port || 80, method: req.method, path: route.path, headers: reqHeaders, agent: false },
       (up) => {
         const headers = { ...up.headers };
+        const csp = headers['content-security-policy'];
+        if (typeof csp === 'string') headers['content-security-policy'] = rewriteCsp(csp, String(req.headers.host ?? ''));
+        // The app's HTTPS policy is not SF Agents' to set.
+        delete headers['strict-transport-security'];
         const loc = headers.location;
         if (typeof loc === 'string') {
           try {
@@ -136,6 +192,24 @@ export class AppProxy {
         }
         // The app may be framed by SF Agents.
         delete headers['x-frame-options'];
+        if (transform && up.statusCode === 200 && !headers['content-encoding']) {
+          const chunks: Buffer[] = [];
+          up.on('data', (c: Buffer) => chunks.push(c));
+          up.on('end', () => {
+            const original = Buffer.concat(chunks);
+            const changed = transform(original.toString('utf8'));
+            const body = changed === null ? original : Buffer.from(changed);
+            delete headers['etag'];
+            delete headers['transfer-encoding'];
+            delete headers['last-modified'];
+            headers['content-length'] = String(body.length);
+            headers['cache-control'] = 'no-cache';
+            res.writeHead(200, headers);
+            res.end(req.method === 'HEAD' ? undefined : body);
+          });
+          up.on('error', () => res.destroy());
+          return;
+        }
         res.writeHead(up.statusCode ?? 502, headers);
         up.pipe(res);
       },
