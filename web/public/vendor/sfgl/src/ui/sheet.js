@@ -482,6 +482,9 @@ export function createSheet(o = {}) {
     document.body.classList.toggle('sf-sheet-open', !!document.querySelector('.sf-sheet-layer'));
     removeEventListener('resize', relayout);
     removeEventListener('sfbar', coverBands);
+    removeEventListener('pointermove', onPointerMove);
+    removeEventListener('pointerup', pointerEnd);
+    removeEventListener('pointercancel', pointerEnd);
     visualViewport?.removeEventListener('resize', relayout);
     offConfigure();
     o.onClose?.(confirmed);
@@ -617,7 +620,8 @@ export function createSheet(o = {}) {
     if (body.contains(e.target) && !e.target.closest('.sf-sheet-grab')) return; // the body scrolls by itself
     press = {id: e.pointerId, x: e.clientX, y: e.clientY, onGrab: !!e.target.closest('.sf-sheet-grab'), moved: false};
   });
-  panel.addEventListener('pointermove', (e) => {
+  // Moves are watched on the window: a quick flick leaves the sheet before the first move arrives.
+  const onPointerMove = (e) => {
     if (drag && press && e.pointerId === press.id) {
       moveDrag(e.clientY);
       e.preventDefault();
@@ -636,7 +640,8 @@ export function createSheet(o = {}) {
     }
     moveDrag(e.clientY);
     e.preventDefault();
-  });
+  };
+  addEventListener('pointermove', onPointerMove);
   const pointerEnd = (e) => {
     if (!press || e.pointerId !== press.id) return;
     const tap = !drag && e.type === 'pointerup' && press.onGrab;
@@ -644,8 +649,8 @@ export function createSheet(o = {}) {
     if (drag) endDrag();
     else if (tap) stepFromHandle();
   };
-  panel.addEventListener('pointerup', pointerEnd);
-  panel.addEventListener('pointercancel', pointerEnd);
+  addEventListener('pointerup', pointerEnd);
+  addEventListener('pointercancel', pointerEnd);
   panel.addEventListener(
     'click',
     (e) => {

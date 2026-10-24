@@ -185,6 +185,14 @@ export function createDomGlass({ host, scroller, quality, units = UNITS, backgro
         if (child.hidden || skip(child)) continue;
         const r = child.getBoundingClientRect();
         if (!r.height || r.bottom < top || r.top > bottom) continue;
+        // A symbol is a mask over its background colour: draw the glyph, never the box.
+        if (child.classList.contains('sf-symbol')) {
+          const style = getComputedStyle(child);
+          if (style.visibility === 'hidden' || style.display === 'none') continue;
+          const url = /url\("?([^")]+)"?\)/.exec(style.webkitMaskImage || style.maskImage || '')?.[1];
+          if (url) out.push({ symbol: { url, color: style.backgroundColor }, r });
+          continue;
+        }
         if (child.matches(units) || ownText(child) || child.tagName === 'IMG' || child.tagName === 'VIDEO' || child.tagName === 'INPUT') {
           out.push({ unit: child, r });
           continue;
@@ -237,6 +245,16 @@ export function createDomGlass({ host, scroller, quality, units = UNITS, backgro
       ctx.rect(0, top, W, bottom - top);
       ctx.clip();
       for (const it of items) {
+        if (it.symbol) {
+          const c = symbolCanvas(it.symbol.url, it.symbol.color);
+          if (c) {
+            const k = Math.min(it.r.width / c.width, it.r.height / c.height);
+            const w = c.width * k;
+            const h = c.height * k;
+            ctx.drawImage(c, it.r.left + (it.r.width - w) / 2, it.r.top + (it.r.height - h) / 2, w, h);
+          }
+          continue;
+        }
         if (it.bg) {
           ctx.fillStyle = it.bg;
           roundRect(it.r.left, it.r.top, it.r.width, it.r.height, it.radius);

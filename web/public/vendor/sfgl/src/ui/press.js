@@ -13,7 +13,7 @@
 import {lensFor, pose, spring, reducedMotion} from './core.js';
 
 const SELECTOR = 'button, [role="button"], a.sf-press, .sf-press';
-const EXCLUDE = '[data-press="none"], .sf-row, .sf-menu-item, .sf-segment, .sf-tab, :disabled, [aria-disabled="true"]';
+const EXCLUDE = '[data-press="none"], .sf-sheet-grab, .sf-row, .sf-menu-item, .sf-segment, .sf-tab, :disabled, [aria-disabled="true"]';
 
 const pressIn = spring(0.26, 0.72);
 const release = spring(0.42, 0.52);
