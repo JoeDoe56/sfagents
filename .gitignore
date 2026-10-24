@@ -7,6 +7,12 @@ dist/
 coverage/
 .sfagents/
 .tools/
+
+# Personal project configuration; generic starting points live in examples/.
+/agents/
+/mcp.json
+/brightdata-mcp-example.json
+
 web/native/bin/
 web/native/windows/bin/
 web/native/windows/obj/

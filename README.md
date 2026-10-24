@@ -17,8 +17,12 @@ SF Agents started as an extraction of the minimal runtime from Qwen Code's `pack
 git clone https://github.com/JoeDoe56/sfagents
 cd sfagents
 npm install        # installs dependencies and builds (via the prepare script)
+cp -R examples/agents agents
+cp examples/mcp.json mcp.json
 npx sfagents --help
 ```
+
+The copy commands above are for a new checkout and also work in PowerShell. Skip them if you already have your own `agents/` folder and `mcp.json`. These local configuration files are ignored by Git; edit them freely without publishing your setup. Generic defaults stay in `examples/`.
 
 `npm run build` rebuilds after changes. On any platform, `npm run sfagents -- <args>` also works.
 
@@ -65,10 +69,11 @@ Common options: `--config <dir|file>` (the project directory, its `agents` folde
 ## Files
 
 ```text
-agents/                       one JSON file per agent, any name (main.json replies by default)
+examples/                     tracked starting configurations to copy into a new checkout
+agents/                       local, untracked; one JSON file per agent (main.json replies by default)
   main.json
   worker.json
-mcp.json                      named MCP servers (optional)
+mcp.json                      local, untracked named MCP servers (optional)
 .env                          secrets (optional, untracked)
 .sfagents/                    local conversation state (created by start; never committed)
   conversation.md             the persistent conversation: messages, sections, artifact references
@@ -77,7 +82,7 @@ mcp.json                      named MCP servers (optional)
   uploads/                    files attached in the web interface (and partial uploads)
 ```
 
-This repository ships a working example: `main` with file tools and shell, which may message a read-only `worker` (two at once), and a demo MCP server. Run `npx sfagents agents validate` to see it.
+The configurations in `examples/` provide `main` with file tools and shell, which may message a read-only `worker` (two at once), and a demo MCP server. After copying them as described above, run `npx sfagents agents validate` to see them.
 
 ## Agent definition
 
