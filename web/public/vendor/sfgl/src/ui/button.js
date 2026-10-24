@@ -39,6 +39,10 @@ export function createButton(o = {}) {
       if (symbolNode) node.prepend(symbolNode);
     },
     setLabel(text) {
+      if (labelNode && text) {
+        if (labelNode.textContent !== text) labelNode.textContent = text;
+        return;
+      }
       labelNode?.remove();
       labelNode = null;
       node.classList.toggle('capsule', !!text);

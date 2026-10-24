@@ -7,142 +7,36 @@
   --fm-gutter: max(16px, env(safe-area-inset-left, 0px));
   color: var(--ink, #fff);
 }
-.fm-inner { --ms-bg: var(--fm-bg); background: var(--fm-bg); }
-.fm-scroll {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  padding: 76px 0 calc(var(--safe-bottom) + 112px);
-}
+.fm-inner { --ms-bg: var(--fm-bg); }
 .fm-hero, .fm-content { max-width: 920px; margin: 0 auto; padding: 0 var(--fm-gutter); box-sizing: border-box; }
-
-/* Scroll-edge effect: the list softens under the glass. */
-.fm-edge { position: absolute; left: 0; right: 0; z-index: 2; pointer-events: none; opacity: 0; transition: opacity 0.2s ease; }
-.fm-edge.top {
-  top: 0;
-  height: 84px;
-  background: linear-gradient(to bottom, var(--fm-bg) 0%, rgba(28, 28, 30, 0.86) 45%, rgba(28, 28, 30, 0));
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
-  mask-image: linear-gradient(to bottom, #000 55%, transparent);
-}
-.fm-edge.bottom {
-  bottom: 0;
-  height: calc(var(--safe-bottom) + 96px);
-  opacity: 1;
-  background: linear-gradient(to top, rgba(28, 28, 30, 0.9), rgba(28, 28, 30, 0));
-}
-.fm.scrolled .fm-edge.top { opacity: 1; }
 
 /* ------------------------------------------------------------------ chrome */
 
-.fm-top {
-  position: absolute;
-  z-index: 5;
-  left: 0;
-  right: 0;
-  top: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 18px var(--fm-gutter) 8px;
-  touch-action: none;
-}
-.fm-glass {
-  position: relative;
-  border: 0;
-  margin: 0;
-  color: rgba(255, 255, 255, 0.92);
-  font: inherit;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-/* Without WebGL (sfgl unavailable): plain frosted material. */
-.fm.no-glass .fm-glass {
-  background: rgba(58, 58, 60, 0.62);
-  -webkit-backdrop-filter: blur(20px) saturate(1.6);
-  backdrop-filter: blur(20px) saturate(1.6);
-  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.22);
-}
-.fm-glass:focus-visible { outline: 2px solid rgba(68, 153, 248, 0.85); outline-offset: 2px; }
-.fm-glass > * { position: relative; }
-.fm-circle { flex: none; width: 44px; height: 44px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
-.fm-circle:disabled { opacity: 0.4; cursor: default; }
-.fm-pill { flex: none; height: 44px; padding: 0 18px; border-radius: 22px; font-size: 17px; font-weight: 600; }
-.fm-done { color: #fff; }
-.fm-glass:active > *, .fm-glass:active > i { opacity: 0.6; }
-
-.fm-stats {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-  scroll-snap-type: x proximity;
-  padding: 2px 0;
-  -webkit-mask-image: linear-gradient(to right, transparent, #000 10px, #000 calc(100% - 14px), transparent);
-  mask-image: linear-gradient(to right, transparent, #000 10px, #000 calc(100% - 14px), transparent);
-}
-.fm-stats.at-start { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent); }
-.fm-stats::-webkit-scrollbar { display: none; }
+/* The chrome (close, the stats button, more; the drives or the selection toolbar) is the sheet's header and footer, made of the framework's bars. */
 .fm-chip {
-  flex: none;
-  height: 44px;
-  min-width: 64px;
-  padding: 0 13px;
-  border-radius: 22px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  scroll-snap-align: start;
-  text-align: left;
-  font-variant-numeric: tabular-nums;
+  display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+  width: 100%; height: 100%; padding: 0 14px; box-sizing: border-box;
+  border: 0; background: none; color: #fff; font: inherit; text-align: left; cursor: pointer;
+  font-variant-numeric: tabular-nums; -webkit-tap-highlight-color: transparent;
 }
 .fm-chip-label { font-size: 11px; line-height: 13px; font-weight: 600; color: rgba(235, 235, 245, 0.6); letter-spacing: 0.01em; }
 .fm-chip-value { font-size: 15px; line-height: 19px; font-weight: 600; white-space: nowrap; }
+.fm-chip:active > * { opacity: 0.6; }
 
-.fm-bottom {
-  position: absolute;
-  z-index: 5;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 8px var(--fm-gutter) calc(var(--safe-bottom) + 14px);
-  pointer-events: none;
-}
-.fm-bottom > * { pointer-events: auto; }
-.fm-drives {
-  --count: 1;
-  max-width: 920px;
-  margin: 0 auto;
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: calc((100% - (var(--count) - 1) * 8px) / var(--count));
-  gap: 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  scroll-snap-type: x mandatory;
-  padding: 2px;
-  margin-inline: auto;
-}
-.fm-drives.scrolls { grid-auto-columns: calc((100% - 2 * 8px) / 3 - 14px); }
-.fm-drives::-webkit-scrollbar { display: none; }
-.fm-drives[hidden] { display: none; }
 /* A drive: a Liquid Glass capsule, filled from the left as the drive fills. */
 .fm-drive {
-  height: 44px;
-  border-radius: 22px;
-  overflow: hidden;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  margin: 0;
   padding: 0;
-  scroll-snap-align: start;
+  overflow: hidden;
+  border-radius: inherit;
+  background: none;
+  color: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  cursor: pointer;
   min-width: 0;
 }
 .fm-drive-fill {
@@ -176,17 +70,15 @@
 .fm-drive-pct { flex: none; font-weight: 600; }
 
 .fm-toolbar {
-  max-width: 420px;
-  height: 52px;
-  margin: 0 auto;
-  border-radius: 26px;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-around;
   padding: 0 6px;
   cursor: default;
 }
-.fm-toolbar[hidden] { display: none; }
 .fm-tool { flex: 1; height: 44px; border: 0; background: none; color: var(--blue); display: grid; place-items: center; border-radius: 22px; cursor: pointer; }
 .fm-tool.destructive { color: var(--red); }
 .fm-tool:disabled { color: rgba(235, 235, 245, 0.28); cursor: default; }
@@ -541,3 +433,6 @@
 /* Toasts clear the drive bars and the selection toolbar. */
 .files-open .toast-host { bottom: calc(var(--safe-bottom) + 84px); }
 .fm:focus { outline: none; }
+
+/* The folder picker's list sits in the sheet's body. */
+.fm-picker .sf-sheet-body { padding-inline: 16px; }

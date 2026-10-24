@@ -493,3 +493,4 @@ button.sf-row, .sf-row.tappable { cursor: pointer; }
 .sf-row.has-lead-chevron .sf-row-chevron { transition: transform 0.25s var(--sf-ease, ease); }
 .sf-row .sf-row-chevron.open { transform: rotate(90deg); }
 .sf-row.nested { padding-left: 40px; }
+.sf-button-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

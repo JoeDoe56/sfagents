@@ -17,11 +17,10 @@ import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { getJson, postJson, waitJob, rawUrl, zipUrl } from './api.js';
 import { showMenu, onHold, closeMenu } from './menu.js';
 import { alertDialog, confirmDialog, promptDialog, showError, toast } from './dialogs.js';
-import { openPeek, group, row, el as peekEl } from './peek.js';
+import { openPeek, group, row, button as peekButton, el as peekEl } from './peek.js';
 import { openQuickLook } from './quicklook.js';
 import { UploadJob } from './up2k.js';
-import { createFilesGlass } from './filesglass.js';
-import { createSheetFrame, makeGlass } from './modalsheet.js';
+import { createSheet, createButton, createField, standardHeader } from './vendor/sfgl/src/ui/index.js';
 import { DASH, bytesText, dateText, fullDate, formatUsedTotal, percentText, rateText, temperature, formatDuration, plural } from './format.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -182,24 +181,21 @@ async function copyText(text) {
  *   attach: (ref: object) => void, onOpenChange?: (open: boolean) => void}} options
  */
 export function createFileManager(options) {
-  // An iOS sheet that goes straight to its large detent (see modalsheet.js).
-  const frame = createSheetFrame({
-    detents: ['large'],
-    className: 'fm',
-    label: 'Files',
-    z: 40,
-    scroller: () => scroller,
-    onMove: () => fg?.invalidate(),
-    onClosed: () => finishClose(),
-    // Escape leaves selection first.
-    onEscape: () => (state.selecting ? (setSelecting(false), true) : false),
-  });
-  const root = frame.layer;
-  const inner = frame.panel;
-  inner.classList.add('fm-inner');
+  // The sheet is rebuilt each time Files opens (its content nodes below are
+  // kept); its header and footer are the framework's bars.
+  let sheet = null;
+  let root = null;
+  let scroller = null;
+  let closeBtn = null;
+  let moreBtn = null;
+  let doneBtn = null;
+  let statsBtn = null;
+  let toolbar = null;
+  let picker = null;
+  let dropHint = null;
+  let statsOpen = false;
+  let pendingFrom = null;
 
-  // Scrolling content.
-  const scroller = el('div', 'fm-scroll');
   const hero = el('div', 'fm-hero');
   const nav = el('div', 'fm-nav');
   const back = el('button', 'fm-back');
@@ -212,93 +208,75 @@ export function createFileManager(options) {
   const title = el('h1', 'fm-title', 'Browse');
   const info = el('p', 'fm-info');
   const path = el('div', 'fm-path');
-  const searchWrap = el('label', 'fm-search');
-  searchWrap.append(sym('magnifyingglass', 15));
-  const search = el('input');
-  search.type = 'search';
-  search.placeholder = 'Search';
+  const searchField = createField({ placeholder: 'Search', look: 'card', multiline: false, maxRows: 1, inputMode: 'search', autocapitalize: 'off', aria: 'Search this folder and the folders in it', leading: [sym('magnifyingglass', 15)] });
+  const searchWrap = searchField.el;
+  searchWrap.classList.add('fm-search');
+  const search = searchField.input;
   search.autocomplete = 'off';
   search.spellcheck = false;
-  search.setAttribute('aria-label', 'Search this folder and the folders in it');
-  searchWrap.append(search);
+  search.setAttribute('enterkeyhint', 'search');
   hero.append(nav, title, info, path, searchWrap);
   const content = el('div', 'fm-content');
-  scroller.append(hero, content);
 
-  // Glass chrome over the content: close, stats, more; drives or the selection toolbar.
-  const top = el('header', 'fm-top');
-  const closeBtn = el('button', 'fm-glass fm-circle fm-close');
-  closeBtn.type = 'button';
-  closeBtn.setAttribute('aria-label', 'Close Files');
-  closeBtn.append(sym('xmark', 15));
-  const stats = el('div', 'fm-stats');
-  const moreBtn = el('button', 'fm-glass fm-circle fm-more');
-  moreBtn.type = 'button';
-  moreBtn.setAttribute('aria-label', 'More');
-  moreBtn.append(sym('ellipsis', 18));
-  const doneBtn = el('button', 'fm-glass fm-pill fm-done', 'Done');
-  doneBtn.type = 'button';
-  doneBtn.hidden = true;
-  top.append(closeBtn, stats, moreBtn, doneBtn);
-  const bottom = el('footer', 'fm-bottom');
-  const drives = el('div', 'fm-drives');
-  const toolbar = el('div', 'fm-glass fm-toolbar');
-  toolbar.hidden = true;
-  bottom.append(drives, toolbar);
-  const dropHint = el('div', 'fm-drop', '');
-  dropHint.append(sym('tray.and.arrow.down', 34), el('span', '', 'Drop to upload here'));
-  dropHint.hidden = true;
-  const picker = el('input');
-  picker.type = 'file';
-  picker.multiple = true;
-  picker.hidden = true;
-  const edgeTop = el('div', 'fm-edge top');
-  const edgeBottom = el('div', 'fm-edge bottom');
-  inner.append(scroller, edgeTop, edgeBottom, top, bottom, dropHint, picker);
+  const headerLayout = () => `${state.selecting ? 'select' : 'browse'}${statsOpen ? '-stats' : ''}`;
+  const footerLayout = () => (state.selecting ? 'select' : 'drives');
+  const chunk = (list, n) => Array.from({ length: Math.ceil(list.length / n) }, (_, i) => list.slice(i * n, i * n + n));
 
-  // Liquid Glass for the chrome (created on first open, when it can be measured).
-  let fg = null;
-  function setupGlass() {
-    if (fg) return;
-    try {
-      fg = createFilesGlass({
-        host: inner,
-        scroller,
-        quality: options.quality?.(),
-        edges: () => {
-          const t = edgeTop.getBoundingClientRect();
-          const b = edgeBottom.getBoundingClientRect();
-          return [
-            { from: 'top', top: t.top, height: t.height, opacity: root.classList.contains('scrolled') ? 1 : 0 },
-            { from: 'bottom', top: b.top, height: b.height, opacity: 1, stops: [[0, 0.9], [1, 0]] },
-          ];
-        },
-      });
-    } catch {
-      fg = null;
-      root.classList.add('no-glass');
-      return;
-    }
-    fg.lens(closeBtn);
-    fg.lens(moreBtn);
-    fg.lens(doneBtn);
-    fg.lens(toolbar, 'bar');
-    fg.group('chips', [...stats.children], 'control', { clip: stats });
-    stats.addEventListener('scroll', () => fg.invalidate(), { passive: true });
-    drives.addEventListener('scroll', () => fg.invalidate(), { passive: true });
-    new ResizeObserver(updateBands).observe(top);
-    new ResizeObserver(updateBands).observe(bottom);
-    addEventListener('resize', updateBands);
-    updateBands();
-  }
-  function updateBands() {
-    if (!fg || !state.open) return;
-    const t = top.getBoundingClientRect();
-    const b = bottom.getBoundingClientRect();
-    const bands = [{ top: t.top, bottom: t.bottom }];
-    if (b.height) bands.push({ top: b.top, bottom: b.bottom });
-    fg.setBands(bands);
-    fg.invalidate();
+  function buildSheet(from) {
+    statsOpen = false;
+    chipNodes.clear();
+    driveNodes.clear();
+    driveOrder = [];
+    closeBtn = createButton({ symbol: 'xmark', aria: 'Close', size: 'large' });
+    moreBtn = createButton({ symbol: 'ellipsis', aria: 'More', size: 'large' });
+    doneBtn = createButton({ label: 'Done', aria: 'Done', size: 'large' });
+    statsBtn = createButton({ symbol: 'gauge', label: 'System', aria: 'System statistics', size: 'large' });
+    toolbar = el('div', 'fm-toolbar');
+    // The statistics: one button that opens a second row of chips below it. They
+    // stay separate buttons, because each opens a window (not a tab).
+    const chipItems = CHIPS.map(([key, label]) => {
+      const chip = el('button', 'fm-chip');
+      chip.type = 'button';
+      const v = el('span', 'fm-chip-value', DASH);
+      chip.append(el('span', 'fm-chip-label', label), v);
+      chip.addEventListener('click', () => options.openWindow(key, chip, (p, o) => navigate(p, o)));
+      chipNodes.set(key, v);
+      return { id: `chip-${key}`, node: chip, size: 'fill', height: 48, glass: 'control', from: 'stats', into: 'stats' };
+    });
+    const chipRows = chunk(chipItems, 3);
+    const top = (right) => [{ id: 'close', node: closeBtn.el, size: 44, height: 48 }, { id: 'stats', node: statsBtn.el, size: 'fill', height: 48 }, right];
+    const more = { id: 'more', node: moreBtn.el, size: 44, height: 48, into: 'done' };
+    const done = { id: 'done', node: doneBtn.el, size: 88, height: 48, from: 'more' };
+    sheet = createSheet({
+      kind: 'button',
+      source: from ?? options.monitorEl,
+      detents: ['large'],
+      handle: true,
+      label: 'Files',
+      header: { edge: 'top', layout: headerLayout(), layouts: { browse: [top(more)], 'browse-stats': [top(more), ...chipRows], select: [top(done)], 'select-stats': [top(done), ...chipRows] } },
+      footer: {
+        edge: 'bottom',
+        layout: footerLayout(),
+        layouts: { drives: [[]], select: [[{ id: 'toolbar', node: toolbar, size: 'fill', height: 56, glass: 'bar' }]] },
+      },
+      // Escape leaves selection first.
+      onEscape: () => (state.selecting ? (setSelecting(false), true) : false),
+      onClose: () => finishClose(),
+    });
+    root = sheet.layer.el;
+    scroller = sheet.body;
+    sheet.el.classList.add('fm', 'fm-inner');
+    scroller.append(hero, content);
+    dropHint = el('div', 'fm-drop', '');
+    dropHint.append(sym('tray.and.arrow.down', 34), el('span', '', 'Drop to upload here'));
+    dropHint.hidden = true;
+    picker = el('input');
+    picker.type = 'file';
+    picker.multiple = true;
+    picker.hidden = true;
+    sheet.el.append(dropHint, picker);
+    wireSheet();
+    sheet.present('large');
   }
 
   const state = {
@@ -334,41 +312,35 @@ export function createFileManager(options) {
     ['sfagents', 'SF Agents', (s) => formatDuration(s.uptime.sfagents)],
   ];
   const chipNodes = new Map();
-  for (const [key, label] of CHIPS) {
-    const chip = el('button', 'fm-glass fm-chip');
-    chip.type = 'button';
-    const l = el('span', 'fm-chip-label', label);
-    const v = el('span', 'fm-chip-value', DASH);
-    chip.append(l, v);
-    chip.addEventListener('click', () => options.openWindow(key, chip, (p, o) => navigate(p, o)));
-    stats.append(chip);
-    chipNodes.set(key, v);
-  }
   function renderStats(s) {
     state.snapshot = s;
     for (const [key, , fmt] of CHIPS) {
       const text = fmt(s);
       const node = chipNodes.get(key);
-      if (node.textContent !== text) node.textContent = text;
+      if (node && node.textContent !== text) node.textContent = text;
     }
     const t = temperature(s.cpu.temperature);
-    chipNodes.get('cpu').title = t ? `CPU temperature ${t}` : '';
+    const cpuNode = chipNodes.get('cpu');
+    if (cpuNode) cpuNode.parentElement.title = t ? `CPU temperature ${t}` : '';
+    statsBtn?.setLabel(`CPU ${percentText(s.cpu.usage)} · Mem ${percentText(s.memory.used / s.memory.total)}`);
     renderDrives(s);
   }
 
   // ---------------------------------------------------------------- drive bars
 
   const driveNodes = new Map(); // mount → {node, name, pct, size, fill}
+  let driveOrder = [];
   function renderDrives(s) {
     const binary = s.platform !== 'darwin';
     const list = s.drives ?? [];
     const seen = new Set();
     let changed = false;
+    const order = [...driveOrder];
     list.forEach((d, i) => {
       seen.add(d.mount);
       let n = driveNodes.get(d.mount);
       if (!n) {
-        const node = el('button', 'fm-glass fm-drive');
+        const node = el('button', 'fm-drive');
         node.type = 'button';
         const fill = el('span', 'fm-drive-fill');
         const text = el('span', 'fm-drive-text');
@@ -393,11 +365,10 @@ export function createFileManager(options) {
       const pctText = `${Math.round(frac * 100)}%`;
       if (n.pct.textContent !== pctText) n.pct.textContent = pctText;
       n.fill.style.width = `${(frac * 100).toFixed(2)}%`;
-      if (drives.children[i] !== n.node) {
-        drives.insertBefore(n.node, drives.children[i] ?? null);
-        changed = true;
-      }
+      if (order[i] !== n.node) changed = true;
+      order[i] = n.node;
     });
+    order.length = list.length;
     for (const [mount, n] of driveNodes) {
       if (!seen.has(mount)) {
         n.node.remove();
@@ -405,11 +376,12 @@ export function createFileManager(options) {
         changed = true;
       }
     }
-    drives.style.setProperty('--count', String(Math.max(1, Math.min(3, list.length))));
-    drives.classList.toggle('scrolls', list.length > 3);
-    if (changed && fg) {
-      fg.group('drives', [...drives.children], 'tile', { clip: drives });
-      updateBands();
+    if (changed) {
+      driveOrder = order.filter(Boolean);
+      sheet?.footer?.setItems(
+        'drives',
+        chunk(driveOrder.map((node, i) => ({ id: `drive-${i}`, node, size: 'fill', height: 48, glass: 'tile' })), 3),
+      );
     }
   }
 
@@ -492,12 +464,9 @@ export function createFileManager(options) {
       requestAnimationFrame(() => (path.scrollLeft = path.scrollWidth));
     }
     searchWrap.hidden = p === null;
-    moreBtn.hidden = state.selecting;
-    doneBtn.hidden = !state.selecting;
-    drives.hidden = state.selecting;
-    toolbar.hidden = !state.selecting;
+    sheet?.header.setLayout(headerLayout());
+    sheet?.footer.setLayout(footerLayout());
     if (state.selecting) renderToolbar();
-    if (fg) requestAnimationFrame(updateBands);
   }
 
   function renderMessage(text, symbol) {
@@ -593,10 +562,8 @@ export function createFileManager(options) {
       const box = el('div', 'fm-empty');
       box.append(sym(state.query ? 'magnifyingglass' : 'folder', 34), el('p', '', state.query ? 'No items match.' : l.truncated ? '' : 'This folder is empty.'));
       if (!state.query && l.writable && l.path !== state.locations?.trash) {
-        const up = el('button', 'ui-button', 'Upload');
-        up.type = 'button';
-        up.addEventListener('click', () => picker.click());
-        box.append(up);
+        const up = createButton({ symbol: 'tray.and.arrow.up', label: 'Upload', size: 'large', glass: 'control', onClick: () => picker.click() });
+        box.append(up.el);
       }
       content.replaceChildren(box);
       return;
@@ -1067,16 +1034,15 @@ export function createFileManager(options) {
           })
           .catch((error) => list.replaceChildren(peekEl('p', 'ui-empty', error.message)));
         const actions = peekEl('div', 'ui-actions');
-        const b = (label, symbol, run, role) => {
-          const x = peekEl('button', `ui-button${role ? ` ${role}` : ''}`);
-          x.type = 'button';
-          x.append(sym(symbol, 15), peekEl('span', '', label));
-          x.addEventListener('click', () => {
-            ctx.close();
-            run();
+        const b = (label, symbol, run, role) =>
+          peekButton(label, {
+            symbol,
+            role,
+            onClick: () => {
+              ctx.close();
+              run();
+            },
           });
-          return x;
-        };
         actions.append(b(item.kind === 'folder' ? 'Open' : 'Quick Look', item.kind === 'folder' ? 'folder' : 'eye', () => activate(item)), b('Rename', 'pencil', () => rename(item)), b('Copy Path', 'link', () => copyPaths([item])));
         ctx.body.append(actions);
       },
@@ -1171,7 +1137,7 @@ export function createFileManager(options) {
     const writable = state.listing?.writable ?? false;
     const fav = p !== null && state.favorites.includes(p);
     showMenu({
-      anchor: moreBtn,
+      anchor: moreBtn.el,
       align: 'end',
       quick:
         p === null
@@ -1256,35 +1222,42 @@ export function createFileManager(options) {
     });
   }
 
-  picker.addEventListener('change', () => {
-    upload([...picker.files]);
-    picker.value = '';
-  });
-
   // Dropping files from the computer uploads them here.
-  let dragDepth = 0;
   const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
-  root.addEventListener('dragenter', (e) => {
-    if (!hasFiles(e) || state.path === null) return;
-    dragDepth++;
-    dropHint.hidden = false;
-  });
-  root.addEventListener('dragleave', (e) => {
-    if (!hasFiles(e)) return;
-    dragDepth = Math.max(0, dragDepth - 1);
-    if (!dragDepth) dropHint.hidden = true;
-  });
-  root.addEventListener('dragover', (e) => {
-    if (hasFiles(e) && state.path !== null) e.preventDefault();
-  });
-  root.addEventListener('drop', (e) => {
-    if (!hasFiles(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragDepth = 0;
-    dropHint.hidden = true;
-    upload([...e.dataTransfer.files]);
-  });
+  function wireSheet() {
+    picker.addEventListener('change', () => {
+      upload([...picker.files]);
+      picker.value = '';
+    });
+    let dragDepth = 0;
+    root.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e) || state.path === null) return;
+      dragDepth++;
+      dropHint.hidden = false;
+    });
+    root.addEventListener('dragleave', (e) => {
+      if (!hasFiles(e)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) dropHint.hidden = true;
+    });
+    root.addEventListener('dragover', (e) => {
+      if (hasFiles(e) && state.path !== null) e.preventDefault();
+    });
+    root.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragDepth = 0;
+      dropHint.hidden = true;
+      upload([...e.dataTransfer.files]);
+    });
+    doneBtn.el.addEventListener('click', () => setSelecting(false));
+    moreBtn.el.addEventListener('click', () => moreMenu());
+    statsBtn.el.addEventListener('click', () => {
+      statsOpen = !statsOpen;
+      sheet.header.setLayout(headerLayout());
+    });
+  }
 
   // ---------------------------------------------------------------- folder picker (Move, Copy)
 
@@ -1292,63 +1265,29 @@ export function createFileManager(options) {
     return new Promise((resolve) => {
       // The same kind of sheet as Files itself: grabber, close button on the left.
       let result = null;
-      let pickerGlass = null;
-      const pickerBands = () => {
-        if (!pickerGlass) return;
-        const r = head.getBoundingClientRect();
-        pickerGlass.setBands([{ top: r.top, bottom: r.bottom }]);
-        pickerGlass.invalidate();
-      };
-      const frame = createSheetFrame({
-        detents: ['large'],
-        className: 'fm-picker-layer',
-        label: heading,
-        z: 70,
-        scroller: () => list,
-        onClosed: () => {
-          pickerGlass?.destroy();
-          frame.layer.remove();
-          resolve(result);
-        },
-        onMove: () => pickerBands(),
-      });
-      const sheet = frame.panel;
-      sheet.classList.add('fm-picker');
-      const head = el('header', 'fm-picker-head');
-      const cancel = el('button', 'ms-close');
-      cancel.type = 'button';
-      cancel.setAttribute('aria-label', 'Cancel');
-      cancel.append(sym('xmark', 15));
-      const t = el('h2', '', heading);
-      const add = el('button', 'ms-close');
-      add.type = 'button';
-      add.setAttribute('aria-label', 'New Folder');
-      add.append(sym('folder.badge.plus', 17));
-      head.append(cancel, t, add);
-      const where = el('div', 'fm-picker-where');
-      const list = el('div', 'fm-picker-list');
-      const foot = el('footer', 'fm-picker-foot');
-      const go = el('button', 'ui-button primary', confirm);
-      go.type = 'button';
-      foot.append(where, go);
-      sheet.append(head, list, foot);
-      frame.addDragArea(head);
-      frame.show('large');
-      // Its buttons are real Liquid Glass too.
-      pickerGlass = makeGlass({ host: sheet, scroller: list });
-      if (pickerGlass) {
-        pickerGlass.lens(cancel, 'control');
-        pickerGlass.lens(add, 'control');
-        pickerBands();
-      }
       let cur = start;
+      const add = createButton({ symbol: 'folder.badge.plus', aria: 'New Folder', size: 'large' });
+      const head = standardHeader({ title: heading, close: true, trailing: [add.el] });
+      const where = el('div', 'fm-picker-where');
+      const go = createButton({ label: confirm, aria: confirm, size: 'large', tint: 'action' });
+      const picker = createSheet({
+        kind: 'button',
+        detents: ['large'],
+        handle: true,
+        label: heading,
+        header: { edge: 'top', layout: head.layout, layouts: head.layouts },
+        footer: { edge: 'bottom', layout: 'main', layouts: { main: [[{ id: 'where', node: where, size: 'fill', height: 48, glass: false }, { id: 'go', node: go.el, size: 140, height: 48 }]] } },
+        onClose: () => resolve(result),
+      });
+      picker.layer.el.classList.add('fm-picker-layer');
+      picker.el.classList.add('fm-picker');
+      const list = picker.body;
       const finish = (value) => {
         result = value;
-        frame.close();
+        picker.close();
       };
-      cancel.addEventListener('click', () => finish(null));
-      go.addEventListener('click', () => cur && finish(cur));
-      add.addEventListener('click', async () => {
+      go.el.addEventListener('click', () => cur && finish(cur));
+      add.el.addEventListener('click', async () => {
         if (!cur) return;
         const name = await promptDialog('New Folder', 'untitled folder', 'Create');
         if (!name) return;
@@ -1359,6 +1298,7 @@ export function createFileManager(options) {
           await showError(error.message, "Couldn't create the folder");
         }
       });
+      picker.present('large');
       const line = (name, symbol, color, onClick, detail) => {
         const b = el('button', 'fm-place');
         b.type = 'button';
@@ -1374,8 +1314,8 @@ export function createFileManager(options) {
       };
       async function show(p) {
         cur = p;
-        go.disabled = !p;
-        add.disabled = !p;
+        go.setDisabled?.(!p);
+        add.setDisabled?.(!p);
         list.replaceChildren(el('div', 'fm-loading'));
         if (p === null) {
           where.textContent = 'Choose a folder';
@@ -1392,11 +1332,11 @@ export function createFileManager(options) {
           const nodes = [line(up ? `‹ ${baseName(up)}` : '‹ Browse', 'chevron.left', '#0a84ff', () => show(up ?? null))];
           for (const e of sorted(l.entries.filter((x) => x.kind === 'folder'), { key: 'name' })) nodes.push(line(e.name, 'folder.fill', '#5ac8fa', () => show(e.path), Number.isFinite(e.items) ? plural(e.items, 'item') : ''));
           list.replaceChildren(section(null, nodes));
-          go.disabled = !l.writable;
+          go.setDisabled?.(!l.writable);
           if (!l.writable) where.textContent = `${p} (read-only)`;
         } catch (error) {
           list.replaceChildren(el('p', 'ui-empty', error.message), line('Browse', 'chevron.left', '#0a84ff', () => show(null)));
-          go.disabled = true;
+          go.setDisabled?.(true);
         }
       }
       show(start);
@@ -1514,18 +1454,6 @@ export function createFileManager(options) {
     else for (const x of all) state.selection.add(x.path);
     renderFolder();
   });
-  doneBtn.addEventListener('click', () => setSelecting(false));
-  moreBtn.addEventListener('click', () => moreMenu());
-  closeBtn.addEventListener('click', () => close());
-  scroller.addEventListener('scroll', () => root.classList.toggle('scrolled', scroller.scrollTop > 4), { passive: true });
-  stats.addEventListener('scroll', () => {
-    stats.classList.toggle('at-start', stats.scrollLeft < 2);
-    stats.classList.toggle('at-end', stats.scrollWidth - stats.clientWidth - stats.scrollLeft < 2);
-  }, { passive: true });
-
-  // Dragging the glass bar moves the sheet, as its grabber does.
-  frame.addDragArea(top);
-
   let statsTimer = 0;
   async function pollStats() {
     clearTimeout(statsTimer);
@@ -1549,7 +1477,7 @@ export function createFileManager(options) {
   }
 
   /** Opens the sheet at `path`, or where it was left. */
-  async function open({ path, select = null } = {}) {
+  async function open({ path, select = null, from = null } = {}) {
     if (path !== undefined) {
       state.path = path;
       state.pendingSelect = select;
@@ -1561,12 +1489,11 @@ export function createFileManager(options) {
     }
     state.open = true;
     options.onOpenChange?.(true);
+    buildSheet(from ?? pendingFrom);
     renderHeader();
     content.replaceChildren(el('div', 'fm-loading'));
-    frame.show('large');
-    setupGlass();
-    updateBands();
-    if (fg && driveNodes.size) fg.group('drives', [...drives.children], 'tile', { clip: drives });
+    if (state.snapshot) renderStats(state.snapshot);
+    else if (state.locations?.drives?.length) renderDrives({ drives: state.locations.drives, platform: state.locations.platform });
     pollStats();
     await refresh();
     pollList();
@@ -1578,7 +1505,7 @@ export function createFileManager(options) {
     clearTimeout(statsTimer);
     clearTimeout(listTimer);
     closeMenu();
-    frame.close();
+    sheet?.close();
   }
 
   function finishClose() {
@@ -1588,6 +1515,7 @@ export function createFileManager(options) {
       clearTimeout(statsTimer);
       clearTimeout(listTimer);
     }
+    sheet = null;
     options.onOpenChange?.(false);
   }
 

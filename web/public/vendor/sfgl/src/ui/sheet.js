@@ -120,6 +120,7 @@ export function standardHeader(o = {}) {
  * @property {number} [headerTop]                   px from the top of the sheet to the header (button sheets, default 18)
  * @property {() => Element | null} [closeSource]   the element the discard popover grows from (default: the header's close button)
  * @property {(detent: string) => void} [onDetent]
+ * @property {() => boolean | void} [onEscape]    handle Escape yourself (return true to keep the sheet open)
  * @property {(confirmed?: boolean) => void} [onClose]
  * @property {() => void} [onMove]
  * @property {(dirty: boolean) => void} [onDirty]    e.g. tint the confirm button
@@ -307,7 +308,7 @@ export function createSheet(o = {}) {
     const footH = heightOf(footer);
     const headTop = isBar ? lerp(ROW_TOP, 22, smooth(0, 1, t)) : (o.headerTop ?? 18);
     headEl.style.top = `${headTop}px`;
-    const bottomInset = edge === 'bottom' ? inset('bottom') * smooth(1.2, 2, t) : 0;
+    const bottomInset = edge === 'bottom' ? Math.max(inset('bottom'), footer ? 12 : 0) * smooth(1.2, 2, t) : 0;
     footEl.style.bottom = `${bottomInset}px`;
     const bodyTop = header ? headTop + headH + 10 : isBar ? 0 : 28;
     const bodyBottom = footer ? footH + bottomInset + 10 : bottomInset;
@@ -785,6 +786,7 @@ export function createSheet(o = {}) {
     if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.sf-pop')) {
       e.preventDefault();
       e.stopPropagation();
+      if (o.onEscape?.()) return;
       if (isBar) stepDown();
       else requestClose();
     }
