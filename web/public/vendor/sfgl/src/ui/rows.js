@@ -110,7 +110,7 @@ export function createRow(o = {}) {
         d.style.setProperty('--sf-tint', state.dot);
         valueNode.append(d);
       }
-      if (state.value !== undefined) valueNode.append(el('span', '', state.value));
+      if (state.value !== undefined) valueNode.append(state.value instanceof Node ? state.value : el('span', '', state.value));
       if (state.accessory === 'menu') valueNode.append(icon('chevron.up.chevron.down', 13));
       node.append(valueNode);
     }

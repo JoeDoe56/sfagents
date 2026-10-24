@@ -93,6 +93,7 @@
  * WebGL, and what the glass sits on. */
 .sf-button {
   position: relative;
+  z-index: 4; /* above the glass canvas, wherever the button sits */
   display: inline-grid;
   place-items: center;
   grid-auto-flow: column;

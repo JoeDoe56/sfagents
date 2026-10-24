@@ -8,6 +8,7 @@
 import { getJson, postJson } from './api.js';
 import { createChart, COLORS } from './charts.js';
 import { openPeek, group, row, figures, segmented, button, el, symbol } from './peek.js';
+import { createButton, createField } from './vendor/sfgl/src/ui/index.js';
 import { showMenu } from './menu.js';
 import { confirmDialog, showError } from './dialogs.js';
 import {
@@ -84,7 +85,7 @@ function setRows(container, rows) {
 /** A grouped list whose rows are replaced on each update without rebuilding its section. */
 function liveGroup(title) {
   const section = group([], title);
-  const list = section.querySelector('.ui-group');
+  const list = section.querySelector('.sf-group');
   return { element: section, set: (rows) => setRows(list, rows) };
 }
 
@@ -96,7 +97,7 @@ function cpuWindow(ctx) {
   const figs = figures([{ label: 'Utilization' }, { label: 'Speed' }, { label: 'Temperature' }]);
   const box = chartBox();
   const chart = createChart(box, { series: [{ color: COLORS.blue }], max: 1, format: pctMax });
-  const coresTitle = el('h3', 'ui-section-title', 'Logical processors');
+  const coresTitle = el('h3', 'sf-section-title', 'Logical processors');
   const coresGrid = el('div', 'ui-cores');
   const facts = liveGroup();
   const temps = liveGroup('Temperatures');
@@ -188,7 +189,7 @@ function memoryWindow(ctx) {
   const comp = el('div', 'ui-composition');
   const legend = el('div', 'ui-legend');
   const facts = liveGroup();
-  ctx.body.append(figs.element, box, el('h3', 'ui-section-title', 'Memory composition'), comp, legend, facts.element);
+  ctx.body.append(figs.element, box, el('h3', 'sf-section-title', 'Memory composition'), comp, legend, facts.element);
   detailFeed(ctx, (d) => {
     const m = d.memory;
     figs.set(0, bytesText(m.used));
@@ -259,10 +260,10 @@ function diskWindow(ctx) {
     for (const disk of d.disks) {
       let card = cards.get(disk.name);
       if (!card) {
-        const section = el('section', 'ui-section');
-        const title = el('h3', 'ui-section-title', disk.name);
+        const section = el('section', 'sf-section');
+        const title = el('h3', 'sf-section-title', disk.name);
         const graph = el('div', 'ui-chart small');
-        const list = el('div', 'ui-group');
+        const list = el('div', 'sf-group');
         section.append(title, graph, list);
         disks.append(section);
         card = { list, chart: createChart(graph, { series: [{ color: COLORS.green }], max: 1, format: pctMax, span: 'Active time' }) };
@@ -315,10 +316,10 @@ function networkWindow(ctx) {
     for (const a of d.adapters) {
       let card = cards.get(a.name);
       if (!card) {
-        const section = el('section', 'ui-section');
+        const section = el('section', 'sf-section');
         const graph = el('div', 'ui-chart small');
-        const list = el('div', 'ui-group');
-        section.append(el('h3', 'ui-section-title', a.name), graph, list);
+        const list = el('div', 'sf-group');
+        section.append(el('h3', 'sf-section-title', a.name), graph, list);
         adapters.append(section);
         card = { list, chart: createChart(graph, { series: [{ color: COLORS.orange }, { color: COLORS.teal, fill: false }], max: 'auto', format: rateText }) };
         cards.set(a.name, card);
@@ -377,7 +378,7 @@ function systemWindow(ctx) {
     // Every hardware sensor, by device (as Libre Hardware Monitor lists them).
     if (d.sensors.length) {
       sensors.replaceChildren(
-        el('h3', 'ui-section-title big', 'Sensors'),
+        el('h3', 'sf-section-title big', 'Sensors'),
         ...d.sensors.map((hw) => {
           const details = el('details', 'ui-disclosure');
           const summary = el('summary', '', hw.hardware);
@@ -445,16 +446,21 @@ const SORTS = {
 };
 
 function searchField(placeholder, onInput) {
-  const wrap = el('label', 'ui-search');
-  wrap.append(symbol('magnifyingglass', 14));
-  const input = el('input');
-  input.type = 'search';
-  input.placeholder = placeholder;
-  input.autocomplete = 'off';
-  input.spellcheck = false;
-  input.addEventListener('input', () => onInput(input.value));
-  wrap.append(input);
-  return wrap;
+  const field = createField({
+    placeholder,
+    look: 'card',
+    multiline: false,
+    maxRows: 1,
+    inputMode: 'search',
+    autocapitalize: 'off',
+    aria: placeholder,
+    leading: [symbol('magnifyingglass', 15)],
+    onInput,
+  });
+  field.input.spellcheck = false;
+  field.input.autocomplete = 'off';
+  field.input.setAttribute('enterkeyhint', 'search');
+  return field.el;
 }
 
 function processesWindow(ctx) {
@@ -489,21 +495,21 @@ function processList(ctx, pane) {
   let sort = 'cpu';
   let data = null;
   const tools = el('div', 'ui-toolbar');
-  const sortBtn = button('CPU', { symbol: 'arrow.up.arrow.down' });
-  sortBtn.classList.add('ui-sort');
+  const sort_ = createButton({ symbol: 'arrow.up.arrow.down', label: 'CPU', aria: 'Sort by', className: 'ui-sort' });
+  const sortBtn = sort_.el;
   sortBtn.addEventListener('click', () =>
     showMenu({
       anchor: sortBtn,
       align: 'end',
       title: 'Sort By',
-      groups: [Object.entries(SORTS).map(([k, s]) => ({ label: s.label, checked: k === sort, action: () => ((sort = k), (sortBtn.querySelector('span').textContent = s.label), draw()) }))],
+      groups: [Object.entries(SORTS).map(([k, s]) => ({ label: s.label, checked: k === sort, action: () => ((sort = k), sort_.setLabel(s.label), draw()) }))],
     }),
   );
   tools.append(searchField('Search processes', (v) => ((query = v.toLowerCase()), draw())), sortBtn);
   const summary = el('p', 'ui-caption');
   const head = el('div', 'proc-head');
   head.append(el('span', '', 'Name'), el('span', '', 'CPU'), el('span', '', 'Memory'));
-  const list = el('div', 'ui-group proc-list');
+  const list = el('div', 'sf-group proc-list');
   pane.append(tools, summary, head, list);
   const rows = new Map();
 
@@ -696,7 +702,7 @@ function processView(pid, name) {
 }
 
 function usersPane(ctx, pane) {
-  const list = el('div', 'ui-group');
+  const list = el('div', 'sf-group');
   pane.append(list);
   ctx.every(4000, async () => {
     const { users } = await getJson('/api/system/users');
@@ -718,7 +724,7 @@ function usersPane(ctx, pane) {
 function servicesPane(ctx, pane) {
   let query = '';
   let data = null;
-  const list = el('div', 'ui-group');
+  const list = el('div', 'sf-group');
   const note = el('p', 'ui-caption');
   pane.append(searchField('Search services', (v) => ((query = v.toLowerCase()), draw())), note, list);
   function draw() {
@@ -771,7 +777,7 @@ function servicesPane(ctx, pane) {
 }
 
 function startupPane(ctx, pane) {
-  const list = el('div', 'ui-group');
+  const list = el('div', 'sf-group');
   pane.append(el('p', 'ui-caption', 'Apps that start when you sign in.'), list);
   const load = async () => {
     const { startup } = await getJson('/api/system/startup');

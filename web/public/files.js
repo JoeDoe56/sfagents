@@ -1036,7 +1036,7 @@ export function createFileManager(options) {
         text.append(name, kind);
         head.append(text);
         const facts = group([]);
-        const list = facts.querySelector('.ui-group');
+        const list = facts.querySelector('.sf-group');
         ctx.body.append(head, facts);
         const set = (rows) => list.replaceChildren(...rows.filter(Boolean));
         getJson('/api/files/info', { path: item.path })

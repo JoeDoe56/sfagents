@@ -735,3 +735,11 @@
 /* Content of an sfgl/ui sheet made by openSheet: the sheets' own side margins. */
 .ms-content { padding-left: 16px; padding-right: 16px; }
 .sf-sheet-layer { --ms-bg: var(--sf-sheet); }
+
+/* Windows built on the framework */
+.sf-section-title.big { margin-top: 8px; font-size: 20px; line-height: 26px; color: var(--sf-label); font-weight: 700; }
+.ui-actions { display: block; margin: 4px 0 10px; border-radius: var(--sf-radius-group); background: var(--sf-card); overflow: hidden; }
+.ui-actions:empty { display: none; }
+.ui-segment-wrap { margin: 0 0 14px; }
+.ui-toolbar .sf-field { flex: 1 1 auto; min-width: 0; }
+.ui-toolbar .sf-button { flex: none; }
