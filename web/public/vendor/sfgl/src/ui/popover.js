@@ -29,11 +29,12 @@ const fadeIn = spring(0.3, 0.9);
  * @property {Node | {el: Node}} content
  * @property {number} [width]               default 248
  * @property {number} [maxHeight]           default: what fits
- * @property {'auto'|'below'|'above'|'cover'} [placement]  `cover`: top edge on the source's (a dropdown from its label)
+ * @property {'auto'|'below'|'above'|'cover'|'center'} [placement]  `cover`: top edge on the source's (a dropdown from its label); `center`: centred on it (an alert)
  * @property {'start'|'end'|'center'} [align]  default 'start'
  * @property {number} [radius]              default 26
  * @property {string} [className]
  * @property {boolean} [dismissOutside]     tap outside closes it (default true)
+ * @property {boolean} [dim]                 a light dim behind it (an alert that asks for an answer)
  * @property {boolean} [hideSource]         the source is hidden while the popover stands in for it (default true)
  * @property {() => void} [onClose]
  * @property {'menu'|'bar'|'control'|'tile'} [glass]   material (default 'menu')
@@ -65,6 +66,7 @@ export function presentPopover(o) {
   const width = Math.min(o.width ?? 248, innerWidth - MARGIN * 2);
   const finalRadius = o.radius ?? 26;
   const catcher = el('div', 'sf-pop-catcher');
+  const dim = o.dim ? el('div', 'sf-pop-dim') : null;
   const root = el('div', `sf-pop ${o.className ?? ''}`.trim());
   const body = el('div', 'sf-pop-body');
   root.dataset.sfNopaint = '';
@@ -73,7 +75,7 @@ export function presentPopover(o) {
   const contentNode = o.content?.el ?? o.content;
   body.append(contentNode);
   root.append(body);
-  layer.el.append(catcher, root);
+  layer.el.append(...(dim ? [dim] : []), catcher, root);
   layer.host?.adoptOne(root);
 
   // The source gives way to the popover, and comes back as it folds in.
@@ -121,11 +123,11 @@ export function presentPopover(o) {
     const below = vh - s.top - s.height - MARGIN - 8;
     const above = s.top - MARGIN - 8;
     if (placement === 'auto') placement = natural <= below || below >= above ? 'below' : 'above';
-    const free = placement === 'cover' ? vh - s.top - MARGIN : placement === 'below' ? below : above;
+    const free = placement === 'center' ? vh - MARGIN * 2 : placement === 'cover' ? vh - s.top - MARGIN : placement === 'below' ? below : above;
     const h = Math.round(Math.min(natural, o.maxHeight ?? room, Math.max(free, Math.min(natural, 160))));
     let left = o.align === 'end' ? s.left + s.width - target.w : o.align === 'center' ? s.left + (s.width - target.w) / 2 : s.left;
     left = clamp(left, MARGIN, innerWidth - target.w - MARGIN);
-    let top = placement === 'above' ? s.top - 8 - h : placement === 'cover' ? s.top : s.top + s.height + 8;
+    let top = placement === 'above' ? s.top - 8 - h : placement === 'cover' ? s.top : placement === 'center' ? s.top + s.height / 2 - h / 2 : s.top + s.height + 8;
     top = clamp(top, MARGIN, Math.max(MARGIN, vh - h - MARGIN));
     upward = placement === 'above';
     target = {x: left, y: top, w: target.w, h, r: finalRadius};
@@ -146,6 +148,7 @@ export function presentPopover(o) {
     s.borderRadius = `${Math.max(0, Math.min(st.r.x, st.h.x / 2, st.w.x / 2))}px`;
     const f = clamp(st.fade.x, 0, 1);
     body.style.opacity = String(f);
+    if (dim) dim.style.opacity = String(f);
     body.style.filter = f < 0.98 ? `blur(${((1 - f) * 8).toFixed(2)}px)` : '';
     // The content grows with the shape: it starts small, at the source.
     body.style.transformOrigin = upward ? '0 100%' : '0 0';
@@ -251,6 +254,7 @@ export function presentPopover(o) {
     layer.host?.release(root);
     root.remove();
     catcher.remove();
+    dim?.remove();
     layer.cover(handle);
   }
 

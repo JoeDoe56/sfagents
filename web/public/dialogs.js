@@ -4,6 +4,7 @@
  */
 
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
+import { presentAlert } from './vendor/sfgl/src/ui/index.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
 
@@ -14,77 +15,32 @@ function el(tag, className, text) {
   return node;
 }
 
+// What was last pressed: an alert that follows a tap grows out of that control.
+let lastPressed = null;
+let lastPressedAt = 0;
+document.addEventListener(
+  'pointerdown',
+  (e) => {
+    lastPressed = e.target instanceof Element ? e.target.closest('button, [role="button"], .sf-row, .fm-row') : null;
+    lastPressedAt = performance.now();
+  },
+  true,
+);
+
 /**
- * @param {{title: string, message?: string, input?: {value?: string, placeholder?: string, select?: [number, number]},
+ * An alert (a title, a message, an optional text field and capsule actions)
+ * that grows out of what was tapped, or out of the middle of the screen.
+ * @param {{title: string, message?: string, source?: Element, input?: {value?: string, placeholder?: string, select?: [number, number]},
  *   actions: {label: string, value?: string, role?: 'cancel' | 'destructive' | 'default'}[]}} options
  * @returns {Promise<{action: string | null, value: string}>}  action is the chosen button's value (or label); null when dismissed
  */
 export function alertDialog(options) {
-  return new Promise((resolve) => {
-    const layer = el('div', 'dialog-layer');
-    const box = el('div', 'dialog');
-    box.setAttribute('role', 'alertdialog');
-    box.setAttribute('aria-modal', 'true');
-    const title = el('h2', 'dialog-title', options.title);
-    title.id = `dialog-${Math.random().toString(36).slice(2)}`;
-    box.setAttribute('aria-labelledby', title.id);
-    const content = el('div', 'dialog-content');
-    content.append(title);
-    if (options.message) content.append(el('p', 'dialog-message', options.message));
-    let field = null;
-    if (options.input) {
-      field = el('input', 'dialog-input');
-      field.type = 'text';
-      field.value = options.input.value ?? '';
-      field.placeholder = options.input.placeholder ?? '';
-      field.autocomplete = 'off';
-      field.spellcheck = false;
-      field.setAttribute('autocapitalize', 'off');
-      content.append(field);
-    }
-    box.append(content);
-    const actions = el('div', `dialog-actions${options.actions.length > 2 ? ' stacked' : ''}`);
-    const buttons = options.actions.map((a) => {
-      const b = el('button', `dialog-button${a.role ? ` ${a.role}` : ''}`, a.label);
-      b.type = 'button';
-      b.addEventListener('click', () => finish(a.value ?? a.label));
-      actions.append(b);
-      return [a, b];
-    });
-    box.append(actions);
-    layer.append(box);
-    document.body.append(layer);
-    layer.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160 });
-    box.animate([{ transform: 'scale(1.12)', opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 260, easing: EASE });
-    const preferred = buttons.find(([a]) => a.role === 'default') ?? buttons.find(([a]) => a.role !== 'cancel');
-    if (field) {
-      field.focus();
-      const sel = options.input.select;
-      if (sel) field.setSelectionRange(sel[0], sel[1]);
-      else field.select();
-    } else (preferred?.[1] ?? buttons[0]?.[1])?.focus();
-
-    function onKey(e) {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        const cancel = options.actions.find((a) => a.role === 'cancel');
-        finish(cancel ? (cancel.value ?? cancel.label) : null);
-      } else if (e.key === 'Enter' && preferred && (field ? document.activeElement === field : true)) {
-        e.preventDefault();
-        e.stopPropagation();
-        finish(preferred[0].value ?? preferred[0].label);
-      }
-    }
-    window.addEventListener('keydown', onKey, true);
-
-    function finish(action) {
-      window.removeEventListener('keydown', onKey, true);
-      const value = field?.value ?? '';
-      layer.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, fill: 'forwards' }).onfinish = () => layer.remove();
-      resolve({ action, value });
-    }
-  });
+  let source = options.source;
+  if (!source && lastPressed?.isConnected && performance.now() - lastPressedAt < 4000) {
+    const r = lastPressed.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0 && r.top >= 0 && r.bottom <= innerHeight && getComputedStyle(lastPressed).visibility !== 'hidden') source = lastPressed;
+  }
+  return presentAlert({ ...options, source });
 }
 
 /** OK/Cancel question; resolves true for the confirming button. */

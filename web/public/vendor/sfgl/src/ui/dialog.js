@@ -80,3 +80,77 @@ export async function confirmDiscard(o) {
   });
   return choice === 'discard';
 }
+
+/**
+ * An alert: a title, a message, an optional text field and capsule actions,
+ * growing out of `source` (or, with none, out of the middle of the screen),
+ * with a light dim behind it. Resolves `{action, value}`: the chosen action's
+ * `value` (its label by default; `null` when dismissed) and the field's text.
+ * Enter chooses the default action, Escape the cancel one.
+ * @param {{source?: Element | {left: number, top: number, width: number, height: number}, title: string, message?: string,
+ *   input?: {value?: string, placeholder?: string, select?: [number, number]}, actions: DialogAction[], width?: number}} o
+ * @returns {Promise<{action: any, value: string}>}
+ */
+export function presentAlert(o) {
+  return new Promise((resolve) => {
+    const box = el('div', 'sf-dialog');
+    box.append(el('div', 'sf-dialog-title', o.title));
+    if (o.message) box.append(el('div', 'sf-dialog-message', o.message));
+    let field = null;
+    if (o.input) {
+      field = el('input', 'sf-dialog-input');
+      field.type = 'text';
+      field.value = o.input.value ?? '';
+      field.placeholder = o.input.placeholder ?? '';
+      field.autocomplete = 'off';
+      field.spellcheck = false;
+      field.setAttribute('autocapitalize', 'off');
+      box.append(field);
+    }
+    const list = el('div', 'sf-dialog-actions');
+    let answered = false;
+    let pop = null;
+    const answer = (action) => {
+      if (answered) return;
+      answered = true;
+      resolve({action, value: field?.value ?? ''});
+      pop?.close();
+    };
+    const preferred = o.actions.find((a) => a.role === 'default') ?? o.actions.find((a) => a.role !== 'cancel') ?? o.actions[0];
+    for (const a of o.actions) {
+      const b = el('button', `sf-dialog-action ${a.role ?? 'default'}`, a.label);
+      b.type = 'button';
+      b.addEventListener('click', () => answer(a.value ?? a.label));
+      list.append(b);
+    }
+    box.append(list);
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && preferred && !e.isComposing) {
+        e.preventDefault();
+        e.stopPropagation();
+        answer(preferred.value ?? preferred.label);
+      }
+    });
+    const w = o.width ?? 280;
+    const centre = {left: innerWidth / 2 - 2, top: (visualViewport?.height ?? innerHeight) / 2 - 2, width: 4, height: 4};
+    pop = presentPopover({
+      source: o.source ?? centre,
+      content: box,
+      width: w,
+      placement: o.source ? 'cover' : 'center',
+      align: o.source ? 'start' : 'center',
+      radius: 32,
+      className: 'sf-dialog-pop sf-alert',
+      group: 'dialog',
+      dim: true,
+      onClose: () => answer(null),
+    });
+    setTimeout(() => {
+      if (field) {
+        field.focus();
+        if (o.input.select) field.setSelectionRange(o.input.select[0], o.input.select[1]);
+        else field.select();
+      } else box.querySelector('.sf-dialog-action.' + (preferred?.role ?? 'default'))?.focus?.({preventScroll: true});
+    }, 60);
+  });
+}

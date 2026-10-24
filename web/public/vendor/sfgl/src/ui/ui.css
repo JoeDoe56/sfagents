@@ -494,3 +494,12 @@ button.sf-row, .sf-row.tappable { cursor: pointer; }
 .sf-row .sf-row-chevron.open { transform: rotate(90deg); }
 .sf-row.nested { padding-left: 40px; }
 .sf-button-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sf-pop-dim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.28); opacity: 0; pointer-events: none; }
+.sf-dialog-input {
+  display: block; width: 100%; box-sizing: border-box; height: 40px; margin: 0 0 16px; padding: 0 12px;
+  border: 0; border-radius: 20px; outline: none; font: 400 16px/20px var(--sf-font); color: var(--sf-label);
+  background: var(--sf-fill, rgba(120, 120, 128, 0.24));
+}
+.sf-alert .sf-dialog-title { text-align: center; }
+.sf-alert .sf-dialog-message { text-align: center; }
+.sf-button[hidden] { display: none; }

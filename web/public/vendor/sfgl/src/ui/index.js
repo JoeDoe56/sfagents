@@ -21,6 +21,6 @@ export {createBar} from './bar.js';
 export {layerRoot, createLayer} from './layers.js';
 export {presentPopover, closePopovers} from './popover.js';
 export {showMenu, onHold} from './menu.js';
-export {presentDialog, confirmDiscard} from './dialog.js';
+export {presentDialog, presentAlert, confirmDiscard} from './dialog.js';
 export {createSheet, standardHeader, safeInset} from './sheet.js';
 export {createWindow} from './window.js';

@@ -328,7 +328,7 @@ export function createSheetFrame(options = {}) {
 
   scrim.addEventListener('click', () => close());
   layer.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.menu-layer, .dialog-layer, .peek-layer, .ql-layer, .fm-picker-layer')) {
+    if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.sf-pop, .sf-sheet[data-kind="window"], .ql-layer, .fm-picker-layer')) {
       e.preventDefault();
       e.stopPropagation();
       if (!options.onEscape?.()) close();

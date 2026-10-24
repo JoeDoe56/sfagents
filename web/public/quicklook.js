@@ -5,13 +5,11 @@
  * files of the folder. Anything else shows its icon, details and actions.
  */
 
-import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { getJson, postJson, rawUrl } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { alertDialog, showError } from './dialogs.js';
+import { createSheet, createButton, confirmDiscard } from './vendor/sfgl/src/ui/index.js';
 import { bytesText, dateText } from './format.js';
-import { makeGlass } from './modalsheet.js';
-import { GLASS, SEND_TINT } from './glassvalues.js';
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
 
@@ -20,18 +18,6 @@ function el(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
-}
-
-function iconButton(symbol, label, onClick) {
-  const b = el('button', 'ql-btn glass');
-  b.type = 'button';
-  b.setAttribute('aria-label', label);
-  b.title = label;
-  const i = el('i');
-  applySymbol(i, symbol, { size: 16 });
-  b.append(i);
-  b.addEventListener('click', onClick);
-  return b;
 }
 
 const TEXT_KINDS = new Set(['text', 'code', 'spreadsheet']);
@@ -43,93 +29,89 @@ const NO_PREVIEW = /\.(heic|heif|tif|tiff|mkv|avi)$/i;
 export function openQuickLook(options) {
   const items = (options.items ?? [options.item]).filter((i) => i.kind !== 'folder');
   let index = Math.max(0, items.findIndex((i) => i.path === options.item.path));
-  const layer = el('div', 'ql-layer');
-  layer.setAttribute('role', 'dialog');
-  layer.setAttribute('aria-modal', 'true');
-  const top = el('header', 'ql-top');
-  const titleWrap = el('div', 'ql-title');
+  const titleWrap = el('div', 'sf-sheet-title ql-title');
   const title = el('h2', '');
   const meta = el('span', 'ql-meta');
   titleWrap.append(title, meta);
   // While editing, the close button leaves the editor (the preview stays) and the check saves.
-  const close = iconButton('xmark', 'Close', () => (editor ? leaveEdit() : dismiss()));
-  const editBtn = iconButton('pencil', 'Edit', () => startEdit());
-  const checkBtn = iconButton('checkmark', 'Save', () => editor?.save());
-  checkBtn.hidden = true;
-  const more = iconButton('ellipsis', 'More', (e) => options.actions.menu?.(current(), e.currentTarget));
-  const share = iconButton('square.and.arrow.up', 'Share', () => options.actions.share(current()));
-  top.append(close, titleWrap, editBtn, share, more, checkBtn);
-  const stage = el('div', 'ql-stage');
-  const prev = iconButton('chevron.left', 'Previous', () => go(-1));
-  const next = iconButton('chevron.right', 'Next', () => go(1));
-  prev.classList.add('ql-nav', 'prev');
-  next.classList.add('ql-nav', 'next');
-  const shade = el('div', 'ql-shade');
-  layer.append(stage, shade, top, prev, next);
-  document.body.append(layer);
-  layer.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220 });
-  // The buttons are real Liquid Glass over the file being shown.
-  const glass = makeGlass({
-    host: layer,
-    scroller: stage,
-    background: '#000000',
-    edges: () => {
-      const r = shade.getBoundingClientRect();
-      return [{ from: 'top', top: r.top, height: r.height, opacity: 1, stops: [[0, 0.72], [1, 0]] }];
+  const close = createButton({ symbol: 'xmark', aria: 'Close', size: 'large' });
+  const editBtn = createButton({ symbol: 'pencil', aria: 'Edit', size: 'large' });
+  const checkBtn = createButton({ symbol: 'checkmark', aria: 'Save', size: 'large' });
+  const more = createButton({ symbol: 'ellipsis', aria: 'More', size: 'large' });
+  const share = createButton({ symbol: 'square.and.arrow.up', aria: 'Share', size: 'large' });
+  const prev = createButton({ symbol: 'chevron.left', aria: 'Previous', size: 'large', className: 'ql-nav prev' });
+  const next = createButton({ symbol: 'chevron.right', aria: 'Next', size: 'large', className: 'ql-nav next' });
+  const titleItem = { id: 'title', node: titleWrap, size: 'fill', height: 48, glass: false };
+  const btn = (id, b) => ({ id, node: b.el, size: 44, height: 48 });
+  const sheet = createSheet({
+    kind: 'button',
+    source: options.source,
+    detents: ['large'],
+    handle: true,
+    label: 'Quick Look',
+    header: {
+      edge: 'top',
+      layout: 'view',
+      layouts: {
+        view: [[btn('close', close), titleItem, btn('edit', editBtn), btn('share', share), btn('more', more)]],
+        readonly: [[btn('close', close), titleItem, btn('share', share), btn('more', more)]],
+        editing: [[btn('close', close), titleItem, btn('save', checkBtn)]],
+      },
+    },
+    closeSource: () => close.el,
+    onClose: () => {
+      window.removeEventListener('keydown', onKey, true);
+      sheet.el.querySelectorAll('video, audio').forEach((m) => m.pause());
     },
   });
-  const glassBands = () => {
-    if (!glass) return;
-    const rects = [top, prev, next].map((n) => n.getBoundingClientRect()).filter((r) => r.height);
-    glass.setBands(rects.map((r) => ({ top: r.top, bottom: r.bottom })));
-    glass.invalidate();
-  };
-  if (glass) {
-    for (const b of [close, editBtn, more, share, prev, next, checkBtn]) glass.lens(b, 'control');
-    new ResizeObserver(glassBands).observe(layer);
-    stage.addEventListener('load', () => glass.repaint(), true);
-    glassBands();
-  }
+  sheet.el.classList.add('ql-sheet');
+  sheet.layer.el.classList.add('ql-layer');
+  const stage = el('div', 'ql-stage');
+  sheet.body.append(stage);
+  sheet.el.append(prev.el, next.el);
+  close.el.addEventListener('click', () => {
+    if (editor) leaveEdit();
+  });
+  editBtn.el.addEventListener('click', () => startEdit());
+  checkBtn.el.addEventListener('click', () => editor?.save());
+  more.el.addEventListener('click', (e) => options.actions.menu?.(current(), more.el, e));
+  share.el.addEventListener('click', () => options.actions.share(current()));
+  prev.el.addEventListener('click', () => go(-1));
+  next.el.addEventListener('click', () => go(1));
+  sheet.present('large');
 
   let editor = null;
+  let canEdit = false;
   const current = () => items[index];
 
   /** The chrome for previewing or for editing. */
   function setEditing(on) {
-    checkBtn.hidden = !on;
-    share.hidden = on;
-    more.hidden = on;
-    if (on) editBtn.hidden = true;
-    close.setAttribute('aria-label', on ? 'Stop editing' : 'Close');
-    close.title = on ? 'Stop editing' : 'Close';
-    layer.classList.toggle('editing', on);
-    requestAnimationFrame(glassBands);
+    sheet.header.setLayout(on ? 'editing' : canEdit ? 'view' : 'readonly');
+    close.el.setAttribute('aria-label', on ? 'Stop editing' : 'Close');
+    close.el.title = on ? 'Stop editing' : 'Close';
+    sheet.el.classList.toggle('editing', on);
   }
 
   function setSaveReady(on) {
-    checkBtn.classList.toggle('dirty', on);
-    const lens = glass?.lensOf?.(checkBtn);
-    lens?.transition({ tint: on ? SEND_TINT : GLASS.control.tint }, { duration: 220, easing: 'easeInOut' });
+    sheet.setDirty(on);
+    checkBtn.setTint(on ? 'action' : null);
   }
 
   async function leaveEdit() {
-    if (editor?.dirty()) {
-      const { action } = await alertDialog({ title: 'Discard your changes?', actions: [{ label: 'Keep Editing', role: 'cancel', value: 'keep' }, { label: 'Discard', role: 'destructive', value: 'discard' }] });
-      if (action !== 'discard') return;
-    }
+    if (editor?.dirty() && !(await confirmDiscard({ source: close.el, title: 'Discard your changes?', discardLabel: 'Discard Changes' }))) return;
+    setSaveReady(false);
     show();
   }
 
   async function show() {
     const item = current();
     editor = null;
-    setEditing(false);
-    setSaveReady(false);
     title.textContent = item.name;
     meta.textContent = [item.type, item.size !== null ? bytesText(item.size, false) : null, dateText(item.modified, true)].filter(Boolean).join(' · ');
-    prev.hidden = index <= 0;
-    next.hidden = index >= items.length - 1;
-    editBtn.hidden = !(TEXT_KINDS.has(item.kind) && item.writable) || (item.size ?? 0) > 5 * 1024 * 1024;
+    prev.el.hidden = index <= 0;
+    next.el.hidden = index >= items.length - 1;
+    canEdit = (TEXT_KINDS.has(item.kind) && item.writable) && (item.size ?? 0) <= 5 * 1024 * 1024;
+    setEditing(false);
     stage.replaceChildren();
     const url = rawUrl(item.path);
     const lower = item.name.toLowerCase();
@@ -191,16 +173,8 @@ export function openQuickLook(options) {
     wrap.append(options.iconFor(item, 120), el('p', 'ql-file-name', item.name), el('p', 'ql-file-meta', `${item.type} · ${item.size !== null ? bytesText(item.size, false) : ''}`));
     if (note) wrap.append(el('p', 'ql-file-meta', note));
     const actions = el('div', 'ql-actions');
-    const dl = el('button', 'ui-button primary', 'Download');
-    dl.type = 'button';
-    dl.addEventListener('click', () => options.actions.download(item));
-    actions.append(dl);
-    if (options.actions.ask) {
-      const ask = el('button', 'ui-button', 'Ask SF Agents');
-      ask.type = 'button';
-      ask.addEventListener('click', () => options.actions.ask(item));
-      actions.append(ask);
-    }
+    actions.append(createButton({ symbol: 'arrow.down', label: 'Download', size: 'large', tint: 'action', onClick: () => options.actions.download(item) }).el);
+    if (options.actions.ask) actions.append(createButton({ label: 'Ask SF Agents', size: 'large', onClick: () => options.actions.ask(item) }).el);
     wrap.append(actions);
     return wrap;
   }
@@ -230,14 +204,16 @@ export function openQuickLook(options) {
       if (!dirty) setSaveReady(true);
       dirty = true;
     });
+    setSaveReady(false);
     // The check saves and, once it is saved, leaves the editor for the updated preview.
     const doSave = async (force = false) => {
-      checkBtn.disabled = true;
+      checkBtn.setDisabled(true);
       try {
         const saved = await postJson('/api/files/text', { path: item.path, text: area.value, modified, force });
         modified = saved.modified;
         Object.assign(item, saved);
         dirty = false;
+        setSaveReady(false);
         options.onSaved?.(item);
         show();
       } catch (error) {
@@ -253,7 +229,7 @@ export function openQuickLook(options) {
           if (action === 'replace') await doSave(true);
         } else await showError(error.message, `Couldn't save "${item.name}"`);
       } finally {
-        checkBtn.disabled = false;
+        checkBtn.setDisabled(false);
       }
     };
     area.addEventListener('keydown', (e) => {
@@ -290,7 +266,7 @@ export function openQuickLook(options) {
   });
 
   function onKey(e) {
-    if (document.querySelector('.menu-layer, .dialog-layer')) return;
+    if (document.querySelector('.sf-pop')) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -306,19 +282,12 @@ export function openQuickLook(options) {
   }
   window.addEventListener('keydown', onKey, true);
 
-  async function dismiss() {
-    if (editor?.dirty()) {
-      const { action } = await alertDialog({ title: 'Discard your changes?', actions: [{ label: 'Keep Editing', role: 'cancel', value: 'keep' }, { label: 'Discard', role: 'destructive', value: 'discard' }] });
-      if (action !== 'discard') return;
-    }
-    window.removeEventListener('keydown', onKey, true);
-    layer.querySelectorAll('video, audio').forEach((m) => m.pause());
-    glass?.destroy();
-    layer.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, fill: 'forwards' }).onfinish = () => layer.remove();
+  function dismiss() {
+    sheet.requestClose();
   }
 
   show().then(() => {
-    if (options.edit && !editBtn.hidden) startEdit();
+    if (options.edit && canEdit) startEdit();
   });
   return { close: dismiss };
 }

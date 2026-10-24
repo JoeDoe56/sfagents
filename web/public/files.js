@@ -725,6 +725,7 @@ export function createFileManager(options) {
     const siblings = (state.results ?? visibleEntries()).filter((e) => e.kind !== 'folder');
     openQuickLook({
       item,
+      source: [...content.querySelectorAll('[data-path]')].find((n) => n.dataset.path === item.path),
       items: siblings.length ? siblings : [item],
       iconFor,
       actions: { share: (i) => shareItems([i]), download: (i) => download([i]), info: (i) => getInfo(i), ask: (i) => askAgent([i]), menu: (i, anchor) => itemMenu(i, anchor, null, true) },
@@ -1352,7 +1353,7 @@ export function createFileManager(options) {
   }
 
   window.addEventListener('keydown', (e) => {
-    if (!state.open || e.defaultPrevented || document.querySelector('.menu-layer, .dialog-layer, .ql-layer, .peek-layer, .fm-picker-layer')) return;
+    if (!state.open || e.defaultPrevented || document.querySelector('.sf-pop, .ql-layer, .sf-sheet[data-kind="window"], .fm-picker-layer')) return;
     if (e.target !== search && e.target.closest?.('input, textarea, [contenteditable="true"]')) return;
     if (e.target === search) {
       if (e.key === 'Escape') {
@@ -1458,7 +1459,7 @@ export function createFileManager(options) {
   async function pollStats() {
     clearTimeout(statsTimer);
     if (!state.open) return;
-    if (!document.hidden && !document.querySelector('.peek-layer')) {
+    if (!document.hidden && !document.querySelector('.sf-sheet[data-kind="window"]')) {
       try {
         renderStats(await getJson('/api/system'));
       } catch {
@@ -1472,7 +1473,7 @@ export function createFileManager(options) {
   function pollList() {
     clearTimeout(listTimer);
     if (!state.open) return;
-    if (!document.hidden && !document.querySelector('.menu-layer, .dialog-layer, .ql-layer, .fm-picker-layer') && state.path !== null && !state.results) refresh({ quiet: true });
+    if (!document.hidden && !document.querySelector('.sf-pop, .ql-layer, .fm-picker-layer') && state.path !== null && !state.results) refresh({ quiet: true });
     listTimer = setTimeout(pollList, 5000);
   }
 
