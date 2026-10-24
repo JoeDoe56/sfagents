@@ -40,12 +40,13 @@ includes the .NET runtime, so users need no separate .NET installation.
 
 Ordinary-user mode reads the sensors Windows exposes. CPU temperatures and
 some storage counters need the signed PawnIO driver and administrator access.
-If needed, run `npm run sensors:setup` once to open the official, pinned,
-signature-checked PawnIO installer. This requires Windows administrator
-approval and is never run automatically when the monitor is opened.
+`sfagents web` installs PawnIO at its first start, silently, from the
+official, pinned, checksum-verified installer, in the same administrator
+approval as Remote Desktop's MoonlightWeb (`npm run sensors:setup` does the
+same by hand). Opening the monitor never installs anything.
 
-Start `sfagents web --sensor-admin` to request elevation for the sensor
-worker only. SF Agents, model tools, and its web server stay at their normal
+The `sensors.admin` setting (on by default on Windows; `--sensor-admin` for
+one run) requests elevation for the sensor worker only. SF Agents, model tools, and its web server stay at their normal
 privilege level. The broker uses a local named pipe restricted to the same
 Windows account; closing the broker closes the elevated worker too.
 Rejecting the prompt or a helper failure falls back to OS readings, with

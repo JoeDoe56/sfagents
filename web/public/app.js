@@ -1233,3 +1233,23 @@ const openDrive = (e) => {
 };
 drivesEl.addEventListener('click', openDrive);
 drivesEl.addEventListener('keydown', openDrive);
+
+// The monitor and its buttons sit as far below the field as the buttons are
+// from each other (the buttons spread down the monitor's height, so the gap
+// depends on it).
+{
+  const toolsRow = document.querySelector('.tools-row');
+  const align = () => {
+    const buttons = [...document.querySelectorAll('.side-buttons .circle.side')].map((b) => b.getBoundingClientRect());
+    const field = $('send').getBoundingClientRect();
+    if (buttons.length < 2 || !buttons[0].height || !field.height) return;
+    const between = buttons[1].top - buttons[0].bottom;
+    const current = parseFloat(toolsRow.style.marginTop) || 0;
+    const above = buttons[0].top - field.bottom - current;
+    const want = Math.max(0, Math.round(between - above));
+    if (want !== current) toolsRow.style.marginTop = `${want}px`;
+  };
+  const obs = new ResizeObserver(() => requestAnimationFrame(align));
+  obs.observe($('monitor'));
+  obs.observe(toolsRow);
+}

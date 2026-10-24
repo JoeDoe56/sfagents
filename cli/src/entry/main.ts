@@ -342,7 +342,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       return serveWeb(
         tree,
         conversation,
-        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] || setting('sensors.admin', false), settings: appSettings, newToken: values['new-token'] },
+        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] || setting('sensors.admin', process.platform === 'win32'), settings: appSettings, newToken: values['new-token'] },
         streams,
       );
     }
@@ -502,6 +502,9 @@ async function serveWeb(
     return EXIT_FAILURE;
   }
   for (const n of conversation.notices) streams.stderr.write(`${n.message}\n`);
+  // What the features need beyond the package (Remote Desktop's MoonlightWeb, the
+  // dictation model, the sensor driver), set up in the background.
+  if (process.env['SFAGENTS_NO_SETUP'] !== '1') void server.setupFeatures();
   streams.stdout.write(`SF Agents web interface: ${url}\n`);
   if (opts.publicOrigin) streams.stdout.write(`Reverse proxy origin: ${opts.publicOrigin}\n`);
   if (opts.host !== DEFAULT_HOST && opts.host !== 'localhost' && opts.host !== '::1') {

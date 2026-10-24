@@ -24,6 +24,7 @@ import {
   ArtifactError,
   OPENROUTER_BASE_URL,
   getErrorMessage,
+  sfagentsHome,
   threadKey,
   type AgentRunResult,
   type AgentSession,
@@ -52,6 +53,8 @@ import { Dictation } from './dictation.js';
 import { DISPLAY_SCALES, RemoteDesktop } from './remote.js';
 import { applyEmbedEdits, embedScript, EMBED_EDITS, EMBED_SCRIPT } from './remote-embed.js';
 import { getDisplayScale, setDisplayScale } from './remote-dpi.js';
+import { runElevatedWindows } from './remote.js';
+import { pawnioInstalled, pawnioStep } from './sensor-driver.js';
 import { TerminalError, TerminalManager } from './terminal.js';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
@@ -338,6 +341,8 @@ export class WebServer {
         hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
         log: (line) => this.log(line),
         onChange: (status) => this.broadcast('remote', status),
+        // The sensor driver comes in the same administrator approval.
+        extraElevated: async () => (process.platform === 'win32' && !pawnioInstalled() ? [await pawnioStep(path.join(sfagentsHome(), 'setup'))] : []),
       });
     this.terminals = new TerminalManager({
       cwd: options.tree.configDir,
@@ -428,6 +433,29 @@ export class WebServer {
 
   get listeningPort(): number {
     return this.port;
+  }
+
+  /**
+   * Everything the features need that is not in the package, set up at the
+   * first start without being asked for: Remote Desktop's MoonlightWeb (and,
+   * on Windows, the sensor driver, in the same administrator approval) and
+   * the dictation model. Runs in the background; progress goes to the log
+   * and to the pages as events.
+   */
+  async setupFeatures(): Promise<void> {
+    const dictation = this.dictation.status().state === 'missing' ? this.dictation.install().catch((error) => this.log(`Dictation could not be set up: ${getErrorMessage(error)}`)) : Promise.resolve();
+    await this.remote.autoSetup();
+    const r = this.remote.status();
+    if (r.state === 'ready') this.log(`Remote Desktop: MoonlightWeb ${r.version ?? ''} at ${r.url}${r.managed ? ' (started by SF Agents)' : ''}.`);
+    else if (r.error) this.log(`Remote Desktop is not available: ${r.error}`);
+    if (process.platform === 'win32' && !pawnioInstalled()) {
+      try {
+        await runElevatedWindows([await pawnioStep(path.join(sfagentsHome(), 'setup'))]);
+      } catch (error) {
+        this.log(`The sensor driver was not installed: ${getErrorMessage(error)}`);
+      }
+    }
+    await dictation;
   }
 
   async close(): Promise<void> {

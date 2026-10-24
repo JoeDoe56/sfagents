@@ -449,7 +449,7 @@ describe('web server', () => {
 describe('sfagents web (CLI)', () => {
   test('starts on the requested port, serves the page, and stops cleanly on SIGINT', async () => {
     const dir = project();
-    const child = spawn(process.execPath, [CLI_ENTRY, 'web', '--port', '0', '--config', dir], { env: { ...process.env, OPENROUTER_API_KEY: 'test-key', SFAGENTS_WEB_NO_LOGIN: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [CLI_ENTRY, 'web', '--port', '0', '--config', dir], { env: { ...process.env, OPENROUTER_API_KEY: 'test-key', SFAGENTS_WEB_NO_LOGIN: '1', SFAGENTS_NO_SETUP: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     child.stdout.on('data', (d: Buffer) => (out += d.toString()));

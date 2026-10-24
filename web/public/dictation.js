@@ -8,7 +8,7 @@
  */
 
 import { getJson, postJson } from './api.js';
-import { confirmDialog, toast } from './dialogs.js';
+import { toast } from './dialogs.js';
 
 const MAX_SECONDS = 300;
 
@@ -122,16 +122,13 @@ export function setupDictation({ mic, input, changed, notice }) {
 
   async function ensureInstalled() {
     if (!status) status = await getJson('/api/dictation');
-    if (status.state !== 'missing' && status.state !== 'error') return true;
+    if (status.state === 'ready' || status.state === 'running' || status.state === 'starting') return true;
     if (status.state === 'error' && status.downloadSize === 0) return true; // installed; the start failed: try again
-    const gb = (status.downloadSize / 1e9).toFixed(1);
-    const ok = await confirmDialog(
-      'Set up dictation?',
-      `This downloads the Qwen3-ASR speech model and llama.cpp (about ${gb} GB) to the computer SF Agents runs on, once. Your speech is transcribed there, on its GPU when it has one, and is not sent anywhere else.`,
-      'Download',
-    );
-    if (!ok) return false;
-    status = await postJson('/api/dictation', { action: 'install' });
+    // Normally downloaded when SF Agents started; if not yet, now (or wait for it).
+    if (status.state !== 'installing') {
+      toast('Setting up dictation: the speech model downloads once.', { symbol: 'arrow.down', timeout: 3000 });
+      status = await postJson('/api/dictation', { action: 'install' });
+    }
     const done = await waitFor((s) => s.state === 'ready' || s.state === 'running' || s.state === 'error');
     if (done.state === 'error') {
       notice(`Dictation could not be set up: ${done.error}`, 'error');

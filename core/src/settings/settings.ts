@@ -59,7 +59,7 @@ export const SETTINGS: readonly SettingSpec[] = [
     hint: 'Ask to elevate only the read-only sensor helper (CPU temperatures need it on Windows).',
     group: 'Hardware sensors',
     type: 'boolean',
-    default: false,
+    default: process.platform === 'win32',
     restart: true,
     platform: 'win32',
   },

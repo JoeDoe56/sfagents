@@ -52,6 +52,7 @@ export async function openRemoteDesktop() {
   let stage;
   let panel;
   let streaming = false;
+  let installAsked = false;
 
   const more = el('button', 'ms-close rd-more');
   more.type = 'button';
@@ -165,21 +166,17 @@ export async function openRemoteDesktop() {
     } else if (status.state === 'starting') {
       showPanel('Starting MoonlightWeb…', '');
     } else if (status.state === 'error') {
-      showPanel("Remote Desktop isn't available", status.error ?? '', [{ label: 'Try Again', primary: true, action: () => load(true) }]);
+      showPanel("Remote Desktop isn't available", status.error ?? '', [{ label: 'Try Again', primary: true, action: () => (status.canInstall ? install_() : load(true)) }]);
+    } else if (status.canInstall) {
+      // Normally done when SF Agents started; if not (declined, offline), now.
+      showPanel('Setting up Remote Desktop…', 'SF Agents is installing MoonlightWeb, which streams this screen. The computer may ask for administrator approval once.');
+      if (!installAsked) {
+        installAsked = true;
+        install_();
+      }
     } else {
-      const install = status.canInstall
-        ? [{ label: 'Install MoonlightWeb', primary: true, action: install_ }]
-        : [];
-      showPanel(
-        'MoonlightWeb is not installed',
-        `Remote Desktop streams this computer's screen with MoonlightWeb, which captures and encodes it on the GPU into a virtual display made at this device's size.${status.canInstall ? (navigatorPlatformWindows(info) ? ' Its installer asks for administrator rights to add the display driver.' : '') : ' Install it from ' + status.project + ', then try again.'}`,
-        [...install, { label: 'Check Again', action: () => load(true) }],
-      );
+      showPanel('Remote Desktop is not available here', `MoonlightWeb, which streams this screen, has no build for this computer. See ${status.project}.`, [{ label: 'Check Again', action: () => load(true) }]);
     }
-  }
-
-  function navigatorPlatformWindows(i) {
-    return i?.platform === 'win32';
   }
 
   async function install_() {

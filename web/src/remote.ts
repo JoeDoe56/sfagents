@@ -26,6 +26,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -36,6 +37,29 @@ const PROJECT = 'https://github.com/linckosz/moonlight-web';
 /** Where a MoonlightWeb already running usually answers (its HTTP port and its fallbacks). */
 const KNOWN_PORTS = [80, 8080, 18080, 28080];
 const START_TIMEOUT_MS = 60_000;
+/** Used when GitHub cannot say which release is the newest. */
+const FALLBACK_TAG = 'v0.4.0';
+
+function range(a: number, b: number): number[] {
+  return Array.from({ length: b - a + 1 }, (_, i) => a + i);
+}
+
+/** The HTTP port an installed MoonlightWeb was set to (its settings.json, per user). */
+function configuredPorts(): number[] {
+  const home = os.homedir();
+  const dirs =
+    process.platform === 'win32'
+      ? [path.join(process.env['APPDATA'] ?? path.join(home, 'AppData', 'Roaming'), 'MoonlightWeb', 'MoonlightWeb')]
+      : process.platform === 'darwin'
+        ? [path.join(home, 'Library', 'Application Support', 'MoonlightWeb', 'MoonlightWeb')]
+        : [path.join(process.env['XDG_DATA_HOME'] ?? path.join(home, '.local', 'share'), 'MoonlightWeb', 'MoonlightWeb')];
+  const out: number[] = [];
+  for (const d of dirs) {
+    const port = readJsonFile<{ http_port?: unknown }>(path.join(d, 'settings.json'), {}).http_port;
+    if (typeof port === 'number' && port > 0 && port < 65536) out.push(port);
+  }
+  return out;
+}
 
 export interface RemoteStatus {
   state: 'missing' | 'installing' | 'starting' | 'ready' | 'error';
@@ -102,6 +126,8 @@ export interface RemoteOptions {
   knownPorts?: number[];
   /** Installed executables to look for (tests). */
   candidates?: string[];
+  /** Other installers to run in the same administrator approval on Windows (the sensor driver). */
+  extraElevated?: () => Promise<Array<{ file: string; args: string[] }>>;
 }
 
 export class RemoteDesktop {
@@ -158,7 +184,7 @@ export class RemoteDesktop {
       try {
         const configured = this.options.setting?.('remote.server');
         const urls = typeof configured === 'string' && configured && configured !== 'auto' ? [configured.replace(/\/+$/, '')] : [];
-        for (const port of this.options.knownPorts ?? KNOWN_PORTS) urls.push(`http://127.0.0.1:${port}`);
+        for (const port of this.options.knownPorts ?? [...configuredPorts(), ...KNOWN_PORTS, ...range(49080, 49090)]) urls.push(`http://127.0.0.1:${port}`);
         for (const url of urls) {
           const found = await this.probe(url);
           if (found) {
@@ -236,33 +262,68 @@ export class RemoteDesktop {
 
   // ---------------------------------------------------------------- install
 
-  /** Downloads MoonlightWeb and installs it (or, on Linux, keeps the AppImage to run). */
+  /** The newest MoonlightWeb release file for this computer. */
+  private async latestInstaller(pattern: RegExp): Promise<{ tag: string; name: string; url: string; size: number }> {
+    try {
+      const res = await this.fetch(RELEASES, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'SF-Agents' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const releases = (await res.json()) as Array<{ tag_name: string; draft?: boolean; prerelease?: boolean; assets: Array<{ name: string; browser_download_url: string; size: number }> }>;
+      const rel = releases.filter((r) => !r.draft && !r.prerelease).find((r) => r.assets.some((a) => pattern.test(a.name)));
+      const asset = rel?.assets.find((a) => pattern.test(a.name));
+      if (rel && asset) return { tag: rel.tag_name, name: asset.name, url: asset.browser_download_url, size: asset.size };
+    } catch {
+      // the API is rate-limited: the release page's redirect names the tag too
+    }
+    let tag = FALLBACK_TAG;
+    try {
+      const res = await this.fetch(`${PROJECT}/releases/latest`, { redirect: 'manual', headers: { 'User-Agent': 'SF-Agents' } });
+      const m = /\/releases\/tag\/(v[\d.]+)$/.exec(res.headers.get('location') ?? '');
+      if (m) tag = m[1]!;
+    } catch {
+      // keep the known release
+    }
+    const v = tag.slice(1);
+    const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+    const name = process.platform === 'win32' ? `MoonlightWeb-installer-${v}-win-${arch}.exe` : process.platform === 'darwin' ? `moonlightweb-${v}-macos-arm64.pkg` : `moonlightweb-${v}-x86_64.AppImage`;
+    return { tag, name, url: `${PROJECT}/releases/download/${tag}/${name}`, size: 0 };
+  }
+
+  /**
+   * Installs MoonlightWeb with no questions but the system's own approval:
+   * Windows' administrator prompt (the installer adds the virtual display
+   * driver and its scheduled tasks; it runs silently), macOS' password prompt
+   * for the package, nothing on Linux (the AppImage runs as you; one polkit
+   * prompt gives it the input devices it types and clicks with).
+   */
   install(): Promise<void> {
     if (this.installing) return this.installing;
     const pattern = installerPattern();
     if (!pattern) return Promise.reject(new Error(`MoonlightWeb has no build for this computer. See ${PROJECT}.`));
     this.installing = (async () => {
       try {
-        const res = await this.fetch(RELEASES, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'SF-Agents' } });
-        if (!res.ok) throw new Error(`The MoonlightWeb releases could not be listed (HTTP ${res.status}).`);
-        const releases = (await res.json()) as Array<{ tag_name: string; draft?: boolean; prerelease?: boolean; assets: Array<{ name: string; browser_download_url: string; size: number }> }>;
-        const rel = releases.filter((r) => !r.draft && !r.prerelease).find((r) => r.assets.some((a) => pattern.test(a.name)));
-        const asset = rel?.assets.find((a) => pattern.test(a.name));
-        if (!rel || !asset) throw new Error(`No MoonlightWeb release has a build for this computer. See ${PROJECT}.`);
+        const rel = await this.latestInstaller(pattern);
         fs.mkdirSync(this.dir, { recursive: true });
-        const file = path.join(this.dir, process.platform === 'linux' ? 'MoonlightWeb.AppImage' : asset.name);
-        await this.download(asset.browser_download_url, file, asset.size, `MoonlightWeb ${rel.tag_name}`);
+        const file = path.join(this.dir, process.platform === 'linux' ? 'MoonlightWeb.AppImage' : rel.name);
+        await this.download(rel.url, file, rel.size, `MoonlightWeb ${rel.tag}`);
         if (process.platform === 'linux') {
           fs.chmodSync(file, 0o755);
+          await linuxInputAccess(this.options.log);
         } else {
-          // The installer asks for administrator rights itself (it installs the
-          // virtual display driver); SF Agents waits for it to finish.
-          this.set({ state: 'installing', progress: { label: 'Waiting for the installer', done: 0, total: 0 } });
-          await runInstaller(file);
+          this.set({ state: 'installing', progress: { label: 'Waiting for administrator approval', done: 0, total: 0 } });
+          if (process.platform === 'win32') await runElevatedWindows([{ file, args: ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-'] }, ...((await this.options.extraElevated?.().catch(() => [])) ?? [])]);
+          else await runElevatedMac(`/usr/sbin/installer -pkg ${shellQuote(file)} -target /`);
+          fs.rmSync(file, { force: true });
         }
-        this.set({ state: 'missing' });
-        await this.ensure();
-        if (this.status_.state !== 'ready') throw new Error(this.status_.error ?? 'MoonlightWeb was installed but does not answer yet. Try again in a moment.');
+        this.set({ state: 'starting' });
+        // The installer starts MoonlightWeb itself; give it a moment.
+        const deadline = Date.now() + START_TIMEOUT_MS;
+        for (;;) {
+          this.status_ = { ...this.status_, state: 'missing' };
+          await this.ensure();
+          if (this.status_.state === 'ready' || Date.now() > deadline) break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        if (this.status_.state !== 'ready') throw new Error(this.status_.error ?? 'MoonlightWeb was installed but does not answer yet.');
       } catch (error) {
         this.set({ state: 'error', error: getErrorMessage(error) });
         throw error;
@@ -271,6 +332,19 @@ export class RemoteDesktop {
       }
     })();
     return this.installing;
+  }
+
+  /**
+   * At start: find MoonlightWeb, or install it, so Remote Desktop works the
+   * first time it is opened. Never throws; problems end up in status().
+   */
+  async autoSetup(): Promise<void> {
+    const s = await this.ensure();
+    if (s.state === 'ready') {
+      if (process.platform === 'linux') await linuxInputAccess(this.options.log).catch(() => undefined);
+      return;
+    }
+    if (s.state === 'missing' && s.canInstall) await this.install().catch(() => undefined);
   }
 
   private async download(url: string, file: string, size: number, label: string): Promise<void> {
@@ -329,16 +403,73 @@ export class RemoteDesktop {
 /** Windows' scaling steps, in percent. */
 export const DISPLAY_SCALES = [100, 125, 150, 175, 200, 225, 250, 300, 350];
 
-function runInstaller(file: string): Promise<void> {
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function run(cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child =
-      process.platform === 'darwin'
-        ? spawn('open', ['-W', file], { stdio: 'ignore' })
-        : // Windows: the installer's own UAC prompt; shell so a "requires elevation" exe can start.
-          spawn('cmd.exe', ['/d', '/s', '/c', `start "" /wait "${file}"`], { stdio: 'ignore', windowsHide: true });
+    const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    let err = '';
+    child.stderr?.on('data', (d: Buffer) => (err += d.toString()));
     child.once('error', reject);
-    child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(`The MoonlightWeb installer ended with code ${code}.`))));
+    child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(err.trim() || `${path.basename(cmd)} exited with code ${code}`))));
   });
+}
+
+/**
+ * Runs installers with administrator rights, all behind one approval
+ * prompt: an elevated PowerShell runs them in turn and reports the first
+ * that fails.
+ */
+export function runElevatedWindows(steps: Array<{ file: string; args: string[] }>): Promise<void> {
+  const ps = (v: string) => `'${v.replace(/'/g, "''")}'`;
+  const inner = steps
+    .map((st) => `$p = Start-Process -FilePath ${ps(st.file)} -ArgumentList @(${st.args.map(ps).join(',')}) -Wait -PassThru; if ($p.ExitCode -ne 0) { exit $p.ExitCode }`)
+    .join('; ');
+  const encoded = Buffer.from(inner, 'utf16le').toString('base64');
+  const outer = `$p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encoded}'); exit $p.ExitCode`;
+  const exe = path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return run(exe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', outer]).catch((error) => {
+    throw new Error(/canceled|cancelled|1223/i.test(String(error?.message)) ? 'The administrator approval was declined. Remote Desktop needs it once, to install its display driver.' : String(error?.message ?? error));
+  });
+}
+
+/** macOS: one password prompt for a shell command run as root. */
+export function runElevatedMac(command: string): Promise<void> {
+  const script = `do shell script ${JSON.stringify(command)} with administrator privileges with prompt "SF Agents installs MoonlightWeb for Remote Desktop."`;
+  return run('/usr/bin/osascript', ['-e', script]);
+}
+
+const UINPUT_RULES = `KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess", MODE="0660", GROUP="input"
+KERNEL=="uhid", SUBSYSTEM=="misc", OPTIONS+="static_node=uhid", TAG+="uaccess", MODE="0660", GROUP="input"
+`;
+
+/**
+ * Linux: MoonlightWeb types and clicks through /dev/uinput, which a user
+ * may not open by default. Once, with polkit's prompt: MoonlightWeb's own
+ * udev rule (the one its packages install) and the modules loaded at boot.
+ */
+export async function linuxInputAccess(log?: (line: string) => void): Promise<void> {
+  if (process.platform !== 'linux') return;
+  try {
+    fs.accessSync('/dev/uinput', fs.constants.W_OK);
+    return;
+  } catch {
+    // not yet
+  }
+  if (fs.existsSync('/etc/udev/rules.d/70-moonlightweb-uinput.rules')) return;
+  if (!hasCommand('pkexec')) {
+    log?.('remote: /dev/uinput is not writable and pkexec is missing; Remote Desktop can show the screen but not type or click.');
+    return;
+  }
+  const script = [
+    `printf '%s' ${shellQuote(UINPUT_RULES)} > /etc/udev/rules.d/70-moonlightweb-uinput.rules`,
+    `printf 'uinput\\nuhid\\n' > /etc/modules-load.d/moonlightweb-uinput.conf`,
+    'modprobe uinput; modprobe uhid',
+    'udevadm control --reload-rules; udevadm trigger --subsystem-match=misc',
+  ].join('; ');
+  await run('pkexec', ['/bin/sh', '-c', script]).catch((error) => log?.(`remote: input access was not set up: ${getErrorMessage(error)}`));
 }
 
 /** Is a command available (for diagnostics in the sheet)? */
