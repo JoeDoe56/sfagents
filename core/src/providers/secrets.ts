@@ -8,6 +8,7 @@
  * Linux kernel keyring is not used: it forgets everything on reboot.)
  */
 
+import { randomUUID } from 'node:crypto';
 import { getErrorMessage } from '../utils/errors.js';
 
 export const KEYRING_SERVICE = 'SF Agents';
@@ -39,6 +40,11 @@ interface KeyringEntry {
   deleteCredential(): Promise<boolean>;
 }
 type EntryCtor = new (service: string, account: string, options?: unknown) => KeyringEntry;
+
+// The Windows backend can lose writes/deletes when native tasks overlap,
+// even for different entries. Share a queue across store instances and keep
+// each operation (including chunked values and probes) together.
+let keyringQueue: Promise<void> = Promise.resolve();
 
 function platformLabel(platform: NodeJS.Platform): string {
   if (platform === 'win32') return 'Windows Credential Manager';
@@ -93,44 +99,66 @@ export class KeyringSecretStore implements SecretStore {
     }
   }
 
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const result = keyringQueue.then(fn);
+    // A refused operation must not prevent the next attempt from running.
+    keyringQueue = result.then(() => {}, () => {});
+    return result;
+  }
+
   async check(): Promise<void> {
-    const e = await this.entry('sfagents-probe');
-    await this.call(async () => {
-      await e.setPassword('ok');
-      if ((await e.getPassword()) !== 'ok') throw new Error('the keyring did not return what was stored');
-      await e.deleteCredential();
+    // Settings, sign-in and other processes may check the same store at once.
+    // A shared entry lets one check delete another's value before it is read.
+    await this.serial(async () => {
+      const e = await this.entry(`sfagents-probe:${randomUUID()}`);
+      await this.call(async () => {
+        try {
+          await e.setPassword('ok');
+          if ((await e.getPassword()) !== 'ok') throw new Error('the keyring did not return what was stored');
+        } finally {
+          await e.deleteCredential();
+        }
+      });
     });
   }
 
   async get(key: string): Promise<string | null> {
-    const head = await this.call(async () => (await this.entry(key)).getPassword());
-    if (head === null) return null;
-    const m = /^sfagents-chunks:(\d+)$/.exec(head);
-    if (!m) return head;
-    let out = '';
-    for (let i = 0; i < Number(m[1]); i++) {
-      const part = await this.call(async () => (await this.entry(`${key}#${i}`)).getPassword());
-      if (part === null) return null;
-      out += part;
-    }
-    return out;
+    return this.serial(async () => {
+      const head = await this.call(async () => (await this.entry(key)).getPassword());
+      if (head === null) return null;
+      const m = /^sfagents-chunks:(\d+)$/.exec(head);
+      if (!m) return head;
+      let out = '';
+      for (let i = 0; i < Number(m[1]); i++) {
+        const part = await this.call(async () => (await this.entry(`${key}#${i}`)).getPassword());
+        if (part === null) return null;
+        out += part;
+      }
+      return out;
+    });
   }
 
   async set(key: string, value: string): Promise<void> {
-    await this.delete(key);
-    if (value.length <= CHUNK) {
-      await this.call(async () => (await this.entry(key)).setPassword(value));
-      return;
-    }
-    const parts = Math.ceil(value.length / CHUNK);
-    for (let i = 0; i < parts; i++) {
-      const part = value.slice(i * CHUNK, (i + 1) * CHUNK);
-      await this.call(async () => (await this.entry(`${key}#${i}`)).setPassword(part));
-    }
-    await this.call(async () => (await this.entry(key)).setPassword(`sfagents-chunks:${parts}`));
+    await this.serial(async () => {
+      await this.erase(key);
+      if (value.length <= CHUNK) {
+        await this.call(async () => (await this.entry(key)).setPassword(value));
+        return;
+      }
+      const parts = Math.ceil(value.length / CHUNK);
+      for (let i = 0; i < parts; i++) {
+        const part = value.slice(i * CHUNK, (i + 1) * CHUNK);
+        await this.call(async () => (await this.entry(`${key}#${i}`)).setPassword(part));
+      }
+      await this.call(async () => (await this.entry(key)).setPassword(`sfagents-chunks:${parts}`));
+    });
   }
 
   async delete(key: string): Promise<void> {
+    await this.serial(() => this.erase(key));
+  }
+
+  private async erase(key: string): Promise<void> {
     const e = await this.entry(key);
     const head = await this.call(() => e.getPassword());
     if (head === null) return;

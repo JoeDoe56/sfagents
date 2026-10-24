@@ -355,6 +355,12 @@ export function createSheet({ bar, row, grabber, scroller, onLayout, onDetent })
       animateTo(Math.max(0, detent - 1));
     }
   });
+  grabber.addEventListener('wheel', (e) => {
+    if (e.ctrlKey || !e.deltaY || Math.abs(e.deltaX) > Math.abs(e.deltaY) || drag || press) return;
+    e.preventDefault();
+    const next = clamp(detent + (e.deltaY < 0 ? 1 : -1), 0, 2);
+    if (next !== detent) animateTo(next);
+  }, { passive: false });
 
   addEventListener('resize', () => {
     safe = safeBottom();
