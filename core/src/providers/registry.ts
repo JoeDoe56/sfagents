@@ -98,7 +98,7 @@ export class ProviderRegistry {
   readonly file: string;
   readonly dir: string;
   readonly secrets: SecretStore;
-  private cache: { mtime: number; records: ProviderRecord[] } | null = null;
+  private cache: { stamp: string; records: ProviderRecord[] } | null = null;
   private readonly listeners = new Set<() => void>();
   private watcher: fs.StatWatcher | null = null;
 
@@ -110,18 +110,21 @@ export class ProviderRegistry {
 
   /** Every provider, re-read when another process (the CLI, another window) changed the file. */
   list(): ProviderRecord[] {
-    let mtime = 0;
+    let stamp = 'missing';
     try {
-      mtime = fs.statSync(this.file).mtimeMs;
+      // Atomic replacement can retain the same mtime on Windows. File identity
+      // and size also change when another process replaces providers.json.
+      const stat = fs.statSync(this.file, { bigint: true });
+      stamp = `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
     } catch {
       // no file yet
     }
-    if (this.cache && this.cache.mtime === mtime) return this.cache.records;
+    if (this.cache && this.cache.stamp === stamp) return this.cache.records;
     const raw = readJsonFile<Partial<FileShape>>(this.file, { providers: [] });
     const records = (Array.isArray(raw.providers) ? raw.providers : []).filter(
       (r): r is ProviderRecord => !!r && typeof r.id === 'string' && typeof r.name === 'string' && (PROVIDER_KINDS as readonly string[]).includes(r.kind),
     );
-    this.cache = { mtime, records };
+    this.cache = { stamp, records };
     return records;
   }
 

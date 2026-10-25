@@ -73,6 +73,24 @@ describe('provider registry and keyring', () => {
     assert.ok(reg.find('Claude 1'));
   });
 
+  test('another process replacing the list with the same timestamp and size invalidates the cache', async () => {
+    const dir = makeTempDir();
+    const secrets = new MemorySecretStore();
+    const reg = new ProviderRegistry({ dir, secrets });
+    const entry = await reg.add({ name: 'Local llama', kind: 'custom', baseUrl: 'http://127.0.0.1:8080', secret: {} });
+    const timestamp = new Date(1_700_000_000_000);
+    fs.utimesSync(reg.file, timestamp, timestamp);
+    assert.equal(reg.find('Local llama')?.id, entry.id);
+    const before = fs.statSync(reg.file);
+    const other = new ProviderRegistry({ dir, secrets });
+    other.update(entry.id, { name: 'Other llama' });
+    fs.utimesSync(reg.file, timestamp, timestamp);
+    assert.equal(fs.statSync(reg.file).size, before.size);
+    assert.equal(fs.statSync(reg.file).mtimeMs, before.mtimeMs);
+    assert.equal(reg.find('Other llama')?.id, entry.id);
+    assert.equal(reg.find('Local llama'), undefined);
+  });
+
   test('without a keyring, adding a provider is refused and nothing is listed', async () => {
     const reg = new ProviderRegistry({ dir: makeTempDir(), secrets: new MemorySecretStore(false) });
     await assert.rejects(() => reg.add({ name: 'OpenRouter 1', kind: 'openrouter', secret: { apiKey: 'k' } }), /No system keyring is available/);
