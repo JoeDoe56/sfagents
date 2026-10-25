@@ -1,0 +1,1165 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * VideoDecodeWorker — OffscreenCanvas decode + render worker (opt-in).
+ *
+ * Runs the WebCodecs VideoDecoder and canvas rendering off the main UI thread.
+ * The main thread keeps frame ingest, stale/gap detection, stats and the overlay
+ * (StreamView.handleVideoFrame); it forwards each accepted frame here and we do:
+ * NAL parse → decoder configure → decode → render to the transferred OffscreenCanvas.
+ *
+ * Workers have no requestAnimationFrame, so rendering is driven by decoder output
+ * (render-on-decode with a "render in flight" guard + drop-to-latest), which keeps
+ * latency low and serializes GPU access (needed by the Chrome Windows HEVC path).
+ *
+ * This is a faithful port of StreamView's decode/render pipeline; the codec/NAL
+ * helpers are imported from the same shared modules, so there is no divergence in
+ * codec handling. Render quirks (green tint, stride) are preserved and must be
+ * re-validated per browser/codec when this path is enabled.
+ *
+ * Messages in:  init | frame | frameloss | framesize | stop
+ * Messages out: requestidr | codecfallback | firstframe | status | counters | fatal
+ */
+import {
+    NalParser,
+    buildDescription,
+    getCodecString,
+    getPictureSize,
+    toAvcc,
+    H264_FALLBACK_CODEC_STRINGS,
+    HEVC_FALLBACK_CODEC_STRINGS,
+    HEVC_ANNEXB_CODEC_STRINGS,
+    CODEC_HEVC,
+    isHevcHdrProfile,
+} from '../util/Mp4Muxer.js';
+import {
+    findSequenceHeader,
+    buildAv1DecoderConfigs,
+    stripNonEssentialObus,
+    isAv1HdrProfile,
+    CODEC_AV1,
+} from '../util/Av1Utils.js';
+import { createVideoRenderer } from './renderers/createRenderer.js';
+import { PipelineDiag } from './PipelineDiag.js';
+import { shouldFlushAtKeyframe } from './DecodeQueuePolicy.js';
+import { EnhancerGovernor, ladderRung, rendererAlgo } from './EnhancerGovernor.js';
+import { drawCapFor } from './RenderPacing.js';
+import { FramePacer } from './FramePacer.js';
+import { cropToAnnounced } from './FrameCrop.js';
+
+// ── Worker-local pipeline state (mirrors the StreamView fields) ──────────────
+const S = {
+    canvas: null,
+    renderer: null,
+    outW: 0,
+    outH: 0,
+    videoCodec: 'h264',
+    isChromeWindowsHevc: false,
+    transport: 'webrtc',
+    /** @type {{width: number, height: number} | null} */
+    frameSize: null,
+
+    decoder: null,
+    decoderConfigured: false,
+    decoderConfiguring: false,
+    nalParser: null,
+
+    pendingFrames: [],
+    frameQueue: [],
+    drawsInFlight: 0,
+
+    // Adaptive presentation reserve (null = present on decode, the historical
+    // behavior). Enabled from the init message; the worker has no localStorage.
+    pacer: null,
+    _pacingTimer: null,
+    _pacingDue: 0,
+
+    _noDescription: false,
+    _referenceValid: true,
+    _recoveryAttempts: 0,
+    _decoderRecovering: false,
+    _fatalDecodeError: false,
+    _codecFallbackRequested: false,
+    _proactiveIdrScheduled: false,
+    _firstFrameReported: false,
+    _firstDecoderOutputLogged: false,
+    _lastResolution: '',
+
+    frameCount: 0,
+    _lastChunkTs: 0,
+    _queueStallStart: 0,
+    _activeDecoderCfg: null, // last config applied, re-applied after a queue flush
+    _idrRequested: false,
+    _lastIdrRequestMs: 0,
+
+    // latency: client pipeline leg, measured entirely on the worker's clock —
+    // no cross-clock offset involved. Split into its three stages so the
+    // overlay breakdown can name where the browser time goes.
+    _chunkSubmitTimes: new Map(), // chunk timestamp (µs) → { perf, backendTs } at decode()
+    // Last fragment on the main thread → decode() submit here: the postMessage
+    // hop plus whatever queued in front of the frame. Measured on the absolute
+    // clock (timeOrigin + now), the one both contexts share.
+    _arriveSamples: [], // [{ time, value }]
+    _decodeSamples: [], // [{ time, value }] decode() submit → decoder output
+    _queueSamples: [], // [{ time, value }] decoder output → draw start
+    _renderSamples: [], // [{ time, value }] draw start → draw done
+
+    // Why those three legs move: arrival cadence, queue depths, draw split and
+    // drop causes (posted with the counters — see PipelineDiag).
+    diag: new PipelineDiag(2000),
+    // Steps the enhancer down when its GPU cost stops fitting between two
+    // frames; created at init with the setting as its ceiling.
+    governor: null,
+
+    stopped: false,
+
+    // tunables (match StreamView)
+    DECODE_QUEUE_MAX: 8,
+    _lastQueueFlushMs: -Infinity, // see DecodeQueuePolicy
+    QUEUE_STALL_MS: 200,
+    QUEUE_RESET_MS: 1000,
+    MAX_RECOVERY_ATTEMPTS: 10,
+
+    stats: { received: 0, decoded: 0, rendered: 0, dropped: 0, recoveries: 0 },
+    // Decoder recovery in progress: when it began and the drop count then.
+    _recoveryStartedPerf: 0,
+    _recoveryDroppedBefore: 0,
+    _lastCountersPost: 0,
+    // Click-to-photon probe: until this performance.now(), every presented
+    // frame is reported to the main thread ('probe-frame') so it can sample
+    // the placeholder canvas right away. 0 = off (one comparison per draw).
+    probeUntil: 0,
+};
+
+// Record a decode() submit time and the frame's capture stamp; both are consumed
+// in onDecodedFrame (latency stages, and the pacer's presentation clock). Frames
+// the decoder never outputs would leak entries, so clear past a burst-sized bound.
+// backendTs is carried explicitly rather than recovered from the chunk timestamp:
+// the H.264/HEVC path derives that timestamp from backendTs but nudges it to stay
+// monotonic, and AV1 makes it up entirely (frameCount * 16667).
+function trackChunkSubmit(timestamp, backendTs) {
+    if (S._chunkSubmitTimes.size > 240) S._chunkSubmitTimes.clear();
+    S._chunkSubmitTimes.set(timestamp, { perf: performance.now(), backendTs: backendTs || 0 });
+}
+
+// Wake pump() when the head frame comes due. Presentation is FIFO — a later
+// frame cannot be shown before the one it follows — so only the head's deadline
+// governs and a single pending timer is enough. (Deadlines are NOT monotonic: a
+// frame that arrives past the whole reserve gets "now", which can precede the
+// deadline of the frame ahead of it. It simply waits its turn and the resulting
+// back-to-back pair is the underrun the pacer then widens the reserve for.)
+// Re-arm only for an earlier deadline — a trim that drops the head produces one.
+function armPacingTimer(delayMs) {
+    const due = performance.now() + delayMs;
+    if (S._pacingTimer !== null) {
+        if (S._pacingDue <= due) return;
+        clearTimeout(S._pacingTimer);
+    }
+    S._pacingDue = due;
+    S._pacingTimer = setTimeout(
+        () => {
+            S._pacingTimer = null;
+            // Just pump. An empty queue here is NOT an underrun: the head can only
+            // leave the queue early by being presented (a pump that ran at/past the
+            // deadline while this callback sat behind decode/draw work) or by a
+            // clear that also cancels this timer. A real underrun — frame due but
+            // not arrived — never had a queued frame to arm a timer for in the
+            // first place, so it is detected in schedule() (excess > reserve), not
+            // here. Bumping on this fired-late timer only ratchets the reserve up
+            // on phantom evidence.
+            pump();
+        },
+        Math.max(0, delayMs),
+    );
+}
+
+function clearPacingTimer() {
+    if (S._pacingTimer !== null) {
+        clearTimeout(S._pacingTimer);
+        S._pacingTimer = null;
+    }
+}
+
+// Sliding-window average of a client pipeline stage (2s, like the main-thread
+// SlidingStats used by the overlay).
+function addStageSample(samples, ms) {
+    if (ms >= 0 && ms < 5000) samples.push({ time: performance.now(), value: ms });
+}
+
+function stageAvg(samples) {
+    const cutoff = performance.now() - 2000;
+    let sum = 0;
+    let n = 0;
+    for (const s of samples) {
+        if (s.time > cutoff) {
+            sum += s.value;
+            n++;
+        }
+    }
+    if (n !== samples.length) samples.splice(0, samples.length - n);
+    return n === 0 ? 0 : sum / n;
+}
+
+// Mean AND tail of a stage over the same 2s window. The mean is what the
+// overlay adds up; the p99 is the frame the viewer felt. A window holds a few
+// hundred samples at most, so a sort every half second costs nothing.
+function stageStats(samples) {
+    const avg = stageAvg(samples); // prunes
+    const n = samples.length;
+    if (n === 0) return { n: 0, avg: 0, p95: 0, p99: 0, max: 0 };
+    const values = samples.map((s) => s.value).sort((a, b) => a - b);
+    const at = (p) => values[Math.min(n - 1, Math.max(0, Math.ceil(p * n) - 1))];
+    return { n, avg, p95: at(0.95), p99: at(0.99), max: values[n - 1] };
+}
+
+// The clock the main thread stamps arrivals on: performance.now() is relative
+// to each context's own time origin, so only the sum is comparable across the
+// postMessage boundary.
+function nowAbs() {
+    return performance.timeOrigin + performance.now();
+}
+
+function post(msg, transfer) {
+    self.postMessage(msg, transfer || []);
+}
+
+function setStatus(state, msg) {
+    post({ type: 'status', state, msg });
+}
+
+// Level-triggered IDR request with a 1s throttle (mirrors StreamView._requestIdr).
+function requestIdr(reason) {
+    const now = performance.now();
+    if (S._idrRequested && now - S._lastIdrRequestMs < 1000) return;
+    S._idrRequested = true;
+    S._lastIdrRequestMs = now;
+    post({ type: 'requestidr', reason });
+}
+
+function postCounters(force) {
+    const now = performance.now();
+    if (!force && now - S._lastCountersPost < 500) return;
+    S._lastCountersPost = now;
+    const diag = S.diag.snapshot();
+    applyEnhancerGovernor(diag, now);
+    post({
+        type: 'counters',
+        received: S.stats.received,
+        decoded: S.stats.decoded,
+        rendered: S.stats.rendered,
+        recoveries: S.stats.recoveries,
+        dropped: S.stats.dropped,
+        clientDecodeMs: stageAvg(S._decodeSamples),
+        clientQueueMs: stageAvg(S._queueSamples),
+        clientRenderMs: stageAvg(S._renderSamples),
+        // The same stages with their tail, plus the hop from the main thread.
+        clientStages: {
+            arrive: stageStats(S._arriveSamples),
+            decode: stageStats(S._decodeSamples),
+            queue: stageStats(S._queueSamples),
+            render: stageStats(S._renderSamples),
+        },
+        resolution: S._lastResolution || '',
+        // The renderer copied the last frame at 1:1, its pass idle (overlay).
+        passthrough: !!(S.renderer && S.renderer.passthrough),
+        pacer: S.pacer ? S.pacer.stats : null,
+        diag,
+    });
+}
+
+// Feed the observation window to the enhancer ladder and apply its verdict.
+// The draw wait is the enhancer's own GPU cost, the arrival interval is the
+// budget it has to fit in, and the decode queue catches the pass that reports
+// no cost because it only queued its work. Main is told so the overlay can name
+// what is running.
+function applyEnhancerGovernor(diag, now) {
+    if (!S.governor || !S.renderer) return;
+    const algo = S.governor.update({
+        serviceMs: diag.renderServiceMs,
+        arrivalMs: diag.arrivalAvgMs,
+        decodeQueue: diag.decodeQueueAvg,
+        // The GPU fences (WebGlRenderer.takeGpuBehind): a pass the GPU keeps
+        // up with, frames late.
+        gpuBehind:
+            typeof S.renderer.takeGpuBehind === 'function' ? S.renderer.takeGpuBehind() : null,
+        // A frame copied at 1:1 ran no pass: the window is not a measurement.
+        passthrough: S.renderer.passthrough === true,
+        now,
+    });
+    if (!algo) return;
+    const pass = rendererAlgo(algo, S.renderer.kind);
+    if (!S.renderer.setAlgo(pass)) return;
+    post({
+        type: 'enhancer',
+        algo: pass,
+        kind: S.renderer.kind,
+        degraded: S.governor.degraded,
+        recoverAfterMs: S.governor.recoverAfterMs,
+    });
+}
+
+// ── Decoder lifecycle ────────────────────────────────────────────────────────
+
+function setupDecoder() {
+    if (S.decoder) {
+        try {
+            S.decoder.close();
+        } catch (e) {}
+        S.decoder = null;
+    }
+    S.decoderConfigured = false;
+    S.decoderConfiguring = false;
+
+    S.decoder = new VideoDecoder({
+        output: (frame) => {
+            if (!S._firstDecoderOutputLogged) {
+                S._firstDecoderOutputLogged = true;
+                console.log(
+                    '[VideoWorker] First decoded frame: ' +
+                        (frame.displayWidth || frame.codedWidth) +
+                        'x' +
+                        (frame.displayHeight || frame.codedHeight) +
+                        ' format=' +
+                        (frame.format || 'null'),
+                );
+            }
+            // AV1 padded past the picture: cut to the host's size (FrameCrop.js).
+            if (S.videoCodec === CODEC_AV1) frame = cropToAnnounced(frame, S.frameSize);
+            onDecodedFrame(frame);
+        },
+        error: (err) => {
+            console.error('[VideoWorker] VideoDecoder error:', err.message);
+            handleDecoderError(err);
+        },
+    });
+}
+
+function handleDecoderError(err) {
+    if (S.stopped) return;
+    if (S._decoderRecovering) return;
+    S._recoveryAttempts++;
+
+    // AV1 that never produced a frame → broken AV1 decode in this browser.
+    if (S.videoCodec === CODEC_AV1 && S.stats.decoded === 0 && S._recoveryAttempts >= 3) {
+        S._fatalDecodeError = true;
+        if (S.decoder) {
+            try {
+                S.decoder.close();
+            } catch (e) {}
+            S.decoder = null;
+        }
+        S.decoderConfigured = false;
+        S.pendingFrames = [];
+        post({
+            type: 'fatal',
+            msg: 'AV1 decoding failed in this browser — select H.264 or HEVC in Settings',
+        });
+        return;
+    }
+    if (S._recoveryAttempts > S.MAX_RECOVERY_ATTEMPTS) {
+        setStatus('error', 'Max recovery attempts exceeded');
+        return;
+    }
+    S._decoderRecovering = true;
+
+    if (S.decoder) {
+        try {
+            S.decoder.close();
+        } catch (e) {}
+        S.decoder = null;
+    }
+    S.decoderConfigured = false;
+    S.decoderConfiguring = false;
+    S._referenceValid = false;
+
+    for (const frame of S.frameQueue) {
+        try {
+            frame.close();
+        } catch (e) {}
+    }
+    S.frameQueue = [];
+    S.pendingFrames = [];
+    S.nalParser.reset();
+    // The recovery gap is not network jitter: re-priming keeps the pacer from
+    // reading it as one and pinning the reserve at MAX.
+    clearPacingTimer();
+    if (S.pacer) S.pacer.reset();
+
+    // Timed to the first frame the new decoder outputs — see onDecodedFrame.
+    if (!S._recoveryStartedPerf) {
+        S._recoveryStartedPerf = performance.now();
+        S._recoveryDroppedBefore = S.stats.dropped;
+        S.stats.recoveries++;
+    }
+    setupDecoder();
+    requestIdr('decoder error');
+    setStatus('connecting', 'Recovering...');
+    S._decoderRecovering = false;
+}
+
+// ── H.264 / HEVC decoder configuration (ported from configureDecoder) ─────────
+
+function configureDecoder() {
+    if (S.stopped) return;
+    if (S.decoderConfigured || S.decoderConfiguring || !S.nalParser.isReady()) return;
+    S.decoderConfiguring = true;
+    const codecType = S.nalParser.codec;
+
+    const desc = buildDescription(S.nalParser);
+    if (!desc) {
+        S.decoderConfiguring = false;
+        return;
+    }
+
+    const codec = getCodecString(S.nalParser);
+    if (!codec) {
+        S.decoderConfiguring = false;
+        setStatus('error', 'Unknown codec');
+        return;
+    }
+
+    const applyConfig = (cfg, noDescription = false, hw = true) => {
+        // `hw` is what the probe in tryCodecs found out — see there.
+        const _doConfigure = (config, hwAccel) => {
+            const cfgToUse = hwAccel
+                ? { ...config, hardwareAcceleration: 'prefer-hardware' }
+                : config;
+            try {
+                S.decoder.configure(cfgToUse);
+                S.decoderConfigured = true;
+                S.decoderConfiguring = false;
+                S._noDescription = noDescription;
+                // Kept for flushDecodeQueue: reset() unconfigures the decoder.
+                S._activeDecoderCfg = cfgToUse;
+                console.log(
+                    '[VideoWorker] Decoder CONFIGURED codec=' +
+                        cfgToUse.codec +
+                        ' noDescription=' +
+                        noDescription +
+                        ' hw=' +
+                        (cfgToUse.hardwareAcceleration || 'none'),
+                );
+                flushPendingFrames();
+                if (!S._proactiveIdrScheduled) {
+                    S._proactiveIdrScheduled = true;
+                    setTimeout(() => {
+                        if (!S.stopped) post({ type: 'requestidr', reason: 'proactive' });
+                    }, 250);
+                }
+                return true;
+            } catch (e) {
+                S.decoderConfiguring = false;
+                if (hwAccel && e.name === 'NotSupportedError') throw e;
+                return false;
+            }
+        };
+        try {
+            return _doConfigure(cfg, hw);
+        } catch (hwErr) {
+            return _doConfigure(cfg, false);
+        }
+    };
+
+    const tryCodecs = (configs, index, onExhausted) => {
+        if (index >= configs.length) {
+            onExhausted();
+            return;
+        }
+        const cfg = configs[index];
+        const noDescription = cfg._noDescription === true;
+        const next = () => tryCodecs(configs, index + 1, onExhausted);
+        // The preference is probed too, not just the codec: configure() does
+        // not throw for a prefer-hardware the browser cannot honour, the
+        // decoder fails asynchronously instead, and that read as a decoder
+        // error to recover from — ten identical retries, then the transport
+        // given up (StreamView.tryCodecs has the full story). Hardware refused
+        // → the same codec in software, before the next codec.
+        VideoDecoder.isConfigSupported({ ...cfg, hardwareAcceleration: 'prefer-hardware' })
+            .then((hwResult) => {
+                if (hwResult.supported) {
+                    if (!applyConfig(cfg, noDescription, true)) next();
+                    return;
+                }
+                console.warn(
+                    '[VideoWorker] prefer-hardware not supported for codec=' +
+                        cfg.codec +
+                        ', probing software',
+                );
+                return VideoDecoder.isConfigSupported(cfg).then((result) => {
+                    if (result.supported) {
+                        if (!applyConfig(cfg, noDescription, false)) next();
+                    } else next();
+                });
+            })
+            .catch(() => next());
+    };
+
+    // Detect HDR: HEVC Main10, HEVC RExt only when the SPS says 10-bit (8-bit
+    // 4:4:4 is RExt too and is SDR), AV1 10-bit.
+    const isHdr = isHevcHdrProfile(codec, S.nalParser.sps) || isAv1HdrProfile(codec);
+
+    // The size the host really encodes, from the SPS (StreamView.configureDecoder
+    // has why: issue #23); 1080p only when the SPS cannot be read.
+    const pic = getPictureSize(S.nalParser);
+    const codedSize = pic
+        ? { codedWidth: pic.width, codedHeight: pic.height }
+        : { codedWidth: 1920, codedHeight: 1080 };
+    const shared = { ...codedSize, optimizeForLatency: true };
+    // Decoder color space: HDR (BT.2020 + PQ) or SDR (BT.709).
+    /** @type {{ colorSpace: HdrVideoColorSpaceInit }} */
+    const vColor = isHdr
+        ? {
+              colorSpace: {
+                  primaries: 'bt2020',
+                  transfer: 'pq',
+                  matrix: 'bt2020-ncl',
+                  fullRange: false,
+              },
+          }
+        : {
+              colorSpace: {
+                  primaries: 'bt709',
+                  transfer: 'bt709',
+                  matrix: 'bt709',
+                  fullRange: false,
+              },
+          };
+
+    const fallbacks =
+        codecType === CODEC_HEVC ? HEVC_FALLBACK_CODEC_STRINGS : H264_FALLBACK_CODEC_STRINGS;
+    const colorConfig = { codec, description: desc.buffer, ...shared, ...vColor };
+
+    // HEVC: Annex B (no description) first — Chromium keyframe validator only
+    // parses start codes; AVCC-with-description comes after.
+    if (codecType === CODEC_HEVC) {
+        const annexBCfgs = [];
+        const hev1Primary = codec.replace(/^hvc1/, 'hev1');
+        annexBCfgs.push({ codec: hev1Primary, ...shared, ...vColor, _noDescription: true });
+        annexBCfgs.push({ codec: hev1Primary, ...shared, _noDescription: true });
+        for (const fb of HEVC_ANNEXB_CODEC_STRINGS) {
+            if (fb === hev1Primary) continue;
+            annexBCfgs.push({ codec: fb, ...shared, ...vColor, _noDescription: true });
+            annexBCfgs.push({ codec: fb, ...shared, _noDescription: true });
+        }
+        tryCodecs(annexBCfgs, 0, () => tryHevcAvccConfigs(codec, desc, fallbacks, shared, vColor));
+        return;
+    }
+
+    // H.264: AVCC with description + fallback variants. Explicitly typed: the
+    // fallbacks deliberately drop fields (description, dimensions, colorSpace)
+    // one at a time, so inferring the element type from the richest entry would
+    // reject every degraded variant.
+    /** @type {HdrVideoDecoderConfig[]} */
+    const configsToTry = [colorConfig];
+    for (const fbCodec of fallbacks) {
+        if (fbCodec === codec) continue;
+        configsToTry.push({
+            codec: fbCodec,
+            description: desc.buffer,
+            ...codedSize,
+            optimizeForLatency: true,
+            ...vColor,
+        });
+        configsToTry.push({
+            codec: fbCodec,
+            description: desc.buffer,
+            ...codedSize,
+            optimizeForLatency: true,
+        });
+    }
+    configsToTry.push({ codec, description: desc.buffer, ...codedSize });
+    configsToTry.push({ codec, description: desc.buffer });
+    configsToTry.push({
+        codec,
+        description: desc,
+        ...codedSize,
+        optimizeForLatency: true,
+    });
+    configsToTry.push({ codec, optimizeForLatency: true });
+    configsToTry.push({ codec });
+
+    tryCodecs(configsToTry, 0, () => {
+        const avc3Configs = [
+            { codec: 'avc3.42E01E', ...shared, ...vColor, optimizeForLatency: true },
+            { codec: 'avc3.42E01E', ...shared, optimizeForLatency: true },
+            { codec: 'avc3.42E01E', ...shared },
+        ];
+        tryCodecs(avc3Configs, 0, () => {
+            S.decoderConfiguring = false;
+            setStatus('error', 'Codec not supported by browser');
+        });
+    });
+}
+
+function tryHevcAvccConfigs(codec, desc, fallbacks, shared, vColor) {
+    const cfgs = [];
+    cfgs.push({ codec, description: desc.buffer, ...shared, ...vColor });
+    cfgs.push({ codec, description: desc.buffer, ...shared });
+    for (const fb of fallbacks) {
+        if (fb === codec) continue;
+        cfgs.push({ codec: fb, description: desc.buffer, ...shared, ...vColor });
+        cfgs.push({ codec: fb, description: desc.buffer, ...shared });
+    }
+    cfgs.push({ codec, description: desc, ...shared });
+    cfgs.push({ codec, description: desc.buffer, optimizeForLatency: true });
+    cfgs.push({
+        codec,
+        description: desc.buffer,
+        codedWidth: shared.codedWidth,
+        codedHeight: shared.codedHeight,
+    });
+    cfgs.push({ codec, description: desc.buffer });
+    cfgs.push({ codec, ...shared });
+    cfgs.push({ codec, optimizeForLatency: true });
+
+    const tryNext = (idx) => {
+        if (idx >= cfgs.length) {
+            S.decoderConfiguring = false;
+            handleHevcFallback();
+            return;
+        }
+        const cfg = cfgs[idx];
+        VideoDecoder.isConfigSupported(cfg)
+            .then((r) => {
+                if (r.supported) {
+                    try {
+                        S.decoder.configure(cfg);
+                        S.decoderConfigured = true;
+                        S.decoderConfiguring = false;
+                        S._noDescription = false;
+                        flushPendingFrames();
+                    } catch (e) {
+                        S.decoderConfiguring = false;
+                        handleHevcFallback();
+                    }
+                } else {
+                    tryNext(idx + 1);
+                }
+            })
+            .catch(() => tryNext(idx + 1));
+    };
+    tryNext(0);
+}
+
+function handleHevcFallback() {
+    S.decoderConfiguring = false;
+    S._codecFallbackRequested = true;
+    S.stopped = true; // stop processing; main will quit + relaunch with H.264
+    post({ type: 'codecfallback', from: 'hevc', to: 'h264' });
+}
+
+function flushPendingFrames() {
+    // After configure, a keyframe MUST be fed first (delta-first → green output).
+    if (S.pendingFrames.length > 1 && !S.pendingFrames[0].isKeyframe) {
+        const keyIdx = S.pendingFrames.findIndex((e) => e.isKeyframe);
+        if (keyIdx > 0) {
+            const [keyframe] = S.pendingFrames.splice(keyIdx, 1);
+            S.pendingFrames.unshift(keyframe);
+        }
+    }
+    while (S.pendingFrames.length > 0) {
+        const entry = S.pendingFrames.shift();
+        decodeFrame(entry.data, entry.isKeyframe, entry.backendTs, entry.arrivalAbs);
+    }
+}
+
+// reset() is the only WebCodecs call that empties the decode queue; it also
+// unconfigures the decoder, so the active config is applied again right away.
+// The caller must submit a keyframe next.
+function flushDecodeQueue() {
+    if (!S.decoder || !S._activeDecoderCfg) return false;
+    const queued = S.decoder.decodeQueueSize;
+    try {
+        S.decoder.reset();
+        S.decoder.configure(S._activeDecoderCfg);
+    } catch (e) {
+        console.warn('[VideoWorker] Decode queue flush failed: ' + e.message);
+        return false;
+    }
+    S._chunkSubmitTimes.clear();
+    S.stats.dropped += queued;
+    S.diag.noteDrop('backpressure', queued);
+    S.diag.noteRecovery('flush');
+    S._lastQueueFlushMs = performance.now();
+    console.warn('[VideoWorker] Decode queue flushed at the keyframe: ' + queued + ' stale');
+    return true;
+}
+
+function decodeFrame(data, isKeyframe, backendTs, arrivalAbs) {
+    if (!S.decoderConfigured) {
+        if (S.pendingFrames.length < 120)
+            S.pendingFrames.push({ data, isKeyframe, backendTs, arrivalAbs });
+        return;
+    }
+    if (!S.decoder) return;
+    if (S.decoder.state === 'closed') {
+        handleDecoderError(new Error('Decoder state is closed'));
+        return;
+    }
+
+    if (!isKeyframe && !S._referenceValid) {
+        S.stats.dropped++;
+        S.diag.noteDrop('backpressure');
+        requestIdr('reference invalid');
+        return;
+    }
+
+    S.diag.noteDecodeQueue(S.decoder.decodeQueueSize);
+
+    if (!isKeyframe && S.decoder.decodeQueueSize >= S.DECODE_QUEUE_MAX) {
+        const now = performance.now();
+        if (S._queueStallStart === 0) S._queueStallStart = now;
+        const saturatedMs = now - S._queueStallStart;
+        if (saturatedMs > S.QUEUE_RESET_MS) {
+            S._queueStallStart = 0;
+            handleDecoderError(new Error('Decode queue stalled'));
+            return;
+        }
+        if (saturatedMs > S.QUEUE_STALL_MS) {
+            S.stats.dropped++;
+            S.diag.noteDrop('backpressure');
+            S._referenceValid = false;
+            requestIdr('decode queue overflow');
+            return;
+        }
+    } else {
+        S._queueStallStart = 0;
+    }
+
+    let timestamp =
+        backendTs !== undefined && backendTs > 0 ? backendTs * 1000 : S.frameCount * 16667;
+    if (timestamp <= S._lastChunkTs) timestamp = S._lastChunkTs + 1;
+    S._lastChunkTs = timestamp;
+    S.frameCount++;
+
+    const type = isKeyframe ? 'key' : 'delta';
+    const useAnnexB = S._noDescription && S.nalParser.codec === CODEC_HEVC;
+    const avccData = toAvcc(data, S.decoderConfigured, S.nalParser.codec, useAnnexB);
+
+    // A keyframe behind a saturated queue recovers nothing: it would wait its
+    // turn after every stale frame already submitted. Flush them first.
+    if (
+        isKeyframe &&
+        shouldFlushAtKeyframe({
+            queued: S.decoder.decodeQueueSize,
+            arrivalMs: S.diag.arrivalAvgMs,
+            sinceLastFlushMs: performance.now() - S._lastQueueFlushMs,
+        })
+    ) {
+        flushDecodeQueue();
+    }
+
+    try {
+        const chunk = new EncodedVideoChunk({ type, timestamp, duration: 16667, data: avccData });
+        trackChunkSubmit(timestamp, backendTs);
+        if (arrivalAbs > 0) addStageSample(S._arriveSamples, nowAbs() - arrivalAbs);
+        S.decoder.decode(chunk);
+        S.stats.received++;
+        if (isKeyframe) {
+            S._referenceValid = true;
+            S._idrRequested = false;
+            S._queueStallStart = 0;
+        }
+    } catch (err) {
+        S.stats.dropped++;
+        handleDecoderError(err);
+    }
+}
+
+// ── AV1 pipeline ─────────────────────────────────────────────────────────────
+
+function handleAv1Frame(data, isKeyframe, arrivalAbs) {
+    if (!S.decoderConfigured && !S.decoderConfiguring) {
+        if (isKeyframe) {
+            if (S.pendingFrames.length > 0) S.pendingFrames = [];
+            S._idrRequested = false;
+            const seqHeader = findSequenceHeader(data);
+            configureAv1Decoder(seqHeader || undefined);
+        } else {
+            if (S.pendingFrames.length < 120)
+                S.pendingFrames.push({ data, isKeyframe, arrivalAbs });
+            if (S.pendingFrames.length > 30 && S.pendingFrames.length % 30 === 0) {
+                requestIdr('AV1 no keyframe while buffering');
+            }
+            return;
+        }
+    }
+    decodeAv1Frame(data, isKeyframe, arrivalAbs);
+}
+
+function configureAv1Decoder(seqHeaderObu) {
+    if (S.decoderConfigured || S.decoderConfiguring) return;
+    if (!S.decoder) setupDecoder();
+    S.decoderConfiguring = true;
+
+    const configs = buildAv1DecoderConfigs(seqHeaderObu || null);
+    const tryCodecs = (index) => {
+        if (index >= configs.length) {
+            S.decoderConfiguring = false;
+            setStatus('error', 'AV1 codec not supported by browser');
+            return;
+        }
+        const cfg = configs[index];
+        VideoDecoder.isConfigSupported(cfg)
+            .then((result) => {
+                if (result.supported) {
+                    try {
+                        S.decoder.configure(cfg);
+                        S.decoderConfigured = true;
+                        S.decoderConfiguring = false;
+                        while (S.pendingFrames.length > 0 && !S.pendingFrames[0].isKeyframe) {
+                            S.pendingFrames.shift();
+                            S.stats.dropped++;
+                        }
+                        while (S.pendingFrames.length > 0) {
+                            const entry = S.pendingFrames.shift();
+                            decodeAv1Frame(entry.data, entry.isKeyframe);
+                        }
+                    } catch (e) {
+                        tryCodecs(index + 1);
+                    }
+                } else {
+                    tryCodecs(index + 1);
+                }
+            })
+            .catch(() => tryCodecs(index + 1));
+    };
+    tryCodecs(0);
+}
+
+function decodeAv1Frame(data, isKeyframe, arrivalAbs) {
+    if (!S.decoderConfigured) {
+        if (S.pendingFrames.length < 120) S.pendingFrames.push({ data, isKeyframe, arrivalAbs });
+        return;
+    }
+    if (!S.decoder) return;
+
+    const timestamp = S.frameCount * 16667;
+    S.frameCount++;
+    const type = isKeyframe ? 'key' : 'delta';
+    const obuData = stripNonEssentialObus(data);
+    S.diag.noteDecodeQueue(S.decoder.decodeQueueSize);
+    try {
+        // AV1 has no backendTs here (synthetic chunk timestamps), so the pacer
+        // sees 0 and leaves this path on the present-on-decode behavior.
+        const chunk = new EncodedVideoChunk({ type, timestamp, duration: 16667, data: obuData });
+        trackChunkSubmit(timestamp, 0);
+        if (arrivalAbs > 0) addStageSample(S._arriveSamples, nowAbs() - arrivalAbs);
+        S.decoder.decode(chunk);
+        S.stats.received++;
+    } catch (err) {
+        S.stats.dropped++;
+    }
+}
+
+// ── Decoded-frame handling + render (render-on-decode, no rAF) ────────────────
+
+function onDecodedFrame(frame) {
+    S.stats.decoded++;
+    S._recoveryAttempts = 0;
+    if (S._recoveryStartedPerf) {
+        console.warn(
+            '[VideoWorker] Decoder recovered in ' +
+                Math.round(performance.now() - S._recoveryStartedPerf) +
+                ' ms, ' +
+                (S.stats.dropped - S._recoveryDroppedBefore) +
+                ' frames dropped meanwhile (recovery ' +
+                S.stats.recoveries +
+                ')',
+        );
+        S._recoveryStartedPerf = 0;
+    }
+
+    // Pair the decoder output with its decode() submit time (same clock): this
+    // closes the decode stage (decode queue + decode). The frame carries its
+    // output time so pump() can close the queue and render stages too.
+    const submit = S._chunkSubmitTimes.get(frame.timestamp);
+    const outPerf = performance.now();
+    let backendTs = 0;
+    if (submit !== undefined) {
+        S._chunkSubmitTimes.delete(frame.timestamp);
+        addStageSample(S._decodeSamples, outPerf - submit.perf);
+        frame._mwDecodedPerf = outPerf;
+        backendTs = submit.backendTs;
+    }
+
+    // Presentation deadline. Timing it from the decoder output (not from network
+    // arrival) is deliberate: decode time varies too, and it is the cadence of
+    // what reaches the screen that has to be smooth — this way the reserve
+    // absorbs both sources of variance with one mechanism.
+    frame._mwPresentAt = S.pacer ? S.pacer.schedule(backendTs, outPerf) : outPerf;
+
+    // Hard memory bound. With a reserve, frames legitimately wait their turn, so
+    // the cap has to clear the deepest reserve (25ms = 3 frames @120fps) plus
+    // arrival bunching, or we would drop exactly what we just decided to hold.
+    if (S.frameQueue.length >= (S.pacer ? 6 : 3)) {
+        frame.close();
+        S.stats.dropped++;
+        S.diag.noteDrop('queueFull');
+        return;
+    }
+    S.frameQueue.push(frame);
+
+    // Track resolution from frame dims; retry past the first frame since some
+    // decoders report 0×0 initially (otherwise the overlay stays stuck on "?").
+    const w = frame.displayWidth || frame.codedWidth || 0;
+    if (w > 0) S._lastResolution = w + '×' + (frame.displayHeight || frame.codedHeight || 0);
+
+    if (!S._firstFrameReported) {
+        S._firstFrameReported = true;
+        console.log('[VideoWorker] Posting firstframe, resolution=' + (S._lastResolution || '?'));
+        post({ type: 'firstframe', resolution: S._lastResolution || '' });
+    }
+
+    pump();
+}
+
+// Render the freshest queued frame; serialize via the rendering guard so two
+// VideoFrames are never touched concurrently (Chrome Windows HEVC NV12 race).
+function pump() {
+    if (S.stopped || S.frameQueue.length === 0) return;
+    // Depth BEFORE the trim: > 1 means the draw did not keep up with decode.
+    S.diag.noteFrameQueue(S.frameQueue.length);
+
+    if (S.pacer) {
+        // Paced: a queued frame is not stale, it is early — the queue is the
+        // reserve. Only trim back to the memory bound, oldest first, and then
+        // wait for the head's deadline instead of racing to the freshest frame.
+        while (S.frameQueue.length > 6) {
+            S.frameQueue.shift().close();
+            S.stats.dropped++;
+            S.diag.noteDrop('stale');
+        }
+        const wait = S.frameQueue[0]._mwPresentAt - performance.now();
+        if (wait > 0) {
+            armPacingTimer(wait);
+            return;
+        }
+    } else {
+        // Always present the freshest frame — the older ones are already stale by
+        // the time the GPU would get to them.
+        while (S.frameQueue.length > 1) {
+            S.frameQueue.shift().close();
+            S.stats.dropped++;
+            S.diag.noteDrop('stale');
+        }
+    }
+    // Pipelined draws: the next frame is submitted while the current one is
+    // still retiring on the GPU, instead of after (see RenderPacing).
+    if (S.drawsInFlight >= drawCapFor(S.renderer)) return;
+
+    const frame = S.frameQueue.shift();
+    S.drawsInFlight++;
+    const inFlight = S.drawsInFlight;
+    // Read the decode time before the draw — the renderer closes the VideoFrame.
+    const decodedPerf = frame._mwDecodedPerf;
+    const drawStart = performance.now();
+    if (decodedPerf !== undefined) addStageSample(S._queueSamples, drawStart - decodedPerf);
+    drawFrame(frame)
+        .then((ok) => {
+            if (ok) {
+                S.stats.rendered++;
+                addStageSample(S._renderSamples, performance.now() - drawStart);
+                S.diag.noteDraw(S.renderer && S.renderer.lastDraw, inFlight);
+                if (S.probeUntil) {
+                    if (performance.now() < S.probeUntil) post({ type: 'probe-frame' });
+                    else S.probeUntil = 0;
+                }
+            }
+        })
+        .finally(() => {
+            S.drawsInFlight--;
+            postCounters(false);
+            pump();
+        });
+}
+
+// Delegate to the renderer (owns context + HEVC NV12 fallbacks). The renderer
+// closes the frame; stats stay here per the render boundary.
+async function drawFrame(frame) {
+    if (!S.renderer) {
+        try {
+            frame.close();
+        } catch (e) {}
+        return false;
+    }
+    await S.renderer.draw(frame);
+    return true;
+}
+
+// ── Main-thread message handling ─────────────────────────────────────────────
+
+// Core frame entry (mirrors StreamView._processVideoFrame from the AV1 dispatch
+// onward; stale/gap/stats/overlay stay on the main thread before this point).
+function processFrame(data, isKeyframe, backendTs, arrivalAbs) {
+    if (S.stopped || S._fatalDecodeError) return;
+
+    // Arrival cadence + encoded size at the pipeline entry: distinguishes "the
+    // host now sends 60fps of heavy frames" from "the browser slowed down" when
+    // the legs inflate together.
+    S.diag.noteArrival(data.length);
+
+    if (S.videoCodec === CODEC_AV1) {
+        handleAv1Frame(data, isKeyframe, arrivalAbs);
+        return;
+    }
+
+    // New parameter sets at a keyframe: the host changed the picture size
+    // mid-stream — reconfigure, or the old description decodes it green
+    // (StreamView._processVideoFrame has the full story, and why configure()
+    // on the running decoder rather than a new one).
+    if (isKeyframe && S.decoderConfigured && S.nalParser.changedBy(data)) {
+        console.log('[VideoWorker] Parameter sets changed at a keyframe — reconfiguring decoder');
+        S.nalParser.reset();
+        S.nalParser.feed(data);
+        S.decoderConfigured = false;
+        S.decoderConfiguring = false;
+        configureDecoder();
+    }
+
+    // H.264 / HEVC: extract SPS/PPS from the first keyframe, then configure.
+    if (!S.nalParser.isReady()) {
+        if (isKeyframe) {
+            if (S._idrRequested && S.pendingFrames.length > 0) {
+                S.pendingFrames = [];
+                S._idrRequested = false;
+            }
+            const ready = S.nalParser.feed(data);
+            if (ready) configureDecoder();
+        } else {
+            if (S.pendingFrames.length > 30 && S.pendingFrames.length % 30 === 0) {
+                requestIdr('no keyframe while buffering');
+            }
+        }
+    }
+    if (!S.decoderConfigured && S.nalParser.isReady()) configureDecoder();
+
+    decodeFrame(data, isKeyframe, backendTs, arrivalAbs);
+}
+
+self.onmessage = (e) => {
+    const m = e.data;
+    switch (m.type) {
+        case 'init':
+            S.canvas = m.canvas;
+            S.videoCodec = m.videoCodec;
+            S.isChromeWindowsHevc = !!m.isChromeWindowsHevc;
+            S.transport = m.transport || 'webrtc';
+            // The native host's frame size, null elsewhere (StreamView._frameSize).
+            S.frameSize = m.frameSize || null;
+            // Adaptive presentation reserve (mw_pacing, resolved on main — the
+            // worker has no localStorage). Null keeps present-on-decode.
+            S.pacer = m.pacing ? new FramePacer() : null;
+            // Always use a low-latency (desynchronized) context in the worker: it
+            // lets the canvas bypass the document compositor and present sooner,
+            // clawing back the ~1-frame latency that an OffscreenCanvas presented
+            // from a worker otherwise adds vs the main-thread rAF path. (m.tearing
+            // is kept for reference; tearing is acceptable for a real-time stream.)
+            // Renderer assigned in a microtask; well before any decoded frame reaches
+            // drawFrame. mw_webgpu flag arrives via the message (no localStorage here).
+            createVideoRenderer(S.canvas, {
+                desynchronized: true,
+                videoCodec: S.videoCodec,
+                isChromeWindowsHevc: S.isChromeWindowsHevc,
+                webgpu: !!m.webgpu,
+                algo: m.algo,
+                ceiling: m.ceiling,
+                yuv444: !!m.yuv444,
+                hdr: !!m.hdr,
+            }).then((r) => {
+                S.renderer = r;
+                // The setting is the ceiling: the governor only steps below
+                // it, and only while the GPU cost does not fit a frame. It may
+                // start below it too (enhancerProfile.startRung, from main).
+                if (r.kind === 'webgpu' || r.kind === 'webgl')
+                    S.governor = new EnhancerGovernor(
+                        ladderRung(m.ceiling || m.algo),
+                        m.enhancerProfile || {},
+                    );
+                // Apply an output size that may have arrived before the renderer.
+                if (S.outW > 0 && S.outH > 0) r.setOutputSize(S.outW, S.outH);
+                console.log(
+                    '[VideoWorker] renderer=' + r.kind + ' (webgpu requested=' + !!m.webgpu + ')',
+                );
+                post({ type: 'rendererinfo', kind: r.kind, hdr: !!r.hdrActive });
+            });
+            S.nalParser = new NalParser();
+            setupDecoder();
+            console.log(
+                '[VideoWorker] init codec=' +
+                    S.videoCodec +
+                    ' chromeWinHevc=' +
+                    S.isChromeWindowsHevc,
+            );
+            break;
+        case 'frame': {
+            const data = new Uint8Array(m.data);
+            processFrame(data, m.isKeyframe, m.backendTs, m.arrivalAbs || 0);
+            break;
+        }
+        case 'frameloss':
+            S._referenceValid = false;
+            break;
+        case 'framesize':
+            // The host's display changed size (`displayformat`).
+            S.frameSize = m.frameSize || null;
+            break;
+        case 'resync':
+            // The tab is back from the background: the burst of frames that
+            // waited for it is not jitter — re-prime the pacer rather than let
+            // it pin the reserve on it (see StreamView._resyncAfterHidden).
+            clearPacingTimer();
+            if (S.pacer) S.pacer.reset();
+            break;
+        case 'resize':
+            S.outW = m.outW;
+            S.outH = m.outH;
+            if (S.renderer) S.renderer.setOutputSize(S.outW, S.outH);
+            break;
+        case 'probe':
+            // Click-to-photon probe: report each presented frame for `ms`.
+            S.probeUntil = performance.now() + (m.ms || 250);
+            break;
+        case 'capture':
+            // Snapshot of the last presented frame, for the relaunch
+            // freeze-frame bridge. Best-effort: some contexts read back blank
+            // after presenting — the receiver detects that and drops it.
+            createImageBitmap(S.canvas).then(
+                (bmp) => post({ type: 'freezeframe', bitmap: bmp }, [bmp]),
+                () => post({ type: 'freezeframe' }),
+            );
+            break;
+        case 'stop':
+            S.stopped = true;
+            if (S.decoder) {
+                try {
+                    S.decoder.close();
+                } catch (e) {}
+                S.decoder = null;
+            }
+            for (const f of S.frameQueue) {
+                try {
+                    f.close();
+                } catch (e) {}
+            }
+            S.frameQueue = [];
+            S.pendingFrames = [];
+            clearPacingTimer();
+            break;
+    }
+};

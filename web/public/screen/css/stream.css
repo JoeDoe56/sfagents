@@ -1,0 +1,1926 @@
+/* MoonlightWeb — Streaming View Styles */
+
+/* While a stream is active, the overlay owns the screen. Hide the underlying
+   app (header, content, footer) so pinch-zoom/pan or the iOS virtual keyboard
+   pushing the viewport can never reveal the apps grid, settings or buttons
+   beneath the stream — the stream has absolute visual priority.
+
+   The floating Discord button is part of that shell: pinned to the viewport it
+   would otherwise survive the overlay and float over the game, one misclick
+   away from throwing the player out of their session into a browser tab. */
+body.streaming-active .app-header,
+body.streaming-active #main-content,
+body.streaming-active .app-footer,
+body.streaming-active .discord-fab {
+    display: none !important;
+}
+
+/* ── Stream surround: the signature grid instead of dead black ──────────── */
+/* The letterbox bars around the picture, and the strip the soft keyboard
+   leaves under the shrunk overlay, read as MoonlightWeb rather than as a gap.
+   One rule for every layer the stream can paint — the overlay, the CSS
+   fallback fullscreen area that covers it, the relaunch cover, and the page
+   BEHIND it, which is what shows in that keyboard strip.
+   background-attachment: fixed anchors each layer's grid to the viewport
+   instead of to its own box, so the lines run straight across the seams
+   between them however JS resizes the overlay.
+   Opaque base color under the pattern (the overlay must hide the app whatever
+   the pattern does), and no neon bloom unlike --app-bg: a tinted surround
+   sitting right next to the video would skew how its colors read. */
+body.streaming-active,
+.stream-overlay,
+.stream-css-fs .stream-canvas-area,
+#stream-relaunch-loader {
+    background-color: var(--surface-0);
+    background-image: var(--bg-grid);
+    background-size: var(--bg-grid-size);
+    background-attachment: fixed;
+}
+/* Page atmosphere off while streaming: its grid is masked to fade out towards
+   the bottom and its bloom is tinted — both would break the seam. */
+body.streaming-active::before,
+body.streaming-active::after {
+    display: none;
+}
+
+.stream-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    font-family: inherit;
+    /* The whole surface is a trackpad: never scroll, zoom or pan */
+    touch-action: none;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Video/canvas must never be draggable or receive native touch gestures */
+.stream-video {
+    /* Fills the area like the canvas; hidden until the media-track path swaps
+       it in (JS toggles display between canvas and video). */
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: none;
+    pointer-events: none;
+    touch-action: none;
+}
+
+/* Click-to-photon probe: the grey circle painted for one frame at the click,
+   so a camera can pair the client's click with the host's flag. Above the
+   picture, below the input layer, never a hit target. */
+.stream-latency-mark {
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    margin: -14px 0 0 -14px;
+    border-radius: 50%;
+    background: rgba(128, 128, 128, 0.95);
+    pointer-events: none;
+    z-index: 5;
+}
+
+.stream-header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    /* Honor the safe-area insets so the header never sits under the iOS
+       status bar / notch in "Add to Home Screen" standalone mode (env() is
+       0 on devices without insets, so this is harmless on desktop). */
+    padding: max(12px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) 12px
+        max(24px, env(safe-area-inset-left));
+    background: #111;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+/* ── The mark on the bar: which machine, which version ────────────────────
+   The stream hides the shell entirely, so for as long as a session lasts the
+   two questions the application's header answers at a glance stop being
+   answerable — and somebody with three machines is never more likely to ask
+   them than while looking at one of the three. The bar's left half was empty;
+   this is what fills it.
+
+   Information only, and it says so twice over: aria-hidden, because the shell
+   already announces both strings to a screen reader and a second copy would
+   just be read out again; and pointer-events:none, because every pixel of this
+   overlay that is not a control is a trackpad, and a caption is not a control.
+
+   Hidden below a tablet's width. It is optional by nature, and where the bar is
+   tight the buttons — which ARE the interface — take the room. margin-right
+   rather than a change of justify-content: with the mark gone, the buttons must
+   stay exactly where they were. */
+.stream-brand {
+    display: none;
+    /* Same metrics as .app-header, and the three items inside carry the shell's
+       own classes (.stream-brand-title shares the h1 rule in layout.css;
+       .instance-menu/.instance-name and .version ARE the header's). Nothing here
+       restyles them: "the same as the header" is only true if it is the same
+       rule, and a second set of numbers that merely looked right would drift the
+       first time one of them changed. */
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+    /* The fullscreen button is absolutely centred in this bar (.btn-stream-fs)
+       and takes no space in the flow, so growing until the quit button would
+       slide the mark straight under it. Stopping well short of the middle is
+       what keeps the two apart, whatever a machine is called. */
+    max-width: 40%;
+    margin-right: auto;
+    pointer-events: none;
+}
+@media (min-width: 768px) {
+    .stream-brand {
+        display: flex;
+    }
+}
+/* The title is styled with the header's h1 (layout.css); it only needs the one
+   thing an h1 gets from being a block. */
+.stream-brand-title {
+    white-space: nowrap;
+}
+
+/* Header controls revealed only once the stream is really on screen
+   (see StreamView._revealStreamControls). Stop stays visible throughout — it
+   is the only way out while the connection is still being negotiated. */
+.stream-header .stream-ctl-prestart {
+    display: none;
+}
+
+.stream-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.stream-status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-connecting {
+    background: var(--warning);
+    animation: pulse 1s ease-in-out infinite;
+}
+
+.status-live {
+    background: var(--success);
+    box-shadow: 0 0 6px var(--success);
+}
+
+.status-disconnected {
+    background: var(--error);
+}
+
+@keyframes pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.3;
+    }
+}
+
+.stream-codec-badge {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    padding: 2px 8px;
+    letter-spacing: 0.5px;
+    margin-left: auto;
+    margin-right: 12px;
+}
+
+/* Same style as the "Back to Hosts" button (.btn-secondary): dark surface with
+   a cyan neon inset edge. Inherits the cyber .btn gabarit (notch, uppercase). */
+.stream-quit-btn {
+    padding: 7px 18px;
+    font-size: 12.5px;
+    background: var(--surface-3);
+    color: var(--text-1);
+    border: none;
+    box-shadow: var(--edge-cyan);
+    cursor: pointer;
+    transition:
+        background 0.15s,
+        color 0.15s,
+        filter 0.2s,
+        transform 0.08s;
+}
+
+.stream-quit-btn:hover {
+    background: var(--surface-4);
+    color: var(--neon-cyan);
+    box-shadow: var(--edge-cyan);
+    filter: var(--glow-cyan);
+}
+
+.stream-quit-btn:active {
+    transform: translateY(1px);
+}
+
+.stream-canvas-area {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.stream-canvas {
+    display: block;
+    /* Fill the area while preserving aspect (object-fit letterboxes). Using
+       width/height (not max-*) so a small frame (e.g. 720p) is scaled up to the
+       edges instead of sitting at its native size. */
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    /* cursor is managed per-mode by JS: hidden in non-gaming, visible pre-focus in gaming */
+}
+
+/* Transparent input-capture layer over the canvas/video area.
+   Receives all mouse/wheel events (and sits above <video> so iOS Safari
+   cannot swallow touches), independent of which display element is active. */
+.stream-input-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 50;
+    background: transparent;
+    touch-action: none;
+}
+
+/* The pointer a touch screen draws for itself (StreamView's
+   MOBILE_CURSOR_CLIENT_DRAWN): an image placed in viewport coordinates from
+   the finger's own moves, above the input layer, touching nothing. */
+.stream-client-cursor {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 51;
+    pointer-events: none;
+    transform-origin: 0 0;
+    will-change: transform;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Last frame of the previous stream, held over the canvas/video until this
+   view decodes its own (see StreamView.showStalePoster). Above the picture
+   elements so the empty canvas cannot show through, below the input layer so
+   the user can still move the mouse — which is exactly what wakes a host that
+   stopped encoding. Slightly dimmed, like the relaunch freeze frame, so a held
+   image never passes for a live one. */
+.stream-stale-poster {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    z-index: 10;
+    pointer-events: none;
+    filter: brightness(0.85);
+}
+
+.stream-click-hint {
+    position: absolute;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    padding: 12px 28px;
+    border-radius: 8px;
+    font-size: 14px;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* The host is dropping our presses (an administrator window has focus there).
+   A strip, not a dialog: the way out is to click elsewhere on the picture. */
+.stream-input-gate {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 24px);
+    background: rgba(120, 60, 0, 0.85);
+    color: #fff;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.35;
+    text-align: center;
+    pointer-events: none;
+    border: 1px solid rgba(255, 200, 120, 0.35);
+    /* Above .stream-input-layer (50), which covers the whole picture and would
+       otherwise take the tap meant for the button below. Safe because the strip
+       itself is transparent to the pointer — only the button takes it back. */
+    z-index: 60;
+}
+
+/* The way out, when Windows has frozen the pointer too and clicking elsewhere
+   is not possible. The strip itself stays transparent to the pointer — only
+   this takes it back, so nothing else about the picture changes. Sized for a
+   thumb: it is pressed on a phone, one-handed, by someone already stuck. */
+.stream-input-gate-release {
+    /* By choice: under the text, and shown whenever the strip is (both reasons). */
+    display: block;
+    margin: 8px auto 0;
+    pointer-events: auto;
+    min-height: 36px;
+    padding: 8px 18px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 220, 160, 0.6);
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.stream-input-gate-release:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.22);
+}
+
+.stream-input-gate-release:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* ── Keyboard shortcuts slide (startup overlay) ────────────────────── */
+.stream-shortcuts-slide {
+    position: absolute;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(10, 10, 16, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 12px;
+    padding: 14px 22px;
+    z-index: 100;
+    /* Clickable so the user can dismiss the hint (tap/click to hide). */
+    pointer-events: auto;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+    animation: shortcuts-fade-in 0.3s ease-out;
+}
+
+@keyframes shortcuts-fade-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+/* Fast fade-out on dismiss (click/tap or auto-hide). */
+.stream-shortcuts-slide.fading-out {
+    animation: shortcuts-fade-out 0.18s ease-in forwards;
+    pointer-events: none;
+}
+
+@keyframes shortcuts-fade-out {
+    from {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+    to {
+        opacity: 0;
+        transform: translateX(-50%) translateY(8px);
+    }
+}
+
+.shortcuts-slide-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.5);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 10px;
+    text-align: center;
+}
+
+.shortcuts-slide-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    white-space: nowrap;
+}
+
+.shortcut-action {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.shortcut-keys {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.shortcut-plus {
+    display: flex;
+    align-items: center;
+    height: 22px;
+    color: rgba(255, 255, 255, 0.35);
+    font-size: 11px;
+    line-height: 1;
+}
+
+.shortcut-keys kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    height: 22px;
+    padding: 0 8px;
+    font-size: 11px;
+    font-family: inherit;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    line-height: 1;
+    box-sizing: border-box;
+}
+
+/* Gesture chips (touch help): wider, sentence-case label rather than a key. */
+.shortcut-keys kbd.gesture {
+    min-width: 0;
+    padding: 0 10px;
+    font-size: 11.5px;
+    letter-spacing: 0.2px;
+    background: rgba(240, 192, 64, 0.12);
+    border-color: rgba(240, 192, 64, 0.28);
+    color: rgba(255, 255, 255, 0.92);
+}
+
+/* ── Streaming stats overlay (top-LEFT, discreet glass card) ───────── */
+.stream-stats-overlay {
+    position: fixed;
+    /* Honor the safe-area insets so the card never sits under the iOS notch /
+       status bar when running as a standalone home-screen app. */
+    top: max(10px, env(safe-area-inset-top));
+    left: max(10px, env(safe-area-inset-left));
+    /* Above the CSS-fallback fullscreen canvas area (z-index 9999) so the stats
+       stay visible in fullscreen. */
+    z-index: 10000;
+    /* Draggable: must receive pointer events. Kept small so it barely
+       intercepts input; the user can move it off the game when needed. */
+    pointer-events: auto;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    background: rgba(8, 8, 14, 0.45);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 10px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+    /* Extra right padding reserves room for the absolute × close button so it
+       never overlaps the resolution line (top-right of the stats). */
+    padding: 8px 24px 8px 12px;
+    min-width: 168px;
+    /* Never wider than the screen it is on, its 10px margin on either side
+       kept: on a phone the open breakdown ran off the right edge. */
+    max-width: calc(
+        100vw - max(10px, env(safe-area-inset-left)) - max(10px, env(safe-area-inset-right))
+    );
+    font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+    line-height: 1.45;
+    color: rgba(255, 255, 255, 0.7);
+    transition: opacity 0.2s ease;
+}
+
+.stream-stats-overlay.dragging {
+    cursor: grabbing;
+    transition: none;
+}
+
+/* ── Mouse-gaming-mode exit reminder (discreet, draggable, top-center) ───────
+   Shown only while gaming mode has the mouse captured. Reminds the single
+   combo that releases the mouse, the full keyboard lock and fullscreen. */
+.stream-gaming-overlay {
+    position: fixed;
+    top: max(10px, env(safe-area-inset-top));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    pointer-events: auto;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    display: none; /* revealed via .visible when captured */
+    align-items: center;
+    gap: 8px;
+    border-radius: 8px;
+    padding: 5px 11px;
+    font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 10.5px;
+    white-space: nowrap;
+    transition: opacity 0.2s ease;
+    /* Non-fullscreen: the card sits in the header next to the Fullscreen button,
+       so it adopts the same surface/text colors for a consistent header look. */
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.65);
+    opacity: 1;
+}
+/* Fullscreen (no header): the card floats over the image, so keep the original
+   discreet dark-glass look that never competes with the game. */
+:fullscreen .stream-gaming-overlay,
+:-webkit-full-screen .stream-gaming-overlay,
+.stream-css-fs .stream-gaming-overlay {
+    background: rgba(8, 8, 14, 0.4);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+    color: rgba(255, 255, 255, 0.55);
+    opacity: 0.5;
+}
+.stream-gaming-overlay.visible {
+    display: flex;
+}
+/* Over the picture it only passes through (issue #28): a few seconds on
+   arrival, then gone — and out of the way of the clicks under it. Not while it
+   is being dragged, which is the one time someone is plainly looking at it. */
+.stream-gaming-overlay.visible.faded:not(.dragging) {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.8s ease;
+}
+.stream-gaming-overlay.dragging {
+    cursor: grabbing;
+    transition: none;
+    opacity: 0.92;
+}
+.stream-gaming-overlay .gm-keys {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+.stream-gaming-overlay .gm-plus {
+    color: rgba(255, 255, 255, 0.3);
+}
+.stream-gaming-overlay .gm-text {
+    color: rgba(255, 255, 255, 0.45);
+}
+.stream-gaming-overlay kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    font-size: 10px;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.8);
+}
+
+/* ── Overlay × close button (stats card) ─────────────────────── */
+.overlay-close-btn {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 14px;
+    line-height: 16px;
+    text-align: center;
+    cursor: pointer;
+    border-radius: 4px;
+    pointer-events: auto;
+    transition:
+        color 0.15s ease,
+        background 0.15s ease;
+}
+.overlay-close-btn:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.12);
+}
+/* A finger needs a target the size of a fingertip, not of a 16px glyph: on a
+   phone the × kept missing and the tap dragged the card instead. The hit area
+   grows past the card's corner rather than into its numbers; the glyph grows
+   a little, the card barely. A mouse keeps the small one. */
+@media (pointer: coarse) {
+    .stream-stats-overlay {
+        padding-right: 32px;
+    }
+    .overlay-close-btn {
+        top: -6px;
+        right: -6px;
+        width: 40px;
+        height: 40px;
+        font-size: 22px;
+        line-height: 40px;
+        border-radius: 10px;
+        color: rgba(255, 255, 255, 0.6);
+    }
+}
+
+/* The 60-second history strip, drawn under the card's numbers when the latency
+   breakdown is open. A canvas: four lanes of hairlines at 2 Hz cost nothing to
+   paint, and cost nothing at all while the panel is closed.
+   No border of its own — the separator is drawn inside the bitmap, so the box
+   the canvas reports is exactly the surface it draws on. */
+.stats-graph {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    /* The card reserves 24px on the right for the × button; the strip claws
+       that back so the curves span the same width as the rows above them. */
+    margin-right: -12px;
+    pointer-events: auto;
+    /* Hovering the strip with a mouse draws a crosshair with every curve's
+       value at that instant; the card can still be dragged from here. */
+    cursor: crosshair;
+}
+
+.stats-line {
+    white-space: nowrap;
+}
+
+.stats-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.stats-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    font-size: 10.5px;
+    color: rgba(255, 255, 255, 0.5);
+    white-space: nowrap;
+}
+
+.stats-latency-row {
+    font-size: 11.5px;
+    margin-top: 3px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.stats-label {
+    color: rgba(255, 255, 255, 0.32);
+    text-transform: uppercase;
+    font-size: 0.88em;
+    letter-spacing: 0.4px;
+}
+
+.stats-value {
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.68);
+    font-variant-numeric: tabular-nums;
+}
+
+/* The dotted underline is the only hint that a breakdown is one click (or one
+   tap) away — no permanent affordance cluttering the card. */
+.stats-latency {
+    color: #f0c040;
+    font-weight: 600;
+    border-bottom: 1px dotted rgba(240, 192, 64, 0.4);
+}
+
+/* Per-leg breakdown, revealed with the total: one labelled row per leg. A grid
+   rather than a stack of flex rows so every value shares one column — with
+   tabular figures and a fixed decimal, the numbers, their decimal points and
+   their unit all line up vertically down the list. */
+.stats-latency-detail {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    column-gap: 14px;
+    row-gap: 1px;
+    margin-top: 3px;
+    padding-top: 3px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+/* The rows are grid contents, not boxes: the label/value cells sit directly in
+   the grid so the columns are shared across every leg. */
+.stats-leg-row {
+    display: contents;
+}
+
+.stats-leg-row .stats-value {
+    text-align: right;
+    color: rgba(240, 192, 64, 0.75);
+}
+
+/* A phone in portrait: the open breakdown is wider than the screen on one line
+   per row ("Screen (compositor + scan-out)" beside "not measured, ~½–1
+   refresh"), and the card stops at the screen's width. So the words wrap
+   instead, labels at least half the card, values right-aligned against their
+   column. A wider screen keeps every row on one line. */
+@media (max-width: 600px) {
+    .stats-row,
+    .stats-latency-detail {
+        white-space: normal;
+    }
+    .stats-row .stats-value {
+        text-align: right;
+    }
+    .stats-latency-detail {
+        grid-template-columns: minmax(50%, 1fr) auto;
+    }
+}
+
+/* Pipeline observations, revealed with the latency breakdown. One dense
+   free-form line rather than labelled rows: it is a diagnostic trace (the same
+   text goes to the console), so it wraps instead of forcing the card wider. */
+.stats-diag {
+    margin-top: 3px;
+    padding-top: 3px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    max-width: 260px;
+    font-size: 9px;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.55);
+    white-space: normal;
+    word-break: break-word;
+}
+
+/* ── Startup overlay (centered 3-step connection status) ──────────────── */
+.stream-startup-overlay {
+    display: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 200;
+    pointer-events: none;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 11px;
+    transition: opacity 0.5s ease;
+}
+
+.stream-startup-overlay.hidden {
+    opacity: 0;
+}
+
+/* Full-screen loader shown during a transport relaunch (transport-chain
+   fallback) so the apps view is never revealed between StreamView instances.
+   Reuses the .startup-loader / .startup-step visuals. */
+#stream-relaunch-loader {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    /* Surround inherited from the shared rule above: the relaunch cover is a
+       continuation of the overlay, not a black flash on top of it. */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 11px;
+}
+
+/* The loader's own Stop button: the outgoing StreamView (and its header) is
+   already gone, so this is the only way out of a relaunch that never lands.
+   Pinned to the top instead of following the flex centering, so it reads as
+   the same header the stream had a moment ago. */
+#stream-relaunch-loader .stream-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 2;
+}
+
+/* Frozen last frame of the outgoing stream (quality transition on a live
+   stream): shown near-full brightness with only a small corner spinner — no
+   connection steps — so the switch reads as a brief pause, not a reconnect. */
+#stream-relaunch-loader .relaunch-freeze-frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: brightness(0.85);
+}
+
+#stream-relaunch-loader.has-freeze-frame .startup-loader {
+    position: absolute;
+    right: 22px;
+    bottom: 22px;
+    width: 26px;
+    height: 26px;
+    margin-bottom: 0;
+    z-index: 1;
+    opacity: 0.8;
+}
+
+/* The host's stream worker crashed and the stream starts again: the last
+   frame stays, under a veil that says so, with the loader centred over it
+   (on the bare surround when there was no frame to keep). */
+#stream-relaunch-loader.is-reconnecting .relaunch-freeze-frame {
+    filter: brightness(0.45);
+}
+
+#stream-relaunch-loader.is-reconnecting .startup-loader {
+    z-index: 1;
+}
+
+#stream-relaunch-loader .relaunch-reconnecting {
+    position: relative;
+    z-index: 1;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.2px;
+    color: rgba(255, 255, 255, 0.95);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.startup-step {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.2px;
+    color: rgba(255, 255, 255, 0.32);
+    transition: color 0.4s ease;
+}
+
+.startup-step.active {
+    color: rgba(255, 255, 255, 0.95);
+}
+
+.startup-step.done {
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.startup-step-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    transition:
+        background 0.4s ease,
+        box-shadow 0.4s ease;
+    flex-shrink: 0;
+}
+
+.startup-step.active .startup-step-dot {
+    background: #f0c040;
+    box-shadow: 0 0 0 4px rgba(240, 192, 64, 0.14);
+}
+
+.startup-step.done .startup-step-dot {
+    background: #4caf50;
+}
+
+.startup-step-label {
+    white-space: nowrap;
+}
+
+/* ── Loader — thin track + single smooth sweeping arc ──────────────────── */
+.startup-loader {
+    position: relative;
+    width: 52px;
+    height: 52px;
+    margin-bottom: 8px;
+}
+
+/* Faint full-circle track. */
+.startup-loader::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.09);
+}
+
+/* Sweeping accent arc: a conic gradient clipped to a thin ring by a radial
+   mask, rotated smoothly. Single color, soft head — clean and calm. */
+.startup-loader-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: conic-gradient(
+        from 0deg,
+        rgba(240, 192, 64, 0) 0deg,
+        rgba(240, 192, 64, 0) 90deg,
+        #f0c040 360deg
+    );
+    -webkit-mask: radial-gradient(
+        farthest-side,
+        transparent calc(100% - 3px),
+        #000 calc(100% - 3px)
+    );
+    mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+    animation: startup-spin 0.9s linear infinite;
+}
+
+@keyframes startup-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ── Fullscreen button — centered in the header bar ────────────────────── */
+.btn-stream-fs {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 14px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+    -webkit-user-select: none;
+    transition:
+        background 0.2s,
+        color 0.2s,
+        border-color 0.2s;
+}
+.btn-stream-fs:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.3);
+}
+.btn-stream-fs:active {
+    transform: translate(-50%, -50%) scale(0.95);
+}
+/* Gaming mode: the fullscreen-toggle combo (…+X) shown on the button. */
+.btn-stream-fs .fs-combo {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 4px;
+    padding-left: 8px;
+    border-left: 1px solid rgba(255, 255, 255, 0.15);
+}
+.btn-stream-fs .fs-plus {
+    color: rgba(255, 255, 255, 0.35);
+    font-size: 10px;
+}
+.btn-stream-fs kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 10px;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+/* ── Stream volume (issue #29) ─────────────────────────────────────────────
+   Left of the Fullscreen button, in the same pill. At rest only the speaker
+   shows; hovering (or tabbing into) it slides the level out to the LEFT — the
+   control is anchored by its right edge (translate -100%, left set by
+   StreamView._positionGamingOverlay), so opening it never nudges the
+   Fullscreen button under the cursor. Open, it may reach over the brand and
+   the version badge on a narrow window, so it is opaque (the header's #111
+   under the same white tint) and sits above them, never see-through. */
+.stream-volume {
+    position: absolute;
+    z-index: 2;
+    top: 50%;
+    transform: translate(-100%, -50%);
+    display: inline-flex;
+    align-items: center;
+    height: 30px;
+    background: linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06)) #111;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.65);
+    transition:
+        background 0.2s,
+        border-color 0.2s;
+}
+.stream-volume[hidden] {
+    display: none;
+}
+.stream-volume:hover,
+.stream-volume:focus-within {
+    background: linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12)) #111;
+    border-color: rgba(255, 255, 255, 0.3);
+    box-shadow: 0 0 0 6px #111;
+}
+.stream-volume-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 28px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 16px;
+    cursor: pointer;
+}
+.stream-volume:hover .stream-volume-btn,
+.stream-volume-btn:focus-visible {
+    color: #fff;
+}
+/* Muted: the speaker says so in the colour the rest of the app uses for "off". */
+.stream-volume.is-muted .stream-volume-btn {
+    color: var(--c-danger-text, #ff6b8b);
+}
+.stream-volume-slider {
+    width: 0;
+    height: 4px;
+    margin: 0;
+    opacity: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    /* Filled up to the level, the rest is track. */
+    background: linear-gradient(
+        to right,
+        rgba(255, 255, 255, 0.85) 0,
+        rgba(255, 255, 255, 0.85) var(--level, 100%),
+        rgba(255, 255, 255, 0.18) var(--level, 100%)
+    );
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+    transition:
+        width 0.18s ease,
+        margin 0.18s ease,
+        opacity 0.18s ease;
+}
+.stream-volume:hover .stream-volume-slider,
+.stream-volume:focus-within .stream-volume-slider {
+    width: 84px;
+    margin: 0 4px 0 12px;
+    opacity: 1;
+}
+.stream-volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fff;
+    border: none;
+    box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.35);
+}
+.stream-volume-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fff;
+    border: none;
+    box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.35);
+}
+
+/* ── On-screen keyboard toggle (touch devices) ─────────────────────────── */
+.btn-stream-kbd {
+    /* In the header flex flow on the right (left of Stop), so it never sits
+       under the top-left stats overlay. The fullscreen button is absolute-center,
+       so the flex items are just this button and Stop. */
+    position: relative;
+    margin-right: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 30px;
+    padding: 0 12px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 19px;
+    line-height: 30px;
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+}
+/* inline-flex above outranks the browser's own [hidden] handling. */
+.btn-stream-kbd[hidden] {
+    display: none;
+}
+.btn-stream-kbd:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.3);
+}
+.btn-stream-kbd:active {
+    transform: scale(0.95);
+}
+.btn-stream-kbd.active {
+    background: var(--kbd-on);
+    color: var(--kbd-on-edge);
+    border-color: var(--kbd-on-edge);
+}
+
+/* Share guest's controller button (check / remap the pad): the keyboard
+   button's square, next to Leave. */
+.btn-stream-pad {
+    position: relative;
+    margin-right: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 30px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 20px;
+    cursor: pointer;
+    user-select: none;
+}
+.btn-stream-pad:hover {
+    background: var(--kbd-on);
+    color: var(--kbd-on-edge);
+    border-color: var(--kbd-on-edge);
+}
+.btn-stream-pad:active {
+    transform: scale(0.95);
+}
+/* The owner's "Buy me a coffee" button (StreamView._mountSupportButton): the
+   official cup alone — white outline, yellow coffee — with no button around
+   it, first of the bar's right-hand controls; the wordmark or a frame would
+   draw the eye over a game. A phone held upright has no room for it; turned
+   sideways it goes first even ahead of the keyboard button, which otherwise
+   heads the bar on a touch screen. */
+.stream-support-btn {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 12px;
+    padding: 2px;
+    border: 0;
+    background: none;
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.15s ease;
+}
+.stream-support-btn:hover,
+.stream-support-btn:focus-visible {
+    opacity: 1;
+}
+/* With the mark hidden, put it ahead of the keyboard button too. */
+@media (max-width: 767px) {
+    .stream-header .stream-support-btn {
+        order: -1;
+    }
+}
+@media (max-width: 767px) and (orientation: portrait) {
+    .stream-header .stream-support-btn {
+        display: none;
+    }
+}
+/* A pad is connected that nothing maps: the button is where to fix it. */
+.btn-stream-pad.is-attention {
+    color: var(--kbd-on-edge);
+    border-color: var(--kbd-on-edge);
+    animation: stream-pad-attention 1.6s ease-in-out infinite;
+}
+@keyframes stream-pad-attention {
+    50% {
+        box-shadow: 0 0 10px rgba(0, 229, 255, 0.55);
+        background: var(--kbd-on);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .btn-stream-pad.is-attention {
+        animation: none;
+        background: var(--kbd-on);
+    }
+}
+
+/* Hidden capture element: focusable (opens the soft keyboard) but invisible.
+   Must NOT use display:none / visibility:hidden — those block focus.
+   Anchored at the TOP (not bottom): a bottom-anchored field sits behind the
+   keyboard, so iOS scrolls the whole document up to reveal the caret — which
+   detaches the keyboard and shifts the streamed image. At top:0 it is always
+   visible, so iOS never scrolls. */
+.stream-kbd-capture {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    opacity: 0;
+    resize: none;
+    z-index: -1;
+    color: transparent;
+    background: transparent;
+    caret-color: transparent;
+    pointer-events: none;
+}
+
+/* ── Special-keys bar shown above the on-screen keyboard (touch) ────────── */
+.stream-kbd-toolbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0; /* JS parks it just above the soft keyboard */
+    display: none;
+    align-items: stretch;
+    gap: 3px;
+    padding: 5px 4px;
+    /* All keys share the width — no horizontal scroll, every key reachable. */
+    background: rgba(20, 20, 22, 0.96);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.4);
+    z-index: 60;
+    box-sizing: border-box;
+}
+.stream-kbd-toolbar.visible {
+    display: flex;
+}
+.stream-kbd-key {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 38px;
+    padding: 0 1px;
+    /* Disable double-tap-to-zoom: otherwise a fast double tap on a modifier is
+       eaten as a zoom gesture, the second toggle never fires and the modifier
+       stays latched/stuck. */
+    touch-action: manipulation;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 7px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+.stream-kbd-key:active {
+    transform: scale(0.94);
+    background: rgba(255, 255, 255, 0.18);
+}
+.stream-kbd-key.is-mod {
+    color: rgba(255, 255, 255, 0.8);
+}
+.stream-kbd-key.active {
+    /* Latched modifier (one-shot) — neon cyan, matching the Stop button border */
+    background: var(--kbd-on);
+    border-color: var(--kbd-on-edge);
+    color: var(--kbd-on-edge);
+}
+.stream-kbd-key.locked {
+    /* Locked modifier (double-tap) — solid, pronounced blue + glow: stays
+       pressed until tapped off. Distinct from the soft cyan one-shot latch. */
+    background: #1f6feb;
+    border-color: #79c0ff;
+    color: #fff;
+    box-shadow:
+        0 0 10px rgba(56, 139, 253, 0.9),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+/* ── Native fullscreen: hide the header so the stream fills the screen ──── */
+:fullscreen .stream-header {
+    display: none !important;
+}
+:-webkit-full-screen .stream-header {
+    display: none !important;
+}
+
+/* ── Canvas CSS fallback fullscreen ────────────────────────────────────── */
+.stream-css-fs .stream-header {
+    display: none !important;
+}
+.stream-css-fs .stream-canvas-area {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 9999 !important;
+    /* Surround inherited from the shared rule above — this layer covers the
+       overlay in CSS-fallback fullscreen, so a plain black here would drop
+       the grid. */
+}
+.stream-css-fs .stream-canvas,
+.stream-css-fs .stream-video {
+    max-width: 100% !important;
+    max-height: 100% !important;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain;
+}
+
+/* ── "Add to Home Screen" hint (iOS) — pinned to the TOP of the stream ─── */
+.install-hint {
+    position: fixed;
+    left: 50%;
+    top: max(16px, env(safe-area-inset-top, 16px));
+    transform: translateX(-50%);
+    z-index: 100000;
+    max-width: min(92vw, 460px);
+    padding: 12px 18px;
+    border-radius: 10px;
+    background: rgba(20, 20, 22, 0.92);
+    color: #fff;
+    font-size: 0.875rem;
+    line-height: 1.4;
+    text-align: center;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    /* Only intercept clicks while visible, so the faded-out hint never blocks
+       input in the top-center region. Clickable to dismiss when shown. */
+    pointer-events: none;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+}
+.install-hint-visible {
+    opacity: 0.8;
+    pointer-events: auto;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Cyberpunk "SIGNAL ACQUIRED" boot reveal — one-shot, plays on first frame.
+   Full-screen, pointer-events:none (Stop stays clickable). Built in
+   StreamView.render(), triggered by _playStreamReveal() at startup step 3.
+   ════════════════════════════════════════════════════════════════════════ */
+.stream-reveal {
+    /* absolute (not fixed): scoped to .stream-canvas-area, which is the
+       positioned ancestor — covers only the streamed image, not the body. */
+    position: absolute;
+    inset: 0;
+    z-index: 9990;
+    pointer-events: none;
+    overflow: hidden;
+    display: none;
+}
+.stream-reveal.playing {
+    display: block;
+}
+
+/* Dark tech-grid cover that dissolves as the screen "materializes". */
+.reveal-grid {
+    position: absolute;
+    inset: 0;
+    background:
+        repeating-linear-gradient(
+            to bottom,
+            rgba(0, 229, 255, 0.07) 0,
+            rgba(0, 229, 255, 0.07) 1px,
+            transparent 1px,
+            transparent 3px
+        ),
+        repeating-linear-gradient(
+            to right,
+            rgba(0, 229, 255, 0.05) 0,
+            rgba(0, 229, 255, 0.05) 1px,
+            transparent 1px,
+            transparent 46px
+        ),
+        linear-gradient(0deg, rgba(5, 8, 11, 0.92), rgba(5, 8, 11, 0.65));
+    opacity: 0;
+}
+.playing .reveal-grid {
+    animation: reveal-grid-out 0.9s ease forwards;
+}
+@keyframes reveal-grid-out {
+    0% {
+        opacity: 1;
+    }
+    55% {
+        opacity: 0.55;
+    }
+    100% {
+        opacity: 0;
+    }
+}
+
+/* Bright cyan scan beam sweeping top → bottom once. */
+.reveal-beam {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 14%;
+    opacity: 0;
+    background: linear-gradient(
+        to bottom,
+        transparent 0%,
+        rgba(0, 229, 255, 0.18) 42%,
+        var(--neon-cyan) 50%,
+        rgba(0, 229, 255, 0.18) 58%,
+        transparent 100%
+    );
+    box-shadow: 0 0 48px 10px rgba(0, 229, 255, 0.45);
+    mix-blend-mode: screen;
+}
+.playing .reveal-beam {
+    animation: reveal-beam 0.72s cubic-bezier(0.4, 0, 0.1, 1) forwards;
+}
+@keyframes reveal-beam {
+    0% {
+        transform: translateY(-30%);
+        opacity: 0;
+    }
+    10% {
+        opacity: 1;
+    }
+    88% {
+        opacity: 1;
+    }
+    100% {
+        transform: translateY(720%);
+        opacity: 0;
+    }
+}
+
+/* Quick RGB-split glitch that settles. */
+.reveal-glitch {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    mix-blend-mode: screen;
+    background:
+        linear-gradient(90deg, rgba(255, 42, 109, 0), rgba(255, 42, 109, 0.16)),
+        linear-gradient(270deg, rgba(0, 229, 255, 0), rgba(0, 229, 255, 0.14));
+}
+.playing .reveal-glitch {
+    animation: reveal-glitch 0.5s steps(1) forwards;
+}
+@keyframes reveal-glitch {
+    0% {
+        opacity: 0;
+        transform: translateX(0);
+    }
+    8% {
+        opacity: 0.8;
+        transform: translateX(-7px);
+    }
+    13% {
+        opacity: 0.15;
+        transform: translateX(5px);
+    }
+    21% {
+        opacity: 0.7;
+        transform: translateX(3px);
+    }
+    27% {
+        opacity: 0;
+        transform: translateX(0);
+    }
+    100% {
+        opacity: 0;
+    }
+}
+
+/* HUD corner brackets that converge inward then fade (neon yellow). */
+.reveal-brackets {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+}
+.playing .reveal-brackets {
+    animation: reveal-brackets 0.85s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+@keyframes reveal-brackets {
+    0% {
+        opacity: 0;
+        transform: scale(1.16);
+    }
+    22% {
+        opacity: 1;
+    }
+    70% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(1);
+    }
+}
+.reveal-brackets .rb {
+    position: absolute;
+    width: 46px;
+    height: 46px;
+    border: 2px solid var(--accent-1);
+    box-shadow: 0 0 12px var(--accent-ring);
+}
+.reveal-brackets .rb.tl {
+    top: 6%;
+    left: 6%;
+    border-right: none;
+    border-bottom: none;
+}
+.reveal-brackets .rb.tr {
+    top: 6%;
+    right: 6%;
+    border-left: none;
+    border-bottom: none;
+}
+.reveal-brackets .rb.bl {
+    bottom: 6%;
+    left: 6%;
+    border-right: none;
+    border-top: none;
+}
+.reveal-brackets .rb.br {
+    bottom: 6%;
+    right: 6%;
+    border-left: none;
+    border-top: none;
+}
+
+/* Flickering HUD line. */
+.reveal-text {
+    position: absolute;
+    top: 15%;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: clamp(14px, 3vw, 22px);
+    letter-spacing: 7px;
+    text-indent: 7px;
+    color: var(--accent-1);
+    text-shadow: 0 0 14px var(--accent-ring);
+    opacity: 0;
+}
+.playing .reveal-text {
+    animation: reveal-text 0.9s steps(1) forwards;
+}
+@keyframes reveal-text {
+    0% {
+        opacity: 0;
+    }
+    12% {
+        opacity: 1;
+    }
+    16% {
+        opacity: 0.2;
+    }
+    22% {
+        opacity: 1;
+    }
+    70% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 0;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Take-over overlay — session interrupted by another device (CP2077 exit)
+   ════════════════════════════════════════════════════════════════════════ */
+.stream-takeover-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        radial-gradient(900px 600px at 50% 50%, rgba(255, 42, 109, 0.1) 0%, transparent 60%),
+        rgba(3, 5, 8, 0);
+    opacity: 0;
+    transition:
+        opacity 0.35s ease,
+        background 0.35s ease;
+    pointer-events: none;
+}
+.stream-takeover-overlay.is-active {
+    opacity: 1;
+    background:
+        radial-gradient(900px 600px at 50% 50%, rgba(255, 42, 109, 0.16) 0%, transparent 60%),
+        rgba(3, 5, 8, 0.86);
+    pointer-events: all;
+}
+.stream-takeover-overlay.is-closing {
+    opacity: 0;
+}
+
+/* Moving scanlines wash */
+.takeover-scanlines {
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 229, 255, 0.05) 0px,
+        rgba(0, 229, 255, 0.05) 1px,
+        transparent 2px,
+        transparent 4px
+    );
+    mix-blend-mode: screen;
+    animation: takeover-scan 7s linear infinite;
+    opacity: 0.55;
+}
+@keyframes takeover-scan {
+    0% {
+        background-position-y: 0;
+    }
+    100% {
+        background-position-y: 64px;
+    }
+}
+
+/* Notched neon box */
+.takeover-box {
+    position: relative;
+    max-width: min(86vw, 520px);
+    padding: 28px 34px;
+    text-align: center;
+    background: var(--surface-glass);
+    backdrop-filter: blur(8px);
+    clip-path: var(--notch-lg);
+    box-shadow:
+        var(--edge-cyan),
+        0 0 34px rgba(255, 42, 109, 0.28);
+    transform: translateY(14px) scale(0.96);
+    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.stream-takeover-overlay.is-active .takeover-box {
+    transform: translateY(0) scale(1);
+}
+
+/* Glitch title (duplicated via data-text, magenta/cyan channel split) */
+.takeover-title {
+    position: relative;
+    font-family: var(--font-ui);
+    font-weight: 700;
+    font-size: clamp(1.4rem, 4.4vw, 2rem);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent-1);
+    text-shadow: 0 0 12px rgba(252, 238, 10, 0.55);
+}
+.takeover-title::before,
+.takeover-title::after {
+    content: attr(data-text);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    clip-path: inset(0 0 0 0);
+}
+.takeover-title::before {
+    color: var(--neon-magenta);
+    animation: takeover-glitch-x 1.9s infinite steps(2);
+    mix-blend-mode: screen;
+}
+.takeover-title::after {
+    color: var(--neon-cyan);
+    animation: takeover-glitch-y 2.3s infinite steps(2);
+    mix-blend-mode: screen;
+}
+@keyframes takeover-glitch-x {
+    0%,
+    100% {
+        transform: translate(0, 0);
+    }
+    20% {
+        transform: translate(-2px, 1px);
+    }
+    40% {
+        transform: translate(2px, -1px);
+    }
+    60% {
+        transform: translate(-1px, 0);
+    }
+}
+@keyframes takeover-glitch-y {
+    0%,
+    100% {
+        transform: translate(0, 0);
+    }
+    25% {
+        transform: translate(1px, -1px);
+    }
+    55% {
+        transform: translate(-2px, 1px);
+    }
+    80% {
+        transform: translate(1px, 1px);
+    }
+}
+
+.takeover-sub {
+    margin-top: 12px;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    letter-spacing: 0.04em;
+}
+
+/* Depleting connection bar (2s) */
+.takeover-bar {
+    margin: 20px auto 2px;
+    width: 70%;
+    height: 3px;
+    background: rgba(0, 229, 255, 0.16);
+    overflow: hidden;
+}
+.takeover-bar > span {
+    display: block;
+    height: 100%;
+    width: 100%;
+    background: linear-gradient(90deg, var(--neon-magenta), var(--accent-1));
+    transform-origin: right center;
+    transform: scaleX(1);
+}
+.stream-takeover-overlay.is-active .takeover-bar > span {
+    animation: takeover-deplete 2s linear forwards;
+}
+@keyframes takeover-deplete {
+    from {
+        transform: scaleX(1);
+    }
+    to {
+        transform: scaleX(0);
+    }
+}
+
+/* Clean-exit variant — user pressed Stop. Signature yellow/cyan instead of
+   the hostile magenta/red take-over wash, and a faster 1.2s deplete. */
+.stream-takeover-overlay.is-quit {
+    background:
+        radial-gradient(900px 600px at 50% 50%, rgba(252, 238, 10, 0.08) 0%, transparent 60%),
+        rgba(3, 5, 8, 0);
+}
+.stream-takeover-overlay.is-quit.is-active {
+    background:
+        radial-gradient(900px 600px at 50% 50%, rgba(252, 238, 10, 0.14) 0%, transparent 60%),
+        rgba(3, 5, 8, 0.86);
+}
+.stream-takeover-overlay.is-quit .takeover-box {
+    box-shadow:
+        var(--edge-cyan),
+        0 0 34px rgba(252, 238, 10, 0.26);
+}
+.stream-takeover-overlay.is-quit .takeover-bar > span {
+    background: linear-gradient(90deg, var(--neon-cyan), var(--accent-1));
+}
+.stream-takeover-overlay.is-quit.is-active .takeover-bar > span {
+    animation-duration: 1.2s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .takeover-scanlines,
+    .takeover-title::before,
+    .takeover-title::after,
+    .takeover-bar > span {
+        animation: none;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CRT power-off — plays after the disconnect/take-over transition. The whole
+   "screen" implodes into a glowing horizontal phosphor line, then a single
+   dot, like an old terminal monitor cutting power. Cyberpunk neon tint.
+   ════════════════════════════════════════════════════════════════════════ */
+/* Phosphor scan line — scoped INSIDE .stream-canvas-area so it collapses
+   together with the real frame (it is a child of the collapsing element).
+   Transparent away from the centre + screen blend so the streamed image shows
+   through and implodes into this glowing band, not just an overlay on top. */
+.crt-poweroff {
+    position: absolute;
+    inset: 0;
+    z-index: 9999; /* above canvas/video, within the frame area */
+    pointer-events: none;
+    mix-blend-mode: screen;
+    background: linear-gradient(
+        0deg,
+        transparent 0%,
+        transparent 44%,
+        rgba(0, 229, 255, 0.45) 47%,
+        rgba(178, 255, 214, 0.95) 49.5%,
+        #eafff6 50%,
+        rgba(178, 255, 214, 0.95) 50.5%,
+        rgba(252, 238, 10, 0.5) 53%,
+        transparent 56%,
+        transparent 100%
+    );
+    opacity: 0;
+}
+.crt-poweroff.is-active {
+    animation: crt-flash 0.6s cubic-bezier(0.5, 0, 0.7, 0.2) forwards;
+}
+@keyframes crt-flash {
+    0% {
+        opacity: 0;
+        filter: brightness(1);
+    }
+    55% {
+        opacity: 1;
+        filter: brightness(2.2);
+    }
+    100% {
+        opacity: 1;
+        filter: brightness(6);
+    }
+}
+
+/* The actual streamed frame (canvas + video) implodes into the line: squash
+   to a thin horizontal band, then to a dot, like an old CRT cutting power. */
+.stream-canvas-area.crt-collapsing {
+    transform-origin: center center;
+    will-change: transform, filter;
+    animation: crt-collapse 0.6s cubic-bezier(0.5, 0, 0.7, 0.2) forwards;
+}
+@keyframes crt-collapse {
+    0% {
+        transform: scale(1, 1);
+        filter: brightness(1.1) saturate(1.2);
+    }
+    55% {
+        transform: scale(1, 0.012); /* squash into a horizontal line */
+        filter: brightness(2.4) saturate(1.4);
+    }
+    78% {
+        transform: scale(0.45, 0.012);
+        filter: brightness(3.2) saturate(1.4);
+    }
+    100% {
+        transform: scale(0, 0.0006); /* collapse to a dot, then fade */
+        filter: brightness(7) saturate(1.6);
+        opacity: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .crt-poweroff {
+        display: none;
+    }
+    .stream-canvas-area.crt-collapsing {
+        animation: none;
+    }
+}
+
+/* ── The stream's own menu: a TV remote's long press of OK ─────────────────
+   One column, so Up and Down are all a remote needs; buttons a finger's
+   width tall, read from three metres away. */
+.stream-remote-menu-box {
+    width: min(360px, 100%);
+}
+.stream-remote-menu-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 16px;
+}
+.stream-remote-menu-actions .btn {
+    width: 100%;
+    padding: 14px 18px;
+    font-size: 1rem;
+}

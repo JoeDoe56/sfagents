@@ -1,0 +1,550 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * LatencyProbe — click-to-photon measurement, browser side.
+ *
+ * The host (backend/src/LatencyFlag.cpp, debug builds on Windows) raises a
+ * French flag at the top of its screen for 100 ms whenever a click is injected
+ * into it. This side sends a click, stamps the moment, and watches the picture
+ * it presents until the flag shows up. The difference is the whole loop the
+ * player feels — input encoding, network, injection, capture, encode, network,
+ * decode, presentation — which no software timestamp in the pipeline covers.
+ *
+ * Costs nothing while idle: no timer, no per-frame work. The hooks the stream
+ * calls (`onFramePresented`) return on a single null check. During a
+ * measurement (at most 200 ms per click) each presented frame costs one tiny
+ * drawImage of the output surface into a 100×20 canvas and a 3-pixel read.
+ *
+ * Usage, from the console of a stream whose launch reply carried
+ * `latency_flag: true`:
+ *
+ *     await mwLatency.run()          // 3 clicks, 2 s apart, prints a summary
+ *     await mwLatency.run(10, 1500)  // 10 clicks, 1.5 s apart
+ *     mwLatencyResults               // every entry ever measured, in order
+ *
+ * Each entry: { ts, latencyMs, fromMarkMs, ok, reason } plus, when it failed,
+ * { saw, via } — the pixels the probe actually read and where it read them.
+ *   ts         — click moment, microseconds since the Unix epoch (integer)
+ *   latencyMs  — click → flag presented, or null when the flag never showed
+ *   fromMarkMs — same, counted from the frame the grey mark was painted in
+ *                (what a camera filming the client screen would see)
+ *   ok         — false when the sample must be discarded (timeout, flag
+ *                already up before the click, no picture to sample)
+ * and, when the stream gave the probe an InputUplink (stream/InputUplink.js)
+ * and the host answered the click's stamp:
+ *   upMs       — click sent → arrived on the host (the way up)
+ *   hostInMs   — arrived → injected
+ *   restMs     — latencyMs minus both: flag, capture, encode, the way down,
+ *                decode, draw
+ *
+ * The grey mark: a small circle at the pointer, painted for exactly one frame
+ * at the click, so a slow-motion camera can pair the client's click with the
+ * flag on either screen.
+ */
+
+/**
+ * Flag rectangle as fractions of the host's primary screen — mirrors
+ * LatencyFlag::kLeft..kBottom. The picture is assumed to show the whole
+ * screen (Sunshine, Apollo and the native host all capture full-screen).
+ */
+export const FLAG_REGION = Object.freeze({ left: 0.44, right: 0.56, top: 0.0, bottom: 0.05 });
+
+/** Past this, the flag is assumed lost (network hiccup) and the sample dropped. */
+export const FLAG_TIMEOUT_MS = 200;
+
+/**
+ * A click waits up to this long, at random, before it leaves. It would leave
+ * right after a picture was sampled, and pictures come at the host's refresh:
+ * every click then reaches the host at the same phase of that refresh, and a
+ * wait that depends on the phase is measured at that one phase only
+ * (09/10/2026, a Linux host's screen at 60 Hz: nine clicks in ten 1.5-2 ms
+ * before its vblank). A refresh at 40 Hz or faster is covered whole.
+ */
+const PHASE_JITTER_MS = 25;
+
+/** Output surface is scaled into this many columns × rows for sampling. */
+const SAMPLE_W = 100;
+const SAMPLE_H = 20;
+
+/**
+ * Sample columns, one per band, at the centre of each third of the flag.
+ * Nearest-neighbour scaling maps column c to source x = (c + 0.5) / SAMPLE_W:
+ * 46.5 %, 50.5 %, 54.5 % of the width — inside blue, white and red. Row 0
+ * maps to y = 2.5 %, the middle of the flag's 5 %.
+ */
+const BAND_COLUMNS = [46, 50, 54];
+
+/**
+ * Whether three RGB(A) pixels read as blue, white and red — loose enough to
+ * survive 4:2:0 chroma, a lossy encode and a downscale, strict enough that a
+ * desktop or a game does not fake it by accident (a pure-blue band next to a
+ * pure-white one next to a pure-red one is not a common sight).
+ * @param {Uint8ClampedArray|number[]} px — 12 values: RGBA × 3, blue/white/red order
+ * @returns {boolean}
+ */
+export function looksLikeFlag(px) {
+    if (!px || px.length < 12) return false;
+    const r0 = px[0],
+        g0 = px[1],
+        b0 = px[2];
+    const r1 = px[4],
+        g1 = px[5],
+        b1 = px[6];
+    const r2 = px[8],
+        g2 = px[9],
+        b2 = px[10];
+    // Everything below is a RATIO between channels, never a level, because the
+    // flag's brightness is not ours to promise. Measured 10/09/2026: the same
+    // window that reads 0,0,255 / 255,255,255 / 255,0,0 on an idle screen reads
+    // 0,0,141 / 141,141,141 / 141,0,1 while a video plays fullscreen on it —
+    // the bands are intact, the whole flag is at 55 %. The old `white >= 170`
+    // rejected that, so twelve passes of a campaign came back as timeouts and
+    // read like a dead pipeline. Bands are what identifies a flag; how bright
+    // the screen renders it is the screen's business.
+    const white = (r1 + g1 + b1) / 3;
+    const level = Math.max(b0, r2, white);
+    // One absolute floor, and only one: in a dark picture the ratios below are
+    // three noisy channels arguing over a handful of levels.
+    if (level < 60) return false;
+    // A band is its colour when its own channel stands well clear of the other
+    // two — 70 % of itself. That is what separates the real thing from a dim,
+    // desaturated triple: the overlay paints pure primaries, so its dead
+    // channels sit at 0 and clearance is ~100 %, while a bluish-grey pixel
+    // clears about 64 %. The margin survives the worst 4:2:0 smearing measured
+    // at a band boundary (~93 % on blue, ~83 % on red), which is why the probe
+    // samples band centres.
+    const dominates = (own, a, b) => own - Math.max(a, b) >= 0.7 * own;
+    const isBlue = dominates(b0, r0, g0);
+    const isRed = dominates(r2, g2, b2);
+    // Neutral, not bright: white is the band whose three channels agree.
+    const spread = Math.max(r1, g1, b1) - Math.min(r1, g1, b1);
+    const isWhite = spread <= 0.25 * Math.max(r1, g1, b1);
+    // And the three are ONE flag, lit by one screen: a band at a fraction of
+    // the others is a coincidence — a blue sky over a grey wall over a red
+    // car — not the overlay we raised.
+    const evenlyLit = Math.min(b0, r2, white) >= 0.4 * level;
+    return isBlue && isWhite && isRed && evenlyLit;
+}
+
+/**
+ * The three sampled pixels, written out. A timeout says nothing on its own —
+ * the flag may be absent from the picture (drawn on a screen the session does
+ * not capture), the picture may not be what we think we are sampling, or the
+ * readback may be handing back a surface that was never drawn into. All three
+ * look identical in the results table unless the colours are shown.
+ * @param {Uint8ClampedArray|number[]|null|undefined} px
+ * @returns {string|null}
+ */
+export function describePixels(px) {
+    if (!px || px.length < 12) return null;
+    const one = (i) => px[i * 4] + ',' + px[i * 4 + 1] + ',' + px[i * 4 + 2];
+    return 'blue?' + one(0) + ' white?' + one(1) + ' red?' + one(2);
+}
+
+/** Median and 90th percentile of a list of numbers (empty → nulls). */
+export function summarize(values) {
+    const v = values.filter((x) => typeof x === 'number' && isFinite(x)).sort((a, b) => a - b);
+    if (v.length === 0) return { n: 0, median: null, p90: null, min: null, max: null };
+    const at = (p) => v[Math.min(v.length - 1, Math.max(0, Math.ceil(p * v.length) - 1))];
+    return { n: v.length, median: at(0.5), p90: at(0.9), min: v[0], max: v[v.length - 1] };
+}
+
+export class LatencyProbe {
+    /**
+     * @param {object} deps
+     * @param {() => (CanvasImageSource|null)} deps.source — the element that
+     *        shows the stream right now (the canvas, or the <video> on the
+     *        media-track path). Read at every sample: it can switch mid-session.
+     * @param {(stamp: number|null) => void} deps.sendClick — send a left button
+     *        press + release to the host, exactly as a real click would go;
+     *        @p stamp, when not null, rides on the press (see InputUplink).
+     * @param {(() => void)|null} [deps.showMark] paint the grey circle for
+     *        one frame. Optional: a headless test has no DOM.
+     * @param {((ms: number) => void)|null} [deps.requestFrameEvents] ask the
+     *        video worker to report each presented frame for the next `ms`.
+     *        The main-thread paths call onFramePresented themselves.
+     * @param {any[]} [deps.results] the array results are appended to;
+     *        exposed as window.mwLatencyResults by the caller.
+     * @param {(() => (Uint8ClampedArray|null|undefined))|null} [deps.samplePixels]
+     *        renderer-side read of the three band pixels (see
+     *        VideoRenderer.probePixels): `undefined` = not offered, sample the
+     *        canvas; `null` = armed but no frame drawn yet; else 12 RGBA values.
+     * @param {((on: boolean) => void)|null} [deps.setProbing] arm/disarm that
+     *        renderer-side read around each measurement.
+     * @param {(() => (number|null))|null} [deps.pixelsDrawnAt] when the frame
+     *        those pixels were read from went to the canvas (performance.now(),
+     *        VideoRenderer.probeDrawnAt). A flag is dated from there rather
+     *        than from the moment it was seen, which comes after the read.
+     * @param {(() => string)|null} [deps.describeSource] what is being
+     *        sampled, for a failed measurement to name (renderer kind and
+     *        surface size). Never called while nothing is being measured.
+     * @param {import('./InputUplink.js').InputUplink|null} [deps.uplink] splits
+     *        each click into its way up and the rest (plan radios, T7).
+     * @param {number} [deps.phaseJitterMs] how long a click may wait at random
+     *        before it leaves (PHASE_JITTER_MS); 0 sends it at once.
+     */
+    constructor({
+        source,
+        sendClick,
+        showMark = null,
+        requestFrameEvents = null,
+        results = [],
+        samplePixels = null,
+        setProbing = null,
+        pixelsDrawnAt = null,
+        describeSource = null,
+        uplink = null,
+        phaseJitterMs = PHASE_JITTER_MS,
+    }) {
+        this._phaseJitterMs = phaseJitterMs;
+        this._pixelsDrawnAt = pixelsDrawnAt;
+        /** When the frame of the last renderer read was drawn, or null. */
+        this._lastDrawnAt = null;
+        this._uplink = uplink;
+        /** Host answers by click ts, for an entry recorded after its answer. */
+        this._splits = new Map();
+        this._source = source;
+        this._sendClick = sendClick;
+        this._showMark = showMark;
+        this._requestFrameEvents = requestFrameEvents;
+        this._samplePixels = samplePixels;
+        this._setProbing = setProbing;
+        this._describeSource = describeSource;
+        this.results = results;
+        /** Last pixels read, and how — reported when a measurement fails. */
+        this._lastPx = null;
+        this._lastVia = null;
+        /** @type {null | {t0: number, ts: number, tMark: number, resolve: Function, timer: any, raf: number}} */
+        this._pending = null;
+        this._running = false;
+        /** How long a click waits for its flag; run() may lengthen it. */
+        this._timeoutMs = FLAG_TIMEOUT_MS;
+        this._canvas = null;
+        this._ctx = null;
+    }
+
+    /** True while a click is waiting for its flag. */
+    get measuring() {
+        return this._pending !== null;
+    }
+
+    /**
+     * Run a trial: `clicks` clicks, `spacingMs` apart, each measured. Resolves
+     * with the entries of this run (they are also appended to `results`).
+     * A run already in progress is left alone — its promise is returned.
+     */
+    async run(clicks = 3, spacingMs = 2000, { timeoutMs = FLAG_TIMEOUT_MS } = {}) {
+        if (this._running) {
+            console.warn('[LatencyProbe] a run is already in progress');
+            return this._runPromise;
+        }
+        this._running = true;
+        this._stopped = false;
+        // A longer wait, for a run that wants to SEE the slow clicks: at the
+        // default 200 ms a flag that arrives at 230 ms is a "timeout", and the
+        // slow tail and the lost flags cannot be told apart (25/09/2026).
+        this._timeoutMs = timeoutMs > 0 ? timeoutMs : FLAG_TIMEOUT_MS;
+        this._runPromise = this._runInner(clicks, spacingMs);
+        if (this._uplink) this._uplink.hold();
+        try {
+            return await this._runPromise;
+        } finally {
+            if (this._uplink) this._uplink.release();
+            this._running = false;
+            this._runPromise = null;
+            this._timeoutMs = FLAG_TIMEOUT_MS;
+        }
+    }
+
+    async _runInner(clicks, spacingMs) {
+        const entries = [];
+        for (let i = 0; i < clicks; i++) {
+            if (i > 0) await new Promise((r) => setTimeout(r, spacingMs));
+            if (this._stopped) break;
+            entries.push(await this.measureOnce());
+        }
+        const s = summarize(entries.filter((e) => e.ok).map((e) => e.latencyMs));
+        const dropped = entries.length - s.n;
+        console.log(
+            `[LatencyProbe] ${s.n}/${entries.length} click(s) measured` +
+                (s.n
+                    ? ` · median ${s.median.toFixed(1)} ms · p90 ${s.p90.toFixed(1)} ms · ` +
+                      `min ${s.min.toFixed(1)} · max ${s.max.toFixed(1)}`
+                    : '') +
+                (dropped ? ` · ${dropped} dropped` : '') +
+                ' — see mwLatencyResults',
+        );
+        const up = summarize(
+            entries.filter((e) => e.ok && typeof e.upMs === 'number').map((e) => e.upMs),
+        );
+        const rest = summarize(
+            entries.filter((e) => e.ok && typeof e.restMs === 'number').map((e) => e.restMs),
+        );
+        if (up.n)
+            console.log(
+                `[LatencyProbe] split of ${up.n} click(s): up median ${up.median.toFixed(1)} ms ` +
+                    `(p90 ${up.p90.toFixed(1)}) · rest median ${rest.n ? rest.median.toFixed(1) : '?'} ms`,
+            );
+        // Every click dropped: say what was under the probe rather than
+        // leaving the table to be opened. This is the case that used to be
+        // unreadable — see describePixels.
+        const firstMiss = entries.find((e) => !e.ok);
+        if (s.n === 0 && firstMiss)
+            console.warn(
+                `[LatencyProbe] nothing measured (${firstMiss.reason}) · sampled ` +
+                    `${firstMiss.via} · ${firstMiss.saw || 'no pixels'} — if the host's screen is ` +
+                    'not those colours at the moment of the click, the flag is not in this picture',
+            );
+        if (typeof console.table === 'function' && entries.length) console.table(entries);
+        return entries;
+    }
+
+    /**
+     * One click, one measurement. Resolves in at most FLAG_TIMEOUT_MS (+ the
+     * wait for a stale flag to clear).
+     */
+    async measureOnce() {
+        if (this._pending) throw new Error('LatencyProbe: a measurement is already pending');
+
+        // Renderers that read their own pixels need a frame drawn after being
+        // armed before they have anything to show; give them a moment.
+        if (this._setProbing) this._setProbing(true);
+        this._lastPx = null;
+        this._lastVia = null;
+        let first = this._sample();
+        if (first === null && this._samplePixels && this._samplePixels() === null) {
+            await this._waitUntil(() => this._sample() !== null, 300);
+            first = this._sample();
+        }
+        // The flag must be down before the click, or the first sample would
+        // "detect" the previous click's flag. Give a lingering one time to go.
+        if (first === null) {
+            if (this._setProbing) this._setProbing(false);
+            return this._record(null, null, null, false, 'no picture to sample');
+        }
+        if (first) {
+            const cleared = await this._waitUntil(() => this._sample() === false, 300);
+            if (!cleared) {
+                if (this._setProbing) this._setProbing(false);
+                return this._record(null, null, null, false, 'flag already up');
+            }
+        }
+        if (this._phaseJitterMs > 0)
+            await new Promise((r) => setTimeout(r, Math.random() * this._phaseJitterMs));
+
+        return new Promise((resolve) => {
+            const t0 = performance.now();
+            const ts = Math.round((performance.timeOrigin + t0) * 1000);
+            this._pending = { t0, ts, tMark: t0, resolve, timer: null, raf: 0 };
+            const stamp = this._uplink
+                ? this._uplink.stamp(t0, (split) => this._noteSplit(ts, split))
+                : null;
+            this._sendClick(stamp);
+            if (this._showMark) this._showMark();
+            // The mark is painted in the next frame: stamp it from there so
+            // fromMarkMs is what a camera on the client screen would count.
+            requestAnimationFrame(() => {
+                if (this._pending && this._pending.ts === ts)
+                    this._pending.tMark = performance.now();
+            });
+            const timeoutMs = this._timeoutMs || FLAG_TIMEOUT_MS;
+            if (this._requestFrameEvents) this._requestFrameEvents(timeoutMs + 50);
+            // rAF polling is the floor: the presented-frame hooks sample sooner
+            // (right after a draw, or a <video> frame callback) when they fire.
+            const tick = () => {
+                if (!this._pending) return;
+                this._checkNow();
+                if (this._pending) this._pending.raf = requestAnimationFrame(tick);
+            };
+            this._pending.raf = requestAnimationFrame(tick);
+            this._pending.timer = setTimeout(() => this._finish(null, 'timeout'), timeoutMs);
+            this._armVideoCallback();
+        });
+    }
+
+    /**
+     * Called by the stream each time a frame has been presented (main-thread
+     * draw resolved, worker reported a draw, <video> frame callback). One null
+     * check when nothing is being measured.
+     */
+    onFramePresented() {
+        if (!this._pending) return;
+        this._checkNow();
+    }
+
+    /** Abandon any pending measurement; the probe stays usable. */
+    stop() {
+        this._stopped = true;
+        if (this._pending) this._finish(null, 'stopped');
+    }
+
+    _checkNow() {
+        const p = this._pending;
+        if (!p) return;
+        const now = performance.now();
+        const hit = this._sample();
+        if (hit) {
+            // The frame's own draw, when the renderer read it: the read, a
+            // GPU round trip of a few ms, is the probe's cost, not the
+            // stream's. A stamp from before the click is not this frame's.
+            const at = this._lastVia === 'renderer' ? this._lastDrawnAt : null;
+            this._finish(typeof at === 'number' && at >= p.t0 && at <= now ? at : now, null);
+        } else if (now - p.t0 > (this._timeoutMs || FLAG_TIMEOUT_MS)) {
+            this._finish(null, 'timeout');
+        }
+    }
+
+    _finish(tHit, reason) {
+        const p = this._pending;
+        if (!p) return;
+        this._pending = null;
+        if (p.timer) clearTimeout(p.timer);
+        if (p.raf) cancelAnimationFrame(p.raf);
+        if (this._setProbing) this._setProbing(false);
+        const ok = tHit !== null;
+        p.resolve(
+            this._record(p.ts, ok ? tHit - p.t0 : null, ok ? tHit - p.tMark : null, ok, reason),
+        );
+    }
+
+    /** The host's answer to a click's stamp, before or after its entry exists. */
+    _noteSplit(ts, split) {
+        this._splits.set(ts, split);
+        while (this._splits.size > 64) this._splits.delete(this._splits.keys().next().value);
+        for (let i = this.results.length - 1; i >= 0 && i >= this.results.length - 64; i--) {
+            if (this.results[i].ts === ts) {
+                this._applySplit(this.results[i]);
+                return;
+            }
+        }
+    }
+
+    _applySplit(entry) {
+        const split = this._splits.get(entry.ts);
+        if (!split) return;
+        const r3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : null);
+        entry.upMs = r3(split.upMs);
+        entry.hostInMs = r3(split.hostInMs);
+        entry.restMs =
+            typeof entry.latencyMs === 'number' && typeof split.upMs === 'number'
+                ? r3(entry.latencyMs - split.upMs - (split.hostInMs || 0))
+                : null;
+    }
+
+    _record(ts, latencyMs, fromMarkMs, ok, reason) {
+        const entry = {
+            ts: ts ?? Math.round((performance.timeOrigin + performance.now()) * 1000),
+            latencyMs: latencyMs === null ? null : Math.round(latencyMs * 1000) / 1000,
+            fromMarkMs: fromMarkMs === null ? null : Math.round(fromMarkMs * 1000) / 1000,
+            ok,
+            reason: reason || null,
+        };
+        // A hit needs no explanation; a miss is worthless without one. `saw`
+        // is the last thing sampled before giving up — grey where the host's
+        // screen is white means the picture is not the screen the flag is on.
+        if (!ok) {
+            entry.saw = describePixels(this._lastPx);
+            entry.via =
+                (this._lastVia || 'nothing sampled') +
+                (this._describeSource ? ' · ' + this._describeSource() : '');
+        }
+        this._applySplit(entry);
+        this.results.push(entry);
+        return entry;
+    }
+
+    /**
+     * Read the three band pixels off the output surface.
+     * @returns {boolean|null} true = flag visible, false = not, null = nothing
+     *          to sample (no element, zero-sized, or a readback that throws).
+     */
+    _sample() {
+        // A renderer that reads its own pixels (desynchronized WebGL2) wins
+        // over the canvas readback, which would come back blank there.
+        if (this._samplePixels) {
+            const px = this._samplePixels();
+            if (px === null) return null;
+            if (px !== undefined) {
+                this._lastPx = px;
+                this._lastVia = 'renderer';
+                this._lastDrawnAt = this._pixelsDrawnAt ? this._pixelsDrawnAt() : null;
+                return looksLikeFlag(px);
+            }
+        }
+        const el = this._source();
+        if (!el) return null;
+        try {
+            if (!this._ctx) {
+                const c = document.createElement('canvas');
+                c.width = SAMPLE_W;
+                c.height = SAMPLE_H;
+                const ctx = c.getContext('2d', { willReadFrequently: true });
+                if (!ctx) return null;
+                // Nearest neighbour: each sample is one source pixel at a known
+                // spot, not an average that could smear a neighbouring band in.
+                ctx.imageSmoothingEnabled = false;
+                this._canvas = c;
+                this._ctx = ctx;
+            }
+            const ctx = this._ctx;
+            ctx.clearRect(0, 0, SAMPLE_W, SAMPLE_H);
+            ctx.drawImage(el, 0, 0, SAMPLE_W, SAMPLE_H);
+            const px = new Uint8ClampedArray(12);
+            let any = false;
+            for (let i = 0; i < 3; i++) {
+                const d = ctx.getImageData(BAND_COLUMNS[i], 0, 1, 1).data;
+                px.set(d, i * 4);
+                if (d[3] !== 0) any = true;
+            }
+            // Fully transparent everywhere: the surface gave nothing back
+            // (a context that cannot be read after present) — not "no flag".
+            if (!any) return null;
+            this._lastPx = px;
+            this._lastVia = 'canvas readback';
+            return looksLikeFlag(px);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /** <video> path: its frame callback fires per presented frame. */
+    _armVideoCallback() {
+        const el = this._source();
+        if (!el || typeof (/** @type {any} */ (el).requestVideoFrameCallback) !== 'function')
+            return;
+        const video = /** @type {any} */ (el);
+        const cb = () => {
+            if (!this._pending) return;
+            this._checkNow();
+            if (this._pending) video.requestVideoFrameCallback(cb);
+        };
+        video.requestVideoFrameCallback(cb);
+    }
+
+    _waitUntil(pred, timeoutMs) {
+        return new Promise((resolve) => {
+            const start = performance.now();
+            const tick = () => {
+                if (pred()) return resolve(true);
+                if (performance.now() - start > timeoutMs) return resolve(false);
+                requestAnimationFrame(tick);
+            };
+            tick();
+        });
+    }
+}

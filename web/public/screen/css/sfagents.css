@@ -1,0 +1,82 @@
+/*
+ * SF Agents screen mirroring: MoonlightWeb's stream view in SF Agents' look.
+ * Copyright (C) 2026 SF Agents contributors. GPL-3.0-or-later.
+ *
+ * Loaded after MoonlightWeb's stylesheets: its tokens get SF Agents' dark
+ * theme (black, iOS blue, the system font, rounded corners, no neon), and the
+ * page's atmosphere (grid, scanlines) goes.
+ */
+
+:root {
+    color-scheme: dark;
+
+    --surface-0: #000;
+    --surface-1: #0c0c0d;
+    --surface-2: #1a191c;
+    --surface-3: #2c2c2e;
+    --surface-4: #3a3a3c;
+    --surface-glass: rgba(28, 28, 30, 0.72);
+
+    --text-1: #fff;
+    --text-2: rgba(235, 235, 245, 0.6);
+    --text-3: rgba(235, 235, 245, 0.3);
+
+    --accent-1: #0a84ff;
+    --accent-strong: #409cff;
+    --accent-deep: #0071e3;
+    --accent-soft: rgba(10, 132, 255, 0.16);
+    --accent-ring: rgba(10, 132, 255, 0.55);
+    --on-accent: #fff;
+
+    --neon-cyan: #64d2ff;
+    --neon-magenta: #ff453a;
+    --cyan-soft: rgba(100, 210, 255, 0.14);
+    --magenta-soft: rgba(255, 69, 58, 0.14);
+
+    --c-success: #30d158;
+    --c-warning: #ff9f0a;
+    --c-danger: #ff453a;
+    --c-info: #64d2ff;
+    --c-danger-text: #ff6961;
+    --c-warning-text: #ffb340;
+
+    --border-1: rgba(84, 84, 88, 0.6);
+    --border-2: rgba(120, 120, 128, 0.6);
+
+    --font-ui: var(--sf-font-sans, -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif);
+    --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
+
+    --radius-sm: 8px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-pill: 999px;
+
+    --notch-lg: none;
+    --notch-sm: none;
+    --glow-accent: none;
+    --glow-cyan: none;
+    --edge-cyan: inset 0 0 0 0.5px var(--border-1);
+    --edge-accent: inset 0 0 0 1px var(--accent-ring);
+
+    --grid-line: transparent;
+    --bg-grid: none;
+    --app-bg: #000;
+}
+
+html,
+body {
+    background: #000;
+}
+body {
+    font-weight: 400;
+}
+body::before,
+body::after {
+    content: none;
+}
+h1,
+h2,
+.settings-section-title {
+    text-transform: none;
+    letter-spacing: normal;
+}

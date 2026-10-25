@@ -1,0 +1,98 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * MoonlightWeb — Remote application data model
+ */
+export class App {
+    constructor(data, hostUuid = null) {
+        this.id = data.id || 0;
+        this.name = data.name || 'Unknown App';
+        this.hdrSupported = data.hdrSupported || false;
+        // Absent means yes: every GameStream host serves cover art, and only a
+        // host that knows it has none — the native host, whose "apps" are
+        // monitors — says so. An older host that says nothing keeps asking.
+        this.hasBoxArt = data.boxArt !== false;
+        // Only the native host sends it: what the display is (OS, built-in or
+        // external screen, monitor name, a stable key), so the card can draw the
+        // machine instead of cover art. See ui/HostArt.js.
+        this.device = data.device && typeof data.device === 'object' ? data.device : null;
+        this.hostUuid = hostUuid;
+    }
+
+    get displayName() {
+        return this.name;
+    }
+
+    /**
+     * Is this card "MoonlightWeb Virtual Display" — a screen made for the
+     * stream rather than one that was already there? The resolution choice
+     * means something else on it: the display is created at the size asked
+     * for (see util/StreamResolution.js). The key is the native host's, and
+     * no other backend sends one.
+     */
+    get isVirtualDisplay() {
+        return this.device?.key === 'moonlightweb-virtual-display';
+    }
+
+    /**
+     * Is this card an app in its own gamescope (a Linux native host: "Steam Big
+     * Picture", or one of the owner's apps)? Its screen is made at the stream's
+     * size when the session starts, and kept at that size for its whole life.
+     */
+    get isGamescope() {
+        const key = this.device?.key;
+        return (
+            key === 'gamescope-steam' ||
+            (typeof key === 'string' && key.startsWith('gamescope-app-'))
+        );
+    }
+
+    /**
+     * Where one of the native host's apps opens (the owner's, or a launcher
+     * found on the PC): "gamescope", "virtual" (MoonlightWeb Virtual Display)
+     * or "primary". Null on a display's card, and on every other host.
+     */
+    get screen() {
+        const screen = this.device?.screen;
+        return typeof screen === 'string' ? screen : null;
+    }
+
+    /** Is this card one of the native host's apps rather than a display? */
+    get isHostApp() {
+        return this.screen !== null;
+    }
+
+    /**
+     * Is the screen behind this card made for the stream — the virtual display,
+     * an app opened on it, or a gamescope app? The resolution choice then names
+     * an exact size, a phone held upright included, instead of a box the host's
+     * shape is fitted into (see util/StreamResolution.js).
+     */
+    get isMadeForStream() {
+        return this.isVirtualDisplay || this.isGamescope || this.screen === 'virtual';
+    }
+
+    get boxArtUrl() {
+        if (!this.hostUuid || !this.id || !this.hasBoxArt) return null;
+        const url = `/api/hosts/${encodeURIComponent(this.hostUuid)}/appasset?appid=${this.id}`;
+        // A native host's app image changes under the same id: its hash makes
+        // each version a URL of its own, which the browser may keep for good.
+        const art = this.device?.art;
+        return typeof art === 'string' && art ? `${url}&v=${encodeURIComponent(art)}` : url;
+    }
+}

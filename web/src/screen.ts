@@ -21,7 +21,7 @@
  *     and starts one helper with it (src/main.cpp, POST /api/hosts/:id/start);
  *   - carries the page's signaling WebSocket to that helper;
  *   - turns the virtual display off a moment after the last stream on it;
- *   - keeps each device's own settings (resolution scale, and the display's
+ *   - keeps each device's own settings (the stream's resolution, and the display's
  *     scaling on Windows, applied when that device streams).
  */
 
@@ -73,14 +73,17 @@ const ENDS_KEEP_MS = 10 * 60_000;
 /** Windows' scaling steps, in percent. */
 export const DISPLAY_SCALES = [100, 125, 150, 175, 200, 225, 250, 300, 350];
 
+/** The stream's size, as MoonlightWeb's page chooses it: its Auto, this screen pixel for pixel, or a height. */
+export const SCREEN_RESOLUTIONS = ['auto', 'device', '1080', '720'] as const;
+export type ScreenResolution = (typeof SCREEN_RESOLUTIONS)[number];
+
 export interface DeviceScreenSettings {
-  /** Stream pixels per device pixel (0.5 to 1). */
-  scale: number;
+  resolution: ScreenResolution;
   /** Windows scaling of the virtual display while this device streams, in percent; null = Windows' own. */
   displayScale: number | null;
 }
 
-const DEFAULT_SETTINGS: DeviceScreenSettings = { scale: 1, displayScale: null };
+const DEFAULT_SETTINGS: DeviceScreenSettings = { resolution: 'auto', displayScale: null };
 
 export interface ScreenStatus {
   state: 'missing' | 'installing' | 'ready' | 'unavailable' | 'error';
@@ -643,15 +646,17 @@ export class ScreenMirror {
 
   deviceSettings(device: string): DeviceScreenSettings {
     const all = readJsonFile<Record<string, Partial<DeviceScreenSettings>>>(this.settingsFile(), {});
-    return { ...DEFAULT_SETTINGS, ...(all[device] ?? {}) };
+    const s = { ...DEFAULT_SETTINGS, ...(all[device] ?? {}) };
+    if (!SCREEN_RESOLUTIONS.includes(s.resolution)) s.resolution = 'auto';
+    return s;
   }
 
   saveDeviceSettings(device: string, patch: Partial<DeviceScreenSettings>): DeviceScreenSettings {
     const all = readJsonFile<Record<string, Partial<DeviceScreenSettings>>>(this.settingsFile(), {});
     const next = { ...DEFAULT_SETTINGS, ...(all[device] ?? {}) };
-    if (patch.scale !== undefined) {
-      if (typeof patch.scale !== 'number' || !(patch.scale >= 0.5 && patch.scale <= 1)) throw new Error('The resolution scale must be from 0.5 to 1.');
-      next.scale = patch.scale;
+    if (patch.resolution !== undefined) {
+      if (!SCREEN_RESOLUTIONS.includes(patch.resolution)) throw new Error(`The resolution must be one of ${SCREEN_RESOLUTIONS.join(', ')}.`);
+      next.resolution = patch.resolution;
     }
     if (patch.displayScale !== undefined) {
       if (patch.displayScale !== null && !DISPLAY_SCALES.includes(patch.displayScale)) throw new Error(`The display scaling must be one of ${DISPLAY_SCALES.join(', ')}.`);

@@ -552,6 +552,9 @@ export class WebServer {
         return sendJson(res, 200, { state: this.screen.streamState(url.searchParams.get('stream') ?? '', device) });
       case 'running-app':
         return sendJson(res, 200, { currentGameId: 0 });
+      case 'health':
+        // The stream page's preflight: this server answers over the page's own path.
+        return sendJson(res, 200, { status: 'ok' });
       default:
         throw new HttpError(404, 'Not found.');
     }
@@ -575,7 +578,7 @@ export class WebServer {
         return sendJson(res, 200, { status: this.screen.status() });
       case 'settings': {
         const patch: Record<string, unknown> = {};
-        if ('scale' in body) patch['scale'] = body['scale'];
+        if ('resolution' in body) patch['resolution'] = body['resolution'];
         if ('displayScale' in body) patch['displayScale'] = body['displayScale'];
         let settings;
         try {
@@ -1101,7 +1104,8 @@ export class WebServer {
   }
 
   private serveStatic(p: string, req: IncomingMessage, res: ServerResponse): void {
-    const rel = p === '/' ? 'index.html' : decodeURIComponent(p).replace(/^\/+/, '');
+    let rel = p === '/' ? 'index.html' : decodeURIComponent(p).replace(/^\/+/, '');
+    if (rel === 'screen' || rel === 'screen/') rel = 'screen/index.html';
     const file = path.resolve(this.publicDir, rel);
     const inside = path.relative(this.publicDir, file);
     if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw new HttpError(404, 'Not found.');
@@ -1128,6 +1132,11 @@ export class WebServer {
     if (rel === 'index.html') {
       headers['Content-Security-Policy'] =
         "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; frame-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+      headers['Referrer-Policy'] = 'no-referrer';
+    } else if (rel === 'screen/index.html') {
+      // The stream page, framed by the Screen sheet: its Opus decoder is WebAssembly.
+      headers['Content-Security-Policy'] =
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'";
       headers['Referrer-Policy'] = 'no-referrer';
     }
     res.writeHead(200, headers);

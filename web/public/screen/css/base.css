@@ -1,0 +1,212 @@
+/* MoonlightWeb — Base layer: reset, document, scrollbar, a11y, helpers */
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+/* The page itself never scrolls — #main-content is the scroll container,
+   so the scrollbar starts BELOW the fixed header instead of overlapping it. */
+html {
+    height: 100%;
+    overflow: hidden;
+    /* Solid dark base so the iOS safe-area regions (notch, home indicator)
+       never show the white default page background behind the app. */
+    background-color: var(--surface-0);
+}
+
+body {
+    height: 100%;
+    overflow: hidden;
+    font-family: var(--font-ui);
+    font-weight: 500;
+    background: var(--app-bg);
+    background-attachment: fixed;
+    background-color: var(--surface-0);
+    color: var(--text-1);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* Disable pinch-zoom / double-tap zoom */
+    touch-action: pan-x pan-y;
+}
+
+/* ── Cyberpunk atmosphere: faint tech grid + CRT scanlines ─────────────── */
+/* Fixed, behind everything, never intercept input. */
+body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image: var(--bg-grid);
+    background-size: var(--bg-grid-size);
+    mask-image: radial-gradient(120% 120% at 50% 0%, #000 30%, transparent 80%);
+    -webkit-mask-image: radial-gradient(120% 120% at 50% 0%, #000 30%, transparent 80%);
+}
+body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+        to bottom,
+        rgba(0, 0, 0, 0) 0,
+        rgba(0, 0, 0, 0) 2px,
+        rgba(0, 0, 0, 0.16) 3px
+    );
+    opacity: 0.5;
+}
+/* App chrome sits above the atmosphere layers. */
+#app {
+    position: relative;
+    z-index: 1;
+}
+
+/* ── HUD headings ──────────────────────────────────────────────────────── */
+h1,
+h2,
+.settings-section-title {
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+}
+
+/* ── Keyboard accessibility: one consistent focus ring ─────────────────── */
+:focus-visible {
+    outline: 2px solid var(--accent-1);
+    outline-offset: 2px;
+    box-shadow: 0 0 12px var(--accent-ring);
+    border-radius: var(--radius-sm);
+}
+/* Don't show the ring on mouse/touch interactions */
+:focus:not(:focus-visible) {
+    outline: none;
+}
+/* The bevelled surfaces clip away an outline drawn outside their box, so
+   theirs goes inside — white, apart from the yellow launching edge — and an
+   app card takes the look it has under a mouse. */
+.btn:focus-visible,
+.host-card:focus-visible,
+.app-card:focus-visible,
+.settings-section:focus-visible {
+    outline: 3px solid var(--text-1);
+    outline-offset: -5px;
+}
+.app-card:focus-visible {
+    box-shadow: var(--edge-accent), var(--glass-highlight);
+    filter: var(--glow-accent);
+}
+.settings-slider:focus-visible {
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+/* On a TV (RemoteNav sets .remote-nav) the focus is the only pointer there is,
+   whatever moved it: a pad's press is no keyboard event, and :focus-visible
+   would stay off for it. Any focus is drawn, thicker for a screen three metres
+   away, and the focused app card lifts — unless the last thing used was the
+   browser's own cursor (.nav-pointer): the ring then stayed on whatever the
+   cursor last clicked, away from where it points. */
+.remote-nav:not(.nav-pointer) :focus {
+    outline: 4px solid var(--text-1);
+    outline-offset: 2px;
+}
+.remote-nav:not(.nav-pointer) .btn:focus,
+.remote-nav:not(.nav-pointer) .host-card:focus,
+.remote-nav:not(.nav-pointer) .app-card:focus,
+.remote-nav:not(.nav-pointer) .settings-section:focus {
+    outline: 4px solid var(--text-1);
+    outline-offset: -6px;
+}
+/* A slider OK has armed (RemoteNav): its arrows change the value now. */
+.remote-nav input[type='range'][data-nav-armed] {
+    box-shadow: 0 0 0 4px var(--accent-1);
+}
+.remote-nav:not(.nav-pointer) .app-card:focus {
+    box-shadow: var(--edge-accent), var(--glass-highlight);
+    filter: var(--glow-accent);
+    transform: translateY(-3px) scale(1.04);
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────────
+   The page's own scroll container plus any overlay tall enough to need one of
+   its own. A second scrollbar in the default OS chrome, right next to this one,
+   reads as a different application. */
+#main-content,
+.share-board {
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface-4) transparent;
+}
+#main-content::-webkit-scrollbar,
+.share-board::-webkit-scrollbar {
+    width: 10px;
+}
+#main-content::-webkit-scrollbar-track,
+.share-board::-webkit-scrollbar-track {
+    background: transparent;
+}
+#main-content::-webkit-scrollbar-thumb,
+.share-board::-webkit-scrollbar-thumb {
+    background: var(--surface-4);
+    border-radius: var(--radius-pill);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+#main-content::-webkit-scrollbar-thumb:hover,
+.share-board::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-strong);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+}
+
+/* ── Shared text helpers ───────────────────────────────────────────────── */
+.hint {
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    margin-top: var(--space-2);
+}
+
+.text-success {
+    color: var(--c-success);
+}
+
+.text-muted {
+    color: var(--text-3);
+}
+
+.text-danger {
+    color: var(--c-danger-text);
+}
+
+/* Discreet positive tint on the "Allow Internet access" opt-in labels/links
+   (setup wizard, admin page, hosts banner) — draws the eye to the opt-in
+   without pre-ticking the box. */
+.consent-highlight {
+    color: var(--c-success);
+}
+
+a.consent-highlight {
+    text-decoration: underline;
+}
+
+/* ── Reduced motion: silence the looping spinners/pulses ───────────────── */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}

@@ -1,0 +1,1414 @@
+/* MoonlightWeb — Components: buttons, cards, fields, badges, toasts,
+ * dialogs, tables. One grammar, consumed by every view. */
+
+/* ════════════════════════════════════════════════════════════════════════
+   Buttons — one gabarit, colour by variant
+   ════════════════════════════════════════════════════════════════════════ */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: 9px 18px;
+    border: none;
+    border-radius: 0;
+    /* Notched (bevelled) corner — the CP2077 signature */
+    clip-path: var(--notch-sm);
+    font-family: inherit;
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    line-height: 1.2;
+    cursor: pointer;
+    white-space: nowrap;
+    /* Default = primary action */
+    background: var(--accent-1);
+    color: var(--on-accent);
+    transition:
+        background 0.15s,
+        color 0.15s,
+        filter 0.2s,
+        transform 0.08s,
+        opacity 0.15s;
+}
+.btn:hover:not(:disabled) {
+    background: var(--accent-strong);
+    color: var(--on-accent);
+    filter: var(--glow-accent);
+}
+.btn:active:not(:disabled) {
+    transform: translateY(1px);
+    background: var(--accent-deep);
+}
+.btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+/* Secondary — dark surface, cyan neon inset edge (follows the notch) */
+.btn-secondary {
+    background: var(--surface-3);
+    color: var(--text-1);
+    box-shadow: var(--edge-cyan);
+}
+.btn-secondary:hover:not(:disabled) {
+    background: var(--surface-4);
+    color: var(--neon-cyan);
+    box-shadow: var(--edge-cyan);
+    filter: var(--glow-cyan);
+}
+
+/* Neutral — yellow outline (used by "Add Manually", "Reset Defaults") */
+.btn-neutral {
+    background: var(--accent-soft);
+    color: var(--accent-1);
+    box-shadow: var(--edge-accent);
+}
+.btn-neutral:hover:not(:disabled) {
+    background: rgba(252, 238, 10, 0.2);
+    color: var(--accent-strong);
+    box-shadow: var(--edge-accent);
+    filter: var(--glow-accent);
+}
+
+/* Success — host "Open" / save-style positive action */
+.btn-save {
+    background: var(--accent-1);
+    color: var(--on-accent);
+}
+.btn-open {
+    background: var(--c-success);
+    color: #06281b;
+}
+.btn-open:hover:not(:disabled) {
+    background: #4eb87c;
+    color: #06281b;
+}
+.btn-save:disabled {
+    background: var(--surface-3);
+    color: var(--text-3);
+}
+
+/* Danger */
+.btn-danger {
+    background: var(--c-danger);
+    color: #2a0809;
+    border-color: transparent;
+}
+.btn-danger:hover {
+    background: #e04a51;
+}
+.btn-danger:disabled {
+    opacity: 0.4;
+}
+
+/* Link-style button */
+.btn-link {
+    background: none;
+    border: none;
+    box-shadow: none;
+    color: var(--accent-1);
+    text-decoration: underline;
+    padding: 2px 4px;
+    font-weight: 500;
+}
+.btn-link:hover {
+    background: none;
+    color: var(--accent-strong);
+}
+
+/* Sizes */
+.btn-small,
+.btn-pair {
+    padding: 5px 12px;
+    font-size: var(--fs-xs);
+    border-radius: var(--radius-sm);
+}
+
+/* Wake-on-LAN — amber edge to set it apart from the cyan "Pair" action */
+.btn-wol {
+    color: var(--accent-1);
+    box-shadow: var(--edge-accent);
+}
+.btn-wol:hover {
+    color: var(--accent-strong);
+    box-shadow: var(--edge-accent);
+}
+.btn-pagination {
+    background: var(--surface-3);
+    color: var(--text-1);
+    min-width: 90px;
+    box-shadow: var(--edge-cyan);
+}
+.btn-pagination:hover:not(:disabled) {
+    background: var(--surface-4);
+}
+.btn-pagination:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+/* Loading spinner suffix */
+.btn-loading,
+.btn-loading:hover {
+    opacity: 0.6;
+    cursor: wait;
+    pointer-events: none;
+    position: relative;
+}
+.btn-loading::after {
+    content: '';
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    margin-left: var(--space-2);
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: btnSpin 0.6s linear infinite;
+    flex-shrink: 0;
+}
+@keyframes btnSpin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Icon button (header) */
+.btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    transition:
+        background 0.15s,
+        color 0.15s,
+        border-color 0.15s;
+}
+.btn-icon:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-1);
+}
+.btn-icon.nav-active {
+    background: var(--accent-soft);
+    border-color: var(--accent-ring);
+    color: #cdddff;
+}
+.btn-icon svg {
+    display: block;
+}
+
+/* Close (×) button used in view headers */
+.view-close-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-2);
+    font-size: 1.4rem;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+        background 0.15s,
+        color 0.15s;
+}
+.view-close-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-1);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Card surface (host cards, app cards, settings sections share this look)
+   ════════════════════════════════════════════════════════════════════════ */
+.host-card,
+.app-card,
+.settings-section {
+    /* Frosted glass with a cyan sheen, notched corners and a neon cyan inset
+       edge that follows the bevel. Outer shadow is clipped by clip-path, so
+       depth/glow comes from the inset edge (and a drop-shadow on hover). */
+    background:
+        linear-gradient(150deg, rgba(0, 229, 255, 0.06), rgba(0, 229, 255, 0) 60%),
+        var(--surface-glass);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border: none;
+    border-radius: 0;
+    clip-path: var(--notch-lg);
+    box-shadow: var(--edge-cyan), var(--glass-highlight);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Form fields
+   ════════════════════════════════════════════════════════════════════════ */
+.settings-label,
+.login-label {
+    display: block;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    margin-bottom: var(--space-2);
+    color: var(--text-1);
+}
+.login-label {
+    font-weight: 500;
+    color: var(--text-2);
+    font-size: 0.82rem;
+}
+
+.setting-desc {
+    display: block;
+    font-size: var(--fs-xs);
+    color: var(--text-2);
+    line-height: 1.45;
+    margin-bottom: var(--space-2);
+}
+
+/* A description that reports something standing in the way of the setting it
+   sits under — an OS permission still to be granted, say. Same size and rhythm
+   as the description it follows; only the colour says "act on this". */
+.setting-desc--warn {
+    color: var(--warning);
+}
+
+.settings-input,
+.login-input,
+.login-pin-input {
+    display: block;
+    width: 100%;
+    padding: 10px 14px;
+    /* Same mono font as admin .pin-display, but discreet (smaller, lighter). */
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: 1px;
+    background-color: var(--surface-1);
+    border: 1px solid var(--border-1);
+    border-radius: var(--radius-sm);
+    color: var(--text-1);
+    outline: none;
+    transition:
+        border-color 0.15s,
+        box-shadow 0.15s;
+}
+.settings-input {
+    font-family: var(--font-mono);
+}
+.settings-input:focus,
+.login-input:focus,
+.login-pin-input:focus {
+    border-color: var(--accent-1);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.settings-input::placeholder,
+.login-input::placeholder,
+.login-pin-input::placeholder {
+    color: var(--text-3);
+}
+
+/* Login name: left-aligned, full width to fit a 24-char session name. */
+.login-input {
+    text-align: left;
+}
+/* Login PIN: centered "123 456", larger and a bit wider. letter-spacing keeps
+ * normal digit tracking; word-spacing trims the mono space to a small gap. */
+.login-pin-input {
+    text-align: center;
+    width: 11ch;
+    margin-left: auto;
+    margin-right: auto;
+    font-size: 1.3rem;
+    letter-spacing: 1px;
+    word-spacing: -0.35em;
+}
+
+/* Select — custom chevron, identical everywhere */
+.settings-select {
+    display: block;
+    width: 100%;
+    padding: 10px 38px 10px 14px;
+    font-size: var(--fs-sm);
+    background-color: var(--surface-1);
+    border: 1px solid var(--border-1);
+    border-radius: var(--radius-sm);
+    color: var(--text-1);
+    outline: none;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aab3c4' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    transition:
+        border-color 0.15s,
+        box-shadow 0.15s;
+}
+.settings-select:focus {
+    border-color: var(--accent-1);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.settings-select option {
+    background-color: var(--surface-1);
+    color: var(--text-1);
+}
+.settings-select option:disabled {
+    color: var(--text-3);
+    font-style: italic;
+}
+
+/* "· auto" after the bitrate value while it follows the estimate */
+.settings-bitrate-auto {
+    color: var(--text-3);
+    font-weight: normal;
+    font-size: var(--fs-xs);
+}
+
+/* Custom resolution — two numbers side by side, styled like the select */
+.settings-size-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 8px;
+}
+.settings-size-row label {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+}
+.settings-size-input {
+    width: 100%;
+    padding: 10px 14px;
+    font-size: var(--fs-sm);
+    background-color: var(--surface-1);
+    border: 1px solid var(--border-1);
+    border-radius: var(--radius-sm);
+    color: var(--text-1);
+    outline: none;
+    appearance: textfield;
+    -moz-appearance: textfield;
+    transition:
+        border-color 0.15s,
+        box-shadow 0.15s;
+}
+.settings-size-input:focus {
+    border-color: var(--accent-1);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.settings-size-input::-webkit-outer-spin-button,
+.settings-size-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* Range slider */
+.settings-slider {
+    display: block;
+    width: 100%;
+    height: 6px;
+    margin: 12px 0 6px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--surface-4);
+    border-radius: var(--radius-pill);
+    outline: none;
+    cursor: pointer;
+}
+.settings-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--accent-1);
+    border: 3px solid var(--surface-1);
+    cursor: pointer;
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
+    transition: transform 0.1s;
+}
+.settings-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+}
+.settings-slider::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--accent-1);
+    border: 3px solid var(--surface-1);
+    cursor: pointer;
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
+}
+.settings-slider-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+    margin-top: 2px;
+    user-select: none;
+}
+
+/* iOS/Safari tick fix — on iOS the native checkbox fill is white,
+   invisible against a dark card-bg. Only rebuild the checkbox when
+   the <body>.ios class is present. */
+body.ios .settings-checkbox-label {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    cursor: pointer;
+}
+body.ios .settings-checkbox-label input[type='checkbox'] {
+    -webkit-appearance: none;
+    appearance: none;
+    box-sizing: border-box;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    margin-top: 2px;
+    background-color: var(--c-surface, transparent);
+    border: 1px solid var(--accent-1);
+    border-radius: 3px;
+    position: relative;
+    outline: none;
+    cursor: pointer;
+}
+body.ios .settings-checkbox-label input[type='checkbox']::before {
+    content: '';
+    display: block;
+    width: 10px;
+    height: 5px;
+    border: solid var(--accent-1);
+    border-width: 0 3px 3px 0;
+    position: absolute;
+    top: 6px;
+    left: 3px;
+    transform: rotate(45deg);
+    display: none;
+}
+body.ios .settings-checkbox-label input[type='checkbox']:checked::before {
+    display: block;
+}
+.settings-checkbox-text {
+    font-size: var(--fs-sm);
+    line-height: 1.4;
+    color: var(--text-1);
+}
+
+/* Hints / notes / inline status */
+.settings-hint {
+    font-size: var(--fs-xs);
+    color: var(--text-2);
+    margin-top: var(--space-1);
+    line-height: 1.45;
+}
+.settings-hint a {
+    color: var(--accent-1);
+    text-decoration: none;
+}
+.settings-hint a:hover {
+    text-decoration: underline;
+}
+
+.settings-note {
+    font-size: var(--fs-xs);
+    color: var(--text-2);
+    line-height: 1.45;
+    margin-top: var(--space-2);
+    padding-left: 30px;
+}
+
+.settings-status {
+    margin-top: var(--space-4);
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    font-size: var(--fs-sm);
+    line-height: 1.45;
+}
+.settings-status-ok {
+    background-color: var(--c-success-soft);
+    border: 1px solid rgba(62, 201, 138, 0.3);
+    color: #9be7c4;
+}
+.settings-status-ok a {
+    color: var(--c-success);
+    text-decoration: underline;
+    font-family: var(--font-mono);
+}
+.settings-status-pending {
+    background-color: var(--c-warning-soft);
+    border: 1px solid rgba(240, 180, 41, 0.3);
+    color: #f3d488;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Badges
+   ════════════════════════════════════════════════════════════════════════ */
+.status-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: var(--radius-sm);
+    font-size: var(--fs-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    border: 1px solid currentColor;
+}
+.status-badge.ready {
+    background-color: var(--c-success-soft);
+    color: var(--c-success);
+}
+.status-badge.locked {
+    background-color: var(--c-warning-soft);
+    color: var(--c-warning);
+}
+.status-badge.offline {
+    background-color: var(--c-danger-soft);
+    color: var(--c-danger);
+}
+.status-badge.unavailable {
+    background-color: var(--surface-3);
+    color: var(--text-3);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Toasts
+   ════════════════════════════════════════════════════════════════════════ */
+#toast-container {
+    position: fixed;
+    /* --kbd-inset lifts the stack over the on-screen keyboard and the stream's
+       special-keys bar; it is 0 whenever no keyboard is up. A toast the user
+       cannot read (e.g. the quality-switch warning typed mid-game) is worse
+       than no toast at all. */
+    bottom: calc(var(--space-5) + var(--kbd-inset, 0px));
+    right: var(--space-5);
+    /* Note: when the floating Discord button is on screen the stack is lifted
+       over it — see the `body:has(.discord-fab)` rule at the end of this file. */
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-width: 380px;
+    pointer-events: none;
+}
+.toast {
+    padding: 12px 18px;
+    border-radius: var(--radius-md);
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    line-height: 1.4;
+    color: #fff;
+    cursor: pointer;
+    pointer-events: auto;
+    border: 1px solid var(--border-2);
+    box-shadow: var(--shadow-3);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    animation: toastSlideIn 0.3s ease forwards;
+}
+.toast-exit {
+    animation: toastFadeOut 0.3s ease forwards;
+}
+/* Optional action button (see Toast.show options.action). Right-aligned on its
+   own row so a long advisory keeps its full width for the text. */
+.toast-action {
+    display: block;
+    margin: 10px 0 0 auto;
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    background: rgba(255, 255, 255, 0.14);
+    color: inherit;
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    cursor: pointer;
+}
+.toast-action:hover {
+    background: rgba(255, 255, 255, 0.26);
+}
+.toast-success {
+    background: rgba(36, 110, 79, 0.92);
+    border-color: var(--c-success);
+}
+.toast-error {
+    background: rgba(140, 41, 45, 0.92);
+    border-color: var(--c-danger);
+}
+.toast-warning {
+    background: rgba(150, 110, 20, 0.92);
+    border-color: var(--c-warning);
+}
+.toast-info {
+    background: rgba(28, 88, 130, 0.92);
+    border-color: var(--c-info);
+}
+
+@keyframes toastSlideIn {
+    from {
+        opacity: 0;
+        transform: translateX(60px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+@keyframes toastFadeOut {
+    from {
+        opacity: 1;
+        transform: translateX(0);
+    }
+    to {
+        opacity: 0;
+        transform: translateX(40px);
+    }
+}
+
+@media (max-width: 600px) {
+    #toast-container {
+        bottom: calc(var(--space-3) + var(--kbd-inset, 0px));
+        right: var(--space-3);
+        left: var(--space-3);
+        max-width: none;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Line notice (ui/LineNotice.js)
+
+   The line to the machine away under a running stream: a small grey pill at
+   the top centre, over the picture and over the CSS-fallback fullscreen
+   (z-index 9999). Nothing to click, so it lets every click through.
+   ════════════════════════════════════════════════════════════════════════ */
+.line-notice {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + var(--space-3));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    max-width: calc(100vw - 2 * var(--space-3));
+    padding: 5px 14px;
+    border-radius: 999px;
+    background: rgba(24, 24, 28, 0.72);
+    color: rgba(255, 255, 255, 0.85);
+    font-size: var(--fs-xs);
+    line-height: 1.4;
+    text-align: center;
+    pointer-events: none;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Statistics disclosure
+
+   What the census covers, folded shut. There is no consent bar to style: the
+   figures identify nobody, so the page states what it sends and offers the
+   switch that stops it, rather than asking permission on arrival.
+
+   Shared by the Settings page and the guest's join page. One rule set, so the
+   same list cannot end up looking like two different statements.
+   ════════════════════════════════════════════════════════════════════════ */
+.privacy-details {
+    margin-top: var(--space-2);
+    font-size: var(--fs-sm);
+    line-height: 1.5;
+}
+.privacy-details summary {
+    cursor: pointer;
+    color: var(--accent, #35c98f);
+}
+.privacy-details ul {
+    margin: var(--space-2) 0 0;
+    padding-left: var(--space-5);
+}
+.privacy-details li {
+    margin-bottom: var(--space-1);
+}
+
+/* ── Gamepad driver notice ───────────────────────────────────────────────
+   Shown at the top of the hosts page and of the admin page, and only on the
+   host machine itself — the server decides that, not this stylesheet.
+
+   Deliberately the quiet in-page kind rather than the fixed bar above: a
+   missing gamepad driver is a clean degradation (keyboard, mouse and the
+   stream are untouched), so it has to read as information and never as an
+   alert, and it must not cover anything. */
+.gamepad-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-5);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    background-color: var(--surface-2);
+    border: 1px solid var(--border-1);
+    border-radius: var(--radius-md);
+}
+.gamepad-notice-icon {
+    font-size: 1.25rem;
+    line-height: 1.4;
+}
+.gamepad-notice-body {
+    flex: 1;
+    min-width: 0;
+    line-height: 1.5;
+}
+.gamepad-notice-title {
+    display: block;
+    margin-bottom: var(--space-1);
+    font-size: var(--fs-md);
+    font-weight: 600;
+    color: var(--text-1);
+}
+.gamepad-notice-text,
+.gamepad-notice-hint {
+    display: block;
+}
+.gamepad-notice-hint {
+    margin-top: var(--space-1);
+    color: var(--text-3);
+}
+.gamepad-notice-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: var(--space-2);
+    align-items: center;
+}
+.gamepad-notice-close {
+    padding: 2px 8px;
+    font-size: 18px;
+    line-height: 1;
+    color: var(--text-3);
+    background: none;
+    border: none;
+    cursor: pointer;
+}
+.gamepad-notice-close:hover {
+    color: var(--text-1);
+}
+@media (max-width: 700px) {
+    .gamepad-notice {
+        flex-wrap: wrap;
+    }
+    .gamepad-notice-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+}
+
+/* ── Virtual display (headless native host) ─────────────────────────────
+   The native host card with nothing plugged in and no "MoonlightWeb Virtual
+   Display" to open: an empty state that says what is missing. */
+.host-empty-display {
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    text-align: center;
+}
+.host-empty-display-text {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    line-height: 1.5;
+}
+/* A Mac that lost Accessibility: it still streams, so the grid stays, with
+   the missing switch said above it. */
+.host-perm-warn {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    align-items: flex-start;
+    margin: 0 var(--space-4) var(--space-3);
+    padding: var(--space-3);
+    border-left: 3px solid var(--warning);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    line-height: 1.5;
+}
+.host-perm-warn p {
+    margin: 0;
+}
+.status-badge.nodisplay,
+.status-icon.nodisplay {
+    color: var(--warn, #d9a441);
+}
+.vdisplay-status-error {
+    color: var(--danger, #e05252);
+}
+.vdisplay-status-info {
+    color: var(--text-2);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Dialog (pairing + future modal dialogs)
+   ════════════════════════════════════════════════════════════════════════ */
+.pairing-overlay {
+    position: fixed;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+.pairing-dialog {
+    background-color: var(--surface-2);
+    border: none;
+    border-radius: 0;
+    clip-path: var(--notch-lg);
+    box-shadow: var(--edge-cyan);
+    padding: var(--space-6) var(--space-5);
+    max-width: 380px;
+    width: 90%;
+    text-align: center;
+}
+.pairing-dialog h3 {
+    margin-bottom: var(--space-2);
+    font-size: var(--fs-lg);
+    color: var(--text-1);
+}
+.pairing-instruction {
+    margin-bottom: var(--space-5);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    line-height: 1.5;
+}
+/* Backend management dialog — reuses .pairing-overlay/.pairing-dialog, but its
+   content is a form, so it reads left-aligned and needs a little more width. */
+.backend-dialog {
+    max-width: 460px;
+    text-align: left;
+}
+/* Stands in for the type row on a host whose backend has not identified itself
+   yet — it says what will happen, where the answer will later sit. */
+.backend-identify-note {
+    margin-bottom: var(--space-4);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    line-height: 1.5;
+}
+.backend-field {
+    display: block;
+    margin-bottom: var(--space-4);
+}
+.backend-field > span {
+    display: block;
+    margin-bottom: var(--space-1);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+}
+.backend-field input,
+.backend-field select {
+    width: 100%;
+    padding: var(--space-2);
+    background-color: var(--surface-1);
+    color: var(--text-1);
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    border-radius: 0;
+    font-size: var(--fs-sm);
+    font-family: inherit;
+}
+.backend-field input:disabled,
+.backend-field select:disabled {
+    opacity: 0.6;
+}
+.backend-status-text {
+    font-size: var(--fs-sm);
+    line-height: 1.5;
+    /* Some backend failures answer with steps to follow, not a sentence — a
+       loopback-only MultiSeat API is the case that earns it. Keep their line
+       breaks, and cap the height so a long answer scrolls instead of pushing
+       the dialog's buttons off screen. */
+    white-space: pre-line;
+    max-height: 11em;
+    overflow-y: auto;
+}
+/* Spinner shown beside the status text while a save/pairing is in flight.
+   Lives on the status line rather than the button so the label never shifts. */
+.backend-status-text.is-loading {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+.backend-status-text.is-loading::before {
+    content: '';
+    flex-shrink: 0;
+    width: 13px;
+    height: 13px;
+    border: 2px solid var(--text-3, rgba(255, 255, 255, 0.3));
+    border-top-color: var(--accent, #fff);
+    border-radius: 50%;
+    animation: btnSpin 0.6s linear infinite;
+}
+/* What the backend supports. Unsupported entries stay visible but dimmed:
+   knowing a backend does NOT do lobbies is as useful as knowing it does. */
+.backend-caps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-bottom: var(--space-4);
+}
+.backend-cap {
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    opacity: 0.55;
+}
+.backend-cap.is-on {
+    color: var(--accent, #35c98f);
+    opacity: 1;
+}
+/* Back-to-console button: sits beside Stop in the stream header, so it stays
+   reachable whatever the stream is showing. */
+.stream-console-btn {
+    margin-right: var(--space-2);
+}
+
+/* Only MultiSeat asks for these, so they sit apart from the main fields. */
+.backend-hint {
+    font-size: var(--fs-xs, 0.78rem);
+    color: var(--text-2);
+    line-height: 1.45;
+    margin: calc(-1 * var(--space-2)) 0 var(--space-4);
+}
+.backend-seats {
+    margin-bottom: var(--space-4);
+    border-top: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    padding-top: var(--space-3);
+}
+.backend-seats-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-2);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+}
+.backend-seat {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    font-size: var(--fs-sm);
+}
+.backend-seat-name {
+    color: var(--text-1);
+    /* Wolf names a seat by its client id, which is long and has no spaces. */
+    overflow-wrap: anywhere;
+}
+.backend-seat-meta {
+    color: var(--text-2);
+    margin-left: auto;
+    white-space: nowrap;
+}
+.backend-seats-empty {
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+}
+.btn-seat-add,
+.btn-seat-free,
+.btn-seat-remove {
+    background: none;
+    border: none;
+    color: var(--text-2);
+    cursor: pointer;
+    font-size: var(--fs-sm);
+    padding: 0 var(--space-1);
+}
+.btn-seat-add:hover,
+.btn-seat-free:hover,
+.btn-seat-remove:hover {
+    color: var(--text-1);
+}
+
+/* Self-stream ("Inception") warning — the "reach me from elsewhere" URL. */
+.self-stream-url {
+    margin-bottom: var(--space-5);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    line-height: 1.5;
+}
+.self-stream-url-value {
+    color: var(--accent, #35c98f);
+    font-weight: 600;
+    word-break: break-all;
+    user-select: all;
+}
+/* "Don't show this again": quiet, just above the buttons it qualifies. Same
+   checkbox as the login's "Keep me signed in". */
+.self-stream-mute {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    cursor: pointer;
+}
+.self-stream-mute input {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent-1);
+    cursor: pointer;
+}
+.pairing-status-text {
+    font-size: var(--fs-sm);
+    margin-bottom: var(--space-3);
+    min-height: 18px;
+}
+.pairing-info {
+    color: var(--text-2);
+}
+.pairing-error {
+    color: var(--c-danger);
+}
+.pairing-success {
+    color: var(--c-success);
+}
+
+.pairing-pin-display {
+    font-size: 42px;
+    font-family: var(--font-mono);
+    letter-spacing: 12px;
+    color: var(--accent-1);
+    background-color: var(--surface-1);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    margin: 0 auto var(--space-3);
+    width: fit-content;
+    min-width: 160px;
+    user-select: all;
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+.pairing-pin-display.visible {
+    opacity: 1;
+}
+
+.pairing-actions {
+    display: flex;
+    gap: var(--space-3);
+    justify-content: center;
+    margin-top: var(--space-5);
+}
+.pairing-actions .btn {
+    min-width: 100px;
+}
+/* Stacked variant — buttons on their own row, full width. Used by dialogs with
+   long labels (e.g. "Open Screen Recording settings") that would otherwise be
+   clipped by the row layout + white-space: nowrap. */
+.pairing-actions-stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+}
+.pairing-actions-stack .btn {
+    width: 100%;
+    white-space: normal;
+    text-align: center;
+}
+
+/* Manual host add dialog — reuses the pairing overlay/dialog shell */
+.manual-add-input {
+    text-align: center;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Tables + pagination
+   ════════════════════════════════════════════════════════════════════════ */
+.sessions-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: var(--space-2);
+    font-size: 0.82rem;
+}
+.sessions-table th {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-1);
+    color: var(--text-2);
+    font-weight: 600;
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+/* Sortable headers: plain until hovered, brighter once they drive the order. */
+.sessions-table th.sessions-th-sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    outline: none;
+    transition: color 0.12s ease;
+}
+.sessions-table th.sessions-th-sortable:hover,
+.sessions-table th.sessions-th-sortable.sorted {
+    color: var(--text-1);
+}
+.sessions-table th.sessions-th-sortable:focus-visible {
+    box-shadow: inset 0 0 0 1px var(--c-accent, var(--border-1));
+    border-radius: var(--radius-1);
+}
+.sessions-sort-arrow {
+    display: inline-block;
+    width: 1em;
+    margin-left: 4px;
+    font-size: 0.75em;
+    color: var(--c-accent, var(--text-2));
+}
+.sessions-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    color: var(--text-1);
+    vertical-align: middle;
+}
+.sessions-table tr:hover td {
+    background: rgba(255, 255, 255, 0.03);
+}
+.sessions-table th:last-child,
+.sessions-table td:last-child {
+    text-align: center;
+    width: 80px;
+}
+.sessions-table tr.session-row-streaming td {
+    background: var(--c-success-soft);
+}
+.sessions-table tr.session-row-streaming:hover td {
+    background: rgba(62, 201, 138, 0.18);
+}
+/* Editable session name: looks like plain text until hovered/focused. */
+.session-name-edit {
+    display: inline-block;
+    min-width: 2ch;
+    padding: 1px 4px;
+    margin: -1px -4px;
+    border-radius: var(--radius-1);
+    cursor: text;
+    outline: none;
+    transition:
+        background 0.12s ease,
+        box-shadow 0.12s ease;
+}
+.session-name-edit:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+.session-name-edit:focus {
+    background: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 0 0 1px var(--c-accent, var(--border-1));
+}
+
+.session-streaming-badge {
+    display: inline-block;
+    margin-left: var(--space-2);
+    padding: 1px 8px;
+    border-radius: var(--radius-pill);
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--c-success);
+    background: var(--c-success-soft);
+    vertical-align: middle;
+    white-space: nowrap;
+    animation: session-streaming-pulse 1.6s ease-in-out infinite;
+}
+@keyframes session-streaming-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.55;
+    }
+}
+
+.sessions-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-1);
+}
+.pagination-info {
+    font-size: 0.82rem;
+    color: var(--text-2);
+    min-width: 100px;
+    text-align: center;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Inline SVG icons (js/ui/icons.js) — sized to the local font, currentColor
+   ════════════════════════════════════════════════════════════════════════ */
+.icon {
+    width: 1em;
+    height: 1em;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    vertical-align: -0.125em;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Utilities — small helpers so view templates carry no inline style
+   ════════════════════════════════════════════════════════════════════════ */
+.u-hidden {
+    display: none;
+}
+.u-mono {
+    font-family: var(--font-mono);
+}
+.u-row {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+}
+.u-grow {
+    flex: 1;
+}
+.u-shrink-0 {
+    flex-shrink: 0;
+}
+.u-center {
+    text-align: center;
+}
+.u-mt-2 {
+    margin-top: var(--space-2);
+}
+.u-mt-3 {
+    margin-top: var(--space-3);
+}
+.u-mb-1 {
+    margin-bottom: var(--space-1);
+}
+.u-mb-2 {
+    margin-bottom: var(--space-2);
+}
+.u-ml-2 {
+    margin-left: var(--space-2);
+}
+.u-pt-0 {
+    padding-top: 0;
+}
+.u-pt-3 {
+    padding-top: var(--space-3);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Floating Discord button
+
+   The live-chat launcher shape every user already knows from e-commerce
+   sites: a round button in the bottom right corner, one icon, no label. The
+   grammar is borrowed on purpose — it says "talk to someone" before anything
+   is read. Blurple, deliberately not the app's cyan, so it reads as
+   "somewhere else" rather than as one more control of this page.
+
+   Round means no notch here: the notched corner is the MoonlightWeb signature
+   for the panels and buttons that belong to the app, and this one does not.
+
+   Two shadow layers — a soft dark drop that lifts the circle off the dark
+   surface, and a faint blurple halo so the edge does not die against it.
+
+   It shares the corner with the toast stack, which is lifted above it (see
+   the rule at the end of this block): a toast landing on top of the button
+   would hide both. The stream hides the whole thing — see css/stream.css.
+   ════════════════════════════════════════════════════════════════════════ */
+.discord-fab {
+    position: fixed;
+    z-index: 1800;
+    right: calc(var(--space-5) + env(safe-area-inset-right, 0px));
+    bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+    width: 58px;
+    height: 58px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    background-color: #5865f2;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow:
+        0 8px 24px rgba(0, 0, 0, 0.5),
+        0 2px 8px rgba(88, 101, 242, 0.45);
+    text-decoration: none;
+    transition:
+        transform 0.18s,
+        background-color 0.18s,
+        box-shadow 0.18s;
+}
+.discord-fab:hover {
+    color: #fff;
+    text-decoration: none;
+}
+@media (hover: hover) {
+    .discord-fab:hover {
+        background-color: #4752c4;
+        transform: translateY(-3px) scale(1.05);
+        box-shadow:
+            0 14px 30px rgba(0, 0, 0, 0.55),
+            0 3px 14px rgba(88, 101, 242, 0.6);
+    }
+}
+.discord-fab:active {
+    transform: translateY(-1px) scale(0.98);
+}
+.discord-fab:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 3px;
+}
+/* Phones: same shape, one size down, tighter to the corner. */
+@media (max-width: 640px) {
+    .discord-fab {
+        right: calc(var(--space-3) + env(safe-area-inset-right, 0px));
+        bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+        width: 52px;
+        height: 52px;
+    }
+}
+
+/* Where it actually hangs in the application: from the footer, not from the
+   window. The shell is a flex column whose middle pane is the only thing that
+   scrolls, so the footer bar is always pinned to the bottom of the window —
+   and a button anchored to the viewport lands ON it. Anchored to the footer at
+   `bottom: 100%` it floats just above the bar instead, at whatever height that
+   bar happens to be, with nothing to measure and nothing to re-tune the day the
+   footer gains a line or a safe-area inset grows.
+   The footer only becomes the reference frame; it does not clip or repaint. */
+.app-footer {
+    position: relative;
+}
+.app-footer .discord-fab {
+    position: absolute;
+    bottom: calc(100% + var(--space-4));
+}
+/* Toasts appear above the button instead of on it. The stack is anchored to the
+   window while the button hangs off the footer, so this clearance is measured,
+   not derived: ~35px of footer bar, the 16px gap above it, the 58px circle and a
+   last gap. Too generous costs nothing — a toast a little higher is still read —
+   while too tight puts text on the button. The keyboard inset stacks on top. */
+body:has(.discord-fab) #toast-container {
+    bottom: calc(var(--space-5) + var(--kbd-inset, 0px) + 95px);
+}

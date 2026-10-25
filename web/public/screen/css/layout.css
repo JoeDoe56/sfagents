@@ -1,0 +1,414 @@
+/* MoonlightWeb — Layout: app shell (header, main, footer) */
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+.app-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-5);
+    /* Mobile: viewport-fit=cover + translucent status bar push content under
+       the notch/status bar — inset the header so the title stays visible. */
+    padding-top: max(var(--space-3), env(safe-area-inset-top));
+    padding-left: max(var(--space-5), env(safe-area-inset-left));
+    padding-right: max(var(--space-5), env(safe-area-inset-right));
+    background: var(--surface-glass);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border-bottom: 1px solid var(--border-1);
+    box-shadow: var(--shadow-1);
+    flex-shrink: 0;
+    z-index: 100;
+}
+
+/* The product name, here and on the stream's own bar (.stream-brand-title in
+   stream.css). ONE rule for both, not two that look alike: the stream bar exists
+   to carry the same three facts the header carries, and a reader who sees them
+   set differently reads two different things. text-transform is spelled out
+   because base.css gives it to h1 and the stream's copy is not one. */
+.app-header h1,
+.stream-brand-title {
+    font-size: var(--fs-lg);
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-1);
+    text-shadow: 0 0 12px var(--accent-ring);
+}
+
+.version {
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--text-2);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-1);
+    border-radius: var(--radius-pill);
+    padding: 2px 10px;
+    /* The version is a fixed short token; letting it shrink would hyphenate a
+       number. The instance name beside it is the elastic one. */
+    flex-shrink: 0;
+}
+
+/* ── Instance name / switcher ───────────────────────────────────────────────
+   Which machine this page is talking to. A plain label while the browser knows
+   only one; a dropdown the moment it knows two, with the caret as the only
+   standing hint and a background lift on hover as the confirmation.
+
+   Both states share the same box metrics on purpose: gaining a second machine
+   must not shift the header's layout, or the whole bar would jump the first
+   time someone visits a new PC. */
+.instance-menu {
+    position: relative;
+    /* The one part of the header that may give up space: the title, the version
+       tag and the action buttons are all fixed-size. */
+    min-width: 0;
+    flex-shrink: 1;
+}
+
+.instance-name {
+    display: block;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-2);
+    /* One line, always. A machine name is a label, not a sentence, and a header
+       that wraps is a header that changes height. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* The plain-label state carries the button's own padding so the two states line
+   up with the title identically. */
+.instance-menu:not(.has-menu) .instance-name {
+    padding: 3px 8px;
+}
+
+.instance-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    max-width: 100%;
+    padding: 3px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    color: inherit;
+    font-family: inherit;
+    cursor: pointer;
+    transition:
+        background-color 0.12s ease,
+        border-color 0.12s ease;
+}
+
+/* The whole affordance, in two lines: something to hover, and something that
+   answers. Deliberately quiet — this sits next to the product name, and a neon
+   button there would read as the page's primary action, which it is not. */
+.instance-btn:hover,
+.instance-menu.is-open .instance-btn {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--border-1);
+}
+.instance-btn:hover .instance-name,
+.instance-menu.is-open .instance-name {
+    color: var(--text-1);
+}
+
+.instance-btn:focus-visible {
+    outline: 1px solid var(--border-2);
+    outline-offset: 1px;
+}
+
+.instance-caret {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--text-3);
+    transition:
+        transform 0.12s ease,
+        color 0.12s ease;
+}
+.instance-caret .icon {
+    width: 14px;
+    height: 14px;
+}
+.instance-btn:hover .instance-caret {
+    color: var(--text-2);
+}
+.instance-menu.is-open .instance-caret {
+    transform: rotate(180deg);
+    color: var(--text-2);
+}
+
+.instance-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 200;
+    min-width: 220px;
+    max-width: min(320px, calc(100vw - 2 * var(--space-4)));
+    padding: var(--space-1);
+    background: var(--surface-2);
+    border: 1px solid var(--border-1);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-2);
+}
+
+.instance-panel-title {
+    margin: 0;
+    padding: var(--space-2) var(--space-3) var(--space-1);
+    font-size: var(--fs-xs);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-3);
+}
+
+.instance-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-1);
+    font-family: inherit;
+    font-size: var(--fs-sm);
+    text-align: left;
+    cursor: pointer;
+}
+.instance-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+.instance-item.is-current {
+    color: var(--accent-1);
+    cursor: default;
+}
+.instance-item-icon {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--text-3);
+}
+.instance-item.is-current .instance-item-icon {
+    color: inherit;
+}
+.instance-item-icon .icon {
+    width: 15px;
+    height: 15px;
+}
+.instance-item-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Reserved whether or not it holds a tick, so the names of the other machines
+   line up with the current one instead of sitting a check-width to its left. */
+.instance-item-mark {
+    display: flex;
+    flex-shrink: 0;
+    width: 15px;
+}
+.instance-item-mark .icon {
+    width: 15px;
+    height: 15px;
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-left: auto;
+}
+/* The header's buttons carry their name beside the icon wherever there is
+   room for it; on a phone (Responsive, below) they are icons alone. The
+   tooltip stays for the icon-only case and says it in a few words. */
+.btn-icon.has-label {
+    width: auto;
+    min-width: 38px;
+    gap: var(--space-2);
+    padding: 0 var(--space-3);
+}
+.header-btn-label {
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* Buy me a coffee (util/supportNudge.js says when it shows): the yellow of
+   "Add manually" (.btn-neutral), with the official cup. .btn's display would
+   beat the [hidden] attribute, hence the explicit rule. */
+.header-btn-bmc {
+    text-decoration: none;
+}
+.header-btn-bmc[hidden] {
+    display: none;
+}
+.header-btn-bmc-logo {
+    display: inline-flex;
+}
+.bmc-logo {
+    width: auto;
+    height: 1.4em;
+    flex-shrink: 0;
+}
+/* The cup with its wordmark (bmcLogo.js), where the button has room for a
+   name. The brand draws the words near-black; on these dark, yellow-tinted
+   buttons they are white. The cup alone stands in for it on a phone. */
+.bmc-full-logo {
+    width: auto;
+    height: 1.9em;
+    flex-shrink: 0;
+    color: #fff;
+}
+.header-btn-bmc-full {
+    display: inline-flex;
+}
+.header-btn-bmc .header-btn-bmc-logo {
+    display: none;
+}
+/* The visit it first appears on, it lights up a few times, then settles —
+   inside the button: the notched clip-path would cut any glow around it. */
+.header-btn-bmc.is-new {
+    animation: bmc-intro 1.2s ease-in-out 5;
+}
+@keyframes bmc-intro {
+    50% {
+        background: rgba(252, 238, 10, 0.34);
+        color: var(--accent-strong);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .header-btn-bmc.is-new {
+        animation: none;
+        background: rgba(252, 238, 10, 0.2);
+    }
+}
+
+/* ── Main content — the ONLY scroll container of the app ────────────────── */
+#main-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: var(--space-6) var(--space-5) var(--space-8);
+    width: 100%;
+}
+
+/* ── On a TV, the document scrolls instead ──────────────────────────────────
+   A TV browser's own cursor (TV Bro, TCL Browser) scrolls the DOCUMENT when it
+   reaches an edge of the screen. With #main-content as the scroller nothing
+   moved, and the host list stayed cut at the bottom (03/10/2026, a Mi TV).
+   Under RemoteNav (.remote-nav, TVs only) the page grows with its content and
+   the header sticks to the top; the stream is position:fixed, untouched. */
+html.remote-nav {
+    height: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    /* Whatever is scrolled to (a focused card) lands below the header, whose
+       height RemoteNav measures into --app-header-h. */
+    scroll-padding-top: calc(var(--app-header-h, 64px) + 16px);
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface-4) transparent;
+}
+html.remote-nav body {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+}
+html.remote-nav #app {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+}
+html.remote-nav #main-content {
+    flex: 1 0 auto;
+    overflow: visible;
+}
+html.remote-nav .app-header {
+    position: sticky;
+    top: 0;
+}
+
+/* Inner views are centered with a max width — the scrollbar stays on the
+   right edge of the viewport, below the header. */
+.hosts-view,
+.apps-view,
+.settings-view,
+.admin-view,
+.login-view {
+    max-width: 960px;
+    margin: 0 auto;
+}
+
+.settings-view,
+.admin-view {
+    max-width: 680px;
+}
+
+/* ── Footer ────────────────────────────────────────────────────────────── */
+.app-footer {
+    text-align: center;
+    padding: var(--space-2) var(--space-5);
+    /* Extend the footer's dark background into the home-indicator safe area
+       so its text clears the indicator and no white bar shows underneath. */
+    padding-bottom: max(var(--space-2), env(safe-area-inset-bottom));
+    padding-left: max(var(--space-5), env(safe-area-inset-left));
+    padding-right: max(var(--space-5), env(safe-area-inset-right));
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+    border-top: 1px solid var(--border-1);
+    background-color: rgba(13, 17, 24, 0.6);
+    flex-shrink: 0;
+}
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+    #main-content {
+        padding: var(--space-3);
+    }
+
+    .app-header {
+        padding: var(--space-3) var(--space-4);
+        /* Keep the safe-area insets — the shorthand above would otherwise
+           reset padding-top and let the title slide under the status bar. */
+        padding-top: max(var(--space-3), env(safe-area-inset-top));
+        padding-left: max(var(--space-4), env(safe-area-inset-left));
+        padding-right: max(var(--space-4), env(safe-area-inset-right));
+        gap: var(--space-2);
+    }
+
+    /* Of the two tags beside the title, one has to go on a phone, and it is
+       this one: the version answers a question nobody asks twice and is still
+       on the admin page, while the machine name answers "which PC am I looking
+       at?" — which is the question a second device makes urgent. */
+    .version {
+        display: none;
+    }
+
+    /* Three icons, no names: Buy me a coffee, Admin, Settings. The coffee
+       drops its yellow box to look like its two neighbours; the cup keeps
+       its yellow coffee. Scoped to .header-actions to outweigh .btn-neutral,
+       which components.css loads after this file. */
+    .header-btn-label {
+        display: none;
+    }
+    .header-btn-bmc .header-btn-bmc-logo {
+        display: inline-flex;
+    }
+    .btn-icon.has-label {
+        width: 38px;
+        padding: 0;
+    }
+    .header-actions .header-btn-bmc {
+        width: 38px;
+        height: 38px;
+        padding: 0;
+        color: var(--text-2);
+        background: transparent;
+        box-shadow: none;
+        clip-path: none;
+    }
+}

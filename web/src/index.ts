@@ -30,6 +30,6 @@ export { PowerShell } from './powershell.js';
 export { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
 export { Dictation, MODEL_FILES, wavSeconds, detectHardware, runtimeChoices, transcriptFromAnswer, deviceFromLog } from './dictation.js';
 export type { DictationStatus, Hardware, Backend } from './dictation.js';
-export { ScreenMirror, DISPLAY_SCALES, streamConfig, transportChain, classifyAddress, vdisplayTaskXml, SCREEN_VERSION, SCREEN_ASSETS } from './screen.js';
+export { ScreenMirror, DISPLAY_SCALES, SCREEN_RESOLUTIONS, streamConfig, transportChain, classifyAddress, vdisplayTaskXml, SCREEN_VERSION, SCREEN_ASSETS } from './screen.js';
 export type { ScreenStatus, ScreenInfo, DeviceScreenSettings } from './screen.js';
 export { rewriteCsp } from './apps.js';
