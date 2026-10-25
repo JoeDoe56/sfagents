@@ -58,9 +58,9 @@ export interface AgentTree {
   readonly skipped: readonly SkippedAgentFile[];
   /** Grants naming agents that are not loaded, and similar notes. */
   readonly warnings: readonly string[];
-  /** Configuration files no agent file tool may modify. */
+  /** Configuration files no agent may modify. */
   readonly protectedFiles: readonly string[];
-  /** Credential files no agent file tool may read or modify (<configDir>/.env). */
+  /** Credential files no agent may read or modify (<configDir>/.env). */
   readonly secretFiles: readonly string[];
 }
 
@@ -175,6 +175,14 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
           throw new ConfigError(shown, `workspace.roots[${i}]`, error instanceof Error ? error.message : String(error));
         }
       });
+      const legacy = def.tools?.legacy;
+      if (legacy) {
+        warnings.push(
+          `${shown}: ${legacy.tools.join(', ')} ${legacy.tools.length === 1 ? 'was' : 'were'} replaced by shell, which runs in a sandbox${legacy.access === 'read' ? ' where the workspace is read-only for this agent' : ''}. Update tools.allow to ["shell", ...] to silence this.`,
+        );
+      }
+      // Agents that only had read tools keep a read-only workspace.
+      const legacyAccess = legacy?.access === 'read' ? roots.map((root): SandboxRule => ({ path: root, access: 'read' })) : [];
       const access = (def.workspace?.access ?? []).map((entry, i): SandboxRule => {
         const expanded = entry.path === '~' || entry.path.startsWith('~/') || entry.path.startsWith('~\\') ? path.join(os.homedir(), entry.path.slice(1)) : entry.path;
         try {
@@ -184,7 +192,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
         }
       });
       if (loaded.has(agentName)) throw new ConfigError(shown, undefined, `another file is already named "${agentName}"`);
-      loaded.set(agentName, { file, definition: def, roots: [...new Set(roots)], access });
+      loaded.set(agentName, { file, definition: def, roots: [...new Set(roots)], access: [...legacyAccess, ...access] });
     } catch (error) {
       skipped.push({ file: shown, error: error instanceof ConfigError ? error.message.replace(`${shown}: `, '').replace(`${shown} `, '') : String(error) });
     }

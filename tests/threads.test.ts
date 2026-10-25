@@ -12,7 +12,9 @@ import {
   type AgentReplyPayload,
   type ModelRequest,
 } from '@sfagents/core';
-import { baseAgent, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script } from './helpers.js';
+import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, useAnySandbox, writeJson, type Script } from './helpers.js';
+
+await useAnySandbox();
 
 const runtimes: AgentRuntime[] = [];
 const conversations: ConversationService[] = [];
@@ -51,8 +53,8 @@ const inThread = (req: ModelRequest) => /<thread>/.test(systemOf(req));
 describe('agents messaging each other in threads', () => {
   test('an agent messages another, which works with its own tools and replies', async () => {
     const { tree, dir, conversation } = project({
-      main: { workspace: { roots: ['work'] }, tools: { allow: ['read_file', '1-worker.json'] } },
-      worker: { description: 'Reads shared files.', workspace: { roots: ['work/shared'] }, tools: { allow: ['read_file', 'shell'], mcpServers: [{ server: 'local', tools: ['echo'] }] } },
+      main: { workspace: { roots: ['work'] }, tools: { allow: ['1-worker.json'] } },
+      worker: { description: 'Reads shared files.', workspace: { roots: ['work/shared'] }, tools: { allow: ['shell'], mcpServers: [{ server: 'local', tools: ['echo'] }] } },
     });
     const script: Script = (req, _n, agent) => {
       if (agent === 'main') {
@@ -61,7 +63,7 @@ describe('agents messaging each other in threads', () => {
         return { text: `Worker (${payload.status}): ${payload.reply}` };
       }
       const toolCount = req.messages.filter((m) => m.role === 'tool').length;
-      if (toolCount === 0) return { toolCalls: [{ name: 'read_file', args: { file_path: 'data.txt' } }] };
+      if (toolCount === 0) return { toolCalls: [{ name: 'shell', args: { command: catFile('data.txt') } }] };
       if (toolCount === 1) return { toolCalls: [{ name: 'mcp__local__echo', args: { text: '7' } }] };
       return { text: `number is ${lastToolContent(req)}` };
     };
@@ -78,7 +80,7 @@ describe('agents messaging each other in threads', () => {
     assert.match(systemOf(req), /^You are worker\.[\s\S]*<thread>[\s\S]*answering "main"/);
     assert.equal(lastUser(req), 'Read data.txt; echo the number.');
     assert.doesNotMatch(JSON.stringify(req.messages), /Ask the worker/);
-    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['mcp__local__echo', 'read_file', 'shell']);
+    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['mcp__local__echo', 'shell']);
     // The writer's prompt says how to talk to agents.
     assert.match(systemOf(providers.get('main')!.requests[0]!.request), /<agent_messaging>[\s\S]*terse, structured/);
     assert.deepEqual(events.filter((e) => e.type === 'agent_start').map((e) => e.agentPath.join('/')), ['main', 'main/worker']);

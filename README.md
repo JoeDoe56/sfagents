@@ -82,7 +82,7 @@ mcp.json                      local, untracked named MCP servers (optional)
   uploads/                    files attached in the web interface (and partial uploads)
 ```
 
-The configurations in `examples/` provide `main` with file tools and shell, which may message a read-only `worker` (two at once), and a demo MCP server. After copying them as described above, run `npx sfagents agents validate` to see them.
+The configurations in `examples/` provide `main` with the shell, which may message a `worker` whose workspace is read-only (two at once), and a demo MCP server. After copying them as described above, run `npx sfagents agents validate` to see them.
 
 ## Agent definition
 
@@ -99,9 +99,9 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
   "maxOutputTokens": 4000,
   "workspace": { "roots": ["."] },
   "tools": {
-    "allow": ["read_file", "write_file", "edit", "glob", "grep", "list_directory", "shell", "2-worker.json"],
+    "allow": ["shell", "2-worker.json"],
     "mcpServers": ["local-tools", { "server": "github", "tools": ["search_issues"] }],
-    "autoApprove": ["edit", "mcp__local-tools__*"]
+    "autoApprove": ["mcp__local-tools__*"]
   },
   "conversation": { "access": "organize" },
   "artifacts": { "access": "create" },
@@ -125,7 +125,7 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | `workspace.roots` | Directories the agent may read and write, relative to the project directory. Default `["."]`. Shell commands are sandboxed to them. |
 | `workspace.access` | Exceptions to the roots, like folder sharing: `[{ "path": "~/.cargo", "mode": "read" }, { "path": "secrets", "mode": "none" }]`. Modes `read`, `write`, `none`; the longest matching path wins. Paths are relative to the project directory, `~` is your home folder. Applies to shell commands and to artifact files alike. SF Agents' own files stay protected whatever an entry says. |
 | `workspace.network` | `true` lets shell commands use the network (`npm install`, `git push`). Default `false`: commands are offline. |
-| `tools.allow` | Built-in tools: `read_file`, `write_file`, `edit`, `glob`, `grep`, `list_directory`, `shell`. And **grants**: `"N-name.json"` lets this agent message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
+| `tools.allow` | The built-in tool `shell`, which reads, searches and edits files too (in the sandbox). Older files that list `read_file`, `write_file`, `edit`, `glob`, `grep` or `list_directory` still load: those entries become `shell`, with the workspace read-only when none of them could write. And **grants**: `"N-name.json"` lets this agent message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
 | `tools.mcpServers` | Server names from `mcp.json`, optionally limited to listed tools. |
 | `tools.autoApprove` | Tools that skip the confirmation prompt. Built-in IDs, `mcp__<server>__<tool>` or `mcp__<server>__*`. |
 | `tools.ask` | `true` asks before each shell command. Default `false`: the sandbox is the boundary. |
@@ -144,7 +144,7 @@ Each pair of agents shares **one persistent thread**, stored in `.sfagents/threa
 
 ```json
 { "agent": "worker", "thread": 1, "status": "replied", "reply": "…", "turns": 3,
-  "toolCalls": { "read_file": { "ok": 2, "failed": 0 } }, "durationMs": 5210 }
+  "toolCalls": { "shell": { "ok": 2, "failed": 0 } }, "durationMs": 5210 }
 ```
 
 `status` is `replied`, `error`, `max_turns`, `timeout` or `cancelled`. Several `message_agent` calls in one turn run **in parallel**, to different agents or to the same agent in separate threads (`threads/<a>--<b>--2.md` and so on, up to the grant's N). An agent replying in a thread can itself message other agents, also in parallel. A reply may not wait on the agent that is waiting for it (that would deadlock); it gets an error saying so instead. Cancelling the reply in the conversation cancels everything under it.
@@ -161,7 +161,7 @@ Threads are listed as artifacts of the conversation (`type: "agent_transcript"`)
 - **One writer.** A second `start` on the same conversation gets an error naming the process that holds it. A lock left by a crashed process is replaced automatically when that process is provably gone; `sfagents conversation unlock` handles anything else.
 - **Durability and crashes.** Every message, tool start and tool result is flushed to disk before the next step. After a crash, the next start reports interrupted runs and marks each unfinished tool call as either "never started" or "outcome unknown". Nothing is retried automatically, and the model is told which is which. A damaged ending is moved to `.sfagents/recovered/` and recorded, never silently dropped.
 - **What is not restored.** "Always allow" approvals and `--yes` apply to the running process only. On resume, tools and permissions come from the current agent files.
-- **Privacy.** `.sfagents/` contains a `.gitignore` that excludes everything in it, and agent file tools cannot read or write it. Conversations can still contain anything you or your tools put in them, so treat the folder as private.
+- **Privacy.** `.sfagents/` contains a `.gitignore` that excludes everything in it, and agent shell commands cannot read or write it. Conversations can still contain anything you or your tools put in them, so treat the folder as private.
 
 ## Artifacts
 
@@ -225,14 +225,14 @@ cross-origin writes. The sign-in gate still applies, and the session cookie is m
 ## Permissions (enforced in code, not in prompts)
 
 - **Tool allowlists** are checked when each call is executed. A model asking for a tool it was not given gets an error back; nothing runs.
-- **File tools** resolve every path to its canonical real path (following `..` and symlinks, including for files that do not exist yet) and refuse anything outside the agent's roots. Agent and MCP configuration files are read-only to all file tools.
 - **Each agent has exactly its own permissions.** Messaging another agent never passes on the writer's tools or roots, and the other agent's are not limited by the writer's: grant wider or different ones when you want them. Grants are explicit (`N-name.json`). The loaded definitions are frozen.
 - **Shell runs in an OS sandbox**: bubblewrap on Linux, Seatbelt (`sandbox-exec`) on macOS. A command can read and write the agent's workspace roots, read the system folders, and nothing else: the home folder and `/tmp` are empty, other folders do not exist, and there is no network unless the agent sets `"workspace": { "network": true }`. Inside the roots, `.env` and `.sfagents/` are hidden, and the `agents` folder, `mcp.json`, `.git/hooks`, `.git/config` and `.git/modules` are read-only (a missing `mcp.json` or `.env` is created empty first, so it can be protected). Commands run without asking; set `"tools": { "ask": true }` to approve each one. **Without a sandbox, every command is refused** (install `bubblewrap` on Linux). Windows support is in progress.
-- **Writes, edits and MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag. In `run` mode without a terminal, calls that need approval are denied and the model is told why.
+- **Artifacts** are written by the host, not the shell, under the same rules: canonical real paths (following `..` and symlinks), the roots and `workspace.access`, and SF Agents' own files protected. They do not ask.
+- **MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag (which also approves shell commands of agents with `tools.ask`). In `run` mode without a terminal, calls that need approval are denied and the model is told why.
 - **MCP servers are not workspace-confined.** A server can reach anything its own process can. Grant servers per agent, preferably limited to specific tools.
-- **Provider keys and sign-ins** live in the system keyring; no file tool, shell command, MCP server or terminal tab gets them in its environment, and they are never sent to a model.
-- **Conversation state** (`.sfagents/`, including threads and uploads) is invisible to all file tools; it changes only through the conversation service and the web server.
-- **Secrets:** the configuration directory's `.env` cannot be read, searched or written by any file tool (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model. Approved shell commands could still read `.env`, so approve shell commands with care.
+- **Provider keys and sign-ins** live in the system keyring; no shell command, MCP server or terminal tab gets them in its environment, and they are never sent to a model.
+- **Conversation state** (`.sfagents/`, including threads and uploads) is invisible to shell commands; it changes only through the conversation service and the web server.
+- **Secrets:** the configuration directory's `.env` cannot be read or written by shell commands or artifacts (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model.
 
 ## MCP servers
 

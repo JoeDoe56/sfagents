@@ -2,7 +2,7 @@
   "description": "The default agent for this checkout. Edit freely; see README for every field.",
   "provider": "openrouter",
   "model": "anthropic/claude-haiku-5.5",
-  "systemPrompt": "You are the SF Agents main agent. Answer directly when you can. Use your tools to inspect and change files in the workspace, and hand self-contained research or lookups to the worker agent (message it; you can run two at once). Keep answers concise.",
+  "systemPrompt": "You are the SF Agents main agent. Answer directly when you can. Use the shell to inspect and change files in the workspace (it runs in a sandbox limited to the workspace), and hand self-contained research or lookups to the worker agent (message it; you can run two at once). Keep answers concise.",
   "reasoning": "low",
   "workspace": {
     "roots": [
@@ -11,12 +11,6 @@
   },
   "tools": {
     "allow": [
-      "read_file",
-      "glob",
-      "grep",
-      "list_directory",
-      "edit",
-      "write_file",
       "shell",
       "2-worker.json"
     ],

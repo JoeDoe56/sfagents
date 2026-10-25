@@ -6,11 +6,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { ConversationService, detectSandbox, loadAgentTree } from '@sfagents/core';
+import { ConversationService, loadAgentTree } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
-import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
+import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, useAnySandbox, writeJson, type Script, writeAgent } from './helpers.js';
 
-const sandboxed = (await detectSandbox()).ok;
+await useAnySandbox();
 
 function project(agent: Record<string, unknown> = {}) {
   const dir = makeTempDir('sfagents-web-');
@@ -279,7 +279,7 @@ describe('web server', () => {
       if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'create_artifact', args: { title: 'Page', path: 'index.html', content: '<h1>hi</h1>' } }] };
       return { text: `Done (${lastToolContent(req)?.slice(0, 20)})` };
     };
-    const s = await startServer(script, { tools: { allow: ['write_file'], autoApprove: ['write_file'] } });
+    const s = await startServer(script);
     const ev = events(s.base);
     try {
       await ev.wait((e) => e.event === 'state');
@@ -346,7 +346,7 @@ describe('web server', () => {
     }
   });
 
-  test('approvals are asked in the browser; denial and cancellation work', { skip: !sandboxed && 'no OS sandbox on this machine' }, async () => {
+  test('approvals are asked in the browser; denial and cancellation work', async () => {
     const s = await startServer(
       (req, call) => {
         if (call === 0) return { toolCalls: [{ name: 'shell', args: { command: 'echo approved-run' } }] };

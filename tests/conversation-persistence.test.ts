@@ -14,17 +14,9 @@ import {
   ToolErrorType,
   type ChatMessage,
 } from '@sfagents/core';
-import {
-  baseAgent,
-  CLI_ENTRY,
-  lastToolContent,
-  makeTempDir,
-  runCli,
-  scriptedFactory,
-  startMockOpenAI,
-  writeJson,
-  type MockChatHandler,
-  type Script, writeAgent } from './helpers.js';
+import { baseAgent, CLI_ENTRY, lastToolContent, makeTempDir, runCli, scriptedFactory, startMockOpenAI, writeJson, type MockChatHandler, type Script, writeAgent, catFile, useAnySandbox, writeFileCommand } from './helpers.js';
+
+const realSandbox = await useAnySandbox();
 
 const isWin = process.platform === 'win32';
 
@@ -58,13 +50,13 @@ function roles(messages: readonly ChatMessage[]): string {
 
 describe('persistent conversation (runtime)', () => {
   test('a tool exchange and reasoning blocks survive a restart and replay validly', async () => {
-    const { dir, file } = project({ tools: { allow: ['read_file'] } });
+    const { dir, file } = project({ tools: { allow: ['shell'] } });
     fs.writeFileSync(path.join(dir, 'work', 'fact.txt'), 'The launch code is AZURE-7.\n');
     const details = [{ type: 'reasoning.text', format: 'anthropic-claude-v1', index: 0, text: 'read it', signature: 'sig123' }];
     const first = openRuntime(dir, (req, n) =>
       n === 0
-        ? { toolCalls: [{ name: 'read_file', args: { file_path: 'fact.txt' } }], reasoningDetails: details }
-        : { text: `Found: ${lastToolContent(req)?.trim()}` },
+        ? { toolCalls: [{ name: 'shell', args: { command: catFile('fact.txt') } }], reasoningDetails: details }
+        : { text: `Found: ${/Stdout: (.*)/.exec(lastToolContent(req) ?? '')?.[1]?.trim()}` },
     );
     const r1 = await first.runtime.createSession().run('What is the launch code?');
     assert.equal(r1.text, 'Found: The launch code is AZURE-7.');
@@ -79,7 +71,7 @@ describe('persistent conversation (runtime)', () => {
     const sent = second.providers.get('main')!.requests[0]!.messages as ChatMessage[];
     assert.equal(roles(sent), 'suatau', 'system, user, assistant(tool call), tool, assistant, user');
     const assistant = sent[2] as Extract<ChatMessage, { role: 'assistant' }>;
-    assert.equal(assistant.tool_calls![0]!.function.arguments, '{"file_path":"fact.txt"}');
+    assert.equal(assistant.tool_calls![0]!.function.arguments, JSON.stringify({ command: catFile('fact.txt') }));
     assert.deepEqual(assistant.reasoning_details, details, 'opaque payload replayed unchanged to the same model');
     assert.equal((sent[3] as { tool_call_id: string }).tool_call_id, assistant.tool_calls![0]!.id);
     assert.match((sent[3] as { content: string }).content, /AZURE-7/);
@@ -96,11 +88,11 @@ describe('persistent conversation (runtime)', () => {
   });
 
   test('crash before execution: the call is marked never-started and is not repeated', async () => {
-    const { dir } = project({ tools: { allow: ['write_file'] } });
+    const { dir } = project({ tools: { allow: ['shell'] } });
     const failOn = 'sfa:tool_start';
     const first = openRuntime(
       dir,
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'write_file', args: { file_path: 'side-effect.txt', content: 'x' } }] } : { text: 'done' }),
+      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('side-effect.txt') } }] } : { text: 'done' }),
       {
         approveAll: true,
         io: {
@@ -129,10 +121,10 @@ describe('persistent conversation (runtime)', () => {
   });
 
   test('crash after execution but before the result is stored: outcome is unknown, not repeated', async () => {
-    const { dir } = project({ tools: { allow: ['write_file'] } });
+    const { dir } = project({ tools: { allow: ['shell'] } });
     const first = openRuntime(
       dir,
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'write_file', args: { file_path: 'once.txt', content: 'x' } }] } : { text: 'done' }),
+      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('once.txt') } }] } : { text: 'done' }),
       {
         approveAll: true,
         io: {
@@ -149,7 +141,7 @@ describe('persistent conversation (runtime)', () => {
     first.conversation.close();
 
     const second = openRuntime(dir, () => ({ text: 'I will check before retrying.' }), { approveAll: true });
-    assert.match(second.conversation.notices.find((n) => n.kind === 'interrupted')!.message, /unknown outcome \(write_file\)/);
+    assert.match(second.conversation.notices.find((n) => n.kind === 'interrupted')!.message, /unknown outcome \(shell\)/);
     const r = await second.runtime.createSession().run('continue');
     assert.equal(r.toolCalls.length, 0, 'nothing re-executed');
     const sent = second.providers.get('main')!.requests[0]!.messages as ChatMessage[];
@@ -206,33 +198,31 @@ describe('persistent conversation (runtime)', () => {
     assert.ok(state.lastResetSeq > 0);
   });
 
-  test('conversation state is invisible to agent file tools', async () => {
-    const { dir } = project({ workspace: { roots: ['.'] }, tools: { allow: ['read_file', 'grep'] } });
+  test('conversation state is invisible to shell commands', { skip: !realSandbox && 'no OS sandbox on this machine' }, async () => {
+    const { dir } = project({ workspace: { roots: ['.'] }, tools: { allow: ['shell'] } });
     const rt = openRuntime(dir, (req) => {
       const last = req.messages[req.messages.length - 1]!;
       if (last.role === 'user' && last.content === 'read the history file') {
-        return { toolCalls: [{ name: 'read_file', args: { file_path: '.sfagents/conversation.md' } }, { name: 'grep', args: { pattern: 'SECRET-PHRASE' } }] };
+        return { toolCalls: [{ name: 'shell', args: { command: 'cat .sfagents/conversation.md; grep -r SECRET-PHRASE . || echo "No matches"' } }] };
       }
       return { text: lastToolContent(req) ?? 'ok' };
     });
     await rt.runtime.createSession().run('SECRET-PHRASE lives in history');
-    const r = await rt.runtime.createSession().run('read the history file');
-    assert.deepEqual(r.toolCalls.map((c) => [c.name, c.ok, c.errorType]), [
-      ['read_file', false, ToolErrorType.EXECUTION_DENIED],
-      ['grep', true, undefined],
-    ]);
-    const grepResult = rt.providers.get('main')!.requests.at(-1)!.messages as ChatMessage[];
-    assert.match((grepResult.at(-1) as { content: string }).content, /No matches/);
+    await rt.runtime.createSession().run('read the history file');
+    const sent = rt.providers.get('main')!.requests.at(-1)!.messages as ChatMessage[];
+    const output = (sent.at(-1) as { content: string }).content.split('\n').slice(1).join('\n');
+    assert.match(output, /No matches/);
+    assert.doesNotMatch(output, /SECRET-PHRASE lives/);
     await rt.close();
   });
 
   test('"always allow" approvals do not survive a restart', async () => {
-    const { dir } = project({ tools: { allow: ['write_file'] } });
+    const { dir } = project({ tools: { allow: ['shell'], ask: true } });
     let asked = 0;
     for (let round = 0; round < 2; round++) {
       const tree = loadAgentTree(dir);
       const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
-      const { factory } = scriptedFactory((_req, n) => (n === 0 ? { toolCalls: [{ name: 'write_file', args: { file_path: `f${round}.txt`, content: 'x' } }] } : { text: 'ok' }));
+      const { factory } = scriptedFactory((_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand(`f${round}.txt`) } }] } : { text: 'ok' }));
       const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation, confirm: async () => (asked++, 'allow_always') });
       await runtime.createSession().run('write');
       await runtime.dispose();
@@ -326,7 +316,7 @@ describe('persistent conversation (CLI)', () => {
     assert.equal(third.code, 0, third.stderr);
   });
 
-  test('a process killed mid-tool leaves an interrupted run that is reported, not repeated', async () => {
+  test('a process killed mid-tool leaves an interrupted run that is reported, not repeated', { skip: !realSandbox && 'no OS sandbox on this machine' }, async () => {
     const sleepCmd = isWin ? 'ping -n 30 127.0.0.1' : 'sleep 30';
     let calls = 0;
     handler = (body) => {

@@ -278,19 +278,6 @@ export interface ToolResult {
   metadata?: Record<string, unknown>;
 }
 
-export interface FileDiff {
-  fileName: string;
-  fileDiff: string;
-}
-
-export interface ToolEditConfirmationDetails {
-  type: 'edit';
-  title: string;
-  fileName: string;
-  filePath: string;
-  fileDiff: string;
-}
-
 export interface ToolExecuteConfirmationDetails {
   type: 'exec';
   title: string;
@@ -315,7 +302,6 @@ export interface ToolInfoConfirmationDetails {
 }
 
 export type ToolCallConfirmationDetails =
-  | ToolEditConfirmationDetails
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails;

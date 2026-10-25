@@ -65,12 +65,12 @@ export const SANDBOX_RUN_DIR = '/run/sfagents';
 /** Environment variable naming the host channel inside the sandbox. */
 export const HOST_CHANNEL_ENV = 'SFAGENTS_HOST';
 
-/** The access the policy gives `p` (canonical): the longest matching rule, or none. */
+/** The access the policy gives `p` (canonical): the longest matching rule (the last one for a path), or none. */
 export function accessFor(rules: readonly SandboxRule[], p: string): SandboxAccess {
   let best: SandboxRule | undefined;
   for (const rule of rules) {
     if (!isPathWithinRoot(p, rule.path)) continue;
-    if (!best || rule.path.length > best.path.length) best = rule;
+    if (!best || rule.path.length >= best.path.length) best = rule;
   }
   return best?.access ?? 'none';
 }

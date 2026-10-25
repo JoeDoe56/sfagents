@@ -23,12 +23,6 @@ import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
-import { ReadFileTool } from '../tools/read-file.js';
-import { WriteFileTool } from '../tools/write-file.js';
-import { EditTool } from '../tools/edit.js';
-import { GlobTool } from '../tools/glob.js';
-import { GrepTool } from '../tools/grep.js';
-import { LSTool } from '../tools/ls.js';
 import { ShellTool } from '../tools/shell.js';
 import { WorkspaceContext } from '../permissions/workspace.js';
 import { buildSandboxPolicy } from '../sandbox/policy.js';
@@ -118,7 +112,7 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
     `Date: ${new Date().toISOString().slice(0, 10)}`,
     `Platform: ${process.platform} (${os.release()})`,
     node.roots.length
-      ? `Workspace roots (file tools are confined to these; relative paths resolve against the first): ${node.roots.join(', ')}`
+      ? `Workspace roots (shell commands run in a sandbox confined to these; relative paths resolve against the first): ${node.roots.join(', ')}`
       : 'Workspace: none (this agent has no filesystem access)',
     `Tools available to you: ${toolNames.length ? toolNames.join(', ') : '(none)'}`,
   ];
@@ -205,12 +199,6 @@ export class AgentRuntime implements AgentMessenger {
         askShell: d.tools?.ask === true,
       };
       const factories: Record<string, () => AnyDeclarativeTool> = {
-        [ToolNames.READ_FILE]: () => new ReadFileTool(ctx),
-        [ToolNames.WRITE_FILE]: () => new WriteFileTool(ctx),
-        [ToolNames.EDIT]: () => new EditTool(ctx),
-        [ToolNames.GLOB]: () => new GlobTool(ctx),
-        [ToolNames.GREP]: () => new GrepTool(ctx),
-        [ToolNames.LS]: () => new LSTool(ctx),
         [ToolNames.SHELL]: () => new ShellTool(ctx),
       };
       for (const id of allow) {
@@ -251,8 +239,7 @@ export class AgentRuntime implements AgentMessenger {
       const artifactWorkspace = node.roots.length
         ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules)
         : undefined;
-      const autoWrite = (d.tools?.autoApprove ?? []).includes(ToolNames.WRITE_FILE);
-      for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, artifactWorkspace, { autoWrite })) tools.set(tool.name, tool);
+      for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, artifactWorkspace)) tools.set(tool.name, tool);
     }
     return tools;
   }

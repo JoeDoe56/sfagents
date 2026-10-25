@@ -10,6 +10,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { detectSandbox, setSandboxForTesting } from '@sfagents/core';
 import type {
   AgentDefinition,
   AssistantMessage,
@@ -275,4 +276,25 @@ export function runCli(args: string[], options: { cwd?: string; env?: NodeJS.Pro
     });
     child.stdin.end(options.input ?? '');
   });
+}
+
+/**
+ * Lets tests that use the shell as an ordinary tool run on any machine: the
+ * real sandbox when there is one, else a stand-in that runs commands as they
+ * are. Sandbox behaviour itself is tested against the real one only.
+ */
+export async function useAnySandbox(): Promise<boolean> {
+  const real = (await detectSandbox()).ok;
+  if (!real) setSandboxForTesting({ ok: true, sandbox: { name: 'test pass-through', wrap: (command) => command } });
+  return real;
+}
+
+/** A command that prints a file, for the platform's shell. */
+export function catFile(file: string): string {
+  return process.platform === 'win32' ? `type ${file}` : `cat ${file}`;
+}
+
+/** A command that writes a file, for the platform's shell. */
+export function writeFileCommand(file: string, text = 'x'): string {
+  return `echo ${text}> ${file}`;
 }

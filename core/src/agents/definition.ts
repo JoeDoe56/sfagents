@@ -5,7 +5,7 @@
  * instead of silently granting or dropping permissions.
  */
 
-import { BUILTIN_TOOL_IDS, MCP_TOOL_PREFIX, ToolNames } from '../tools/tool-names.js';
+import { BUILTIN_TOOL_IDS, LEGACY_FILE_TOOL_IDS, LEGACY_WRITE_TOOL_IDS, MCP_TOOL_PREFIX, ToolNames } from '../tools/tool-names.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../providers/types.js';
 
 /** Providers an agent file can name without adding one in Settings (keys from environment variables). */
@@ -86,6 +86,11 @@ export interface AgentDefinition {
     ask?: boolean;
     /** Agents this one may message ("N-name.json" entries of tools.allow). */
     agents?: AgentGrant[];
+    /**
+     * Set when tools.allow listed removed file tools (read_file, edit, ...):
+     * they became `shell`, read-only ("read") unless one of them could write.
+     */
+    legacy?: { tools: string[]; access: 'read' | 'write' };
   };
   /**
    * Access to the main persistent conversation's sections and history:
@@ -351,6 +356,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     const allowAll = c.stringArray(t['allow'], 'tools.allow', { unique: true });
     const allow: string[] = [];
     const agents: AgentGrant[] = [];
+    const legacy: string[] = [];
     allowAll?.forEach((entry, i) => {
       const grant = AGENT_GRANT_PATTERN.exec(entry);
       if (grant) {
@@ -359,6 +365,10 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
         const agent = target.replace(/\.json$/i, '');
         if (agents.some((a) => a.agent === agent)) c.fail(`tools.allow[${i}]`, `"${agent}" is granted twice`);
         agents.push({ file: target, agent, max: Number(grant[1]) });
+        return;
+      }
+      if (LEGACY_FILE_TOOL_IDS.includes(entry)) {
+        legacy.push(entry);
         return;
       }
       if (!BUILTIN_TOOL_IDS.includes(entry)) {
@@ -394,7 +404,15 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
         return grant;
       });
     }
-    const autoApprove = c.stringArray(t['autoApprove'], 'tools.autoApprove', { unique: true, nonEmptyItems: true });
+    // Removed file tools: shell does their work now, in the sandbox.
+    const hadShell = allow.includes(ToolNames.SHELL);
+    if (legacy.length && !hadShell) allow.push(ToolNames.SHELL);
+    const legacyInfo = legacy.length
+      ? { tools: legacy, access: (hadShell || legacy.some((id) => LEGACY_WRITE_TOOL_IDS.includes(id)) ? 'write' : 'read') as 'read' | 'write' }
+      : undefined;
+    const autoApprove = c
+      .stringArray(t['autoApprove'], 'tools.autoApprove', { unique: true, nonEmptyItems: true })
+      ?.filter((entry) => !LEGACY_FILE_TOOL_IDS.includes(entry));
     autoApprove?.forEach((entry, i) => {
       const field = `tools.autoApprove[${i}]`;
       if (entry.startsWith(MCP_TOOL_PREFIX)) {
@@ -412,7 +430,14 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
         c.fail(field, `"${entry}" is not in tools.allow, so it cannot be auto-approved`);
       }
     });
-    tools = { allow: allowAll === undefined ? undefined : allow, mcpServers, autoApprove, ...(ask !== undefined ? { ask } : {}), ...(agents.length ? { agents } : {}) };
+    tools = {
+      allow: allowAll === undefined ? undefined : allow,
+      mcpServers,
+      autoApprove,
+      ...(ask !== undefined ? { ask } : {}),
+      ...(agents.length ? { agents } : {}),
+      ...(legacyInfo ? { legacy: legacyInfo } : {}),
+    };
   }
 
   let conversation: AgentDefinition['conversation'];
@@ -523,12 +548,3 @@ export function mcpGrants(def: AgentDefinition): Map<string, ReadonlySet<string>
 export function builtinAllow(def: AgentDefinition): readonly string[] {
   return def.tools?.allow ?? [];
 }
-
-export const FILE_TOOL_IDS: readonly string[] = [
-  ToolNames.READ_FILE,
-  ToolNames.WRITE_FILE,
-  ToolNames.EDIT,
-  ToolNames.GLOB,
-  ToolNames.GREP,
-  ToolNames.LS,
-];

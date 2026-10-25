@@ -9,7 +9,7 @@
  * nearest existing ancestor, and rejection of dangling file symlinks.
  * Removed: change listeners and runtime add/remove of directories; an agent's
  * roots are fixed when its definition is loaded. Added: protected paths
- * (agent and MCP configuration files) that file tools may never modify, and
+ * (agent and MCP configuration files) that agents may never modify, and
  * secret paths (the configuration .env) they may not read either.
  */
 
@@ -35,8 +35,8 @@ export class WorkspaceContext {
 
   /**
    * @param directories Absolute or relative root directories. Each must exist.
-   * @param protectedPaths Files that may be read but never written by file tools.
-   * @param secretPaths Files or directories file tools may neither read nor
+   * @param protectedPaths Files that may be read but never written by agents.
+   * @param secretPaths Files or directories agents may neither read nor
    *   write (credentials, SF Agents conversation state). A directory covers
    *   everything inside it.
    * @param rules The agent's sandbox rules. When given, they decide what is
@@ -96,7 +96,7 @@ export class WorkspaceContext {
   }
 
   /**
-   * Full policy check for a file tool. `write` additionally refuses
+   * Full policy check for a path an agent tool (artifacts, the shell's directory) uses. `write` additionally refuses
    * protected configuration files.
    */
   check(pathToCheck: string, access: PathAccess): PathCheck {
@@ -123,14 +123,14 @@ export class WorkspaceContext {
       return {
         ok: false,
         resolvedPath: resolved,
-        reason: `Path holds SF Agents credentials or conversation state and is not accessible to agent file tools: ${pathToCheck}`,
+        reason: `Path holds SF Agents credentials or conversation state and is not accessible to agents: ${pathToCheck}`,
       };
     }
     if (access === 'write' && this.protectedPaths.has(normalizeForCompare(resolved))) {
       return {
         ok: false,
         resolvedPath: resolved,
-        reason: `Path is a protected SF Agents configuration file and cannot be modified by agent file tools: ${pathToCheck}`,
+        reason: `Path is a protected SF Agents configuration file and cannot be modified by agents: ${pathToCheck}`,
       };
     }
     if (access === 'write' && granted === 'read') {

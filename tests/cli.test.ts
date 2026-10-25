@@ -2,7 +2,11 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { baseAgent, makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
+import { detectSandbox } from '@sfagents/core';
+import { baseAgent, catFile, makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeFileCommand, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
+
+// The CLI runs in its own process, with the machine's real sandbox.
+const sandboxed = (await detectSandbox()).ok;
 
 let mock: Awaited<ReturnType<typeof startMockOpenAI>>;
 let handler: MockChatHandler = () => ({ text: 'unset' });
@@ -74,25 +78,25 @@ describe('sfagents CLI', () => {
     assert.match(missing.stderr, /No agents found/);
   });
 
-  test('run: streams the answer to stdout and tool activity to stderr', async () => {
+  test('run: streams the answer to stdout and tool activity to stderr', { skip: !sandboxed && 'no OS sandbox on this machine' }, async () => {
     handler = (body) =>
       lastTool(body) === undefined
-        ? { toolCalls: [{ name: 'read_file', args: { file_path: 'hello.txt' } }] }
-        : { text: `File contents: ${lastTool(body)!.trim()}` };
-    const dir = project({ tools: { allow: ['read_file'] } });
+        ? { toolCalls: [{ name: 'shell', args: { command: catFile('hello.txt') } }] }
+        : { text: `File contents: ${/Stdout: (.*)/.exec(lastTool(body)!)?.[1]?.trim()}` };
+    const dir = project({ tools: { allow: ['shell'] } });
     const r = await runCli(['run', 'read', 'hello.txt'], { cwd: dir });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout.trim(), 'File contents: hello from the workspace');
-    assert.match(r.stderr, /⚙ read_file hello\.txt/);
-    assert.match(r.stderr, /✓ Read 2 lines/);
+    assert.match(r.stderr, /⚙ shell (cat|type) hello\.txt/);
+    assert.match(r.stderr, /✓ exit 0/);
     const lastRequest = mock.requests[mock.requests.length - 1] as { messages: Array<{ role: string; content: string }> };
     assert.equal(lastRequest.messages[1]!.content, 'read hello.txt');
   });
 
-  test('run --json returns the structured result; a denied call in non-interactive mode is explained', async () => {
+  test('run --json returns the structured result; a denied call in non-interactive mode is explained', { skip: !sandboxed && 'no OS sandbox on this machine' }, async () => {
     handler = (body) =>
-      lastTool(body) === undefined ? { toolCalls: [{ name: 'write_file', args: { file_path: 'out.txt', content: 'x' } }] } : { text: lastTool(body)! };
-    const dir = project({ tools: { allow: ['write_file'] } });
+      lastTool(body) === undefined ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('out.txt') } }] } : { text: lastTool(body)! };
+    const dir = project({ tools: { allow: ['shell'], ask: true } });
     const r = await runCli(['run', '--json', 'write a file'], { cwd: dir });
     assert.equal(r.code, 0, r.stderr);
     const result = JSON.parse(r.stdout);
@@ -103,7 +107,7 @@ describe('sfagents CLI', () => {
 
     const yes = await runCli(['run', '--yes', 'write a file'], { cwd: dir });
     assert.equal(yes.code, 0);
-    assert.equal(fs.readFileSync(path.join(dir, 'work', 'out.txt'), 'utf8'), 'x');
+    assert.match(fs.readFileSync(path.join(dir, 'work', 'out.txt'), 'utf8'), /^x\r?\n$/);
   });
 
   test('run reads the task from stdin with "-"', async () => {

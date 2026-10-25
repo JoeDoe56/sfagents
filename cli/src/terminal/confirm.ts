@@ -12,20 +12,10 @@ import {
 import { createStyle } from './style.js';
 import type { EventRenderer } from './render.js';
 
-const MAX_DIFF_LINES = 60;
-
 function describe(details: ToolCallConfirmationDetails, color: ReturnType<typeof createStyle>): string[] {
   switch (details.type) {
     case 'exec':
       return [`  $ ${stripAnsiAndControl(details.command)}`, color.dim(`    in ${details.cwd}`)];
-    case 'edit': {
-      const lines = stripAnsiAndControl(details.fileDiff).split('\n');
-      const body = lines.slice(0, MAX_DIFF_LINES).map((l) =>
-        l.startsWith('+') && !l.startsWith('+++') ? color.green(l) : l.startsWith('-') && !l.startsWith('---') ? color.red(l) : color.dim(l),
-      );
-      if (lines.length > MAX_DIFF_LINES) body.push(color.dim(`  … ${lines.length - MAX_DIFF_LINES} more diff lines`));
-      return [`  ${details.filePath}`, ...body.map((l) => `    ${l}`)];
-    }
     case 'mcp': {
       const args = stripAnsiAndControl(JSON.stringify(details.args));
       return [`  server: ${details.serverName}   tool: ${details.toolName}`, `  args: ${args.length > 600 ? `${args.slice(0, 600)}…` : args}`];

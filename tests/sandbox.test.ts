@@ -246,6 +246,9 @@ describe('policy', () => {
     assert.match(ws.check('docs/plan.md', 'write').reason!, /read-only/);
     assert.match(ws.check('agents/new.json', 'write').reason!, /read-only/);
     assert.match(ws.check('.env', 'read').reason!, /credentials/);
+    // An entry for a root itself overrides it (the example worker: a read-only workspace).
+    const ro = buildSandboxPolicy({ roots: [dir], access: [{ path: dir, access: 'read' }] });
+    assert.match(new WorkspaceContext([dir], [], [], ro.rules).check('notes.md', 'write').reason!, /read-only/);
   });
 
   test('the Seatbelt profile denies by default and carves protected paths out of the roots', () => {

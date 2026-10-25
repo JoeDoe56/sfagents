@@ -233,9 +233,6 @@ export function describeApproval(id: string, request: ConfirmationRequest): Disp
     case 'exec':
       detail = `$ ${d.command}\nin ${d.cwd}`;
       break;
-    case 'edit':
-      detail = `${d.filePath}\n${d.fileDiff.split('\n').slice(0, 80).join('\n')}`;
-      break;
     case 'mcp':
       detail = `${d.serverName} · ${d.toolName}\n${JSON.stringify(d.args, null, 2).slice(0, 2000)}`;
       break;

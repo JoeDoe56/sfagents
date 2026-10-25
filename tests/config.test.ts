@@ -31,13 +31,13 @@ describe('agents folder', () => {
       {
         'agents/main.json': baseAgent('main', {
           workspace: { roots: ['work'] },
-          tools: { allow: ['read_file', 'write_file', 'shell', '2-Research Helper.json'], mcpServers: ['local'] },
+          tools: { allow: ['shell', '2-Research Helper.json'], mcpServers: ['local'] },
         }),
         'agents/Research Helper.json': {
           ...baseAgent('ignored-label'),
           description: 'does research',
           workspace: { roots: ['work/sub'] },
-          tools: { allow: ['read_file', 'shell', '1-main.json'], mcpServers: [{ server: 'local', tools: ['echo'] }] },
+          tools: { allow: ['shell', '1-main.json'], mcpServers: [{ server: 'local', tools: ['echo'] }] },
         },
         'agents/plain.json': baseAgent('plain'),
       },
@@ -114,7 +114,7 @@ describe('agents folder', () => {
 
   test('validates fields, grants and MCP servers per file', () => {
     let dir = setup({});
-    skippedError(dir, /\[tools.allow\[1\]\]: duplicate entry/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['read_file', 'read_file'] } }), 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /\[tools.allow\[1\]\]: duplicate entry/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['shell', 'shell'] } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
     skippedError(dir, /unknown tool "web_fetch"/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['web_fetch'] } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
@@ -128,7 +128,13 @@ describe('agents folder', () => {
     dir = setup({});
     skippedError(dir, /unknown MCP server "nope"/, { 'agents/a.json': baseAgent('a', { tools: { mcpServers: ['nope'] } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
-    skippedError(dir, /"edit" is not in tools.allow/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['read_file'], autoApprove: ['edit'] } }), 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /"shell" is not in tools.allow/, { 'agents/a.json': baseAgent('a', { tools: { allow: [], autoApprove: ['shell'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[workspace.access\[0\].mode\]: must be "read", "write" or "none"/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], access: [{ path: 'x', mode: 'rw' }] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[workspace.network\]: must be true or false/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], network: 'yes' } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[tools.ask\]: must be true or false/, { 'agents/a.json': baseAgent('a', { tools: { ask: 1 } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
     skippedError(dir, /providerOptions\]: is required/, { 'agents/a.json': baseAgent('a', { provider: 'openai-compatible' }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});

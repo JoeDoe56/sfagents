@@ -21,9 +21,8 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { ConversationService } from './service.js';
 import type { ArtifactView } from './state.js';
-import type { PermissionDecision, ToolCallConfirmationDetails } from '../tools/tools.js';
+import type { PermissionDecision } from '../tools/tools.js';
 import type { WorkspaceContext } from '../permissions/workspace.js';
-import { makeDiff, readTextFile, writeTextFile } from '../tools/file-io.js';
 import fs from 'node:fs';
 
 export type ArtifactAccess = 'none' | 'read' | 'create';
@@ -213,7 +212,6 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
     private readonly service: ConversationService,
     private readonly workspace: WorkspaceContext | undefined,
     private readonly runId: string | undefined,
-    private readonly autoWrite: boolean,
     params: CreateParams,
   ) {
     super(params);
@@ -221,7 +219,7 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
   getDescription(): string {
     return `"${this.params.title}" (${this.params.path})`;
   }
-  // Showing a file is harmless; writing one asks, as write_file does (unless write_file is auto-approved).
+  // The workspace checks (roots, workspace.access, SF Agents' own files) are the boundary, as for shell.
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.params.content === undefined) return 'allow';
     const check = this.workspace?.check(this.params.path, 'write');
@@ -229,23 +227,7 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
       this.denialReason = check?.reason ?? 'This agent has no workspace folders to write in.';
       return 'deny';
     }
-    return this.autoWrite ? 'allow' : 'ask';
-  }
-  override async getConfirmationDetails(): Promise<ToolCallConfirmationDetails> {
-    const filePath = this.workspace!.resolve(this.params.path);
-    let before = '';
-    try {
-      before = (await readTextFile(filePath)).content;
-    } catch {
-      // a new file
-    }
-    return {
-      type: 'edit',
-      title: `${before ? 'Overwrite' : 'Create'} ${this.workspace!.display(filePath)} (artifact "${this.params.title}")`,
-      fileName: path.basename(filePath),
-      filePath,
-      fileDiff: makeDiff(path.basename(filePath), before, this.params.content ?? ''),
-    };
+    return 'allow';
   }
   async execute(_signal: AbortSignal, _update?: (o: string) => void, context?: ToolCallContext): Promise<ToolResult> {
     try {
@@ -255,7 +237,7 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
         const check = this.workspace?.check(this.params.path, 'write');
         if (!check?.ok || !check.resolvedPath) throw new ArtifactError(check?.reason ?? 'Path not permitted.');
         fs.mkdirSync(path.dirname(check.resolvedPath), { recursive: true });
-        await writeTextFile(check.resolvedPath, this.params.content, { bom: false, lineEnding: 'lf' });
+        fs.writeFileSync(check.resolvedPath, this.params.content.replace(/\r\n/g, '\n'), 'utf8');
         file = check.resolvedPath;
       } else file = existingFile(this.workspace, this.params.path);
       // One artifact per file: showing it again only retitles it.
@@ -275,12 +257,11 @@ class CreateArtifactTool extends BaseDeclarativeTool<CreateParams, ToolResult> {
     private readonly service: ConversationService,
     private readonly workspace: WorkspaceContext | undefined,
     private readonly runId: string | undefined,
-    private readonly autoWrite: boolean,
   ) {
     super(
       ArtifactToolNames.CREATE,
       ArtifactToolNames.CREATE,
-      'Shows a file from your workspace as an artifact the user keeps: a document, code, a web page (.html), an SVG drawing, data, a PDF or an image. Give "content" to write the file at the same time (asks the user like write_file). The artifact follows the file from then on.',
+      'Shows a file from your workspace as an artifact the user keeps: a document, code, a web page (.html), an SVG drawing, data, a PDF or an image. Give "content" to write the file at the same time. The artifact follows the file from then on.',
       Kind.Edit,
       {
         type: 'object',
@@ -294,7 +275,7 @@ class CreateArtifactTool extends BaseDeclarativeTool<CreateParams, ToolResult> {
     );
   }
   protected createInvocation(params: CreateParams): ToolInvocation<CreateParams, ToolResult> {
-    return new CreateArtifactInvocation(this.service, this.workspace, this.runId, this.autoWrite, params);
+    return new CreateArtifactInvocation(this.service, this.workspace, this.runId, params);
   }
 }
 
@@ -347,7 +328,6 @@ export function createArtifactTools(
   access: ArtifactAccess,
   runId?: string,
   workspace?: WorkspaceContext,
-  options: { autoWrite?: boolean } = {},
 ) {
   if (access === 'none') return [];
   const tools: Array<ArtifactTool<never>> = [];
@@ -387,7 +367,7 @@ export function createArtifactTools(
   );
 
   if (access === 'create') {
-    tools.push(new CreateArtifactTool(service, workspace, runId, options.autoWrite === true) as unknown as ArtifactTool<never>);
+    tools.push(new CreateArtifactTool(service, workspace, runId) as unknown as ArtifactTool<never>);
     add(
       new ArtifactTool<{ id: string; title?: string; path?: string }>(
         service,

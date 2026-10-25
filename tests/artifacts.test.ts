@@ -17,7 +17,9 @@ import {
   type ChatMessage,
   type FunctionDeclaration,
 } from '@sfagents/core';
-import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
+import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent, catFile, useAnySandbox } from './helpers.js';
+
+const realSandbox = await useAnySandbox();
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
   const dir = makeTempDir();
@@ -111,7 +113,7 @@ describe('artifacts: storage and records', () => {
 
 describe('artifacts: model tools and grants', () => {
   test('artifacts are the files themselves: created with or without content, they follow the file', async () => {
-    const dir = project({ tools: { allow: ['read_file', 'write_file'], autoApprove: ['write_file'] } });
+    const dir = project({ tools: { allow: [] } });
     fs.mkdirSync(path.join(dir, 'docs'));
     fs.writeFileSync(path.join(dir, 'docs', 'existing.csv'), 'a,b\n1,2\n');
     const { tree, conversation } = open(dir);
@@ -167,17 +169,25 @@ describe('artifacts: model tools and grants', () => {
     conversation.close();
   });
 
-  test('writing with create_artifact asks like write_file; app artifacts record the address', async () => {
-    const dir = project({ tools: { allow: ['read_file'] } });
+  test('create_artifact writes without asking, inside the workspace rules; app artifacts record the address', async () => {
+    const dir = project({ tools: { allow: [] } });
     const { tree, conversation } = open(dir);
     let asked = 0;
     const script: Script = (_req, call) =>
       call === 0
-        ? { toolCalls: [{ name: 'create_artifact', args: { title: 'Plan', path: 'plan.md', content: '# Plan' } }, { name: 'create_app_artifact', args: { title: 'Prototype', port: 5173 } }] }
+        ? {
+            toolCalls: [
+              { name: 'create_artifact', args: { title: 'Plan', path: 'plan.md', content: '# Plan' } },
+              { name: 'create_app_artifact', args: { title: 'Prototype', port: 5173 } },
+              { name: 'create_artifact', args: { title: 'Sneaky', path: 'agents/sneaky.json', content: '{}' } },
+            ],
+          }
         : { text: 'ok' };
     const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => (asked++, 'allow_once') });
     await runtime.createSession().run('go');
-    assert.equal(asked, 1, 'only the write asks');
+    assert.equal(asked, 0, 'the workspace rules are the boundary');
+    assert.equal(fs.readFileSync(path.join(dir, 'plan.md'), 'utf8'), '# Plan');
+    assert.equal(fs.existsSync(path.join(dir, 'agents', 'sneaky.json')), false, 'the agents folder is read-only');
     const app = conversation.artifacts().find((v) => v.type === 'app')!;
     assert.equal(app.url, 'http://127.0.0.1:5173/');
     assert.throws(() => conversation.artifactContent(app.id), /is an application/);
@@ -215,12 +225,12 @@ describe('artifacts: model tools and grants', () => {
     assert.match(loadAgentTree(bad).skipped[0]!.error, /must be "none", "read" or "create"/);
   });
 
-  test('agent file tools cannot reach artifact files', async () => {
-    const dir = project({ tools: { allow: ['read_file'] } });
+  test('shell commands cannot reach artifact files', { skip: !realSandbox && 'no OS sandbox on this machine' }, async () => {
+    const dir = project({ tools: { allow: ['shell'] } });
     const { tree, conversation } = open(dir);
     const v = conversation.createArtifact({ title: 'secret-ish', filename: 'n.md', content: 'hidden' });
     const target = path.join(dir, '.sfagents', v.path!);
-    const script: Script = (req, call) => (call === 0 ? { toolCalls: [{ name: 'read_file', args: { file_path: target } }] } : { text: lastToolContent(req) ?? '' });
+    const script: Script = (req, call) => (call === 0 ? { toolCalls: [{ name: 'shell', args: { command: catFile(target) } }] } : { text: lastToolContent(req) ?? '' });
     const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation });
     const r = await runtime.createSession().run('read it');
     assert.doesNotMatch(r.text, /hidden/);

@@ -61,14 +61,14 @@ describe(`live provider (${MODEL})`, { skip }, () => {
     assert.match(r.stdout, /TANGERINE/);
   });
 
-  test('tool loop with reasoning: built-in file tool result reaches the answer', async () => {
+  test('tool loop with reasoning: shell result reaches the answer', async () => {
     const dir = project();
-    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['read_file', 'glob'] } }));
+    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['shell'] } }));
     const runtime = track(new AgentRuntime({ tree: loadAgentTree(path.join(dir, 'agent.json')) }));
     const events: RuntimeEvent[] = [];
     const result = await runtime.createSession().run('What is the warehouse code in the inventory file under shared/? Find and read it.', { onEvent: (e) => events.push(e) });
     assert.equal(result.status, AgentTerminateMode.GOAL, result.error);
-    assert.ok(result.toolCalls.some((c) => c.name === 'read_file' && c.ok), JSON.stringify(result.toolCalls));
+    assert.ok(result.toolCalls.some((c) => c.name === 'shell' && c.ok), JSON.stringify(result.toolCalls));
     assert.match(result.text, /ZEPHYR-8/);
   });
 
@@ -89,14 +89,14 @@ describe(`live provider (${MODEL})`, { skip }, () => {
       agent('main', {
         reasoning: 'low',
         workspace: { roots: ['work'] },
-        tools: { allow: ['read_file'] },
+        tools: { allow: ['shell'] },
         systemPrompt: 'You are main, a coordinator. You must delegate file lookups to your child agent "clerk" with invoke_child instead of reading files yourself. Keep answers short.',
         spawn: { children: ['agents/1-Subagent-Clerk.json'] },
       }),
     );
     writeJson(
       path.join(dir, 'agents', '1-Subagent-Clerk.json'),
-      agent('clerk', { description: 'Reads files in the shared folder and reports facts.', workspace: { roots: ['../work/shared'] }, tools: { allow: ['read_file'] } }),
+      agent('clerk', { description: 'Reads files in the shared folder and reports facts.', workspace: { roots: ['../work/shared'] }, tools: { allow: ['shell'] } }),
     );
     const runtime = track(new AgentRuntime({ tree: loadAgentTree(path.join(dir, 'agent.json')) }));
     const events: RuntimeEvent[] = [];
@@ -104,7 +104,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
     assert.equal(result.status, AgentTerminateMode.GOAL, result.error);
     const childEnd = events.find((e) => e.type === 'agent_end' && e.agentPath.join('/') === 'main/clerk');
     assert.ok(childEnd, 'clerk ran');
-    assert.ok(events.some((e) => e.type === 'tool_result' && e.agentPath.join('/') === 'main/clerk' && e.name === 'read_file' && e.ok), 'clerk used read_file');
+    assert.ok(events.some((e) => e.type === 'tool_result' && e.agentPath.join('/') === 'main/clerk' && e.name === 'shell' && e.ok), 'clerk used shell');
     assert.match(result.text.replace(/,/g, ''), /1749/);
   });
 
@@ -124,14 +124,14 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('persistent conversation: restart replays tool calls and reasoning across processes', async () => {
     const dir = project();
-    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['read_file'] } }));
+    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['shell'] } }));
     const env = { OPENROUTER_API_KEY: KEY };
     const one = await runCli(['start', '--yes'], { cwd: dir, env, input: 'Read shared/inventory.txt and tell me the item count. Also remember that my badge number is 5521.\n/exit\n', timeoutMs: 150_000 });
     assert.equal(one.code, 0, one.stderr);
     assert.match(one.stdout.replace(/,/g, ''), /1749/);
     const file = path.join(dir, '.sfagents', 'conversation.md');
     const stored = readConversation(file).state;
-    assert.ok(stored.messages.some((m) => m.role === 'tool' && m.tool === 'read_file'), 'tool exchange stored');
+    assert.ok(stored.messages.some((m) => m.role === 'tool' && m.tool === 'shell'), 'tool exchange stored');
     const two = await runCli(['start'], { cwd: dir, env, input: 'What is my badge number, and what count did the file show? Answer briefly.\n/exit\n', timeoutMs: 150_000 });
     assert.equal(two.code, 0, two.stderr);
     const answer = two.stdout.split('Answer briefly.')[1] ?? two.stdout;
