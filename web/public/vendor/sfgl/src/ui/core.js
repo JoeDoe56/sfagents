@@ -13,17 +13,18 @@
 
 import {applySymbol} from '../symbols.js';
 
-/** @type {{stretch: boolean, scheme: 'auto'|'light'|'dark', glass: null|((o: object) => any), quality: string|undefined}} */
-export const settings = {stretch: true, scheme: 'auto', glass: null, quality: undefined};
+/** @type {{stretch: boolean, scheme: 'auto'|'light'|'dark', glass: null|((o: object) => any), quality: string|undefined, reverseSheetScroll: boolean}} */
+export const settings = {stretch: true, scheme: 'auto', glass: null, quality: undefined, reverseSheetScroll: false};
 
 const listeners = new Set();
 
 /**
  * Global switches.
- * @param {{stretch?: boolean, scheme?: 'auto'|'light'|'dark', glass?: (o: object) => any, quality?: string}} next
+ * @param {{stretch?: boolean, scheme?: 'auto'|'light'|'dark', glass?: (o: object) => any, quality?: string, reverseSheetScroll?: boolean}} next
  *   `stretch`: glass stretches and bounces when dragged (default on).
  *   `scheme`: light, dark, or follow the system.
  *   `glass`: makes the glass for an overlay, `({host, scroller, ...}) => handle`.
+ *   `reverseSheetScroll`: the wheel moves sheets the other way (wheel up opens).
  */
 export function configure(next = {}) {
   Object.assign(settings, next);
