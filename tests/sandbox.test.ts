@@ -10,6 +10,7 @@ import {
   seatbeltProfile,
   setSandboxForTesting,
   ToolErrorType,
+  WorkspaceContext,
   type AnyDeclarativeTool,
   type ToolResult,
 } from '@sfagents/core';
@@ -152,6 +153,35 @@ describe('sandbox escapes (Linux, bubblewrap)', { skip: !linuxSandbox && 'bubble
   });
 });
 
+describe('workspace.access (Linux, bubblewrap)', { skip: !linuxSandbox && 'bubblewrap is not available' }, () => {
+  test('entries share folders read-only, read-write or not at all; the longest path wins', async () => {
+    const shared = makeTempDir();
+    fs.writeFileSync(path.join(shared, 'lib.txt'), 'shared lib\n');
+    const drop = makeTempDir();
+    const f = await fixture({
+      workspace: {
+        roots: ['.'],
+        access: [
+          { path: shared, mode: 'read' },
+          { path: drop, mode: 'write' },
+          { path: 'private', mode: 'none' },
+          { path: 'src', mode: 'read' },
+        ],
+      },
+    });
+    fs.mkdirSync(path.join(f.dir, 'private'));
+    fs.writeFileSync(path.join(f.dir, 'private', 'diary.txt'), 'dear diary\n');
+    const g = { ...f, tools: await buildTools(f.dir) };
+    const r = await sh(g, `cat ${shared}/lib.txt; echo x > ${shared}/planted.txt; echo out > ${drop}/out.txt; cat private/diary.txt; echo y > src/a.txt; echo z > top.txt`);
+    assert.match(stdout(r.result), /shared lib/);
+    assert.doesNotMatch(output(r.result), /dear diary/);
+    assert.equal(fs.existsSync(path.join(shared, 'planted.txt')), false);
+    assert.equal(fs.readFileSync(path.join(drop, 'out.txt'), 'utf8'), 'out\n');
+    assert.equal(fs.readFileSync(path.join(f.dir, 'src', 'a.txt'), 'utf8'), 'alpha\n');
+    assert.equal(fs.readFileSync(path.join(f.dir, 'top.txt'), 'utf8'), 'z\n');
+  });
+});
+
 describe('without a sandbox', () => {
   after(() => setSandboxForTesting(undefined));
 
@@ -196,6 +226,26 @@ describe('policy', () => {
       '.sfagents': 'none',
     });
     assert.equal(policy.network, false);
+  });
+
+  test('guards never open up paths outside what the agent was given', () => {
+    const dir = makeTempDir();
+    const work = path.join(dir, 'work');
+    fs.mkdirSync(work);
+    const policy = buildSandboxPolicy({ roots: [work], secretFiles: [path.join(dir, '.env')], protectedFiles: [path.join(dir, 'mcp.json')], agentsDir: path.join(dir, 'agents') });
+    assert.deepEqual(policy.rules.map((r) => r.path), [work]);
+  });
+
+  test('file checks in the host (artifacts) follow the same rules', () => {
+    const dir = makeTempDir();
+    fs.mkdirSync(path.join(dir, 'docs'));
+    const policy = buildSandboxPolicy({ roots: [dir], access: [{ path: path.join(dir, 'docs'), access: 'read' }], secretFiles: [path.join(dir, '.env')], agentsDir: path.join(dir, 'agents') });
+    const ws = new WorkspaceContext([dir], [], [path.join(dir, '.env')], policy.rules);
+    assert.equal(ws.check('notes.md', 'write').ok, true);
+    assert.equal(ws.check('docs/plan.md', 'read').ok, true);
+    assert.match(ws.check('docs/plan.md', 'write').reason!, /read-only/);
+    assert.match(ws.check('agents/new.json', 'write').reason!, /read-only/);
+    assert.match(ws.check('.env', 'read').reason!, /credentials/);
   });
 
   test('the Seatbelt profile denies by default and carves protected paths out of the roots', () => {

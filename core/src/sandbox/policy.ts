@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveWorkspacePath } from '../permissions/workspace.js';
-import type { SandboxPolicy, SandboxRule } from './sandbox.js';
+import { accessFor, type SandboxAccess, type SandboxPolicy, type SandboxRule } from './sandbox.js';
 
 export interface SandboxPolicyInput {
   roots: readonly string[];
@@ -37,30 +37,42 @@ function canonical(p: string): string {
 }
 
 export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
-  const rules: SandboxRule[] = [];
-  for (const root of input.roots) {
-    rules.push({ path: canonical(root), access: 'write' });
-    const git = path.join(canonical(root), '.git');
+  // What the agent was given: its roots, then its workspace.access entries.
+  const granted: SandboxRule[] = [
+    ...input.roots.map((root): SandboxRule => ({ path: canonical(root), access: 'write' })),
+    ...(input.access ?? []).map((rule) => ({ ...rule, path: canonical(rule.path) })),
+  ];
+  // What is taken back inside that: SF Agents' own files and git's hooks.
+  const guards: SandboxRule[] = [];
+  for (const rule of granted) {
+    if (rule.access !== 'write') continue;
+    const git = path.join(rule.path, '.git');
     if (fs.existsSync(git) && fs.statSync(git).isDirectory()) {
-      for (const name of GIT_PROTECTED) rules.push({ path: path.join(git, name), access: 'read' });
+      for (const name of GIT_PROTECTED) guards.push({ path: path.join(git, name), access: 'read' });
     }
   }
-  if (input.agentsDir) rules.push({ path: canonical(input.agentsDir), access: 'read', ensure: { kind: 'dir' } });
+  if (input.agentsDir) guards.push({ path: canonical(input.agentsDir), access: 'read', ensure: { kind: 'dir' } });
   for (const file of input.protectedFiles ?? []) {
     const p = canonical(file);
     // Agent files are covered by the agents folder; mcp.json may not exist yet.
     if (input.agentsDir && p.startsWith(canonical(input.agentsDir) + path.sep)) continue;
-    rules.push({ path: p, access: 'read', ensure: { kind: 'file', content: path.basename(p).toLowerCase() === 'mcp.json' ? '{ "mcpServers": {} }\n' : '' } });
+    guards.push({ path: p, access: 'read', ensure: { kind: 'file', content: path.basename(p).toLowerCase() === 'mcp.json' ? '{ "mcpServers": {} }\n' : '' } });
   }
   for (const file of [...(input.secretFiles ?? []), ...(input.stateFiles ?? [])]) {
-    rules.push({ path: canonical(file), access: 'none', ensure: { kind: 'file' } });
+    guards.push({ path: canonical(file), access: 'none', ensure: { kind: 'file' } });
   }
-  for (const dir of input.stateDirs ?? []) rules.push({ path: canonical(dir), access: 'none', ensure: { kind: 'dir' } });
-  for (const rule of input.access ?? []) rules.push({ ...rule, path: canonical(rule.path) });
+  for (const dir of input.stateDirs ?? []) guards.push({ path: canonical(dir), access: 'none', ensure: { kind: 'dir' } });
+  // A guard only narrows: outside what was granted it would open a path up.
+  // Guards come last, so they win over an access entry for the same path.
+  const rules = [...granted, ...guards.filter((g) => accessFor(granted, g.path) !== 'none' && rank(g.access) < rank(accessFor(granted, g.path)))];
   return {
     rules,
     network: input.network ?? false,
     ...(input.hostChannel ? { hostChannel: input.hostChannel } : {}),
     ...(input.tools ? { tools: input.tools } : {}),
   };
+}
+
+function rank(access: SandboxAccess): number {
+  return access === 'write' ? 2 : access === 'read' ? 1 : 0;
 }

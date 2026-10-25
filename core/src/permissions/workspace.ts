@@ -16,6 +16,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isNodeError } from '../utils/errors.js';
+import { accessFor, type SandboxRule } from '../sandbox/sandbox.js';
 
 export type PathAccess = 'read' | 'write';
 
@@ -30,6 +31,7 @@ export class WorkspaceContext {
   private readonly directories: readonly string[];
   private readonly protectedPaths: ReadonlySet<string>;
   private readonly secretPaths: readonly string[];
+  private readonly rules: readonly SandboxRule[] | undefined;
 
   /**
    * @param directories Absolute or relative root directories. Each must exist.
@@ -37,11 +39,14 @@ export class WorkspaceContext {
    * @param secretPaths Files or directories file tools may neither read nor
    *   write (credentials, SF Agents conversation state). A directory covers
    *   everything inside it.
+   * @param rules The agent's sandbox rules. When given, they decide what is
+   *   reachable (longest matching path), exactly as for shell commands.
    */
   constructor(
     directories: readonly string[],
     protectedPaths: readonly string[] = [],
     secretPaths: readonly string[] = [],
+    rules?: readonly SandboxRule[],
   ) {
     if (directories.length === 0) {
       throw new Error('A workspace needs at least one root directory.');
@@ -53,6 +58,7 @@ export class WorkspaceContext {
       protectedPaths.map((p) => normalizeForCompare(resolveWorkspacePath(path.resolve(p)))),
     );
     this.secretPaths = secretPaths.map((p) => resolveWorkspacePath(path.resolve(p)));
+    this.rules = rules;
   }
 
   static resolveAndValidateDir(directory: string): string {
@@ -103,7 +109,9 @@ export class WorkspaceContext {
         reason: `Path could not be resolved safely: ${pathToCheck} (${error instanceof Error ? error.message : String(error)})`,
       };
     }
-    const inside = this.directories.some((dir) => isPathWithinRoot(resolved, dir));
+    const granted = this.rules ? accessFor(this.rules, resolved) : undefined;
+    const secret = this.secretPaths.some((s) => isPathWithinRoot(resolved, s));
+    const inside = granted ? granted !== 'none' || secret : this.directories.some((dir) => isPathWithinRoot(resolved, dir));
     if (!inside) {
       return {
         ok: false,
@@ -111,7 +119,7 @@ export class WorkspaceContext {
         reason: `Path is outside this agent's permitted workspace roots: ${pathToCheck}. Permitted roots: ${this.directories.join(', ')}`,
       };
     }
-    if (this.secretPaths.some((secret) => isPathWithinRoot(resolved, secret))) {
+    if (secret) {
       return {
         ok: false,
         resolvedPath: resolved,
@@ -123,6 +131,13 @@ export class WorkspaceContext {
         ok: false,
         resolvedPath: resolved,
         reason: `Path is a protected SF Agents configuration file and cannot be modified by agent file tools: ${pathToCheck}`,
+      };
+    }
+    if (access === 'write' && granted === 'read') {
+      return {
+        ok: false,
+        resolvedPath: resolved,
+        reason: `Path is read-only for this agent: ${pathToCheck}`,
       };
     }
     return { ok: true, resolvedPath: resolved };

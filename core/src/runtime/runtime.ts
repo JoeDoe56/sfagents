@@ -194,13 +194,14 @@ export class AgentRuntime implements AgentMessenger {
     const depth = role === 'main' ? 0 : 1;
     const tools = new Map<string, AnyDeclarativeTool>();
     const allow = d.tools?.allow ?? [];
+    const sandbox = this.sandboxPolicy(node);
     if (allow.length > 0 && node.roots.length > 0) {
       const ctx: ToolContext = {
-        workspace: new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])]),
+        workspace: new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules),
         maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
         secretEnvNames: this.secretEnvNames,
         shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
-        sandbox: this.sandboxPolicy(node),
+        sandbox,
         askShell: d.tools?.ask === true,
       };
       const factories: Record<string, () => AnyDeclarativeTool> = {
@@ -248,7 +249,7 @@ export class AgentRuntime implements AgentMessenger {
     if (conversation?.file) {
       for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
       const artifactWorkspace = node.roots.length
-        ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])])
+        ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules)
         : undefined;
       const autoWrite = (d.tools?.autoApprove ?? []).includes(ToolNames.WRITE_FILE);
       for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, artifactWorkspace, { autoWrite })) tools.set(tool.name, tool);
@@ -268,6 +269,7 @@ export class AgentRuntime implements AgentMessenger {
       stateFiles: state.filter((p) => p !== stateDir && !!path.extname(p)),
       protectedFiles: this.tree.protectedFiles,
       agentsDir: this.tree.agentsDir,
+      access: node.access,
       network: node.definition.workspace?.network === true,
     });
   }

@@ -123,6 +123,7 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | `model` | Any model ID the provider accepts. Nothing is hardcoded. |
 | `reasoning` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Sent as OpenRouter's `reasoning.effort` (or `reasoning_effort` for other endpoints). Reasoning blocks are passed back across tool calls. |
 | `workspace.roots` | Directories the agent may read and write, relative to the project directory. Default `["."]`. Shell commands are sandboxed to them. |
+| `workspace.access` | Exceptions to the roots, like folder sharing: `[{ "path": "~/.cargo", "mode": "read" }, { "path": "secrets", "mode": "none" }]`. Modes `read`, `write`, `none`; the longest matching path wins. Paths are relative to the project directory, `~` is your home folder. Applies to shell commands and to artifact files alike. SF Agents' own files stay protected whatever an entry says. |
 | `workspace.network` | `true` lets shell commands use the network (`npm install`, `git push`). Default `false`: commands are offline. |
 | `tools.allow` | Built-in tools: `read_file`, `write_file`, `edit`, `glob`, `grep`, `list_directory`, `shell`. And **grants**: `"N-name.json"` lets this agent message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
 | `tools.mcpServers` | Server names from `mcp.json`, optionally limited to listed tools. |

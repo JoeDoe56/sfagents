@@ -16,8 +16,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { ConfigError, artifactAccess, conversationAccess, mcpGrants, parseAgentDefinition, type AgentDefinition } from './definition.js';
-import { WorkspaceContext } from '../permissions/workspace.js';
+import { WorkspaceContext, resolveWorkspacePath } from '../permissions/workspace.js';
+import type { SandboxRule } from '../sandbox/sandbox.js';
 import { loadMcpConfig, type McpConfigFile } from '../mcp/config.js';
 
 export const AGENTS_DIR_NAME = 'agents';
@@ -32,6 +34,8 @@ export interface AgentNode {
   readonly definition: Readonly<AgentDefinition>;
   /** Canonical workspace roots; empty when the agent has no filesystem access. */
   readonly roots: readonly string[];
+  /** workspace.access with canonical paths. */
+  readonly access: readonly SandboxRule[];
   /** Agents this one may message → how many threads with each it may run at once. */
   readonly grants: ReadonlyMap<string, number>;
 }
@@ -136,7 +140,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
   const skipped: SkippedAgentFile[] = [];
   const warnings: string[] = [];
   const protectedFiles = new Set<string>([mcpFile]);
-  const loaded = new Map<string, { file: string; definition: AgentDefinition; roots: string[] }>();
+  const loaded = new Map<string, { file: string; definition: AgentDefinition; roots: string[]; access: SandboxRule[] }>();
 
   const files = fs
     .readdirSync(agentsDir, { withFileTypes: true })
@@ -171,8 +175,16 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
           throw new ConfigError(shown, `workspace.roots[${i}]`, error instanceof Error ? error.message : String(error));
         }
       });
+      const access = (def.workspace?.access ?? []).map((entry, i): SandboxRule => {
+        const expanded = entry.path === '~' || entry.path.startsWith('~/') || entry.path.startsWith('~\\') ? path.join(os.homedir(), entry.path.slice(1)) : entry.path;
+        try {
+          return { path: resolveWorkspacePath(path.resolve(configDir, expanded)), access: entry.mode };
+        } catch (error) {
+          throw new ConfigError(shown, `workspace.access[${i}].path`, error instanceof Error ? error.message : String(error));
+        }
+      });
       if (loaded.has(agentName)) throw new ConfigError(shown, undefined, `another file is already named "${agentName}"`);
-      loaded.set(agentName, { file, definition: def, roots: [...new Set(roots)] });
+      loaded.set(agentName, { file, definition: def, roots: [...new Set(roots)], access });
     } catch (error) {
       skipped.push({ file: shown, error: error instanceof ConfigError ? error.message.replace(`${shown}: `, '').replace(`${shown} `, '') : String(error) });
     }
@@ -193,7 +205,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
       }
       grants.set(g.agent, g.max);
     }
-    byId.set(id, { id, file: a.file, definition: a.definition, roots: a.roots, grants });
+    byId.set(id, { id, file: a.file, definition: a.definition, roots: a.roots, access: a.access, grants });
   }
 
   let rootName = options.agent ?? located.agent;

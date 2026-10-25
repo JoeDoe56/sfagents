@@ -27,6 +27,11 @@ export interface McpServerGrant {
 }
 
 /** Another agent this one may message, from a "N-name.json" entry in tools.allow. */
+export interface WorkspaceAccess {
+  path: string;
+  mode: 'read' | 'write' | 'none';
+}
+
 export interface AgentGrant {
   /** The agent's file name, relative to the agents folder (e.g. "researcher.json"). */
   file: string;
@@ -65,6 +70,12 @@ export interface AgentDefinition {
     roots: string[];
     /** Whether shell commands may use the network (default false: offline). */
     network?: boolean;
+    /**
+     * Folder-sharing style exceptions to the roots (which are read-write):
+     * the longest matching path wins. `~` is the home folder; relative paths
+     * are against the project directory.
+     */
+    access?: WorkspaceAccess[];
   };
   tools?: {
     allow?: string[];
@@ -310,12 +321,27 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
 
   let workspace: AgentDefinition['workspace'];
   if (raw['workspace'] !== undefined) {
-    const ws = c.object(raw['workspace'], 'workspace', ['roots', 'network']);
+    const ws = c.object(raw['workspace'], 'workspace', ['roots', 'network', 'access']);
     const roots = c.stringArray(ws['roots'], 'workspace.roots', { unique: true, nonEmptyItems: true });
     if (!roots) c.fail('workspace.roots', 'is required when workspace is given');
     if (roots.length === 0) c.fail('workspace.roots', 'must list at least one directory');
     const network = c.boolean(ws['network'], 'workspace.network');
-    workspace = { roots, ...(network !== undefined ? { network } : {}) };
+    let access: WorkspaceAccess[] | undefined;
+    if (ws['access'] !== undefined) {
+      if (!Array.isArray(ws['access'])) c.fail('workspace.access', 'must be an array of { "path": "...", "mode": "read" | "write" | "none" }');
+      const seen = new Set<string>();
+      access = (ws['access'] as unknown[]).map((entry, i) => {
+        const field = `workspace.access[${i}]`;
+        const o = c.object(entry, field, ['path', 'mode']);
+        const p = c.string(o['path'], `${field}.path`, { nonEmpty: true, maxLength: 4096 });
+        const mode = c.string(o['mode'], `${field}.mode`);
+        if (!['read', 'write', 'none'].includes(mode)) c.fail(`${field}.mode`, 'must be "read", "write" or "none"');
+        if (seen.has(p)) c.fail(`${field}.path`, `"${p}" is listed twice`);
+        seen.add(p);
+        return { path: p, mode: mode as WorkspaceAccess['mode'] };
+      });
+    }
+    workspace = { roots, ...(network !== undefined ? { network } : {}), ...(access ? { access } : {}) };
   }
 
   let tools: AgentDefinition['tools'];
