@@ -6,9 +6,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { ConversationService, loadAgentTree } from '@sfagents/core';
+import { ConversationService, detectSandbox, loadAgentTree } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
 import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
+
+const sandboxed = (await detectSandbox()).ok;
 
 function project(agent: Record<string, unknown> = {}) {
   const dir = makeTempDir('sfagents-web-');
@@ -344,7 +346,7 @@ describe('web server', () => {
     }
   });
 
-  test('approvals are asked in the browser; denial and cancellation work', async () => {
+  test('approvals are asked in the browser; denial and cancellation work', { skip: !sandboxed && 'no OS sandbox on this machine' }, async () => {
     const s = await startServer(
       (req, call) => {
         if (call === 0) return { toolCalls: [{ name: 'shell', args: { command: 'echo approved-run' } }] };
@@ -353,7 +355,7 @@ describe('web server', () => {
         if (call === 3) return { text: `second: ${lastToolContent(req)}` };
         return { text: 'slow', delayMs: 5000 };
       },
-      { tools: { allow: ['shell'] } },
+      { tools: { allow: ['shell'], ask: true } },
     );
     const ev = events(s.base);
     try {

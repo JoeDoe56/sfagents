@@ -135,3 +135,8 @@ export {
   userMessageFor,
 } from './conversation/attachments.js';
 export { estimateMessages } from './conversation/context.js';
+export { detectSandbox, setSandboxForTesting, accessFor, HOST_CHANNEL_ENV, SANDBOX_RUN_DIR } from './sandbox/sandbox.js';
+export type { Sandbox, SandboxPolicy, SandboxRule, SandboxAccess, SandboxStatus, SandboxCommand, WrappedCommand } from './sandbox/sandbox.js';
+export { buildSandboxPolicy, GIT_PROTECTED } from './sandbox/policy.js';
+export { BubblewrapSandbox, bubblewrapCommand, findBubblewrap } from './sandbox/linux.js';
+export { SeatbeltSandbox, seatbeltProfile } from './sandbox/macos.js';

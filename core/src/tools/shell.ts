@@ -10,10 +10,9 @@
  * kill on POSIX and `taskkill /t` from an absolute System32 path on Windows,
  * exit code and signal reporting. Replaced: PTY execution, sandbox runtimes,
  * SSH, background tasks and the shell AST permission analyzer with a small
- * runner that has a timeout, bounded output and an always-ask permission.
- *
- * Shell access is not workspace-confined: a command can touch any path the
- * OS user can. SF Agents therefore only allows this tool on the root agent.
+ * runner that has a timeout and bounded output, and that runs every command
+ * inside the agent's OS sandbox (../sandbox). Without a sandbox, commands are
+ * refused.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -31,6 +30,7 @@ import { ToolErrorType } from './tool-error.js';
 import type { ToolContext } from './tool-context.js';
 import { stripAnsiAndControl, truncateForModel } from '../utils/text-utils.js';
 import { sanitizeChildEnv } from '../utils/child-env.js';
+import { detectSandbox, type Sandbox, type SandboxPolicy } from '../sandbox/sandbox.js';
 
 /** Raw output kept in memory per stream before head/tail truncation. */
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
@@ -157,7 +157,7 @@ class BoundedBuffer {
 
 export function runShellCommand(
   command: string,
-  options: { cwd: string; timeoutMs: number; signal: AbortSignal; env: NodeJS.ProcessEnv },
+  options: { cwd: string; timeoutMs: number; signal: AbortSignal; env: NodeJS.ProcessEnv; sandbox?: { sandbox: Sandbox; policy: SandboxPolicy } },
 ): Promise<ShellRunResult> {
   const shell = getShellConfiguration();
   return new Promise((resolve) => {
@@ -167,16 +167,24 @@ export function runShellCommand(
     let aborted = false;
     let settled = false;
     let child: ChildProcess;
+    let cleanup: (() => void) | undefined;
     try {
-      child = spawn(shell.executable, [...shell.argsPrefix, applyUtf8Prefix(command, shell.shell)], {
-        cwd: options.cwd,
-        env: options.env,
+      let run = { executable: shell.executable, args: [...shell.argsPrefix, applyUtf8Prefix(command, shell.shell)], cwd: options.cwd, env: options.env };
+      if (options.sandbox) {
+        const wrapped = options.sandbox.sandbox.wrap(run, options.sandbox.policy);
+        cleanup = wrapped.cleanup;
+        run = wrapped;
+      }
+      child = spawn(run.executable, run.args, {
+        cwd: run.cwd,
+        env: run.env,
         windowsHide: true,
         windowsVerbatimArguments: shell.shell === 'cmd',
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (error) {
+      cleanup?.();
       resolve({ stdout: '', stderr: '', exitCode: null, signal: null, timedOut, aborted, error: error as Error, truncated: false });
       return;
     }
@@ -184,6 +192,11 @@ export function runShellCommand(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      try {
+        cleanup?.();
+      } catch {
+        // a leftover temporary folder is harmless
+      }
       options.signal.removeEventListener('abort', onAbort);
       resolve({
         stdout: stdout.text(),
@@ -241,13 +254,21 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
     return check.ok ? check.resolvedPath : undefined;
   }
 
-  /** Shell commands always need approval unless the agent auto-approves `shell`. */
+  /**
+   * The sandbox is the boundary, so commands run without asking unless the
+   * agent sets `tools.ask`. Without a sandbox every command is refused.
+   */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (!this.cwd()) {
       this.denialReason = `Working directory is outside this agent's workspace roots: ${this.params.directory}`;
       return 'deny';
     }
-    return 'ask';
+    const status = await detectSandbox();
+    if (!status.ok) {
+      this.denialReason = status.reason;
+      return 'deny';
+    }
+    return this.ctx.askShell ? 'ask' : 'allow';
   }
 
   override async getConfirmationDetails(): Promise<ToolCallConfirmationDetails> {
@@ -267,6 +288,10 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
       const message = `Working directory is outside this agent's workspace roots: ${this.params.directory}`;
       return { llmContent: message, returnDisplay: message, error: { message, type: ToolErrorType.PATH_NOT_IN_WORKSPACE } };
     }
+    const status = await detectSandbox();
+    if (!status.ok) {
+      return { llmContent: status.reason, returnDisplay: 'No sandbox', error: { message: status.reason, type: ToolErrorType.EXECUTION_DENIED } };
+    }
     const requested = this.params.timeout_seconds ? this.params.timeout_seconds * 1000 : this.ctx.shellTimeoutMs;
     const timeoutMs = Math.min(requested, this.ctx.shellTimeoutMs);
     const result = await runShellCommand(this.params.command, {
@@ -274,6 +299,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
       timeoutMs,
       signal,
       env: sanitizeChildEnv(process.env, this.ctx.secretEnvNames),
+      sandbox: { sandbox: status.sandbox, policy: this.ctx.sandbox },
     });
 
     const stdout = stripAnsiAndControl(result.stdout).trimEnd();
@@ -317,7 +343,7 @@ export class ShellTool extends BaseDeclarativeTool<ShellToolParams, ToolResult> 
     super(
       ShellTool.Name,
       'Shell',
-      `Executes a command with ${shell.shell === 'cmd' ? 'cmd.exe /c' : shell.shell === 'powershell' ? 'PowerShell -Command' : 'bash -c'} and returns stdout, stderr and the exit code. Runs in the primary workspace root unless 'directory' is given. Commands are killed after a timeout. Interactive commands are not supported. Prefer the dedicated file and search tools for reading, editing and searching files.`,
+      `Executes a command with ${shell.shell === 'cmd' ? 'cmd.exe /c' : shell.shell === 'powershell' ? 'PowerShell -Command' : 'bash -c'} and returns stdout, stderr and the exit code. Runs in the primary workspace root unless 'directory' is given, inside an OS sandbox: the workspace roots are the only folders you can change, system folders are read-only, your home folder is empty${ctx.sandbox.network ? '' : ', and there is no network'}. Use it to read, search and edit files (cat, sed, grep, find, git). Commands are killed after a timeout. Interactive commands are not supported.`,
       Kind.Execute,
       {
         type: 'object',

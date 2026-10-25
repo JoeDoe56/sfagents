@@ -9,6 +9,7 @@
  */
 
 import os from 'node:os';
+import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
 import { createConversationTools, ORGANIZE_GUIDANCE } from '../conversation/tools.js';
@@ -30,6 +31,8 @@ import { GrepTool } from '../tools/grep.js';
 import { LSTool } from '../tools/ls.js';
 import { ShellTool } from '../tools/shell.js';
 import { WorkspaceContext } from '../permissions/workspace.js';
+import { buildSandboxPolicy } from '../sandbox/policy.js';
+import type { SandboxPolicy } from '../sandbox/sandbox.js';
 import { McpManager } from '../mcp/manager.js';
 import { DiscoveredMcpTool, mcpFunctionName } from '../mcp/mcp-tool.js';
 import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
@@ -43,7 +46,7 @@ import {
   type ToolActivity,
 } from './events.js';
 import { PersistenceFailure, type RunRecorder } from './recorder.js';
-import { ConversationService, type ReplayTarget } from '../conversation/service.js';
+import { ConversationService, STATE_DIR_NAME, type ReplayTarget } from '../conversation/service.js';
 import { buildWorkingContext, contextBreakdown, type ContextBreakdown, type ContextReport, type ContextTool } from '../conversation/context.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
@@ -197,6 +200,8 @@ export class AgentRuntime implements AgentMessenger {
         maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
         secretEnvNames: this.secretEnvNames,
         shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
+        sandbox: this.sandboxPolicy(node),
+        askShell: d.tools?.ask === true,
       };
       const factories: Record<string, () => AnyDeclarativeTool> = {
         [ToolNames.READ_FILE]: () => new ReadFileTool(ctx),
@@ -249,6 +254,22 @@ export class AgentRuntime implements AgentMessenger {
       for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, artifactWorkspace, { autoWrite })) tools.set(tool.name, tool);
     }
     return tools;
+  }
+
+  /** What one agent's shell commands can reach. */
+  sandboxPolicy(node: AgentNode): SandboxPolicy {
+    const state = this.conversation?.protectedPaths() ?? [];
+    const stateDir = this.conversation?.dir && path.basename(this.conversation.dir) === STATE_DIR_NAME ? this.conversation.dir : undefined;
+    return buildSandboxPolicy({
+      roots: node.roots,
+      secretFiles: this.tree.secretFiles,
+      // The .sfagents folder is hidden whether or not this run keeps a conversation in it.
+      stateDirs: [stateDir ?? path.join(this.tree.configDir, STATE_DIR_NAME), ...state.filter((p) => p !== stateDir && !path.extname(p))],
+      stateFiles: state.filter((p) => p !== stateDir && !!path.extname(p)),
+      protectedFiles: this.tree.protectedFiles,
+      agentsDir: this.tree.agentsDir,
+      network: node.definition.workspace?.network === true,
+    });
   }
 
   private provider(definition: Readonly<AgentDefinition>): ModelProvider {

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   AgentRuntime,
+  detectSandbox,
   loadAgentTree,
   ToolErrorType,
   type AnyDeclarativeTool,
@@ -252,11 +253,13 @@ describe('file tools', () => {
   });
 });
 
-describe('shell', () => {
-  test('runs an allowed command, reports exit codes and asks for approval', async () => {
+const sandboxed = (await detectSandbox()).ok;
+
+describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () => {
+  test('runs an allowed command in the sandbox without asking, and reports exit codes', async () => {
     const f = await fixture(['shell']);
     const ok = await call(f, 'shell', { command: isWin ? 'echo hello' : 'echo hello && pwd' });
-    assert.equal(ok.permission, 'ask');
+    assert.equal(ok.permission, 'allow');
     assert.match(ok.result!.llmContent, /Stdout: hello/);
     assert.match(ok.result!.llmContent, /Exit Code: 0/);
     if (!isWin) assert.match(ok.result!.llmContent, new RegExp(f.work.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));

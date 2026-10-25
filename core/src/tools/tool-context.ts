@@ -1,4 +1,5 @@
 import type { WorkspaceContext } from '../permissions/workspace.js';
+import type { SandboxPolicy } from '../sandbox/sandbox.js';
 
 /**
  * Everything a built-in tool needs from its owning agent. Replaces upstream's
@@ -13,6 +14,10 @@ export interface ToolContext {
   readonly secretEnvNames: readonly string[];
   /** Default and maximum shell command timeout in milliseconds. */
   readonly shellTimeoutMs: number;
+  /** What shell commands can reach (the agent's roots, minus SF Agents' own files). */
+  readonly sandbox: SandboxPolicy;
+  /** Ask before each shell command (`tools.ask`). */
+  readonly askShell: boolean;
 }
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 30_000;

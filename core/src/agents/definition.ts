@@ -63,12 +63,16 @@ export interface AgentDefinition {
   maxOutputTokens?: number;
   workspace?: {
     roots: string[];
+    /** Whether shell commands may use the network (default false: offline). */
+    network?: boolean;
   };
   tools?: {
     allow?: string[];
     mcpServers?: Array<string | McpServerGrant>;
-    /** Tool IDs that skip the confirmation prompt (e.g. "edit", "mcp__srv__*"). */
+    /** Tool IDs that skip the confirmation prompt (e.g. "shell", "mcp__srv__*"). */
     autoApprove?: string[];
+    /** Ask before each shell command (default false: the sandbox is the boundary). */
+    ask?: boolean;
     /** Agents this one may message ("N-name.json" entries of tools.allow). */
     agents?: AgentGrant[];
   };
@@ -176,6 +180,12 @@ class FieldChecker {
 
   optionalString(value: unknown, field: string, opts: { nonEmpty?: boolean; maxLength?: number } = {}): string | undefined {
     return value === undefined ? undefined : this.string(value, field, opts);
+  }
+
+  boolean(value: unknown, field: string): boolean | undefined {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'boolean') this.fail(field, 'must be true or false');
+    return value;
   }
 
   integer(value: unknown, field: string, min: number, max: number): number | undefined {
@@ -300,16 +310,18 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
 
   let workspace: AgentDefinition['workspace'];
   if (raw['workspace'] !== undefined) {
-    const ws = c.object(raw['workspace'], 'workspace', ['roots']);
+    const ws = c.object(raw['workspace'], 'workspace', ['roots', 'network']);
     const roots = c.stringArray(ws['roots'], 'workspace.roots', { unique: true, nonEmptyItems: true });
     if (!roots) c.fail('workspace.roots', 'is required when workspace is given');
     if (roots.length === 0) c.fail('workspace.roots', 'must list at least one directory');
-    workspace = { roots };
+    const network = c.boolean(ws['network'], 'workspace.network');
+    workspace = { roots, ...(network !== undefined ? { network } : {}) };
   }
 
   let tools: AgentDefinition['tools'];
   if (raw['tools'] !== undefined) {
-    const t = c.object(raw['tools'], 'tools', ['allow', 'mcpServers', 'autoApprove']);
+    const t = c.object(raw['tools'], 'tools', ['allow', 'mcpServers', 'autoApprove', 'ask']);
+    const ask = c.boolean(t['ask'], 'tools.ask');
     const allowAll = c.stringArray(t['allow'], 'tools.allow', { unique: true });
     const allow: string[] = [];
     const agents: AgentGrant[] = [];
@@ -374,7 +386,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
         c.fail(field, `"${entry}" is not in tools.allow, so it cannot be auto-approved`);
       }
     });
-    tools = { allow: allowAll === undefined ? undefined : allow, mcpServers, autoApprove, ...(agents.length ? { agents } : {}) };
+    tools = { allow: allowAll === undefined ? undefined : allow, mcpServers, autoApprove, ...(ask !== undefined ? { ask } : {}), ...(agents.length ? { agents } : {}) };
   }
 
   let conversation: AgentDefinition['conversation'];
