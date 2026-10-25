@@ -1,73 +1,102 @@
 # Windows shell sandbox: handover
 
-Status on 2026-10-25: **not built**. On Windows the shell tool still refuses every command (`detectSandbox()` in `core/src/sandbox/sandbox.ts` returns `ok: false` for `win32`). This file is the plan, along with what has been decided and what is already in the repo. Linux (bubblewrap) and macOS (Seatbelt) backends are done. Use them as references.
+Status on 2026-10-25: implemented and tested on Windows x64, with the runtime
+limitations below. The original scaffold has been replaced by the restricted
+account backend. See [setup, design, recovery and undo](WINDOWS-SANDBOX.md).
 
-## What is in the repo
+## Confirmed behavior
 
-- `core/native/windows-sandbox/`: a Rust crate scaffold (`sfagents-sandbox`). `main.rs` only answers `version`. `Cargo.toml` already lists `windows-sys` 0.59 with the features below, plus `serde` and `serde_json`. `Cargo.lock` is committed.
-- Cross-compiling from Linux works:
-  `rustup target add x86_64-pc-windows-gnu`, `apt install gcc-mingw-w64-x86-64`, then
-  `cargo build --release --target x86_64-pc-windows-gnu` in that folder.
-- Nothing has run on the Windows PC yet. There are no accounts, firewall rules or ACL changes to clean up.
+- System folders are readable; personal file contents, ProgramData (except
+  `C:\ProgramData\Git`), and other fixed/removable drives are hidden.
+- Commands write only policy grants and disposable home/temp data. Longest-path
+  rules support writable, read-only and hidden subtrees. `.env` and `.sfagents`
+  are hidden; agents, mcp.json and Git configuration/hooks/modules are protected.
+- The default account is offline, including loopback. `workspace.network: true`
+  selects the separate online account. `sf-web` uses the host's private pipe and
+  never puts provider credentials into the sandbox.
+- Setup and uninstall request UAC; commands and recovery run unelevated. Missing
+  setup, failed checks or incomplete cleanup refuse commands. No unsandboxed retry.
+- Setup must have the user's explicit approval before machine changes. Undo is
+  exactly `npm run sandbox:uninstall`. The user approved setup, native isolation
+  tests, uninstall/cleanup verification and reinstall for this implementation.
+  The user separately approved the named-pipe device grant only; KsecDD remains
+  untouched.
+- Commits have no co-author/session trailers. Commit in logical pieces and push
+  to main, as requested.
 
-## The interface to implement
+## Implementation map
 
-`core/src/sandbox/sandbox.ts`:
+- `core/src/sandbox/windows.ts`: synchronous wrapper, prepared policy JSON,
+  helper detection, and recovery after every run, including timeout/cancellation.
+- `core/native/windows-sandbox/src/setup.rs`: two standard accounts, registered
+  Windows profiles, Credential Manager passwords, logon policy, persistent ACLs,
+  fail-closed coverage checks, setup journal and uninstall.
+- `network.rs`: persistent WFP blocks for the offline SID on the four IPv4/IPv6
+  connect/receive layers, supplementing the per-user firewall rules.
+- `runner.rs`: temporary policy ACL journal, unique restricting SID,
+  write-restricted token with disabled privileges, private desktop/window station,
+  protected broker process/token, sanitized environment, Job Object containment,
+  parent-death handling and permission recovery.
+- `win.rs`: Windows handles, SID/ACL primitives, machine mutex and permanent ACL
+  restoration. `model.rs`: protocol, path precedence and command-line quoting.
+- `scripts/build-sandbox.mjs`: MSVC build, source-hash cache and dependency notices.
+  Build output is ignored under `core/native/bin/win-x64` or `win-arm64` and is
+  included by the core package. `prepare` builds it when a toolchain is present;
+  packaging can require it with `SFAGENTS_REQUIRE_SANDBOX=1`.
+- `scripts/windows-sandbox.mjs`: explicit hidden UAC wrapper for setup/uninstall.
+  Passwords never enter argv, scripts or policy JSON.
 
-```ts
-interface Sandbox { readonly name: string; wrap(command: SandboxCommand, policy: SandboxPolicy): WrappedCommand }
+The per-command account ACLs are serialized by a global mutex; a wait exceeding
+25 seconds reports busy. First setup/uninstall propagates inheritable ACLs and
+can take several minutes on a large profile. Recovery restores permanent entries
+when a temporary grant shares their path/SID. It retains failed cleanup journals.
+The named-pipe and null device grants are checked before each run; Windows may
+recreate those objects after reboot, requiring an explicit setup refresh.
+
+## Verification on this PC
+
+- Rust tests: 7 passed, including preservation of permanent allow/deny entries
+  during recovery, removal of both ACE types, partial-setup pipe cleanup, and
+  protecting the helper inside a workspace.
+- Native isolation suite: 9 passed, 1 skipped (no second writable drive available).
+  Covers quotes/Unicode, empty home, workspace writes, Git status/commit, hidden
+  secrets/personal data/ProgramData, system-write denials, guard replacement,
+  nested rules, offline Internet/loopback, online loopback/HTTPS, host-only
+  `sf-web` and quota, timeout/abort, descendants, parent death, helper replacement,
+  recovery, and making a previously read-only path writable under a new policy.
+- Typechecking and the import/dependency audit pass.
+- Uninstall audit: accounts, profiles, credentials, firewall/WFP objects and
+  pending journals absent; no managed entries on 32 checked ACL paths. A separate
+  approved cleanup removed four historical diagnostic capability deny entries;
+  six paths were checked and unrelated PowerShell runtime entries stayed intact.
+- Reinstall completed and the native suite passed against the fresh accounts.
+- Full deterministic suite before merging `usage-bar`: 220 passed, 2 skipped,
+  0 failures. Windows portability fixes cover configuration paths, file-service
+  fixtures, shell commands and line endings. A provider-cache regression now
+  checks atomic file replacement with the same timestamp and size.
+
+Run the repeatable native suite only after approving and installing setup:
+
+```powershell
+npm run build:sandbox
+npm run sandbox:setup
+$env:SFAGENTS_TEST_WINDOWS_SANDBOX = '1'
+node scripts/run-tests.mjs windows-sandbox-native
 ```
 
-`wrap` is synchronous and returns the command that Node spawns, plus an optional `cleanup()`. On Windows it should return the helper: `sfagents-sandbox.exe run --policy <temp.json> -- <shell exe> <args...>`, with `cleanup` deleting the temp file. Add `core/src/sandbox/windows.ts` with `WindowsSandbox` and `detectWindowsSandbox()` (it runs `sfagents-sandbox.exe probe`), and add a `win32` branch to `detectSandbox()`.
+## Runtime limitations and follow-up checks
 
-The policy comes from `buildSandboxPolicy` (`core/src/sandbox/policy.ts`). Its `rules` are `{path, access: write | read | none}`, longest prefix wins. The workspace roots are `write`. Guards inside them are `.sfagents/` and `.env` = `none`, `agents/` and `mcp.json` = `read`, and `.git/hooks`, `.git/config`, `.git/modules` = `read`. The rest of `.git` stays writable. `prepareRules()` creates missing guarded paths, so they can be protected.
+`cmd`, direct Git commands, Node file operations, and Node subprocesses using
+`stdio: 'ignore'` work. Windows PowerShell 5.1 fails its legacy CLR IPC check
+(`80070005`). PowerShell 7 passes that check but failed `BCrypt.dll` startup on
+this PC (`0x8007045A`). Node subprocesses with captured/piped stdio fail with
+`EPERM`, because their new pipes' default Windows DACL omits the restricting SID.
+This limits tools such as npm inside the sandbox. These failures do not relax
+permissions or trigger a retry outside the sandbox.
 
-Binary location: build to `core/native/bin/win-x64/sfagents-sandbox.exe` (ignored by git, built by a script like `scripts/build-sensors.mjs`, hooked into `prepare`). Resolve it from `core/dist/sandbox/windows.js` with `new URL('../../native/bin/win-${process.arch}/sfagents-sandbox.exe', import.meta.url)`.
-
-## Caleb's confirmed rules
-
-1. System folders are readable. The user's profile and personal files are hidden.
-2. **Drives other than C: and `C:\ProgramData` are hidden** (deny-read for the sandbox accounts). The only exceptions are the few ProgramData subfolders that common tools need, such as Git for Windows' system config. Keep that allowlist short and in one place.
-3. Offline by default. Per agent, `workspace.network: true` turns the network on.
-4. No approval prompt once sandboxed (`tools.ask` turns it back on). With no sandbox, every command is refused.
-5. One UAC prompt, at setup only. The per-command path must run unelevated.
-6. Before anything runs on his PC that changes the system (accounts, firewall, ACLs, UAC), ask him first, and give him the exact undo (`sfagents-sandbox uninstall`).
-7. No Claude co-author or session trailers on commits. Commit in logical pieces and push to main.
-
-## Planned design (worked out, not implemented)
-
-**Two local accounts**, created by `setup`: `sfagents_sandbox` (offline) and `sfagents_sandbox_net` (network allowed). A firewall rule that blocks outbound for one user SID cannot be lifted for a single run, so network opt-in picks the second account. Both are standard users with no admin rights and random passwords. Create them with `NetUserAdd` rather than `net user`, so the password never appears on a command line. Store each password in the invoking user's Credential Manager (`CredWriteW`, generic credential, targets such as `sfagents/sandbox` and `sfagents/sandbox-net`). UAC elevation keeps the same user SID, so the unelevated `run` can read them with `CredReadW`.
-
-**Setup (elevated, idempotent):**
-- Create or refresh the two accounts and their stored passwords.
-- Give the accounts the logon right that `CreateProcessWithLogonW` needs. Group policy that removes "log on locally" is a known failure mode, so report it clearly.
-- Add a per-user outbound block rule for `sfagents_sandbox` only, e.g. `New-NetFirewallRule -Direction Outbound -Action Block -LocalUser "D:(A;;CC;;;<SID>)"`.
-- Add persistent deny-read ACEs for both accounts on the other fixed drives and on `C:\ProgramData`, with the allowlisted subfolders granted back. These are machine-wide, so they belong in setup, not in each run.
-- `uninstall` reverses all of the above: removes the ACEs, the firewall rule, the accounts and the stored credentials.
-
-**Run (unelevated, per command):**
-1. Read the policy JSON and pick the account from `network`.
-2. Apply ACEs for that account's SID. `write` roots get an inheritable grant of modify rights. `read` guards get a deny-write ACE (all the write, delete and change-permissions bits). `none` guards get a deny-all ACE. Use `GetNamedSecurityInfoW` → `SetEntriesInAclW` → `SetNamedSecurityInfoW`, which places deny ACEs before allow. The workspace is Caleb's, so he can change its DACL without elevation.
-3. Build the account's own environment, so Caleb's `USERPROFILE`, `APPDATA` and the like don't leak. Call `LogonUserW` to get a token, then `CreateEnvironmentBlock`. A NULL environment would inherit Caleb's.
-4. Launch with `CreateProcessWithLogonW` (`LOGON_WITH_PROFILE`, `CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT`, cwd = workspace). This works from an unelevated process. `CreateProcessAsUserW` would need SeAssignPrimaryToken, which a normal user doesn't have.
-5. Put the process in a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, resume it, wait, and pass the exit code through. Pipe stdout and stderr through the helper.
-6. Cleanup: revoke that SID's ACEs on the policy paths (`REVOKE_ACCESS`; only this helper ever grants these SIDs there).
-
-**Hardening that is still open:**
-- Restricted token: with `CreateProcessWithLogonW` the helper cannot pass in a token from `CreateRestrictedToken`. Options are getting the rights for `CreateProcessAsUserW` at setup (this changes Caleb's own account, so ask him first) or having the first sandboxed process re-launch itself with a restricted copy of its own token.
-- Private desktop: `CreateDesktopW` per run, let the account use it, and set `STARTUPINFOW.lpDesktop`. Make it best effort.
-- Speed: inheritable ACEs propagate through the whole tree, which can be slow on big folders (node_modules). Measure on the PC. If it's slow, apply them once per workspace and keep them.
-- Web access (`sf-web`) on Windows: `host-channel.ts` listens on a Unix socket path. Windows needs a `\\.\pipe\...` name that the sandbox account is allowed to open, and `policy.tools` added to its PATH. Untested.
-- Agents' own environment variables aren't passed through, because the child gets the sandbox account's environment. Decide which variables to merge in, never secrets (`sanitizeChildEnv`).
-
-## Tests to run on the PC
-
-Run them through Remote Control on the default device, with folders under `C:\Users\bugma\projects`:
-- Commands work in the workspace: write, read, git status, git commit.
-- Reading `C:\Users\bugma\Documents`, `.env`, `.sfagents\`, another drive and `C:\ProgramData\<not allowlisted>` all fail.
-- Writing `agents\x.json`, `mcp.json`, `.git\hooks\pre-commit`, `.git\config` and `C:\Windows\x` all fail.
-- The offline agent can't reach the network (`curl https://example.com`). An agent with `network: true` can.
-- A command that starts a background child is killed when the run ends or times out (Job Object).
-- `uninstall` leaves no accounts, rules or ACEs behind.
-
-Also add unit tests in `tests/sandbox.test.ts` for the TS side (`wrap` output, policy JSON) that run on any OS.
+Keep the filesystem boundary when investigating runtime support: adding Everyone
+or the account SID to the restricting set would defeat the write restriction.
+Do not add device permissions without evidence and the user's explicit approval.
+No cryptography-device grant was applied. Other-drive isolation and device ACL
+persistence across reboot remain unverified on this PC. ARM64 packaging and
+enterprise logon-policy variations need their own machines.

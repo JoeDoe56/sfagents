@@ -137,6 +137,7 @@ export function detectSandbox(): Promise<SandboxStatus> {
   detected ??= (async (): Promise<SandboxStatus> => {
     if (process.platform === 'linux') return (await import('./linux.js')).detectBubblewrap();
     if (process.platform === 'darwin') return (await import('./macos.js')).detectSeatbelt();
+    if (process.platform === 'win32') return (await import('./windows.js')).detectWindowsSandbox();
     return { ok: false, reason: `No sandbox is available for ${process.platform} yet, so shell commands are refused.` };
   })();
   return detected;

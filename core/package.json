@@ -13,7 +13,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "native/bin"
   ],
   "engines": {
     "node": ">=20.12"

@@ -26,5 +26,6 @@ if (files.length === 0) {
   console.error('No test files matched.');
   process.exit(1);
 }
-const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', '--test-concurrency=1', `--test-timeout=${live ? 180000 : 60000}`, ...files], { stdio: 'inherit', cwd: root });
+const nativeWindows = process.platform === 'win32' && process.env.SFAGENTS_TEST_WINDOWS_SANDBOX === '1';
+const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', '--test-concurrency=1', `--test-timeout=${live || nativeWindows ? 180000 : 60000}`, ...files], { stdio: 'inherit', cwd: root });
 process.exit(result.status ?? 1);

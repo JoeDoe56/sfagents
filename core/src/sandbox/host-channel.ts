@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { sfagentsHome } from '../settings/home.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { WebAccess, WebOperation } from '../web/brightdata.js';
@@ -73,7 +74,9 @@ async function answer(grant: WebGrant, line: string, signal: AbortSignal): Promi
 export async function openHostChannel(grant: WebGrant, signal: AbortSignal): Promise<HostChannel> {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-host-')));
   fs.chmodSync(dir, 0o700);
-  const socketPath = path.join(dir, 'host.sock');
+  // The native broker grants just the selected sandbox account access to this
+  // pipe before the command starts. No TCP/loopback exception is needed.
+  const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\sfagents-web-${randomUUID()}` : path.join(dir, 'host.sock');
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);

@@ -14,6 +14,7 @@ coverage/
 /brightdata-mcp-example.json
 
 web/native/bin/
+core/native/bin/
 web/native/windows/bin/
 web/native/windows/obj/
 __pycache__/

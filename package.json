@@ -14,8 +14,11 @@
     "node": ">=20.12"
   },
   "scripts": {
-    "prepare": "node scripts/prepare-sensors.mjs && tsc -b web cli tests",
-    "build": "node scripts/prepare-sensors.mjs && tsc -b web cli tests",
+    "prepare": "node scripts/prepare-sensors.mjs && node scripts/prepare-sandbox.mjs && tsc -b web cli tests",
+    "build": "node scripts/prepare-sensors.mjs && node scripts/prepare-sandbox.mjs && tsc -b web cli tests",
+    "build:sandbox": "node scripts/build-sandbox.mjs",
+    "sandbox:setup": "node scripts/windows-sandbox.mjs setup",
+    "sandbox:uninstall": "node scripts/windows-sandbox.mjs uninstall",
     "build:sensors": "node scripts/prepare-sensors.mjs",
     "sensors:setup": "powershell.exe -NoProfile -File scripts/setup-sensors.ps1",
     "clean": "tsc -b web cli tests --clean",

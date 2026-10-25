@@ -48,7 +48,7 @@ export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
     if (rule.access !== 'write') continue;
     const git = path.join(rule.path, '.git');
     if (fs.existsSync(git) && fs.statSync(git).isDirectory()) {
-      for (const name of GIT_PROTECTED) guards.push({ path: path.join(git, name), access: 'read' });
+      for (const name of GIT_PROTECTED) guards.push({ path: path.join(git, name), access: 'read', ensure: name === 'config' ? { kind: 'file' } : { kind: 'dir' } });
     }
   }
   if (input.agentsDir) guards.push({ path: canonical(input.agentsDir), access: 'read', ensure: { kind: 'dir' } });
