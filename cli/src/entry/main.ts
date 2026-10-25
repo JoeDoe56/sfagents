@@ -46,7 +46,7 @@ import {
   type ConversationFlags,
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
-import { DEFAULT_HOST, DEFAULT_PORT, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
+import { DEFAULT_HOST, DEFAULT_PORT, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
 import { providersCommand, settingsCommand } from './providers.js';
 
 export const VERSION = '0.1.0';
@@ -452,9 +452,12 @@ async function serveWeb(
   }
   // One administrator approval for everything SF Agents does with administrator
   // rights, asked for now rather than when a feature is first used.
-  const privileges = process.env['SFAGENTS_NO_SETUP'] === '1' ? undefined : await acquirePrivileges({ log: (line) => streams.stderr.write(`${line}\n`) });
+  // Screen mirroring's setup (its helper, the virtual display) is part of it.
+  const screen = new ScreenMirror({ log: (line) => streams.stderr.write(`${line}\n`) });
+  const privileges = process.env['SFAGENTS_NO_SETUP'] === '1' ? undefined : await acquirePrivileges({ screen, log: (line) => streams.stderr.write(`${line}\n`) });
   const server = new WebServer({
     auth,
+    screen,
     tree,
     conversation,
     privileges,
@@ -479,8 +482,8 @@ async function serveWeb(
     return EXIT_FAILURE;
   }
   for (const n of conversation.notices) streams.stderr.write(`${n.message}\n`);
-  // What the features need beyond the package (Remote Desktop's MoonlightWeb, the
-  // dictation model, the sensor driver), set up in the background.
+  // What the features need beyond the package (the screen mirroring helper, the
+  // dictation model), set up in the background.
   if (process.env['SFAGENTS_NO_SETUP'] !== '1') void server.setupFeatures();
   streams.stdout.write(`SF Agents web interface: ${url}\n`);
   if (opts.publicOrigin) streams.stdout.write(`Reverse proxy origin: ${opts.publicOrigin}\n`);

@@ -32,6 +32,7 @@
 #include "backend/streambackend/NativeProbeService.h"
 #include "backend/VirtualDisplay.h"
 #include "backend/VirtualDisplayApply.h"
+#include "backend/VirtualDisplayJob.h"
 #include "backend/NvApp.h"
 #include "streaming/DataChannelRelay.h"
 #include "streaming/NativeMediaEngine.h"
@@ -559,7 +560,46 @@ static int runStreamWorker(QCoreApplication& app)
     });
     stdinThread.detach();
 
-    session->start();
+    // "SF Agents Virtual Display" is off between streams: a stream on it
+    // turns it on first (enable, mode, primary), as MoonlightWeb's server did
+    // before it spawned the worker (main.cpp, /start), and the session starts
+    // once the engine can see it. SF Agents turns it off again a moment after
+    // the last stream (--vdisplay-off), so that a reload finds it still there.
+    const int appId = cfg["appId"].toInt();
+    if (NativeHostBackend::usesVirtualDisplay(appId)) {
+        const bool match = cfg["matchClientDisplay"].toBool(false);
+        const int vdWidth = match ? cfg["width"].toInt() : 0;
+        const int vdHeight = match ? cfg["height"].toInt() : 0;
+        const int fps = cfg["fps"].toInt();
+        int vdRefresh = VirtualDisplay::refreshForStream(fps, 0, VirtualDisplay::kFasterThanStream) *
+                        VirtualDisplay::kMilliHz;
+        if (VirtualDisplay::kFasterThanStream && VirtualDisplay::kVddMatchProduct) {
+            const int matched = VirtualDisplay::matchedRefreshMilliHz(
+                cfg["clientRefreshMilliHz"].toInt(0), fps, VirtualDisplay::kMatchedRateMaxHz);
+            if (matched > 0) vdRefresh = matched;
+        }
+        qInfo().noquote() << "[StreamWorker] virtual display at"
+                          << VirtualDisplay::rateText(vdRefresh) << "Hz for a" << fps << "fps stream";
+        VirtualDisplayJob::instance().activate(
+            vdWidth, vdHeight, vdRefresh, cfg["hdr"].toBool(false),
+            [session](bool ok, const QString& error) {
+                if (!ok) {
+                    emitEvent({{QStringLiteral("event"), QStringLiteral("response")},
+                               {QStringLiteral("code"), 500},
+                               {QStringLiteral("body"),
+                                QJsonObject{{QStringLiteral("error"),
+                                             QStringLiteral("The virtual display could not be "
+                                                            "turned on: ") +
+                                                 error}}}});
+                    teardownAndExit(0);
+                    return;
+                }
+                session->setPreviousPrimary(NativeHostBackend::previousPrimary());
+                session->start();
+            });
+    } else {
+        session->start();
+    }
 
     const int rc = app.exec();
     qInfo() << "[StreamWorker] Worker exiting rc=" << rc;
@@ -616,6 +656,22 @@ int runInfo()
     return 0;
 }
 
+/// --vdisplay-off: the virtual display off again, the primary back where
+/// it was. Run by SF Agents a moment after the last stream on it ended.
+int runVirtualDisplayOff(QCoreApplication& app)
+{
+    int rc = 0;
+    VirtualDisplayJob::instance().deactivate([&rc](bool ok, const QString& error) {
+        if (!ok) {
+            qWarning().noquote() << "[vdisplay] could not turn the virtual display off:" << error;
+            rc = 1;
+        }
+        QCoreApplication::quit();
+    });
+    app.exec();
+    return rc;
+}
+
 void messageToLogger(QtMsgType type, const QMessageLogContext&, const QString& msg)
 {
     switch (type) {
@@ -633,6 +689,7 @@ void messageToLogger(QtMsgType type, const QMessageLogContext&, const QString& m
  *                                 the protocol in StreamWorkerMain.h
  * sfagents-screen --probe         what this computer can stream, as JSON
  * sfagents-screen --info          this computer as a host, and its displays
+ * sfagents-screen --vdisplay-off   turn the virtual display off
  * sfagents-screen --vdisplay-apply --stage=driver --vdisplay-dir <dir>
  *                                 install the virtual display's driver
  *                                 (elevated, at SF Agents' startup approval)
@@ -672,14 +729,17 @@ int main(int argc, char* argv[])
                                          QStringLiteral("dir"));
     QCommandLineOption infoOption(QStringLiteral("info"),
                                   QStringLiteral("Print this computer as a host, and its displays"));
+    QCommandLineOption vdisplayOffOption(QStringLiteral("vdisplay-off"),
+                                         QStringLiteral("Turn the virtual display off"));
     QCommandLineOption verboseOption(QStringLiteral("verbose"), QStringLiteral("Verbose logs"));
-    parser.addOptions({probeOption, infoOption, vdisplayApplyOption, vdisplayStageOption, vdisplayDirOption,
+    parser.addOptions({probeOption, infoOption, vdisplayOffOption, vdisplayApplyOption, vdisplayStageOption, vdisplayDirOption,
                        verboseOption});
     parser.process(app);
     mw::run::setVerboseFromCli(parser.isSet(verboseOption));
 
     if (parser.isSet(probeOption)) return NativeProbeService::runProbeCommand();
     if (parser.isSet(infoOption)) return runInfo();
+    if (parser.isSet(vdisplayOffOption)) return runVirtualDisplayOff(app);
     if (parser.isSet(vdisplayApplyOption))
         return VirtualDisplayApply::run(parser.value(vdisplayStageOption),
                                         parser.value(vdisplayDirOption));

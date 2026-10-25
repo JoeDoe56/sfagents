@@ -6,7 +6,11 @@
  * What it covers:
  *
  *   - one-time installs that are still missing: on Windows the signed PawnIO
- *     driver that CPU temperatures are read through (sensor-driver.ts);
+ *     driver that CPU temperatures are read through (sensor-driver.ts), and
+ *     what screen mirroring needs (screen.ts: its helper under Program Files,
+ *     the virtual display's driver and task, a firewall rule, the gamepad
+ *     driver); on Linux the udev rule that lets screen mirroring type and
+ *     click;
  *   - the programs that run elevated while SF Agents runs: on Windows the
  *     read-only sensor worker, on Linux the sensor collectors (smartctl and
  *     ipmitool read drive temperatures and the BMC only as root).
@@ -32,10 +36,13 @@ import { getErrorMessage, sfagentsHome } from '@sfagents/core';
 import { pawnioInstalled, pawnioStep } from './sensor-driver.js';
 import { LINUX_SENSORS_PYTHON } from './linux-sensors.js';
 import { WINDOWS_SENSORS_EXE } from './windows-sensors.js';
+import { linuxInputNeedsSetup, linuxInputScript, screenSetupSteps, type ScreenMirror } from './screen.js';
 
 export interface ElevatedStep {
   file: string;
   args: string[];
+  /** Exit codes that are not failures (default: 0). */
+  ok?: number[];
 }
 
 export interface Privileges {
@@ -54,6 +61,8 @@ export interface PrivilegeOptions {
   interactive?: boolean;
   /** Where downloaded installers go. */
   setupDir?: string;
+  /** Screen mirroring, whose setup the approval covers too. */
+  screen?: ScreenMirror;
 }
 
 /**
@@ -67,7 +76,6 @@ export async function acquirePrivileges(options: PrivilegeOptions = {}): Promise
   const setupDir = options.setupDir ?? path.join(sfagentsHome(), 'setup');
   if (platform === 'win32') {
     const worker = fs.existsSync(WINDOWS_SENSORS_EXE);
-    if (!worker && pawnioInstalled()) return { done: Promise.resolve() };
     const pipe = `sfagents-sensors-${crypto.randomBytes(16).toString('hex')}`;
     const done = (async () => {
       const installs: ElevatedStep[] = [];
@@ -78,11 +86,19 @@ export async function acquirePrivileges(options: PrivilegeOptions = {}): Promise
           log(`The sensor driver could not be downloaded: ${getErrorMessage(error)}`);
         }
       }
-      if (!installs.length && !worker) throw new Error('nothing to do.');
+      if (options.screen) {
+        try {
+          installs.push(...(await screenSetupSteps(options.screen, setupDir, fetch, log)));
+        } catch (error) {
+          log(`Screen mirroring could not be set up: ${getErrorMessage(error)}`);
+        }
+      }
+      if (!installs.length && !worker) return false;
       await runElevatedWindows(installs, worker ? [{ file: WINDOWS_SENSORS_EXE, args: ['--pipe-worker', pipe] }] : []);
+      return true;
     })();
     const approved = done.then(
-      () => true,
+      (asked) => asked,
       (error) => {
         log(`Administrator rights were not given: ${getErrorMessage(error)}`);
         return false;
@@ -91,10 +107,13 @@ export async function acquirePrivileges(options: PrivilegeOptions = {}): Promise
     return { ...(worker ? { windowsSensors: { pipe, approved } } : {}), done: approved.then(() => undefined) };
   }
   if (platform === 'linux') {
-    // Only when something would use it: no prompt on a machine with neither tool.
-    if (!fs.existsSync(LINUX_SENSORS_PYTHON) || !['smartctl', 'ipmitool'].some(hasCommand)) return { done: Promise.resolve() };
+    // Only when something would use it: no prompt on a machine that needs nothing.
+    const sensors = fs.existsSync(LINUX_SENSORS_PYTHON) && ['smartctl', 'ipmitool'].some(hasCommand);
+    const input = Boolean(options.screen) && linuxInputNeedsSetup();
+    if (!sensors && !input) return { done: Promise.resolve() };
     const ok = await sudoValidate(options.interactive ?? Boolean(process.stdin.isTTY), log);
-    return { linuxSudo: ok, done: Promise.resolve() };
+    if (ok && input) await run('sudo', ['-n', '/bin/sh', '-c', linuxInputScript()], 'ignore').catch((error) => log(`Screen mirroring's input access was not set up: ${getErrorMessage(error)}`));
+    return { linuxSudo: ok && sensors, done: Promise.resolve() };
   }
   return { done: Promise.resolve() };
 }
@@ -106,10 +125,15 @@ export async function acquirePrivileges(options: PrivilegeOptions = {}): Promise
  */
 export function runElevatedWindows(installs: ElevatedStep[], workers: ElevatedStep[] = []): Promise<void> {
   const ps = (v: string) => `'${v.replace(/'/g, "''")}'`;
-  const list = (args: string[]) => (args.length ? ` -ArgumentList @(${args.map(ps).join(',')})` : '');
+  // Start-Process joins -ArgumentList with spaces and quotes nothing: each
+  // argument is quoted here as the program's command line parser reads it.
+  const list = (args: string[]) => (args.length ? ` -ArgumentList ${ps(args.map(winArg).join(' '))}` : '');
   const inner = [
     '$failed = 0',
-    ...installs.map((st) => `$p = Start-Process -FilePath ${ps(st.file)}${list(st.args)} -Wait -PassThru; if ($p.ExitCode -ne 0 -and $failed -eq 0) { $failed = $p.ExitCode }`),
+    ...installs.map(
+      (st) =>
+        `$p = Start-Process -FilePath ${ps(st.file)}${list(st.args)} -Wait -PassThru -WindowStyle Hidden; if (@(${(st.ok ?? [0]).join(',')}) -notcontains $p.ExitCode -and $failed -eq 0) { $failed = $p.ExitCode }`,
+    ),
     ...workers.map((st) => `Start-Process -FilePath ${ps(st.file)}${list(st.args)} -WindowStyle Hidden`),
     'exit $failed',
   ].join('; ');
@@ -122,6 +146,12 @@ export function runElevatedWindows(installs: ElevatedStep[], workers: ElevatedSt
   });
 }
 
+/** One argument of a Windows command line, quoted as CommandLineToArgvW reads it. */
+export function winArg(arg: string): string {
+  if (arg && !/[\s"]/.test(arg)) return arg;
+  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+}
+
 /** Linux: caches sudo's credentials, asking for the password in the terminal when there is one. */
 async function sudoValidate(interactive: boolean, log: (line: string) => void): Promise<boolean> {
   if (!hasCommand('sudo')) return false;
@@ -130,7 +160,7 @@ async function sudoValidate(interactive: boolean, log: (line: string) => void): 
     log('Administrator rights: no terminal to ask for the sudo password in; drive and BMC sensors are read without them.');
     return false;
   }
-  process.stderr.write('SF Agents asks once for administrator rights, for its hardware sensors.\n');
+  process.stderr.write('SF Agents asks once for administrator rights, for its hardware sensors and screen mirroring.\n');
   try {
     await run('sudo', ['-v', '-p', '[sudo] password for %p: '], 'inherit');
     return true;

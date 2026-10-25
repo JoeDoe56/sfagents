@@ -50,8 +50,7 @@ import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
 import { AuthError, WebAuth } from './auth.js';
 import { Dictation } from './dictation.js';
-import { DISPLAY_SCALES, RemoteDesktop } from './remote.js';
-import { applyEmbedEdits, embedScript, EMBED_EDITS, EMBED_SCRIPT } from './remote-embed.js';
+import { DISPLAY_SCALES, ScreenMirror } from './screen.js';
 import { getDisplayScale, setDisplayScale } from './remote-dpi.js';
 import { TerminalError, TerminalManager } from './terminal.js';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
@@ -117,8 +116,8 @@ export interface WebServerOptions {
   auth?: WebAuth | false;
   /** Speech to text for the mic button (default: llama.cpp + Qwen3-ASR, downloaded on first use). */
   dictation?: Dictation;
-  /** Remote Desktop (default: MoonlightWeb on this computer). */
-  remote?: RemoteDesktop;
+  /** Screen mirroring (default: the helper built from MoonlightWeb, downloaded on first start). */
+  screen?: ScreenMirror;
   publicDir?: string;
   maxUploadBytes?: number;
   log?: (line: string) => void;
@@ -271,10 +270,9 @@ export class WebServer {
   private readonly apps: AppProxy;
   readonly auth: WebAuth | null;
   readonly dictation: Dictation;
-  readonly remote: RemoteDesktop;
-  /** Which device streams Remote Desktop now (its display scaling is read back when it stops). */
-  private remoteStreamer: string | null = null;
-  private embedWarned = false;
+  readonly screen: ScreenMirror;
+  /** Which device streams the screen now (its display scaling is read back when it stops). */
+  private screenStreamer: string | null = null;
   private readonly terminals: TerminalManager;
   private readonly ownNames: Set<string>;
   private readonly mcpFile: string;
@@ -299,28 +297,10 @@ export class WebServer {
     })()]);
     this.apps = new AppProxy(
       (id) => {
-        if (id === 'remote') return this.remote.target();
         const v = this.conversation.state.artifactViews.get(id);
         return v?.type === 'app' && v.url ? v.url : undefined;
       },
       (pathname) => this.ownNames.has(decodeURIComponent(pathname.split('/')[1] ?? '')),
-      {
-        // MoonlightWeb's page, changed for the Remote Desktop sheet (remote-embed.ts).
-        local: (route, pathname) => (route.id === 'remote' && pathname === EMBED_SCRIPT ? { type: 'text/javascript; charset=utf-8', body: embedScript() } : null),
-        transform: (route, pathname) =>
-          route.id === 'remote' && pathname in EMBED_EDITS
-            ? (text) => {
-                const out = applyEmbedEdits(pathname, text);
-                if (out === null && !this.embedWarned) {
-                  this.embedWarned = true;
-                  this.log(`remote: this MoonlightWeb's ${pathname} is not the one SF Agents knows; its own page is shown instead.`);
-                }
-                return out;
-              }
-            : null,
-        // Its signaling and fallback sockets.
-        claimUpgrade: (pathname) => (/^\/ws(\d+|\/stream)?$/.test(pathname) && this.remote.target() ? 'remote' : undefined),
-      },
     );
     this.log = options.log ?? (() => {});
     this.registry = options.registry ?? new ProviderRegistry();
@@ -333,14 +313,12 @@ export class WebServer {
         log: (line) => this.log(line),
         onChange: (status) => this.broadcast('dictation', status),
       });
-    this.remote =
-      options.remote ??
-      new RemoteDesktop({
-        setting: (key) => (options.settings ?? new AppSettings()).get(key),
-        hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
+    this.screen =
+      options.screen ??
+      new ScreenMirror({
         log: (line) => this.log(line),
-        onChange: (status) => this.broadcast('remote', status),
       });
+    this.screen.onStatus((status) => this.broadcast('screen', status));
     this.terminals = new TerminalManager({
       cwd: options.tree.configDir,
       hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
@@ -437,17 +415,16 @@ export class WebServer {
 
   /**
    * Everything the features need that is not in the package, set up at the
-   * first start without being asked for: Remote Desktop's MoonlightWeb and
-   * the dictation model (the sensor driver comes with the administrator
-   * approval at startup, privileges.ts). Runs in the background; progress goes to the log
+   * first start without being asked for: the screen mirroring helper and
+   * the dictation model (the drivers come with the administrator approval at
+   * startup, privileges.ts). Runs in the background; progress goes to the log
    * and to the pages as events.
    */
   async setupFeatures(): Promise<void> {
     const dictation = this.dictation.status().state === 'missing' ? this.dictation.install().catch((error) => this.log(`Dictation could not be set up: ${getErrorMessage(error)}`)) : Promise.resolve();
-    await this.remote.autoSetup();
-    const r = this.remote.status();
-    if (r.state === 'ready') this.log(`Remote Desktop: MoonlightWeb ${r.version ?? ''} at ${r.url}${r.managed ? ' (started by SF Agents)' : ''}.`);
-    else if (r.error) this.log(`Remote Desktop is not available: ${r.error}`);
+    await this.screen.ensure();
+    const r = this.screen.status();
+    if (r.state !== 'ready' && r.error) this.log(`Screen mirroring is not available: ${r.error}`);
     await dictation;
   }
 
@@ -463,7 +440,7 @@ export class WebServer {
     this.clients.clear();
     this.terminals.dispose();
     this.dictation.close();
-    this.remote.close();
+    this.screen.close();
     for (const sock of this.upgraded) sock.destroy();
     this.upgraded.clear();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
@@ -540,9 +517,94 @@ export class WebServer {
       }
       return this.terminals.upgrade(req, socket, head);
     }
+    if (url.pathname.startsWith('/api/screen/')) {
+      if (this.screen.upgrade(req, socket, head, url.pathname)) return;
+      return void socket.destroy();
+    }
     const app = this.apps.routeUpgrade(req);
     if (app) return this.apps.upgrade(req, socket, head, app);
     socket.destroy();
+  }
+
+  private screenDevice(req: IncomingMessage): string {
+    return this.auth?.device(req)?.id ?? 'default';
+  }
+
+  /**
+   * Screen mirroring. GET /api/screen: the sheet's state (status, this
+   * device's settings). The rest is what the stream page asks
+   * (web/public/screen, MoonlightWeb's BackendClient): this computer as a
+   * host, its displays, and how a stream ended.
+   */
+  private async getScreen(sub: string, url: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const device = this.screenDevice(req);
+    switch (sub) {
+      case '':
+        return sendJson(res, 200, { status: this.screen.status(), device, settings: this.screen.deviceSettings(device), displayScales: DISPLAY_SCALES, platform: process.platform });
+      case 'host': {
+        try {
+          return sendJson(res, 200, await this.screen.info());
+        } catch (error) {
+          throw new HttpError(503, getErrorMessage(error));
+        }
+      }
+      case 'stream-state':
+        return sendJson(res, 200, { state: this.screen.streamState(url.searchParams.get('stream') ?? '', device) });
+      case 'running-app':
+        return sendJson(res, 200, { currentGameId: 0 });
+      default:
+        throw new HttpError(404, 'Not found.');
+    }
+  }
+
+  private async postScreen(sub: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const device = this.screenDevice(req);
+    const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+    switch (sub) {
+      case 'start': {
+        const r = await this.screen.start(body, req, device);
+        return sendJson(res, r.code, r.body);
+      }
+      case 'quit':
+      case 'stop-session':
+        await this.screen.quit();
+        return sendJson(res, 200, { status: 'ok' });
+      case 'setup':
+        // Try the download again (offline at startup, say).
+        this.screen.ensure().catch(() => undefined);
+        return sendJson(res, 200, { status: this.screen.status() });
+      case 'settings': {
+        const patch: Record<string, unknown> = {};
+        if ('scale' in body) patch['scale'] = body['scale'];
+        if ('displayScale' in body) patch['displayScale'] = body['displayScale'];
+        let settings;
+        try {
+          settings = this.screen.saveDeviceSettings(device, patch);
+        } catch (error) {
+          throw new HttpError(400, getErrorMessage(error));
+        }
+        // While this device streams, the scaling applies at once.
+        if (settings.displayScale !== null && this.screenStreamer === device) await setDisplayScale(settings.displayScale).catch(() => undefined);
+        return sendJson(res, 200, { settings });
+      }
+      case 'streaming': {
+        this.screenStreamer = device;
+        const { displayScale } = this.screen.deviceSettings(device);
+        const now = displayScale !== null ? await setDisplayScale(displayScale).catch(() => null) : await getDisplayScale().catch(() => null);
+        return sendJson(res, 200, { display: now });
+      }
+      case 'ended': {
+        // Keep what the scaling was (changed in Windows' Settings, maybe) for this device.
+        if (this.screenStreamer === device) {
+          this.screenStreamer = null;
+          const now = await getDisplayScale().catch(() => null);
+          if (now?.found && typeof now.scale === 'number' && DISPLAY_SCALES.includes(now.scale)) this.screen.saveDeviceSettings(device, { displayScale: now.scale });
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+      default:
+        throw new HttpError(404, 'Not found.');
+    }
   }
 
   /** How the browser sees this server: the public origin behind a proxy, else the Host. */
@@ -652,52 +714,11 @@ export class WebServer {
           } else throw new HttpError(400, 'Unknown action.');
           return sendJson(res, 200, this.dictation.status());
         }
-        case 'GET remote': {
+        case 'GET screen':
           this.checkFetchSite(req);
-          const device = this.auth?.device(req)?.id ?? 'default';
-          if (url.searchParams.get('find') === '1') await this.remote.ensure();
-          return sendJson(res, 200, { status: this.remote.status(), device, settings: this.remote.deviceSettings(device), displayScales: DISPLAY_SCALES, platform: process.platform });
-        }
-        case 'POST remote': {
-          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-          const device = this.auth?.device(req)?.id ?? 'default';
-          switch (body['action']) {
-            case 'install':
-              this.remote.install().catch((error) => this.log(`remote: ${getErrorMessage(error)}`));
-              return sendJson(res, 200, { status: this.remote.status() });
-            case 'settings': {
-              const patch: Record<string, unknown> = {};
-              if ('scale' in body) patch['scale'] = body['scale'];
-              if ('displayScale' in body) patch['displayScale'] = body['displayScale'];
-              let settings;
-              try {
-                settings = this.remote.saveDeviceSettings(device, patch);
-              } catch (error) {
-                throw new HttpError(400, getErrorMessage(error));
-              }
-              // While this device streams, the scaling applies at once.
-              if (settings.displayScale !== null && this.remoteStreamer === device) await setDisplayScale(settings.displayScale).catch(() => undefined);
-              return sendJson(res, 200, { settings });
-            }
-            case 'streaming': {
-              this.remoteStreamer = device;
-              const { displayScale } = this.remote.deviceSettings(device);
-              const now = displayScale !== null ? await setDisplayScale(displayScale).catch(() => null) : await getDisplayScale().catch(() => null);
-              return sendJson(res, 200, { display: now });
-            }
-            case 'ended': {
-              // Keep what the scaling was (changed in Windows' Settings, maybe) for this device.
-              if (this.remoteStreamer === device) {
-                this.remoteStreamer = null;
-                const now = await getDisplayScale().catch(() => null);
-                if (now?.found && typeof now.scale === 'number' && DISPLAY_SCALES.includes(now.scale)) this.remote.saveDeviceSettings(device, { displayScale: now.scale });
-              }
-              return sendJson(res, 200, { ok: true });
-            }
-            default:
-              throw new HttpError(400, 'Unknown action.');
-          }
-        }
+          return this.getScreen(parts[1] ?? '', url, req, res);
+        case 'POST screen':
+          return this.postScreen(parts[1] ?? '', req, res);
         case 'POST transcribe': {
           const type = String(req.headers['content-type'] ?? '');
           if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
