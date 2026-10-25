@@ -24,6 +24,9 @@ export {
   FailoverProvider,
   MissingCredentialError,
   UnknownProviderError,
+  NoProviderError,
+  DEFAULT_MODELS,
+  providerChoices,
   OPENROUTER_API_KEY_ENV,
 } from './providers/factory.js';
 export * from './providers/registry.js';

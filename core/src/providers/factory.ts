@@ -14,7 +14,7 @@
 import type { AgentDefinition, ProviderChoice } from '../agents/definition.js';
 import { OPENROUTER_BASE_URL, OpenAICompatibleProvider } from './openai-compatible.js';
 import { ProviderError, type ModelProvider, type ModelRequest, type ModelStreamEvent } from './types.js';
-import type { AnthropicSecret, CustomSecret, OpenAISecret, OpenRouterSecret, ProviderRecord, ProviderRegistry } from './registry.js';
+import type { AnthropicSecret, CustomSecret, OpenAISecret, OpenRouterSecret, ProviderKind, ProviderRecord, ProviderRegistry } from './registry.js';
 import { CodexProvider, isAccountLimitStatus } from './codex.js';
 import { ClaudeSubscriptionProvider } from './claude-subscription.js';
 import type { PlanUsage, PlanUsageStore } from './usage.js';
@@ -36,6 +36,40 @@ export class UnknownProviderError extends Error {
     );
     this.name = 'UnknownProviderError';
   }
+}
+
+export class NoProviderError extends Error {
+  constructor(agentId: string) {
+    super(`Agent "${agentId}" has no provider yet. Add one in Settings → Providers (or with "sfagents providers add"); an agent file that names no provider uses it.`);
+    this.name = 'NoProviderError';
+  }
+}
+
+/**
+ * The model asked for when an agent file names neither a provider nor a
+ * model. "" lets the provider choose (Codex picks the plan's default); a
+ * custom endpoint has no default, so its agent needs "model".
+ */
+export const DEFAULT_MODELS: Readonly<Record<ProviderKind, string>> = {
+  openrouter: 'anthropic/claude-sonnet-5.5',
+  openai: '',
+  anthropic: 'claude-sonnet-5-5',
+  custom: '',
+};
+
+/**
+ * The providers an agent replies with, in failover order: those its file
+ * names, or, when it names none, the account picked for it (else the first
+ * added in Settings) with the agent's model or that provider's default.
+ */
+export function providerChoices(definition: Readonly<AgentDefinition>, registry: ProviderRegistry | undefined, picked?: string): ProviderChoice[] {
+  if (definition.providers?.length) return definition.providers;
+  if (definition.provider) return [{ provider: definition.provider, model: definition.model }];
+  const record = (picked ? registry?.find(picked) : undefined) ?? registry?.list()[0];
+  if (!record) return [];
+  const model = definition.model || DEFAULT_MODELS[record.kind];
+  if (!model && record.kind === 'custom') throw new ProviderError(`Provider "${record.name}" has no default model: set "model" in agent "${definition.id}"'s file.`, 400);
+  return [{ provider: record.name, model }];
 }
 
 export type ProviderFactory = ((definition: Readonly<AgentDefinition>) => ModelProvider) & {
@@ -229,8 +263,9 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
   };
 
   const factory: ProviderFactory = (definition) => {
-    let choices = definition.providers?.length ? definition.providers : [{ provider: definition.provider, model: definition.model }];
     const picked = accounts.get(definition.id);
+    let choices = providerChoices(definition, options.registry, picked);
+    if (!choices.length) throw new NoProviderError(definition.id);
     // An account picked by hand that the agent file doesn't list goes first, with the agent's model.
     if (picked && !choices.some((c) => c.provider.toLowerCase() === picked.toLowerCase()) && options.registry?.find(picked)) {
       choices = [{ provider: picked, model: choices[0]!.model }, ...choices];
@@ -248,7 +283,8 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
 /** Whether an agent's providers can be built now (for early "not set up" errors). Returns the problems. */
 export function checkProviders(definition: Readonly<AgentDefinition>, registry: ProviderRegistry | undefined, env: NodeJS.ProcessEnv): string[] {
   const problems: string[] = [];
-  const choices = definition.providers?.length ? definition.providers : [{ provider: definition.provider, model: definition.model }];
+  const choices = providerChoices(definition, registry);
+  if (!choices.length) return [new NoProviderError(definition.id).message];
   for (const c of choices) {
     if (registry?.find(c.provider)) continue;
     if (c.provider === 'openrouter') {

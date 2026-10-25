@@ -42,6 +42,10 @@ export type McpTransportKind = 'stdio' | 'http';
 export interface McpConfigFile {
   file: string | undefined;
   servers: Readonly<Record<string, Readonly<McpServerConfig>>>;
+  /** Servers left out because their definition is invalid, and why. */
+  skipped?: readonly { server: string; error: string }[];
+  /** Why the whole file could not be used (bad JSON, not an object); no server is loaded then. */
+  error?: string;
 }
 
 export const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$/;
@@ -95,83 +99,102 @@ export function parseMcpConfig(raw: unknown, file: string): McpConfigFile {
   }
   const baseDir = path.dirname(file);
   const servers: Record<string, McpServerConfig> = {};
+  const skipped: { server: string; error: string }[] = [];
+  // One invalid server is left out; the others still load.
   for (const [name, value] of Object.entries(serversRaw as Record<string, unknown>)) {
-    const f = `mcpServers.${name}`;
-    if (!MCP_SERVER_NAME_PATTERN.test(name) || name.includes('__')) {
-      fail(file, f, 'server names must use letters, digits, "-" or "_", start with a letter or digit, be at most 24 characters and must not contain "__"');
+    try {
+      servers[name] = parseServer(name, value, file, baseDir);
+    } catch (error) {
+      if (!(error instanceof ConfigError)) throw error;
+      skipped.push({ server: name, error: error.message.replace(`${file}: `, '').replace(`${file} `, '') });
     }
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) fail(file, f, 'must be an object');
-    const v = value as Record<string, unknown>;
-    if (v['url'] !== undefined) {
-      fail(file, `${f}.url`, 'legacy SSE servers are not supported; use "httpUrl" for a Streamable HTTP endpoint');
-    }
-    for (const key of Object.keys(v)) {
-      if (!SERVER_KEYS.includes(key)) fail(file, `${f}.${key}`, `unknown field. Allowed fields: ${SERVER_KEYS.join(', ')}`);
-    }
-    const transports = ['command', 'httpUrl'].filter((k) => v[k] !== undefined);
-    if (transports.length !== 1) {
-      fail(file, f, 'must define exactly one of "command" (stdio) or "httpUrl" (Streamable HTTP)');
-    }
-    const cfg: McpServerConfig = {};
-    if (v['command'] !== undefined) {
-      if (typeof v['command'] !== 'string' || !v['command'].trim()) fail(file, `${f}.command`, 'must be a non-empty string');
-      cfg.command = v['command'];
-      cfg.args = stringList(v['args'], file, `${f}.args`);
-      cfg.env = stringRecord(v['env'], file, `${f}.env`);
-      if (v['cwd'] !== undefined) {
-        if (typeof v['cwd'] !== 'string') fail(file, `${f}.cwd`, 'must be a string');
-        cfg.cwd = path.resolve(baseDir, v['cwd']);
-      }
-    } else {
-      for (const k of ['args', 'env', 'cwd']) {
-        if (v[k] !== undefined) fail(file, `${f}.${k}`, 'is only valid for stdio servers ("command")');
-      }
-      const urlValue = v['httpUrl'];
-      if (typeof urlValue !== 'string') fail(file, `${f}.httpUrl`, 'must be a string');
-      // ${VAR} placeholders are resolved at connect time; validate the shape otherwise.
-      if (!urlValue.includes('${')) {
-        try {
-          const u = new URL(urlValue);
-          if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error();
-        } catch {
-          fail(file, `${f}.httpUrl`, 'must be an http(s) URL');
-        }
-      }
-      cfg.httpUrl = urlValue;
-    }
-    cfg.headers = stringRecord(v['headers'], file, `${f}.headers`);
-    if (cfg.headers && cfg.command) fail(file, `${f}.headers`, 'is only valid for HTTP servers');
-    if (v['timeout'] !== undefined) {
-      if (typeof v['timeout'] !== 'number' || !Number.isInteger(v['timeout']) || v['timeout'] < 100 || v['timeout'] > 3_600_000) {
-        fail(file, `${f}.timeout`, 'must be an integer number of milliseconds between 100 and 3600000');
-      }
-      cfg.timeout = v['timeout'];
-    }
-    if (v['trust'] !== undefined) {
-      if (typeof v['trust'] !== 'boolean') fail(file, `${f}.trust`, 'must be true or false');
-      cfg.trust = v['trust'];
-    }
-    if (v['description'] !== undefined) {
-      if (typeof v['description'] !== 'string') fail(file, `${f}.description`, 'must be a string');
-      cfg.description = v['description'];
-    }
-    cfg.includeTools = stringList(v['includeTools'], file, `${f}.includeTools`);
-    cfg.excludeTools = stringList(v['excludeTools'], file, `${f}.excludeTools`);
-    servers[name] = Object.freeze(cfg);
   }
-  return { file, servers: Object.freeze(servers) };
+  return { file, servers: Object.freeze(servers), ...(skipped.length ? { skipped: Object.freeze(skipped) } : {}) };
 }
 
-/** Loads `mcp.json`; a missing file yields an empty server set. */
+function parseServer(name: string, value: unknown, file: string, baseDir: string): Readonly<McpServerConfig> {
+  const f = `mcpServers.${name}`;
+  if (!MCP_SERVER_NAME_PATTERN.test(name) || name.includes('__')) {
+    fail(file, f, 'server names must use letters, digits, "-" or "_", start with a letter or digit, be at most 24 characters and must not contain "__"');
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) fail(file, f, 'must be an object');
+  const v = value as Record<string, unknown>;
+  if (v['url'] !== undefined) {
+    fail(file, `${f}.url`, 'legacy SSE servers are not supported; use "httpUrl" for a Streamable HTTP endpoint');
+  }
+  for (const key of Object.keys(v)) {
+    if (!SERVER_KEYS.includes(key)) fail(file, `${f}.${key}`, `unknown field. Allowed fields: ${SERVER_KEYS.join(', ')}`);
+  }
+  const transports = ['command', 'httpUrl'].filter((k) => v[k] !== undefined);
+  if (transports.length !== 1) {
+    fail(file, f, 'must define exactly one of "command" (stdio) or "httpUrl" (Streamable HTTP)');
+  }
+  const cfg: McpServerConfig = {};
+  if (v['command'] !== undefined) {
+    if (typeof v['command'] !== 'string' || !v['command'].trim()) fail(file, `${f}.command`, 'must be a non-empty string');
+    cfg.command = v['command'];
+    cfg.args = stringList(v['args'], file, `${f}.args`);
+    cfg.env = stringRecord(v['env'], file, `${f}.env`);
+    if (v['cwd'] !== undefined) {
+      if (typeof v['cwd'] !== 'string') fail(file, `${f}.cwd`, 'must be a string');
+      cfg.cwd = path.resolve(baseDir, v['cwd']);
+    }
+  } else {
+    for (const k of ['args', 'env', 'cwd']) {
+      if (v[k] !== undefined) fail(file, `${f}.${k}`, 'is only valid for stdio servers ("command")');
+    }
+    const urlValue = v['httpUrl'];
+    if (typeof urlValue !== 'string') fail(file, `${f}.httpUrl`, 'must be a string');
+    // ${VAR} placeholders are resolved at connect time; validate the shape otherwise.
+    if (!urlValue.includes('${')) {
+      try {
+        const u = new URL(urlValue);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error();
+      } catch {
+        fail(file, `${f}.httpUrl`, 'must be an http(s) URL');
+      }
+    }
+    cfg.httpUrl = urlValue;
+  }
+  cfg.headers = stringRecord(v['headers'], file, `${f}.headers`);
+  if (cfg.headers && cfg.command) fail(file, `${f}.headers`, 'is only valid for HTTP servers');
+  if (v['timeout'] !== undefined) {
+    if (typeof v['timeout'] !== 'number' || !Number.isInteger(v['timeout']) || v['timeout'] < 100 || v['timeout'] > 3_600_000) {
+      fail(file, `${f}.timeout`, 'must be an integer number of milliseconds between 100 and 3600000');
+    }
+    cfg.timeout = v['timeout'];
+  }
+  if (v['trust'] !== undefined) {
+    if (typeof v['trust'] !== 'boolean') fail(file, `${f}.trust`, 'must be true or false');
+    cfg.trust = v['trust'];
+  }
+  if (v['description'] !== undefined) {
+    if (typeof v['description'] !== 'string') fail(file, `${f}.description`, 'must be a string');
+    cfg.description = v['description'];
+  }
+  cfg.includeTools = stringList(v['includeTools'], file, `${f}.includeTools`);
+  cfg.excludeTools = stringList(v['excludeTools'], file, `${f}.excludeTools`);
+  return Object.freeze(cfg);
+}
+
+/**
+ * Loads `mcp.json`; a missing file yields an empty server set. A file that
+ * cannot be used at all yields no servers and says why in `error`, so a
+ * broken mcp.json never stops the agents from loading.
+ */
 export function loadMcpConfig(file: string): McpConfigFile {
   if (!fs.existsSync(file)) return { file: undefined, servers: Object.freeze({}) };
-  let raw: unknown;
   try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    let raw: unknown;
+    try {
+      raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    } catch (error) {
+      throw new ConfigError(file, undefined, `invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return parseMcpConfig(raw, file);
   } catch (error) {
-    throw new ConfigError(file, undefined, `invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    return { file, servers: Object.freeze({}), error: error instanceof Error ? error.message : String(error) };
   }
-  return parseMcpConfig(raw, file);
 }
 
 /**

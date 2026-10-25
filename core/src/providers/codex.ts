@@ -655,7 +655,8 @@ export class CodexProvider implements ModelProvider {
         conn.request(
           'thread/start',
           {
-            model: request.model,
+            // "" leaves the model to Codex (the plan's default).
+            model: request.model || null,
             cwd: this.workDir,
             sandbox: 'read-only',
             approvalPolicy: 'on-request',

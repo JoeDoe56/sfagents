@@ -20,6 +20,10 @@ import {
   codexPlanUsage,
   createDefaultProviderFactory,
   checkProviders,
+  providerChoices,
+  NoProviderError,
+  DEFAULT_MODELS,
+  ensureProject,
   findAuthUrl,
   loadAgentTree,
   parseSetting,
@@ -151,6 +155,22 @@ describe('agent provider lists and failover', () => {
     assert.deepEqual(checkProviders(def, reg, {}), [], 'one usable provider is enough');
     const factory = createDefaultProviderFactory({ registry: reg, env: {} });
     assert.ok(factory(def) instanceof FailoverProvider);
+  });
+
+  test('an agent that names no provider uses the picked or first added one, with its default model', async () => {
+    const reg = new ProviderRegistry({ dir: makeTempDir(), secrets: new MemorySecretStore() });
+    const project = makeTempDir();
+    ensureProject(project);
+    const def = loadAgentTree(project).root.definition;
+    assert.deepEqual(providerChoices(def, reg), []);
+    assert.match(checkProviders(def, reg, {})[0]!, /has no provider yet\. Add one in Settings/);
+    assert.throws(() => createDefaultProviderFactory({ registry: reg, env: {} })(def), NoProviderError);
+    await reg.add({ name: 'Claude', kind: 'anthropic', secret: { token: 't' } });
+    await reg.add({ name: 'Local', kind: 'custom', baseUrl: 'http://127.0.0.1:9/v1', secret: {} });
+    assert.deepEqual(checkProviders(def, reg, {}), []);
+    assert.deepEqual(providerChoices(def, reg), [{ provider: 'Claude', model: DEFAULT_MODELS.anthropic }]);
+    assert.throws(() => providerChoices(def, reg, 'Local'), /has no default model: set "model"/);
+    assert.deepEqual(providerChoices({ ...def, model: 'qwen' }, reg, 'local'), [{ provider: 'Local', model: 'qwen' }]);
   });
 });
 

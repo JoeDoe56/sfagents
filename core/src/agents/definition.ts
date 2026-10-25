@@ -47,12 +47,16 @@ export interface AgentDefinition {
   /** Display name, when it differs from the file name. */
   name?: string;
   description?: string;
-  /** The first provider (the one shown); `providers` has them all, in failover order. */
+  /**
+   * The first provider (the one shown); `providers` has them all, in failover
+   * order. "" when the file names none: the agent then replies with the
+   * provider picked in the web interface, else the first one added in Settings.
+   */
   provider: ProviderName;
   /**
    * Every provider the agent may use, in order. When one reports that its
    * account is out of quota, signed out or rate-limited, the next takes over
-   * (and stays current until it, too, runs out).
+   * (and stays current until it, too, runs out). Empty when the file names none.
    */
   providers: ProviderChoice[];
   /** Only for provider "openai-compatible". */
@@ -260,9 +264,10 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
   if (!AGENT_NAME_PATTERN.test(id)) c.fail('id', 'must not contain path separators or control characters (max 100 characters)');
   const description = c.optionalString(raw['description'], 'description', { maxLength: 2000 });
 
-  const model = c.string(raw['model'], 'model', { nonEmpty: true, maxLength: 200 });
   // "provider": a name, a list of names (failover order), or objects with their own model.
+  // Without one (a new project's default agent), "model" is optional too.
   const rawProvider = raw['provider'];
+  const model = rawProvider === undefined && raw['model'] === undefined ? '' : c.string(raw['model'], 'model', { nonEmpty: true, maxLength: 200 });
   const providers: ProviderChoice[] = [];
   const providerName = (v: unknown, field: string): string => {
     const n = c.string(v, field, { nonEmpty: true, maxLength: 60 });
@@ -286,10 +291,10 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       if (seen.has(k)) c.fail(`provider[${i}]`, 'duplicate entry');
       seen.add(k);
     });
-  } else {
+  } else if (rawProvider !== undefined) {
     providers.push({ provider: providerName(rawProvider, 'provider'), model });
   }
-  const provider = providers[0]!.provider;
+  const provider = providers[0]?.provider ?? '';
   const usesCompatible = providers.some((p) => p.provider === 'openai-compatible');
   let providerOptions: AgentDefinition['providerOptions'];
   if (raw['providerOptions'] !== undefined) {

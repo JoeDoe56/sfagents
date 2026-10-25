@@ -69,6 +69,41 @@ export interface LoadOptions {
   mcpConfigFile?: string;
   /** The agent to start with (a name, or a file in the agents folder). */
   agent?: string;
+  /** When no agent file is usable, use the built-in default agent instead of failing. */
+  fallback?: boolean;
+}
+
+/**
+ * The agent a new project starts with: no provider, so it replies with the
+ * one added in Settings (or picked for it in the web interface).
+ */
+export const DEFAULT_AGENT = Object.freeze({
+  description: 'The default agent, created because the project had none. It replies with the provider added in Settings; name one here with "provider" and "model" to choose.',
+  systemPrompt:
+    'You are the SF Agents main agent. Answer directly when you can, and use the shell to inspect and change files in the workspace (it runs in a sandbox limited to the workspace). Keep answers concise.',
+  workspace: Object.freeze({ roots: Object.freeze(['.']) }),
+  tools: Object.freeze({ allow: Object.freeze(['shell']) }),
+});
+
+/**
+ * Creates what a project needs to start: the agents folder, and in it the
+ * default agent when the folder has no agent files. Returns the paths it created.
+ */
+export function ensureProject(projectDir: string): string[] {
+  const created: string[] = [];
+  const agentsDir = path.join(projectDir, AGENTS_DIR_NAME);
+  if (!fs.existsSync(agentsDir)) {
+    // An old single-file project is moved by hand (loadAgentTree says how).
+    if (fs.existsSync(path.join(projectDir, 'agent.json'))) return created;
+    fs.mkdirSync(agentsDir, { recursive: true });
+    created.push(agentsDir);
+  }
+  if (!fs.statSync(agentsDir).isDirectory()) return created;
+  if (fs.readdirSync(agentsDir).some((n) => n.toLowerCase().endsWith('.json'))) return created;
+  const file = path.join(agentsDir, `${DEFAULT_AGENT_NAME}.json`);
+  fs.writeFileSync(file, `${JSON.stringify(DEFAULT_AGENT, null, 2)}\n`, { flag: 'wx' });
+  created.push(file);
+  return created;
 }
 
 function readJson(file: string): unknown {
@@ -136,9 +171,12 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
   }
   const mcpFile = path.resolve(options.mcpConfigFile ?? path.join(configDir, 'mcp.json'));
   const mcp = loadMcpConfig(mcpFile);
+  const mcpShown = rel(configDir, mcpFile);
 
   const skipped: SkippedAgentFile[] = [];
   const warnings: string[] = [];
+  if (mcp.error) warnings.push(`${mcpShown} could not be used, so no MCP server is available: ${mcp.error.replace(`${mcpFile}: `, '')}`);
+  for (const s of mcp.skipped ?? []) warnings.push(`${mcpShown}: MCP server "${s.server}" was left out: ${s.error}`);
   const protectedFiles = new Set<string>([mcpFile]);
   const loaded = new Map<string, { file: string; definition: AgentDefinition; roots: string[]; access: SandboxRule[] }>();
 
@@ -154,9 +192,14 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
     const shown = rel(configDir, file);
     const agentName = name.replace(/\.json$/i, '');
     try {
-      const def = parseAgentDefinition(readJson(file), shown, agentName);
+      let def = parseAgentDefinition(readJson(file), shown, agentName);
       for (const [server] of mcpGrants(def)) {
-        if (!mcp.servers[server]) {
+        if (!mcp.servers[server] && (mcp.error || mcp.skipped?.some((s) => s.server === server))) {
+          // The server is in a broken mcp.json: the agent loads without it.
+          warnings.push(`${shown}: MCP server "${server}" is not available until ${rel(configDir, mcpFile)} is fixed`);
+          const tools = def.tools!;
+          def = { ...def, tools: { ...tools, mcpServers: tools.mcpServers!.filter((g) => (typeof g === 'string' ? g : g.server) !== server) } };
+        } else if (!mcp.servers[server]) {
           throw new ConfigError(
             shown,
             'tools.mcpServers',
@@ -194,13 +237,18 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
       if (loaded.has(agentName)) throw new ConfigError(shown, undefined, `another file is already named "${agentName}"`);
       loaded.set(agentName, { file, definition: def, roots: [...new Set(roots)], access: [...legacyAccess, ...access] });
     } catch (error) {
-      skipped.push({ file: shown, error: error instanceof ConfigError ? error.message.replace(`${shown}: `, '').replace(`${shown} `, '') : String(error) });
+      skipped.push({ file: shown, error: error instanceof ConfigError ? error.message.replace(`${error.file}: `, '').replace(`${error.file} `, '') : String(error) });
     }
   }
 
   if (loaded.size === 0) {
     const why = skipped.length ? ` Skipped: ${skipped.map((s) => `${s.file}: ${s.error}`).join('; ')}` : '';
-    throw new ConfigError(agentsDir, undefined, `no valid agent definitions.${why}`);
+    if (!options.fallback) throw new ConfigError(agentsDir, undefined, `no valid agent definitions.${why}`);
+    // Nothing loaded: the built-in default agent replies until a file is fixed.
+    const file = path.join(agentsDir, `${DEFAULT_AGENT_NAME}.json`);
+    const definition = parseAgentDefinition(structuredClone(DEFAULT_AGENT), rel(configDir, file), DEFAULT_AGENT_NAME);
+    loaded.set(DEFAULT_AGENT_NAME, { file, definition, roots: [configDir], access: [] });
+    warnings.push(`No agent file could be loaded, so the built-in default agent replies until one is fixed.${why}`);
   }
 
   const byId = new Map<string, AgentNode>();
@@ -260,7 +308,7 @@ export function describeTree(tree: AgentTree): string {
     if (access !== 'none') tools.push(`conversation:${access}`);
     const artifacts = artifactAccess(d, 0);
     if (artifacts !== 'none') tools.push(`artifacts:${artifacts}`);
-    lines.push(`${node === tree.root ? '* ' : '  '}${node.id}${d.name ? ` "${d.name}"` : ''}  (${d.provider}:${d.model}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
+    lines.push(`${node === tree.root ? '* ' : '  '}${node.id}${d.name ? ` "${d.name}"` : ''}  (${d.provider ? `${d.provider}:${d.model}` : `no provider${d.model ? `, ${d.model}` : ''}`}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
     lines.push(`      tools: ${tools.length ? tools.join(', ') : '(none)'}`);
     if (d.tools?.autoApprove?.length) lines.push(`      auto-approve: ${d.tools.autoApprove.join(', ')}`);
     lines.push(`      roots: ${node.roots.length ? node.roots.join(', ') : '(no filesystem access)'}`);
