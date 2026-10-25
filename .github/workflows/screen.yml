@@ -1,0 +1,188 @@
+# Builds sfagents-screen, SF Agents' screen mirroring helper (web/native/screen),
+# for Windows and Linux. A tag screen-v<version> publishes the archives as a
+# release; SF Agents downloads them by that version and checks them against
+# the SHA-256 pinned in web/src/screen.ts.
+name: Screen helper
+
+on:
+  push:
+    branches: [main, moonlightweb]
+    tags: ['screen-v*']
+    paths:
+      - web/native/screen/**
+      - scripts/build-screen.mjs
+      - .github/workflows/screen.yml
+      - .github/actions/msvc-env/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: 6.11.2
+  # MoonlightWeb's commit (web/native/screen/UPSTREAM.json), for its prebuilt
+  # Windows OpenSSL.
+  MW_COMMIT: ac6d705bd2a298e8517cf64cb31e7174cf85b8c1
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: MoonlightWeb's prebuilt OpenSSL
+        shell: pwsh
+        run: |
+          git init -q mw-openssl
+          git -C mw-openssl remote add origin https://github.com/linckosz/moonlight-web.git
+          git -C mw-openssl sparse-checkout set backend/libs/windows/include/x64 backend/libs/windows/lib/x64
+          git -C mw-openssl fetch -q --depth 1 --filter=blob:none origin $env:MW_COMMIT
+          git -C mw-openssl checkout -q FETCH_HEAD
+          if (-not (Test-Path mw-openssl/backend/libs/windows/lib/x64/libssl.lib)) { throw 'OpenSSL is not where MoonlightWeb keeps it' }
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          modules: qtwebsockets
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b
+          py7zrversion: ==1.1.0
+          extra: --base https://download.qt.io
+
+      - name: Set up MSVC environment
+        uses: ./.github/actions/msvc-env
+        with:
+          arch: x64
+
+      - name: Build
+        shell: pwsh
+        run: |
+          node -e "import('./scripts/build-screen.mjs').then((m) => m.fetchDependencies())"
+          cmake -S web/native/screen -B web/native/screen/build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            "-DMW_OPENSSL_WINDOWS=$PWD/mw-openssl/backend/libs/windows"
+          cmake --build web/native/screen/build --target sfagents-screen -j
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          $dist = 'dist/sfagents-screen'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item web/native/screen/build/sfagents-screen.exe $dist
+          Copy-Item web/native/screen/build/*-3-x64.dll $dist
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime $dist/sfagents-screen.exe
+          # The C++ runtime, app-local, so a fresh Windows needs no installer.
+          $crt = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory -Filter 'Microsoft.VC*.CRT' | Select-Object -First 1
+          Copy-Item "$($crt.FullName)\msvcp140*.dll", "$($crt.FullName)\vcruntime140*.dll" $dist
+          # The virtual display's driver (MIT, signed), installed at SF Agents'
+          # startup approval with sfagents-screen --vdisplay-apply.
+          New-Item -ItemType Directory -Force -Path $dist/drivers/vdd | Out-Null
+          Copy-Item web/native/screen/moonlight-web/backend/installer/drivers/vdd/* $dist/drivers/vdd
+          Copy-Item web/native/screen/README.md, web/native/screen/UPSTREAM.json, web/native/screen/moonlight-web/LICENSE, web/native/screen/moonlight-web/COPYRIGHT $dist
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $out = & dist/sfagents-screen/sfagents-screen.exe --probe 2>$null
+          Write-Host $out
+          $probe = $out | ConvertFrom-Json
+          if ($null -eq $probe.schema) { throw 'the probe did not answer' }
+
+      - name: Archive
+        shell: pwsh
+        run: |
+          $name = 'sfagents-screen-win-x64.zip'
+          Compress-Archive -Path dist/sfagents-screen -DestinationPath $name
+          (Get-FileHash $name -Algorithm SHA256).Hash.ToLower() + "  $name" | Out-File -Encoding ascii "$name.sha256"
+          Get-Content "$name.sha256"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sfagents-screen-win-x64
+          path: sfagents-screen-win-x64.zip*
+
+  linux:
+    name: Linux x64
+    # The oldest image GitHub hosts: the glibc this builds against is the floor.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config nasm libssl-dev libfuse2 wget \
+            libdrm-dev libva-dev libegl1-mesa-dev libgles2-mesa-dev libgbm-dev libpipewire-0.3-dev \
+            libsystemd-dev glslang-tools libdav1d-dev libx11-dev libxrandr-dev libxext-dev libxfixes-dev libxtst-dev \
+            libxkbcommon-dev libxcb-cursor0
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: qtwebsockets
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b
+          py7zrversion: ==1.1.0
+          extra: --base https://download.qt.io
+
+      - name: Build
+        run: |
+          set -o pipefail
+          node -e "import('./scripts/build-screen.mjs').then((m) => m.fetchDependencies())"
+          cmake -S web/native/screen -B web/native/screen/build -G Ninja -DCMAKE_BUILD_TYPE=Release | tee configure.log
+          grep -q 'Linux graphics backend ON' configure.log || { echo "::error::the Linux capture backend is off"; exit 1; }
+          cmake --build web/native/screen/build --target sfagents-screen -j
+
+      - name: Stage
+        env:
+          EXTRA_PLATFORM_PLUGINS: libqoffscreen.so;libqwayland-generic.so
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+          # The graphics and audio stack stays the system's (driver-coupled).
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir -e web/native/screen/build/sfagents-screen \
+            --exclude-library 'libva.so.*' --exclude-library 'libva-drm.so.*' --exclude-library 'libGLESv2.so.*' \
+            --plugin qt
+          test -f AppDir/usr/plugins/platforms/libqoffscreen.so
+          mkdir -p dist
+          mv AppDir/usr dist/sfagents-screen
+          cp web/native/screen/README.md web/native/screen/UPSTREAM.json web/native/screen/moonlight-web/LICENSE web/native/screen/moonlight-web/COPYRIGHT dist/sfagents-screen/
+
+      - name: Smoke test
+        run: |
+          dist/sfagents-screen/bin/sfagents-screen --probe 2>/dev/null | tee probe.json
+          grep -q '"schema"' probe.json
+
+      - name: Archive
+        run: |
+          name=sfagents-screen-linux-x64.tar.gz
+          tar -C dist -czf "$name" sfagents-screen
+          sha256sum "$name" | tee "$name.sha256"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sfagents-screen-linux-x64
+          path: sfagents-screen-linux-x64.tar.gz*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/screen-v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Screen helper ${GITHUB_REF_NAME#screen-v}" \
+            --notes "sfagents-screen, SF Agents' screen mirroring helper, built from web/native/screen at $GITHUB_SHA." \
+            sfagents-screen-*
