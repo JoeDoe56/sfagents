@@ -155,7 +155,7 @@ describe('Windows sandbox native isolation', { skip: !enabled && 'requires appro
       assert.match(offline.stderr, /EACCES|EPERM|timed out/);
       assert.match(success(await js(script, { ...policy, network: true })), /connected/);
       assert.notEqual((await command('curl.exe --max-time 5 -I https://example.com')).exitCode, 0);
-      assert.match(success(await js(`const request=require('node:https').get('https://example.com',r=>{console.log('https '+r.statusCode);r.resume()});request.setTimeout(8000,()=>{request.destroy(new Error('HTTPS timed out'))});request.on('error',e=>{console.error(e);process.exit(1)});`, { ...policy, network: true })), /https 200/);
+      assert.match(success(await js(`const request=require('node:https').get('https://example.com',r=>{console.log('https '+r.statusCode);r.resume()});request.setTimeout(15000,()=>{request.destroy(new Error('HTTPS timed out'))});request.on('error',e=>{console.error(e);process.exit(1)});`, { ...policy, network: true })), /https 200/);
     } finally { for (const s of sockets) s.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
   });
 

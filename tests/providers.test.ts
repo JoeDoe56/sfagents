@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import { spawnSync } from 'node:child_process';
 import {
   AccountState,
   AppSettings,
@@ -29,7 +30,7 @@ import {
   type ModelRequest,
   type ModelStreamEvent,
 } from '@sfagents/core';
-import { baseAgent, makeTempDir, writeAgent } from './helpers.js';
+import { baseAgent, makeTempDir, writeAgent, REPO_ROOT } from './helpers.js';
 
 const request = (over: Partial<ModelRequest> = {}): ModelRequest => ({ model: 'm', messages: [{ role: 'user', content: 'hi' }], signal: new AbortController().signal, ...over });
 
@@ -89,9 +90,14 @@ describe('provider registry and keyring', () => {
     fs.utimesSync(reg.file, timestamp, timestamp);
     assert.equal(reg.find('Local llama')?.id, entry.id);
     const before = fs.statSync(reg.file);
-    const other = new ProviderRegistry({ dir, secrets });
-    other.update(entry.id, { name: 'Other llama' });
-    fs.utimesSync(reg.file, timestamp, timestamp);
+    const editor = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import fs from 'node:fs';
+      import { ProviderRegistry, MemorySecretStore } from '@sfagents/core';
+      const other = new ProviderRegistry({ dir: ${JSON.stringify(dir)}, secrets: new MemorySecretStore() });
+      other.update(${JSON.stringify(entry.id)}, { name: 'Other llama' });
+      fs.utimesSync(other.file, new Date(${timestamp.getTime()}), new Date(${timestamp.getTime()}));
+    `], { cwd: REPO_ROOT, encoding: 'utf8', windowsHide: true });
+    assert.equal(editor.status, 0, editor.stderr);
     assert.equal(fs.statSync(reg.file).size, before.size);
     assert.equal(fs.statSync(reg.file).mtimeMs, before.mtimeMs);
     assert.equal(reg.find('Other llama')?.id, entry.id);
@@ -318,7 +324,12 @@ describe('ChatGPT and Claude adapters', () => {
       assert.equal((events2.at(-1) as Extract<ModelStreamEvent, { type: 'done' }>).message.content, 'done');
     } finally {
       provider.close();
-      server.close();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        // The mock SSE client may retain a pooled connection after a completed
+        // turn. Its sockets must not keep the test worker alive on Windows.
+        server.closeAllConnections();
+      });
       for (const [k, v] of [['SFAGENTS_TEST_MOCK_KEY', saved.key], ['NO_PROXY', saved.np], ['no_proxy', saved.np2]] as const) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;

@@ -74,6 +74,14 @@ recreate those objects after reboot, requiring an explicit setup refresh.
   0 failures. Windows portability fixes cover configuration paths, file-service
   fixtures, shell commands and line endings. A provider-cache regression now
   checks atomic file replacement with the same timestamp and size.
+- After merging `usage-bar`, the full suite with native isolation enabled:
+  233 passed, 3 skipped, 0 failures. The provider-cache regression uses a second
+  process; the Codex mock closes pooled HTTP sockets so its worker exits. The
+  online sandbox HTTPS check allows 15 seconds for the external endpoint.
+- Browser verification with an isolated mock provider confirmed the five-hour
+  and weekly usage bars, reset captions, and live usage refresh without console
+  errors. The optional Windows Codex binary is installed. Package installation,
+  build and typechecking completed successfully after the merge.
 
 Run the repeatable native suite only after approving and installing setup:
 
