@@ -44,8 +44,10 @@ import {
   watchProject,
   type ProjectWatcher,
   ProviderRegistry,
+  PlanUsageStore,
   createDefaultProviderFactory,
   BrightDataWeb,
+  type PlanUsage,
 } from '@sfagents/core';
 import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
@@ -282,6 +284,10 @@ export class WebServer {
   private readonly mcpFile: string;
   readonly accounts: AccountState;
   private readonly providersApi: ProvidersApi;
+  /** The plans' 5-hour and weekly usage, as ChatGPT and Claude report it. */
+  readonly usage = new PlanUsageStore();
+  private readonly providerFactory: ProviderFactory;
+  private usageRead = new Map<string, { at: number; pending?: Promise<unknown> }>();
 
   constructor(private readonly options: WebServerOptions) {
     if (!options.conversation.dir || !options.conversation.file) throw new Error('The web interface needs a persistent conversation.');
@@ -352,11 +358,15 @@ export class WebServer {
       log: (line) => this.log(line),
     });
     this.accounts = options.accounts ?? new AccountState();
+    this.providerFactory = options.providerFactory ?? createDefaultProviderFactory({ registry: this.registry, accounts: this.accounts, usage: this.usage });
+    this.usage.onChange((id) => {
+      if (this.registry.find(this.agentInfo().account)?.id === id) void this.usageInfo(false).then((u) => this.broadcast('usage', u));
+    });
     this.runtime = new AgentRuntime({
       tree: options.tree,
       conversation: options.conversation,
       approveAll: options.approveAll,
-      providerFactory: options.providerFactory ?? createDefaultProviderFactory({ registry: this.registry, accounts: this.accounts }),
+      providerFactory: this.providerFactory,
       confirm: (request, signal) => this.confirm(request, signal),
       web: new BrightDataWeb(() => this.registry.webKey()),
     });
@@ -759,6 +769,7 @@ export class WebServer {
         case 'GET agent':
           this.checkFetchSite(req);
           if (parts[1] === 'context') return sendJson(res, 200, await this.contextInfo());
+          if (parts[1] === 'usage') return sendJson(res, 200, await this.usageInfo(url.searchParams.get('refresh') === '1'));
           if (parts[1]) throw new HttpError(404, 'Not found.');
           return sendJson(res, 200, this.agentInfo());
         case 'POST agent': {
@@ -1264,6 +1275,33 @@ export class WebServer {
       skipped: this.runtime.tree.skipped,
       warnings: this.runtime.tree.warnings,
     };
+  }
+
+  /**
+   * The plan usage of the account the agent replies with (the usage bar):
+   * ChatGPT's is read from Codex when it is older than a minute; Claude's is
+   * what the last request reported.
+   */
+  private async usageInfo(refresh: boolean): Promise<{ account: string; kind: string | null; supported: boolean; usage: PlanUsage | null; error?: string }> {
+    const account = this.agentInfo().account;
+    const record = this.registry.find(account);
+    const supported = record?.kind === 'openai' || record?.kind === 'anthropic';
+    if (!record || !supported) return { account, kind: record?.kind ?? null, supported: false, usage: null };
+    let error: string | undefined;
+    const known = this.usage.get(record.id);
+    const last = this.usageRead.get(record.id);
+    if (record.kind === 'openai' && this.providerFactory.readPlanUsage && (refresh || !known || Date.now() - known.updated > 60_000) && !(last && Date.now() - last.at < 15_000 && !refresh)) {
+      const pending = last?.pending ?? this.providerFactory.readPlanUsage(record);
+      this.usageRead.set(record.id, { at: Date.now(), pending });
+      try {
+        await pending;
+      } catch (e) {
+        error = getErrorMessage(e);
+      } finally {
+        this.usageRead.set(record.id, { at: Date.now() });
+      }
+    }
+    return { account, kind: record.kind, supported, usage: this.usage.get(record.id) ?? null, ...(error ? { error } : {}) };
   }
 
   /** What the next request would carry, part by part, with the model's own window when the provider lists it. */

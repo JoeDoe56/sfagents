@@ -7,25 +7,30 @@
  *   POST /api/settings {values}           saves (validated); null resets one
  *   GET  /api/providers                   the providers and whether a keyring is available
  *   POST /api/providers {kind, name, apiKey?, baseUrl?}       OpenRouter or a custom endpoint
- *   POST /api/providers/signin {kind, name}                   starts ChatGPT or Claude sign-in → {id, url}
- *   POST /api/providers/signin/<id> {callbackUrl | code}      finishes it (pasted address or code)
+ *   POST /api/providers/signin {kind, name}                   starts ChatGPT or Claude sign-in in this computer's browser → {id, opened}
+ *   POST /api/providers/signin/<id> {action: "reopen"}        opens the ChatGPT sign-in page again
  *   POST /api/providers/signin/<id> {action: "cancel"}
+ *
+ * Both sign-ins finish on the computer SF Agents runs on: the page returns to
+ * a listener here (Codex's or Claude's), and a "signin" event says when the
+ * provider was added.
  *   POST /api/providers/<id> {action: "rename", name} | {action: "remove"}
  *   POST /api/providers/web {apiKey} | {action: "remove"}     the Bright Data key for agents' web access
  */
 
+import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
   AppSettings,
   ClaudeSignIn,
+  CodexSignIn,
   KeyringUnavailableError,
-  OpenAISignIn,
   PROVIDER_KIND_LABELS,
   ProviderRegistry,
   ProviderRegistryError,
   SettingsError,
-  chatGPTHostId,
   getErrorMessage,
+  openInBrowser,
   validateProviderName,
   type ProviderKind,
   type ProviderRecord,
@@ -45,9 +50,18 @@ interface SignInSession {
   state: 'waiting' | 'done' | 'failed';
   error?: string;
   provider?: ProviderRecord;
-  openai?: OpenAISignIn;
+  codex?: CodexSignIn;
+  /** The Codex home made for the new provider (deleted when the sign-in fails). */
+  home?: string;
   claude?: ClaudeSignIn;
   timer: NodeJS.Timeout;
+}
+
+/** How sign-ins start (tests replace them). */
+export interface SignInStarters {
+  codex(home: string): Promise<CodexSignIn>;
+  claude(): Promise<ClaudeSignIn>;
+  open(url: string): Promise<boolean>;
 }
 
 export interface ProvidersApiOptions {
@@ -57,6 +71,7 @@ export interface ProvidersApiOptions {
   running: Record<string, unknown>;
   broadcast: (event: string, data: unknown) => void;
   log: (line: string) => void;
+  signIn?: Partial<SignInStarters>;
 }
 
 export function describeProvider(p: ProviderRecord) {
@@ -66,8 +81,15 @@ export function describeProvider(p: ProviderRecord) {
 export class ProvidersApi {
   private readonly signIns = new Map<string, SignInSession>();
   private keyring: { available: boolean; label: string; reason?: string; checked: number } | null = null;
+  private readonly starters: SignInStarters;
 
   constructor(private readonly options: ProvidersApiOptions) {
+    this.starters = {
+      codex: (home) => CodexSignIn.start({ home }),
+      claude: () => ClaudeSignIn.start(),
+      open: openInBrowser,
+      ...options.signIn,
+    };
     options.registry.onChange(() => options.broadcast('providers', { providers: this.list() }));
   }
 
@@ -197,30 +219,52 @@ export class ProvidersApi {
     const name = this.checkName(body['name']);
     const keyring = await this.keyringStatus(true);
     if (!keyring.available) throw new ApiError(503, keyring.reason ?? 'No keyring.');
+    for (const s of this.signIns.values()) if (s.state === 'waiting' && s.kind === kind) this.endSignIn(s.id, 'Another sign-in started.');
     const id = randomUUID();
     let session: SignInSession;
     const timer = setTimeout(() => this.endSignIn(id, 'Sign-in timed out.'), 15 * 60_000);
     timer.unref();
-    if (kind === 'openai') {
-      const openai = await OpenAISignIn.start({ hostId: chatGPTHostId(this.options.registry) });
-      session = { id, kind, name, url: openai.url, state: 'waiting', openai, timer };
-      // On this computer the browser comes back to the listener by itself.
-      openai.done.then(
-        (result) => this.finishOpenAI(session, result),
-        (error) => this.endSignIn(id, getErrorMessage(error)),
-      );
-    } else {
-      const claude = await ClaudeSignIn.start();
-      session = { id, kind, name, url: claude.url, state: 'waiting', claude, timer };
+    let opened: boolean;
+    try {
+      if (kind === 'openai') {
+        // The provider's id is chosen now: Codex keeps the sign-in under that provider's own folder.
+        const recordId = randomUUID();
+        const home = this.options.registry.stateDir({ id: recordId, kind });
+        const codex = await this.starters.codex(home).catch((error) => {
+          fs.rmSync(home, { recursive: true, force: true });
+          throw error;
+        });
+        session = { id, kind, name, url: codex.url, state: 'waiting', codex, home, timer };
+        this.signIns.set(id, session);
+        codex.done.then(
+          (result) => this.finish(session, { id: recordId, account: result.email, secret: { codex: true } }),
+          (error) => this.endSignIn(id, getErrorMessage(error)),
+        );
+        opened = await this.starters.open(codex.url);
+      } else {
+        // Claude opens its page in this computer's browser by itself.
+        const claude = await this.starters.claude();
+        session = { id, kind, name, url: claude.url, state: 'waiting', claude, timer };
+        this.signIns.set(id, session);
+        claude.done.then(
+          (token) => this.finish(session, { account: 'Claude plan', secret: { token } }),
+          (error) => this.endSignIn(id, getErrorMessage(error)),
+        );
+        opened = true;
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      throw error;
     }
-    this.signIns.set(id, session);
-    return { id, kind, name, url: session.url };
+    this.options.log(`web: started the ${kind === 'openai' ? 'ChatGPT' : 'Claude'} sign-in for "${name}"`);
+    return { id, kind, name, opened };
   }
 
-  private async finishOpenAI(session: SignInSession, result: Awaited<OpenAISignIn['done']>): Promise<void> {
+  private async finish(session: SignInSession, add: { id?: string; account?: string; secret: { codex: true } | { token: string } }): Promise<void> {
     if (session.state !== 'waiting') return;
     try {
-      const provider = await this.options.registry.add({ name: session.name, kind: 'openai', account: result.email, secret: result.secret });
+      const provider = await this.options.registry.add({ name: session.name, kind: session.kind, id: add.id, account: add.account, secret: add.secret });
+      this.options.log(`web: added provider "${provider.name}" (${provider.kind})`);
       this.endSignIn(session.id, undefined, provider);
     } catch (error) {
       this.endSignIn(session.id, getErrorMessage(error));
@@ -235,8 +279,10 @@ export class ProvidersApi {
     s.error = error;
     s.provider = provider;
     if (error) {
-      s.openai?.cancel();
+      s.codex?.cancel();
       s.claude?.cancel();
+      // A failed ChatGPT sign-in leaves nothing behind (Codex wrote no keyring entry, or it is unused).
+      if (s.home) setTimeout(() => fs.rmSync(s.home!, { recursive: true, force: true }), 1000).unref();
     }
     this.options.broadcast('signin', { id, state: s.state, error: error ?? null, provider: provider ? describeProvider(provider) : null });
     setTimeout(() => this.signIns.delete(id), 60_000).unref();
@@ -249,28 +295,13 @@ export class ProvidersApi {
       this.endSignIn(id, 'Cancelled.');
       return { id, state: s.state };
     }
-    if (s.state !== 'waiting') return { id, state: s.state, error: s.error ?? null, provider: s.provider ? describeProvider(s.provider) : null };
-    if (s.kind === 'openai') {
-      const callbackUrl = body['callbackUrl'];
-      if (typeof callbackUrl !== 'string') throw new ApiError(400, 'Paste the address of the page the sign-in ended on.');
-      // complete() rejects a wrong address without ending the attempt; a valid one finishes it (finishOpenAI adds the provider).
-      await s.openai!.complete(callbackUrl);
-      await new Promise((r) => setTimeout(r, 50));
-    } else {
-      const code = body['code'];
-      if (typeof code !== 'string') throw new ApiError(400, 'Paste the code Claude showed.');
-      let token: string;
-      try {
-        token = await s.claude!.complete(code);
-      } catch (error) {
-        this.endSignIn(id, getErrorMessage(error));
-        throw error;
-      }
-      const provider = await this.options.registry.add({ name: s.name, kind: 'anthropic', account: 'Claude plan', secret: { token } });
-      this.endSignIn(id, undefined, provider);
+    if (body['action'] === 'reopen') {
+      if (s.state !== 'waiting') throw new ApiError(409, 'That sign-in has ended. Start again.');
+      if (!s.codex) throw new ApiError(400, 'Claude opens its sign-in page once. Start again to open it again.');
+      return { id, state: s.state, opened: await this.starters.open(s.url) };
     }
-    const done = this.signIns.get(id)!;
-    return { id, state: done.state, error: done.error ?? null, provider: done.provider ? describeProvider(done.provider) : null };
+    if (s.state !== 'waiting') return { id, state: s.state, error: s.error ?? null, provider: s.provider ? describeProvider(s.provider) : null };
+    throw new ApiError(400, '"action" must be "reopen" or "cancel". The sign-in finishes in the browser on this computer.');
   }
 
   close(): void {

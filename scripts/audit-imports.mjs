@@ -7,7 +7,8 @@
  *  3. The CLI and the web server reach Core only through "@sfagents/core";
  *     Core never imports the CLI, the web server or terminal modules
  *     (node:readline), and the web server never imports the CLI.
- *  4. Every declared dependency is imported somewhere in that package, and
+ *  4. Every declared dependency is imported (or located with require.resolve,
+ *     for packages that ship only a binary) somewhere in that package, and
  *     every bare import is declared (or is a Node builtin / the sibling package).
  * Exits non-zero and prints each violation.
  */
@@ -20,7 +21,7 @@ const root = process.argv[2] ? path.resolve(process.argv[2]) : path.resolve(path
 const problems = [];
 const builtins = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`)]);
 
-const IMPORT_RE = /(?:^|[\s;])(?:import|export)\s(?:[^'"]*?\sfrom\s)?['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/gm;
+const IMPORT_RE = /(?:^|[\s;])(?:import|export)\s(?:[^'"]*?\sfrom\s)?['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)|require\.resolve\(\s*['"]([^'"]+)['"]\s*\)/gm;
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -56,7 +57,7 @@ for (const pkg of ['core', 'web', 'cli']) {
     const src = stripComments(fs.readFileSync(file, 'utf8'));
     const rel = path.relative(root, file);
     for (const m of src.matchAll(IMPORT_RE)) {
-      const spec = m[1] ?? m[2];
+      const spec = m[1] ?? m[2] ?? m[3];
       if (FORBIDDEN.test(spec)) problems.push(`${rel}: forbidden import "${spec}"`);
       if (spec.startsWith('.')) {
         const target = path.resolve(path.dirname(file), spec);

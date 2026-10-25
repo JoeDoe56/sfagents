@@ -25,6 +25,11 @@ export const PROVIDER_KIND_LABELS: Record<ProviderKind, string> = {
   custom: 'Custom endpoint',
 };
 
+/** The folder a signed-in provider keeps its state in (Codex's home, the Claude SDK's settings). */
+export function providerStateDir(dir: string, record: Pick<ProviderRecord, 'id' | 'kind'>): string {
+  return path.join(dir, record.kind === 'openai' ? 'codex' : 'claude', record.id);
+}
+
 /** Names an agent file may use without adding a provider (the environment-variable providers). */
 export const LEGACY_PROVIDER_NAMES = ['openrouter', 'openai-compatible'] as const;
 
@@ -45,10 +50,13 @@ export interface OpenRouterSecret {
 export interface CustomSecret {
   apiKey?: string;
 }
+/**
+ * A ChatGPT sign-in: Codex keeps the tokens itself, in the OS keyring under
+ * the provider's Codex home, so this only marks the provider as signed in.
+ * (Providers added before Codex have `refreshToken` here and must sign in again.)
+ */
 export interface OpenAISecret {
-  clientId: string;
-  refreshToken: string;
-  subject?: string;
+  codex: true;
 }
 export interface AnthropicSecret {
   token: string;
@@ -59,6 +67,13 @@ export class ProviderRegistryError extends Error {
   constructor(message: string, readonly status = 400) {
     super(message);
   }
+}
+
+/** Removes a ChatGPT sign-in from the keyring (Codex keeps it; only Codex can find its entry). */
+async function signOutCodex(record: ProviderRecord, stateDir: string): Promise<void> {
+  if (record.kind !== 'openai' || !fs.existsSync(stateDir)) return;
+  const { codexSignOut } = await import('./codex.js');
+  await codexSignOut(stateDir);
 }
 
 /** Keyring entry of the Bright Data key (web access is not a model provider, so it has no record). */
@@ -92,6 +107,8 @@ export interface ProviderRegistryOptions {
   /** Folder for providers.json (default: the per-user folder). */
   dir?: string;
   secrets?: SecretStore;
+  /** Called when a provider is removed, before its record goes (signs Codex out, deletes its state). */
+  cleanup?: (record: ProviderRecord, stateDir: string) => Promise<void>;
 }
 
 export class ProviderRegistry {
@@ -101,11 +118,18 @@ export class ProviderRegistry {
   private cache: { mtime: number; records: ProviderRecord[] } | null = null;
   private readonly listeners = new Set<() => void>();
   private watcher: fs.StatWatcher | null = null;
+  private readonly cleanup?: (record: ProviderRecord, stateDir: string) => Promise<void>;
 
   constructor(options: ProviderRegistryOptions = {}) {
     this.dir = options.dir ?? sfagentsHome();
     this.file = path.join(this.dir, 'providers.json');
     this.secrets = options.secrets ?? new KeyringSecretStore();
+    this.cleanup = options.cleanup ?? signOutCodex;
+  }
+
+  /** Where a signed-in provider keeps its state. */
+  stateDir(record: Pick<ProviderRecord, 'id' | 'kind'>): string {
+    return providerStateDir(this.dir, record);
   }
 
   /** Every provider, re-read when another process (the CLI, another window) changed the file. */
@@ -170,12 +194,13 @@ export class ProviderRegistry {
   }
 
   /** Stores the secret in the keyring first; the provider is listed only once that worked. */
-  async add(input: { name: string; kind: ProviderKind; baseUrl?: string; account?: string; secret: ProviderSecret }): Promise<ProviderRecord> {
+  async add(input: { name: string; kind: ProviderKind; baseUrl?: string; account?: string; secret: ProviderSecret; id?: string }): Promise<ProviderRecord> {
     const name = validateProviderName(input.name);
     if (!(PROVIDER_KINDS as readonly string[]).includes(input.kind)) throw new ProviderRegistryError(`Unknown provider kind "${input.kind}".`);
     if (this.find(name)) throw new ProviderRegistryError(`A provider named "${name}" already exists.`, 409);
+    if (input.id !== undefined && (!/^[\w-]{8,64}$/.test(input.id) || this.list().some((r) => r.id === input.id))) throw new ProviderRegistryError('Invalid provider id.');
     const record: ProviderRecord = {
-      id: randomUUID(),
+      id: input.id ?? randomUUID(),
       name,
       kind: input.kind,
       ...(input.kind === 'custom' ? { baseUrl: validateBaseUrl(input.baseUrl) } : {}),
@@ -212,7 +237,17 @@ export class ProviderRegistry {
 
   async remove(id: string): Promise<void> {
     const records = this.list();
-    if (!records.some((r) => r.id === id)) throw new ProviderRegistryError('No such provider.', 404);
+    const record = records.find((r) => r.id === id);
+    if (!record) throw new ProviderRegistryError('No such provider.', 404);
+    if (record.kind === 'openai' || record.kind === 'anthropic') {
+      const dir = this.stateDir(record);
+      try {
+        await this.cleanup?.(record, dir);
+      } catch {
+        // signing out is best effort; the listing goes either way
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
     try {
       await this.secrets.delete(this.secretKey(id));
     } catch {

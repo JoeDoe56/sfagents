@@ -28,13 +28,28 @@ function sym(name, size = 17) {
   return i;
 }
 
-const KIND_SYMBOL = { openrouter: 'antenna.radiowaves.left.and.right', openai: 'sparkles', anthropic: 'asterisk.circle', custom: 'desktopcomputer' };
+const KIND_SYMBOL = { anthropic: 'asterisk.circle', openai: 'sparkles', openrouter: 'antenna.radiowaves.left.and.right', custom: 'sparkles' };
+// The companies' marks, drawn in the icon's tile like a symbol (icons/provider-*.svg).
+const KIND_LOGO = { anthropic: 'icons/provider-anthropic.svg', openai: 'icons/provider-openai.svg', openrouter: 'icons/provider-openrouter.svg' };
 const KINDS = [
-  { kind: 'openrouter', title: 'OpenRouter', detail: 'Hundreds of models with one API key.' },
-  { kind: 'openai', title: 'OpenAI', detail: 'Sign in with your ChatGPT plan.' },
   { kind: 'anthropic', title: 'Anthropic', detail: 'Sign in with your Claude plan.' },
+  { kind: 'openai', title: 'OpenAI', detail: 'Sign in with your ChatGPT plan.' },
+  { kind: 'openrouter', title: 'OpenRouter', detail: 'Hundreds of models with one API key.' },
   { kind: 'custom', title: 'Custom Endpoint', detail: 'Any OpenAI-compatible server: llama.cpp, vLLM, LM Studio, Ollama…' },
 ];
+
+/** A row with a provider's icon: its logo in the tinted tile, where there is one. */
+function providerRow(kind, options) {
+  const row = createRow({ ...options, icon: KIND_SYMBOL[kind] ?? 'cpu', iconTint: KIND_COLOR[kind] ?? KIND_COLOR.custom });
+  const glyph = KIND_LOGO[kind] && row.el.querySelector('.sf-row-icon i');
+  if (glyph) {
+    const url = `url("${KIND_LOGO[kind]}")`;
+    glyph.style.webkitMaskImage = url;
+    glyph.style.maskImage = url;
+    glyph.removeAttribute('data-sf-symbol');
+  }
+  return row;
+}
 
 // The app forwards server events here (signin, providers, settings).
 const listeners = new Set();
@@ -46,7 +61,7 @@ function listen(fn) {
   return () => listeners.delete(fn);
 }
 
-const KIND_COLOR = { openrouter: '#6466f1', openai: '#10a37f', anthropic: '#d97757', custom: '#636366' };
+const KIND_COLOR = { anthropic: '#D97757', openai: '#6A9BCC', openrouter: '#788C5D', custom: '#725e8d' };
 
 /** A row with a text input at its end (Name, API Key, a port). */
 function field({ label, value = '', type = 'text', placeholder = '', autocomplete = 'off', inputmode, onInput, hint }) {
@@ -159,9 +174,7 @@ export function openSettingsSheet(device) {
   function renderProviders(data) {
     const rows = [];
     for (const p of data?.providers ?? []) {
-      const row = createRow({
-        icon: KIND_SYMBOL[p.kind] ?? 'cpu',
-        iconTint: KIND_COLOR[p.kind] ?? KIND_COLOR.custom,
+      const row = providerRow(p.kind, {
         title: p.name,
         subtitle: [p.kindLabel, p.account ?? p.baseUrl].filter(Boolean).join(' · '),
         accessory: 'ellipsis',
@@ -462,7 +475,7 @@ export function openAddProvider(data) {
     ctx.setTitle('Add Provider');
     ctx.setDirty(false);
     const rows = KINDS.map((k) =>
-      createRow({ icon: KIND_SYMBOL[k.kind], iconTint: KIND_COLOR[k.kind], title: k.title, subtitle: k.detail, wrap: true, accessory: 'chevron', onTap: () => renderKind(k) }),
+      providerRow(k.kind, { title: k.title, subtitle: k.detail, wrap: true, accessory: 'chevron', onTap: () => renderKind(k) }),
     );
     const parts = [section(null, rows)];
     if (data && !data.keyring.available) parts.unshift(el('p', 'ag-problem st-problem', data.keyring.reason));
@@ -510,94 +523,71 @@ export function openAddProvider(data) {
       setTimeout(() => (k.kind === 'custom' ? url.input : key.input).focus(), 350);
     } else {
       const openai = k.kind === 'openai';
-      const start = createRow({ title: openai ? 'Continue with ChatGPT' : 'Continue with Claude', tintTitle: true, center: true, onTap: () => startSignIn() });
-      const finishBox = el('div');
+      const start = createRow({ title: openai ? 'Sign In with ChatGPT' : 'Sign In with Claude', tintTitle: true, center: true, onTap: () => startSignIn() });
+      const cancelRow = createRow({ title: 'Cancel Sign-In', destructive: true, center: true, onTap: () => restart('') });
       nodes.push(
-        section(null, [name.row], openai ? 'Signs in with your ChatGPT plan; usage counts against the plan, not API billing.' : 'Signs in with your Claude plan (Pro or Max) and keeps a long-lived token in the keyring.'),
-        section(null, [start]),
+        section(null, [name.row], openai ? 'Signs in with your ChatGPT plan through Codex; usage counts against the plan, not API billing.' : 'Signs in with your Claude plan (Pro or Max) and keeps a long-lived token in the keyring.'),
+        section(null, [start], 'Sign in on the computer SF Agents runs on: the page opens in a new tab there.'),
         status,
-        finishBox,
       );
       ctx.body.replaceChildren(...nodes);
       finish = null;
       ctx.setDirty(false);
+      const restart = (message) => {
+        if (signIn && signIn.state !== 'done') postJson(`/api/providers/signin/${signIn.id}`, { action: 'cancel' }).catch(() => {});
+        signIn = null;
+        stop();
+        stop = () => {};
+        name.input.disabled = false;
+        start.update({ title: openai ? 'Sign In with ChatGPT' : 'Sign In with Claude', disabled: false });
+        cancelRow.el.remove();
+        status.classList.remove('st-done');
+        status.textContent = message;
+        ctx.refresh();
+      };
       const startSignIn = async () => {
         if (signIn) {
-          window.open(signIn.url, '_blank', 'noopener');
+          // The ChatGPT page can be opened again; Claude's only once.
+          if (openai) postJson(`/api/providers/signin/${signIn.id}`, { action: 'reopen' }).catch((error) => (status.textContent = error.message));
           return;
         }
-        // Open the tab now, while the tap still counts as one (pop-up blockers).
-        const tab = window.open('about:blank', '_blank');
         start.setDisabled(true);
-        status.textContent = 'Starting…';
+        status.textContent = 'Opening the sign-in page…';
         try {
           signIn = await postJson('/api/providers/signin', { kind: k.kind, name: name.input.value });
         } catch (error) {
-          tab?.close();
           start.setDisabled(false);
           status.textContent = '';
           showError(error.message, "Couldn't start the sign-in");
           return;
         }
-        if (tab) {
-          try {
-            tab.opener = null;
-          } catch {
-            // cross-origin already
-          }
-          tab.location.href = signIn.url;
-        }
         name.input.disabled = true;
-        start.setTitle('Open the Sign-in Page Again');
-        start.setDisabled(false);
-        renderFinish(openai, finishBox, status);
+        status.textContent = signIn.opened
+          ? 'Sign in on the page that opened in your browser, then close the tab and come back here.'
+          : 'The browser could not be opened on this computer. Open SF Agents there and try again.';
+        if (openai) start.update({ title: 'Open the Sign-In Page Again', disabled: false });
+        else start.update({ title: 'Waiting for Claude…', disabled: true });
+        start.el.after(cancelRow.el);
+        listenForSignIn(status, restart);
+        ctx.refresh();
       };
     }
     ctx.refresh();
   }
 
-  function renderFinish(openai, box, status) {
-    const input = field({
-      label: openai ? 'Address' : 'Code',
-      placeholder: openai ? 'http://127.0.0.1:…/auth/callback?…' : 'Paste the code from Claude',
-      inputmode: openai ? 'url' : undefined,
-    });
-    status.textContent = openai
-      ? 'Sign in on the page that opened. On this computer it finishes by itself.'
-      : 'Sign in on the page that opened. Claude then shows a code: paste it here.';
-    box.replaceChildren(
-      section(
-        openai ? 'Signing in on another device?' : null,
-        [input.row],
-        openai ? 'The last page won’t load on a phone or another computer. Copy its address from the address bar and paste it here.' : '',
-      ),
-    );
-    input.input.addEventListener('input', () => ctx.setDirty(!!input.input.value.trim()));
-    finish = async () => {
-      status.textContent = 'Checking…';
-      try {
-        const r = await postJson(`/api/providers/signin/${signIn.id}`, openai ? { callbackUrl: input.input.value } : { code: input.input.value });
-        if (r.state === 'done') {
-          signIn.state = 'done';
-          toast(`Signed in. Added “${r.provider?.name}”`, { symbol: 'checkmark', timeout: 2600 });
-          return true;
-        }
-        status.textContent = r.error ?? 'The sign-in did not finish.';
-        return false;
-      } catch (error) {
-        status.textContent = error.message;
-        return false;
-      }
-    };
+  function listenForSignIn(status, restart) {
     stop = listen((event, data) => {
       if (event !== 'signin' || data.id !== signIn?.id) return;
       if (data.state === 'done') {
         signIn.state = 'done';
-        toast(`Signed in${data.provider?.account && data.provider.account !== 'Claude plan' ? ` as ${data.provider.account}` : ''}. Added “${data.provider?.name}”`, { symbol: 'checkmark', timeout: 2600 });
-        ctx.close();
-      } else if (data.state === 'failed') status.textContent = data.error ?? 'The sign-in failed. Start again.';
+        const who = data.provider?.account && data.provider.account !== 'Claude plan' ? ` as ${data.provider.account}` : '';
+        status.replaceChildren(sym('checkmark.circle.fill', 15), document.createTextNode(` Signed in${who}. Added “${data.provider?.name}”.`));
+        status.classList.add('st-done');
+        ctx.body.querySelectorAll('.sf-row').forEach((r) => r.classList.add('disabled'));
+        // A moment to see it, then the sheet goes.
+        setTimeout(() => ctx.close(), 1400);
+      } else if (data.state === 'failed') restart(data.error && data.error !== 'Cancelled.' ? data.error : '');
     });
-    ctx.refresh();
   }
 
   renderKinds();
