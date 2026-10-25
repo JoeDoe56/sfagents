@@ -80,10 +80,11 @@ function section(title, nodes, footer) {
 
 /**
  * @param {{quality: () => string, qualities: string[], previewQuality: (q: string) => void, qualityHint: () => string,
- *          enterSends: () => boolean, save: (local: {quality: string, enterSends: boolean}) => void}} device
+ *          enterSends: () => boolean, reverseSheetScroll: () => boolean,
+ *          save: (local: {quality: string, enterSends: boolean, reverseSheetScroll: boolean}) => void}} device
  */
 export function openSettingsSheet(device) {
-  const savedLocal = { quality: device.quality(), enterSends: device.enterSends() };
+  const savedLocal = { quality: device.quality(), enterSends: device.enterSends(), reverseSheetScroll: device.reverseSheetScroll() };
   const local = { ...savedLocal };
   let server = null; // {settings: [...]}
   const draft = {}; // key → value
@@ -117,7 +118,11 @@ export function openSettingsSheet(device) {
         local.enterSends = v;
         dirty();
       });
-      deviceSection = createSection({ title: 'This Device', rows: [qualityRow, enter.row], note: '' });
+      const reverse = switchRow('Reverse Sheet Scrolling', 'Scrolling up over a sheet’s handle opens it and scrolling down closes it.', local.reverseSheetScroll, (v) => {
+        local.reverseSheetScroll = v;
+        dirty();
+      });
+      deviceSection = createSection({ title: 'This Device', rows: [qualityRow, enter.row, reverse.row], note: '' });
       const marker = el('div');
       marker.dataset.mediumEnd = '';
       providersBox = el('div');
@@ -158,7 +163,7 @@ export function openSettingsSheet(device) {
   }
 
   function dirty() {
-    ctx.setDirty(local.quality !== savedLocal.quality || local.enterSends !== savedLocal.enterSends || Object.keys(draft).length > 0);
+    ctx.setDirty(local.quality !== savedLocal.quality || local.enterSends !== savedLocal.enterSends || local.reverseSheetScroll !== savedLocal.reverseSheetScroll || Object.keys(draft).length > 0);
   }
 
   // ---------------------------------------------------------------- providers
