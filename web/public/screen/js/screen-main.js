@@ -7,7 +7,7 @@
  * The stream page SF Agents opens in its Screen sheet (web/public/remotesheet.js):
  * MoonlightWeb's stream view, with no host list, no settings page and no
  * accounts. It asks SF Agents' server for this computer (/api/screen/host),
- * streams its virtual display (or its first screen where there is none), and
+ * streams its primary screen (or its virtual display where none is on), and
  * tells the sheet what it is doing with postMessage:
  *
  *   {source: 'mw-embed', type: 'state', state, message}
@@ -161,7 +161,12 @@ async function launch() {
         }
         const host = new Host(info.host || {});
         const apps = (info.apps || []).map((a) => new App(a, host.uuid));
-        const app = apps.find((a) => a.isVirtualDisplay) || apps.find((a) => a.isMadeForStream) || apps[0];
+        // The screen in front of the owner, the primary first (the helper's
+        // order); the virtual display only on a computer with no screen on.
+        const app =
+            apps.find((a) => !a.isMadeForStream && !a.isHostApp && !a.isGamescope) ||
+            apps.find((a) => a.isVirtualDisplay) ||
+            apps[0];
         if (!app) {
             lastError =
                 (host.nativeDisplay && host.nativeDisplay.diagnostic) ||

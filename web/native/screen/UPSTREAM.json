@@ -28,6 +28,10 @@
     {
       "file": "backend/src/backend/VirtualDisplay.cpp",
       "why": "With MW_SFAGENTS the elevated task may name its staging folder after the fixed argument (--vdisplay-dir), and is still recognised as the installer's."
+    },
+    {
+      "file": "backend/src/backend/VirtualDisplayApply.cpp",
+      "why": "With MW_SFAGENTS no layout is saved to Windows' display database, and the virtual display takes the primary role only when no other display is on: a node left on across a restart must never bring the desktop back on a screen nobody sees."
     }
   ],
   "removed": [

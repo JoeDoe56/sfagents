@@ -94,7 +94,7 @@ export interface ScreenStatus {
 
 /** What the helper's --info says: this computer as the page knows a host, and its displays. */
 export interface ScreenInfo {
-  host: Record<string, unknown> & { nativeDisplay?: { state?: string; diagnostic?: string; virtual_display?: { installed?: boolean } } };
+  host: Record<string, unknown> & { nativeDisplay?: { state?: string; diagnostic?: string; virtual_display?: { installed?: boolean; enabled?: boolean } } };
   apps: Array<Record<string, unknown> & { id: number }>;
 }
 
@@ -461,6 +461,24 @@ export class ScreenMirror {
       if (this.info_?.value === value) this.info_ = null;
     });
     return value;
+  }
+
+  /**
+   * Windows, at startup: the virtual display off when an earlier run left it
+   * on (SF Agents or the PC stopped mid-stream), so that it never outlives
+   * the stream it was made for.
+   */
+  async resetVirtualDisplay(): Promise<void> {
+    if (this.platform !== 'win32' || this.stream) return;
+    const exe = this.helper();
+    if (!exe) return;
+    const on = await this.info(true)
+      .then((i) => i.host.nativeDisplay?.virtual_display?.enabled === true)
+      .catch(() => false);
+    if (!on || this.stream) return;
+    this.log('screen: the virtual display was left on; turning it off');
+    const child = spawn(exe, ['--vdisplay-off'], { stdio: 'ignore', windowsHide: true, cwd: path.dirname(exe) });
+    child.on('error', () => {});
   }
 
   /** The device streaming now, if any. */

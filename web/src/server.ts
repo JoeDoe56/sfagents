@@ -423,6 +423,7 @@ export class WebServer {
   async setupFeatures(): Promise<void> {
     const dictation = this.dictation.status().state === 'missing' ? this.dictation.install().catch((error) => this.log(`Dictation could not be set up: ${getErrorMessage(error)}`)) : Promise.resolve();
     await this.screen.ensure();
+    await this.screen.resetVirtualDisplay();
     const r = this.screen.status();
     if (r.state !== 'ready' && r.error) this.log(`Screen mirroring is not available: ${r.error}`);
     await dictation;
