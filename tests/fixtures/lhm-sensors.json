@@ -1,0 +1,476 @@
+{
+ "sensors": [
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/clock/0",
+   "name": "Bus Speed",
+   "type": "Clock",
+   "value": 100
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/temperature/0",
+   "name": "CPU Core #1",
+   "type": "Temperature",
+   "value": 55
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/temperature/8",
+   "name": "CPU Package",
+   "type": "Temperature",
+   "value": 61.25
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/temperature/9",
+   "name": "Core Max",
+   "type": "Temperature",
+   "value": 63
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/0",
+   "name": "CPU Total",
+   "type": "Load",
+   "value": 23.5
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/1",
+   "name": "CPU Core Max",
+   "type": "Load",
+   "value": 71
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/2",
+   "name": "CPU Core #1 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/3",
+   "name": "CPU Core #1 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/4",
+   "name": "CPU Core #2 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/5",
+   "name": "CPU Core #2 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/6",
+   "name": "CPU Core #3 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/7",
+   "name": "CPU Core #3 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/8",
+   "name": "CPU Core #4 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/9",
+   "name": "CPU Core #4 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/10",
+   "name": "CPU Core #5 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/11",
+   "name": "CPU Core #5 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/12",
+   "name": "CPU Core #6 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/13",
+   "name": "CPU Core #6 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/14",
+   "name": "CPU Core #7 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/15",
+   "name": "CPU Core #7 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/16",
+   "name": "CPU Core #8 Thread #1",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/load/17",
+   "name": "CPU Core #8 Thread #2",
+   "type": "Load",
+   "value": 20
+  },
+  {
+   "hardwareId": "/intelcpu/0",
+   "hardware": "Intel Core i7-11700K",
+   "id": "/intelcpu/0/power/0",
+   "name": "CPU Package",
+   "type": "Power",
+   "value": 65.2
+  },
+  {
+   "hardwareId": "/ram",
+   "hardware": "Total Memory",
+   "id": "/ram/load/0",
+   "name": "Memory",
+   "type": "Load",
+   "value": 44
+  },
+  {
+   "hardwareId": "/ram",
+   "hardware": "Total Memory",
+   "id": "/ram/data/0",
+   "name": "Memory Used",
+   "type": "Data",
+   "value": 15032385536
+  },
+  {
+   "hardwareId": "/ram",
+   "hardware": "Total Memory",
+   "id": "/ram/data/1",
+   "name": "Memory Available",
+   "type": "Data",
+   "value": 19327352832
+  },
+  {
+   "hardwareId": "/vram",
+   "hardware": "Virtual Memory",
+   "id": "/vram/data/2",
+   "name": "Memory Used",
+   "type": "Data",
+   "value": 40000000000
+  },
+  {
+   "hardwareId": "/vram",
+   "hardware": "Virtual Memory",
+   "id": "/vram/data/3",
+   "name": "Memory Available",
+   "type": "Data",
+   "value": 9000000000
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/temperature/0",
+   "name": "GPU Core",
+   "type": "Temperature",
+   "value": 48
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/temperature/2",
+   "name": "GPU Hot Spot",
+   "type": "Temperature",
+   "value": 57.4
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/load/0",
+   "name": "GPU Core",
+   "type": "Load",
+   "value": 37
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/load/3",
+   "name": "GPU Memory",
+   "type": "Load",
+   "value": 40
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/data/0",
+   "name": "GPU Memory Free",
+   "type": "Data",
+   "value": 4831838208
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/data/1",
+   "name": "GPU Memory Used",
+   "type": "Data",
+   "value": 3758096384
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/data/2",
+   "name": "GPU Memory Total",
+   "type": "Data",
+   "value": 8589934592
+  },
+  {
+   "hardwareId": "/gpu-nvidia/0",
+   "hardware": "NVIDIA GeForce RTX 3070",
+   "id": "/gpu-nvidia/0/data/3",
+   "name": "D3D Dedicated Memory Used",
+   "type": "Data",
+   "value": 3500000000
+  },
+  {
+   "hardwareId": "/gpu-intel-integrated/0",
+   "hardware": "Intel(R) UHD Graphics 750",
+   "id": "/gpu-intel-integrated/0/load/0",
+   "name": "D3D 3D",
+   "type": "Load",
+   "value": 90
+  },
+  {
+   "hardwareId": "/gpu-intel-integrated/0",
+   "hardware": "Intel(R) UHD Graphics 750",
+   "id": "/gpu-intel-integrated/0/data/0",
+   "name": "D3D Shared Memory Used",
+   "type": "Data",
+   "value": 300000000
+  },
+  {
+   "hardwareId": "/nvme/0",
+   "hardware": "Samsung SSD 980 PRO 1TB",
+   "id": "/nvme/0/temperature/0",
+   "name": "Composite Temperature",
+   "type": "Temperature",
+   "value": 41
+  },
+  {
+   "hardwareId": "/nvme/0",
+   "hardware": "Samsung SSD 980 PRO 1TB",
+   "id": "/nvme/0/load/30",
+   "name": "Used Space",
+   "type": "Load",
+   "value": 61.2
+  },
+  {
+   "hardwareId": "/nvme/0",
+   "hardware": "Samsung SSD 980 PRO 1TB",
+   "id": "/nvme/0/load/51",
+   "name": "Read Activity",
+   "type": "Load",
+   "value": 12
+  },
+  {
+   "hardwareId": "/nvme/0",
+   "hardware": "Samsung SSD 980 PRO 1TB",
+   "id": "/nvme/0/load/52",
+   "name": "Write Activity",
+   "type": "Load",
+   "value": 3.5
+  },
+  {
+   "hardwareId": "/nvme/0",
+   "hardware": "Samsung SSD 980 PRO 1TB",
+   "id": "/nvme/0/load/53",
+   "name": "Total Activity",
+   "type": "Load",
+   "value": 15.5
+  },
+  {
+   "hardwareId": "/nvme/0",
+   "hardware": "Samsung SSD 980 PRO 1TB",
+   "id": "/nvme/0/throughput/54",
+   "name": "Read Rate",
+   "type": "Throughput",
+   "value": 52428800
+  },
+  {
+   "hardwareId": "/nvme/0",
+   "hardware": "Samsung SSD 980 PRO 1TB",
+   "id": "/nvme/0/throughput/55",
+   "name": "Write Rate",
+   "type": "Throughput",
+   "value": 1048576
+  },
+  {
+   "hardwareId": "/hdd/1",
+   "hardware": "WDC WD40EZRZ-00GXCB0",
+   "id": "/hdd/1/load/30",
+   "name": "Used Space",
+   "type": "Load",
+   "value": 80
+  },
+  {
+   "hardwareId": "/hdd/1",
+   "hardware": "WDC WD40EZRZ-00GXCB0",
+   "id": "/hdd/1/load/51",
+   "name": "Read Activity",
+   "type": "Load",
+   "value": 0
+  },
+  {
+   "hardwareId": "/hdd/1",
+   "hardware": "WDC WD40EZRZ-00GXCB0",
+   "id": "/hdd/1/load/52",
+   "name": "Write Activity",
+   "type": "Load",
+   "value": 27
+  },
+  {
+   "hardwareId": "/hdd/1",
+   "hardware": "WDC WD40EZRZ-00GXCB0",
+   "id": "/hdd/1/throughput/54",
+   "name": "Read Rate",
+   "type": "Throughput",
+   "value": 0
+  },
+  {
+   "hardwareId": "/hdd/1",
+   "hardware": "WDC WD40EZRZ-00GXCB0",
+   "id": "/hdd/1/throughput/55",
+   "name": "Write Rate",
+   "type": "Throughput",
+   "value": 2097152
+  },
+  {
+   "hardwareId": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D",
+   "hardware": "Ethernet",
+   "id": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D/load/1",
+   "name": "Network Utilization",
+   "type": "Load",
+   "value": 1.2
+  },
+  {
+   "hardwareId": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D",
+   "hardware": "Ethernet",
+   "id": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D/data/2",
+   "name": "Data Uploaded",
+   "type": "Data",
+   "value": 1200000000
+  },
+  {
+   "hardwareId": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D",
+   "hardware": "Ethernet",
+   "id": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D/data/3",
+   "name": "Data Downloaded",
+   "type": "Data",
+   "value": 9000000000
+  },
+  {
+   "hardwareId": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D",
+   "hardware": "Ethernet",
+   "id": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D/throughput/7",
+   "name": "Upload Speed",
+   "type": "Throughput",
+   "value": 184320
+  },
+  {
+   "hardwareId": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D",
+   "hardware": "Ethernet",
+   "id": "/nic/%7B5A2C0E3D-1111-2222-3333-444455556666%7D/throughput/8",
+   "name": "Download Speed",
+   "type": "Throughput",
+   "value": 2411724.8
+  },
+  {
+   "hardwareId": "/nic/%7B9F9F9F9F-AAAA-BBBB-CCCC-DDDDEEEEFFFF%7D",
+   "hardware": "vEthernet (Default Switch)",
+   "id": "/nic/%7B9F9F9F9F-AAAA-BBBB-CCCC-DDDDEEEEFFFF%7D/throughput/7",
+   "name": "Upload Speed",
+   "type": "Throughput",
+   "value": 184320
+  },
+  {
+   "hardwareId": "/nic/%7B9F9F9F9F-AAAA-BBBB-CCCC-DDDDEEEEFFFF%7D",
+   "hardware": "vEthernet (Default Switch)",
+   "id": "/nic/%7B9F9F9F9F-AAAA-BBBB-CCCC-DDDDEEEEFFFF%7D/throughput/8",
+   "name": "Download Speed",
+   "type": "Throughput",
+   "value": 2411724.8
+  },
+  {
+   "hardwareId": "/nic/%7B00000000-0000-0000-0000-000000000003%7D",
+   "hardware": "Wi-Fi",
+   "id": "/nic/%7B00000000-0000-0000-0000-000000000003%7D/throughput/7",
+   "name": "Upload Speed",
+   "type": "Throughput",
+   "value": null
+  },
+  {
+   "hardwareId": "/nic/%7B00000000-0000-0000-0000-000000000003%7D",
+   "hardware": "Wi-Fi",
+   "id": "/nic/%7B00000000-0000-0000-0000-000000000003%7D/throughput/8",
+   "name": "Download Speed",
+   "type": "Throughput",
+   "value": 1024
+  }
+ ]
+}

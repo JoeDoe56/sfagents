@@ -31,6 +31,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { getErrorMessage, readJsonFile, sfagentsHome, writeFileAtomic } from '@sfagents/core';
+import { runElevatedWindows } from './privileges.js';
 
 const RELEASES = 'https://api.github.com/repos/linckosz/moonlight-web/releases?per_page=10';
 const PROJECT = 'https://github.com/linckosz/moonlight-web';
@@ -126,8 +127,6 @@ export interface RemoteOptions {
   knownPorts?: number[];
   /** Installed executables to look for (tests). */
   candidates?: string[];
-  /** Other installers to run in the same administrator approval on Windows (the sensor driver). */
-  extraElevated?: () => Promise<Array<{ file: string; args: string[] }>>;
 }
 
 export class RemoteDesktop {
@@ -310,7 +309,7 @@ export class RemoteDesktop {
           await linuxInputAccess(this.options.log);
         } else {
           this.set({ state: 'installing', progress: { label: 'Waiting for administrator approval', done: 0, total: 0 } });
-          if (process.platform === 'win32') await runElevatedWindows([{ file, args: ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-'] }, ...((await this.options.extraElevated?.().catch(() => [])) ?? [])]);
+          if (process.platform === 'win32') await runElevatedWindows([{ file, args: ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-'] }]);
           else await runElevatedMac(`/usr/sbin/installer -pkg ${shellQuote(file)} -target /`);
           fs.rmSync(file, { force: true });
         }
@@ -414,24 +413,6 @@ function run(cmd: string, args: string[]): Promise<void> {
     child.stderr?.on('data', (d: Buffer) => (err += d.toString()));
     child.once('error', reject);
     child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(err.trim() || `${path.basename(cmd)} exited with code ${code}`))));
-  });
-}
-
-/**
- * Runs installers with administrator rights, all behind one approval
- * prompt: an elevated PowerShell runs them in turn and reports the first
- * that fails.
- */
-export function runElevatedWindows(steps: Array<{ file: string; args: string[] }>): Promise<void> {
-  const ps = (v: string) => `'${v.replace(/'/g, "''")}'`;
-  const inner = steps
-    .map((st) => `$p = Start-Process -FilePath ${ps(st.file)} -ArgumentList @(${st.args.map(ps).join(',')}) -Wait -PassThru; if ($p.ExitCode -ne 0) { exit $p.ExitCode }`)
-    .join('; ');
-  const encoded = Buffer.from(inner, 'utf16le').toString('base64');
-  const outer = `$p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encoded}'); exit $p.ExitCode`;
-  const exe = path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  return run(exe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', outer]).catch((error) => {
-    throw new Error(/canceled|cancelled|1223/i.test(String(error?.message)) ? 'The administrator approval was declined. Remote Desktop needs it once, to install its display driver.' : String(error?.message ?? error));
   });
 }
 

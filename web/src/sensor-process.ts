@@ -13,6 +13,13 @@ export interface SensorProcessOptions {
   args?: string[];
   timeoutMs?: number;
   retryMs?: number;
+  /**
+   * How to run the program with administrator rights, from the approval
+   * given at startup (privileges.ts). Used until it fails, or until
+   * @p approved says the approval was not given; then the program runs
+   * as command and args, at SF Agents' own level.
+   */
+  elevated?: { command: string; args: string[]; timeoutMs?: number; approved?: Promise<boolean> };
 }
 
 export function sensorEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -27,10 +34,21 @@ export class SensorProcessClient implements LhmReader {
   private failedAt = 0;
   private disposed = false;
   private warned = false;
+  private elevated: SensorProcessOptions['elevated'];
   hint: string | null = null;
   processes: number | null = null;
 
-  constructor(private readonly options: SensorProcessOptions) {}
+  constructor(private readonly options: SensorProcessOptions) {
+    this.elevated = options.elevated;
+    void this.elevated?.approved?.then((ok) => { if (!ok) this.dropElevated(); }, () => this.dropElevated());
+  }
+
+  /** From now on, at SF Agents' own level. */
+  private dropElevated(): void {
+    if (!this.elevated) return;
+    this.elevated = undefined;
+    this.stop();
+  }
 
   read(): Promise<LhmSensor[] | null> {
     if (this.disposed || (this.failedAt && Date.now() - this.failedAt < (this.options.retryMs ?? 30_000))) return Promise.resolve(null);
@@ -41,9 +59,10 @@ export class SensorProcessClient implements LhmReader {
 
   private start(): ChildProcessWithoutNullStreams {
     if (this.child) return this.child;
-    const command = this.options.command;
-    if (path.isAbsolute(command) && !fs.existsSync(command)) throw new Error(`Bundled ${this.options.name} sensors are missing. Run npm run build to prepare them.`);
-    const child = spawn(command, this.options.args ?? [], {
+    const program = this.options.command;
+    if (path.isAbsolute(program) && !fs.existsSync(program)) throw new Error(`Bundled ${this.options.name} sensors are missing. Run npm run build to prepare them.`);
+    const { command, args } = this.elevated ?? { command: program, args: this.options.args ?? [] };
+    const child = spawn(command, args, {
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: sensorEnvironment(process.env),
     });
     this.child = child;
@@ -56,25 +75,30 @@ export class SensorProcessClient implements LhmReader {
       while ((newline = buffered.indexOf('\n')) !== -1) {
         const line = buffered.slice(0, newline).trim();
         buffered = buffered.slice(newline + 1);
-        this.deliver?.(line);
+        if (this.child === child) this.deliver?.(line);
       }
     });
     // Native error details are logged, never exposed as an HTTP endpoint.
     child.stderr.on('data', (data: Buffer) => this.options.log?.(data.toString().trim().slice(0, 2000)));
-    child.stdin.on('error', () => this.deliver?.(null));
-    child.on('error', () => this.deliver?.(null));
-    child.on('exit', () => {
-      if (this.child === child) this.child = undefined;
+    // A child that was stopped (and replaced) no longer answers for the current request.
+    const gone = () => {
+      if (this.child !== child) return;
+      this.child = undefined;
+      child.kill();
       this.deliver?.(null);
-    });
+    };
+    child.stdin.on('error', gone);
+    child.on('error', gone);
+    child.on('exit', gone);
     return child;
   }
 
   private async request(): Promise<LhmSensor[] | null> {
+    const elevated = this.elevated;
     try {
       const child = this.start();
       const line = await new Promise<string | null>((resolve) => {
-        const timeout = setTimeout(() => finish(null), this.options.timeoutMs ?? 20_000);
+        const timeout = setTimeout(() => finish(null), (this.elevated?.timeoutMs ?? this.options.timeoutMs) ?? 20_000);
         const finish = (value: string | null) => {
           clearTimeout(timeout);
           if (this.deliver === finish) this.deliver = undefined;
@@ -94,6 +118,12 @@ export class SensorProcessClient implements LhmReader {
       this.warned = false;
       return payload.sensors;
     } catch (error) {
+      if (elevated && !this.disposed) {
+        // (Not when the approval was declined: that was said already.)
+        if (this.elevated) this.options.log?.(`${this.options.name} sensors: the elevated helper failed (${error instanceof Error ? error.message : String(error)}); reading without administrator rights.`);
+        this.dropElevated();
+        return this.request();
+      }
       this.failedAt = Date.now();
       this.processes = null;
       this.hint = error instanceof Error ? error.message : `${this.options.name} sensors are unavailable.`;

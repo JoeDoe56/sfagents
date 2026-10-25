@@ -24,7 +24,6 @@ import {
   ArtifactError,
   OPENROUTER_BASE_URL,
   getErrorMessage,
-  sfagentsHome,
   threadKey,
   type AgentRunResult,
   type AgentSession,
@@ -54,8 +53,6 @@ import { Dictation } from './dictation.js';
 import { DISPLAY_SCALES, RemoteDesktop } from './remote.js';
 import { applyEmbedEdits, embedScript, EMBED_EDITS, EMBED_SCRIPT } from './remote-embed.js';
 import { getDisplayScale, setDisplayScale } from './remote-dpi.js';
-import { runElevatedWindows } from './remote.js';
-import { pawnioInstalled, pawnioStep } from './sensor-driver.js';
 import { TerminalError, TerminalManager } from './terminal.js';
 import { Up2kError, Up2kStore, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 import { SystemMonitor, type SystemSource } from './system.js';
@@ -63,7 +60,8 @@ import { FileError, FileService, INLINE_MIME, type Conflict } from './files.js';
 import { writeZip, zipSourcesFor } from './zip.js';
 import { PerformanceMonitor } from './performance.js';
 import { ProcessError, ProcessMonitor } from './processes.js';
-import { LhmClient } from './lhm.js';
+import type { LhmReader } from './lhm.js';
+import type { Privileges } from './privileges.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
@@ -91,8 +89,8 @@ const options_watch = (o: { watchAgents?: boolean }) => o.watchAgents !== false;
 export const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 export interface WebServerOptions {
-  /** Ask Windows to elevate only the bundled, read-only sensor worker. */
-  sensorAdmin?: boolean;
+  /** What the administrator approval asked for at startup gave (privileges.ts). */
+  privileges?: Privileges;
   tree: AgentTree;
   /** A persistent conversation (the server is its single writer while running). */
   conversation: ConversationService;
@@ -126,8 +124,8 @@ export interface WebServerOptions {
   log?: (line: string) => void;
   /** Tests replace what the resource monitor reads from the machine. */
   systemSource?: SystemSource;
-  /** Libre Hardware Monitor's web server for the resource monitor (default http://127.0.0.1:8085); null: do not use it. */
-  lhmUrl?: string | null;
+  /** Tests: a sensor reader in place of the bundled sensor program; null for none. */
+  sensors?: LhmReader | null;
 }
 
 interface LiveSegment {
@@ -342,8 +340,6 @@ export class WebServer {
         hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
         log: (line) => this.log(line),
         onChange: (status) => this.broadcast('remote', status),
-        // The sensor driver comes in the same administrator approval.
-        extraElevated: async () => (process.platform === 'win32' && !pawnioInstalled() ? [await pawnioStep(path.join(sfagentsHome(), 'setup'))] : []),
       });
     this.terminals = new TerminalManager({
       cwd: options.tree.configDir,
@@ -382,8 +378,8 @@ export class WebServer {
     const saved = this.agentSettings.get().agent;
     this.selectAgent(saved && options.tree.byId.has(saved) ? saved : this.session.node.id, false);
     this.system = new SystemMonitor(options.systemSource, {
-      ...(options.lhmUrl === undefined ? {} : { lhm: options.lhmUrl === null ? null : new LhmClient(options.lhmUrl) }),
-      elevateWindowsSensors: options.sensorAdmin,
+      ...(options.sensors === undefined ? {} : { lhm: options.sensors }),
+      privileges: options.privileges,
       log: this.log,
     });
     this.up2k = new Up2kStore(options.conversation.dir, options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES);
@@ -423,6 +419,8 @@ export class WebServer {
     const address = this.server.address();
     if (address && typeof address === 'object') this.port = address.port;
     this.heartbeat = setInterval(() => this.broadcastRaw(': keep-alive\n\n'), 25_000);
+    // The sensors start with the server, not when the monitor first opens.
+    this.system.warm();
     // Artifacts are the files themselves: when one changes on disk, the page updates.
     this.fileWatch = setInterval(() => {
       if (this.clients.size) this.publishArtifacts();
@@ -439,9 +437,9 @@ export class WebServer {
 
   /**
    * Everything the features need that is not in the package, set up at the
-   * first start without being asked for: Remote Desktop's MoonlightWeb (and,
-   * on Windows, the sensor driver, in the same administrator approval) and
-   * the dictation model. Runs in the background; progress goes to the log
+   * first start without being asked for: Remote Desktop's MoonlightWeb and
+   * the dictation model (the sensor driver comes with the administrator
+   * approval at startup, privileges.ts). Runs in the background; progress goes to the log
    * and to the pages as events.
    */
   async setupFeatures(): Promise<void> {
@@ -450,13 +448,6 @@ export class WebServer {
     const r = this.remote.status();
     if (r.state === 'ready') this.log(`Remote Desktop: MoonlightWeb ${r.version ?? ''} at ${r.url}${r.managed ? ' (started by SF Agents)' : ''}.`);
     else if (r.error) this.log(`Remote Desktop is not available: ${r.error}`);
-    if (process.platform === 'win32' && !pawnioInstalled()) {
-      try {
-        await runElevatedWindows([await pawnioStep(path.join(sfagentsHome(), 'setup'))]);
-      } catch (error) {
-        this.log(`The sensor driver was not installed: ${getErrorMessage(error)}`);
-      }
-    }
     await dictation;
   }
 

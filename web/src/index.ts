@@ -9,10 +9,12 @@ export { Up2kStore, Up2kError, up2kChunkSize, chunkHash, DEFAULT_MAX_UPLOAD_BYTE
 export type { HandshakeRequest, HandshakeResponse } from './up2k.js';
 export { SystemMonitor, nodeSystemSource, parseCpuinfo, NVIDIA_SMI_ARGS, parseMeminfo, parseDiskstats, parseNetDev, parseNetstatIb, parseVmStat, parseNvidiaSmi, parseIoregGpu, parseIoregDisk, parseMounts } from './system.js';
 export type { SystemSnapshot, SystemSource, SystemMonitorOptions, DriveUsage, DiskCounters } from './system.js';
-export { LhmClient, DEFAULT_LHM_URL, parseLhmTree, parseLhmValue, lhmReadings } from './lhm.js';
+export { lhmReadings } from './lhm.js';
 export type { LhmSensor, LhmReadings, LhmReader } from './lhm.js';
 export { WindowsSensorClient, sensorEnvironment } from './windows-sensors.js';
 export { LinuxSensorClient } from './linux-sensors.js';
+export { acquirePrivileges, runElevatedWindows } from './privileges.js';
+export type { Privileges, ElevatedStep } from './privileges.js';
 export { describeCall, displayItems, displaySections } from './display.js';
 export type { DisplayItem, DisplayArtifact, DisplayApproval, DisplayAttachment, DisplaySection } from './display.js';
 export { FileService, FileError, typeOf, explain } from './files.js';

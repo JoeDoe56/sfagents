@@ -15,7 +15,7 @@ export const LINUX_PYTHON = {
 
 export async function buildLinuxSensors(root, arch = process.arch) {
   const release = LINUX_PYTHON[arch];
-  if (!release) throw new Error(`Bundled Linux sensors do not support ${arch}. Use --lhm off for native readers.`);
+  if (!release) throw new Error(`Bundled Linux sensors do not support ${arch}; the resource monitor uses native readers.`);
   const output = path.join(root, 'web/native/bin', `linux-${arch}`);
   // npm excludes symlinks: invoke the real versioned executable directly.
   const executable = path.join(output, 'python/bin/python3.12');
