@@ -24,6 +24,10 @@
     {
       "file": "backend/src/backend/streambackend/NativeHostBackend.cpp",
       "why": "With MW_SFAGENTS the host is named after the computer alone."
+    },
+    {
+      "file": "backend/src/backend/VirtualDisplay.cpp",
+      "why": "With MW_SFAGENTS the elevated task may name its staging folder after the fixed argument (--vdisplay-dir), and is still recognised as the installer's."
     }
   ],
   "removed": [

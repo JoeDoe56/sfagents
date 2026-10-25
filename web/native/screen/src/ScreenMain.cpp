@@ -47,6 +47,7 @@
 #include "common/RunFlags.h"
 
 #include <QCommandLineParser>
+#include <QDir>
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -693,6 +694,9 @@ void messageToLogger(QtMsgType type, const QMessageLogContext&, const QString& m
  * sfagents-screen --vdisplay-apply --stage=driver --vdisplay-dir <dir>
  *                                 install the virtual display's driver
  *                                 (elevated, at SF Agents' startup approval)
+ * sfagents-screen --vdisplay-apply --vdisplay-dir <dir>
+ *                                 the scheduled task: apply the request the
+ *                                 stream left in <dir> (its staging folder)
  *
  * stdout carries only the protocol or the answer; the log goes to stderr,
  * which SF Agents reads.
@@ -740,8 +744,22 @@ int main(int argc, char* argv[])
     if (parser.isSet(probeOption)) return NativeProbeService::runProbeCommand();
     if (parser.isSet(infoOption)) return runInfo();
     if (parser.isSet(vdisplayOffOption)) return runVirtualDisplayOff(app);
-    if (parser.isSet(vdisplayApplyOption))
+    if (parser.isSet(vdisplayApplyOption)) {
+        // Started by the scheduled task, hidden, with nobody reading stderr:
+        // the run is logged to a file next to its request, and to the temp
+        // folder when that is not there (the task found no request).
+        const QString dir = parser.isSet(vdisplayDirOption)
+                                ? QDir::fromNativeSeparators(parser.value(vdisplayDirOption))
+                                : VirtualDisplay::stagingDir();
+        Logger::instance()->setLogFile((QDir(dir).exists() ? dir : QDir::tempPath()) +
+                                           QStringLiteral("/sfagents-vdisplay-apply.log"),
+                                       true);
+        Logger::info(QStringLiteral("[vdisplay-apply] %1, dir %2, LOCALAPPDATA %3, elevated %4")
+                         .arg(QCoreApplication::arguments().join(QLatin1Char(' ')), dir,
+                              qEnvironmentVariable("LOCALAPPDATA"),
+                              VirtualDisplay::processElevated() ? QStringLiteral("yes") : QStringLiteral("no")));
         return VirtualDisplayApply::run(parser.value(vdisplayStageOption),
                                         parser.value(vdisplayDirOption));
+    }
     return runStreamWorker(app);
 }

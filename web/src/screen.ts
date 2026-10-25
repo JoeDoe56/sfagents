@@ -37,7 +37,7 @@ import { pipeline } from 'node:stream/promises';
 import { getErrorMessage, readJsonFile, sfagentsHome, writeFileAtomic } from '@sfagents/core';
 
 /** The helper's version: CI publishes it under the tag screen-v<version>. */
-export const SCREEN_VERSION = '0.1.0';
+export const SCREEN_VERSION = '0.1.1';
 export const SCREEN_RELEASES = `https://github.com/JoeDoe56/sfagents/releases/download/screen-v${SCREEN_VERSION}`;
 
 interface Asset {
@@ -65,8 +65,8 @@ const MEDIA_PORT = 48560;
 const STUN_SERVER = 'stun:stun.l.google.com:19302';
 /** The virtual display stays on this long after its last stream (a reload, a quality change). */
 const VDISPLAY_GRACE_MS = 5_000;
-/** How long a launch may take before the page is told it failed. */
-const START_TIMEOUT_MS = 60_000;
+/** How long a launch may take before the page is told it failed: past the helper's own two minutes for the virtual display, so its reason comes through. */
+const START_TIMEOUT_MS = 150_000;
 /** How long a stream's end is remembered for the page's stream-state question. */
 const ENDS_KEEP_MS = 10 * 60_000;
 
@@ -760,10 +760,6 @@ function regKeyExists(key: string): boolean {
   return spawnSync('reg.exe', ['query', key], { stdio: 'ignore', windowsHide: true }).status === 0;
 }
 
-function taskExists(name: string): boolean {
-  return spawnSync('schtasks.exe', ['/Query', '/TN', name], { stdio: 'ignore', windowsHide: true }).status === 0;
-}
-
 /** Who the scheduled task runs as, the way schtasks resolves it (MoonlightWeb's installer, TaskPrincipal). */
 function taskPrincipal(env: NodeJS.ProcessEnv = process.env): string {
   let domain = env['USERDOMAIN'] ?? '';
@@ -776,19 +772,32 @@ function xmlEscape(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!).replace(/[^\x20-\x7e]/g, (c) => `&#${c.codePointAt(0)};`);
 }
 
+/** Where the stream leaves the virtual display's requests for the task (VirtualDisplay::stagingDir). */
+export function vdisplayStagingDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.win32.join(env['LOCALAPPDATA'] ?? '', 'SF Agents', 'vdisplay');
+}
+
+/** The task is there, and names its staging folder (helper 0.1.1 on). */
+function vdisplayTaskCurrent(): boolean {
+  const r = spawnSync('schtasks.exe', ['/Query', '/TN', VDISPLAY_TASK, '/XML'], { encoding: 'utf8', windowsHide: true });
+  return r.status === 0 && String(r.stdout).includes('--vdisplay-dir');
+}
+
 /**
  * The trigger-less, elevated task the helper starts (`schtasks /Run`) to turn
  * its virtual display on and off without a prompt: MoonlightWeb's installer's
  * RegisterVirtualDisplayTask. Its command is the copy under Program Files,
- * which only an administrator can change.
+ * which only an administrator can change. It names the staging folder
+ * itself, so that the elevated run does not depend on its environment to find
+ * the request.
  */
-export function vdisplayTaskXml(exe: string, principal = taskPrincipal()): string {
+export function vdisplayTaskXml(exe: string, stagingDir = vdisplayStagingDir(), principal = taskPrincipal()): string {
   return [
     '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
     '  <RegistrationInfo><Author>SF Agents</Author></RegistrationInfo>',
     `  <Principals><Principal id="Author"><UserId>${xmlEscape(principal)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>`,
     '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowStartOnDemand>true</AllowStartOnDemand><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>',
-    `  <Actions Context="Author"><Exec><Command>"${xmlEscape(exe)}"</Command><Arguments>--vdisplay-apply</Arguments></Exec></Actions>`,
+    `  <Actions Context="Author"><Exec><Command>"${xmlEscape(exe)}"</Command><Arguments>--vdisplay-apply --vdisplay-dir "${xmlEscape(stagingDir)}"</Arguments></Exec></Actions>`,
     '</Task>',
     '',
   ].join('\r\n');
@@ -835,7 +844,7 @@ export async function screenSetupSteps(screen: ScreenMirror, setupDir: string, f
     fs.writeFileSync(path.join(dir, 'request.json'), '{"action":"install"}\n');
     steps.push({ file: exe, args: ['--vdisplay-apply', '--stage=driver', '--vdisplay-dir', dir], ok: [0, 3010] });
   }
-  if (!taskExists(VDISPLAY_TASK) || steps.length) {
+  if (!vdisplayTaskCurrent() || steps.length) {
     const xml = path.join(setupDir, 'vdisplay-task.xml');
     fs.writeFileSync(xml, vdisplayTaskXml(exe));
     steps.push({ file: 'schtasks.exe', args: ['/Create', '/TN', VDISPLAY_TASK, '/XML', xml, '/F'] });
