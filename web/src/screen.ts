@@ -37,7 +37,7 @@ import { pipeline } from 'node:stream/promises';
 import { getErrorMessage, readJsonFile, sfagentsHome, writeFileAtomic } from '@sfagents/core';
 
 /** The helper's version: CI publishes it under the tag screen-v<version>. */
-export const SCREEN_VERSION = '0.1.1';
+export const SCREEN_VERSION = '0.1.2';
 export const SCREEN_RELEASES = `https://github.com/JoeDoe56/sfagents/releases/download/screen-v${SCREEN_VERSION}`;
 
 interface Asset {
@@ -49,8 +49,8 @@ interface Asset {
 
 /** Per platform-arch; an empty SHA-256 is a build not published yet. */
 export const SCREEN_ASSETS: Readonly<Record<string, Asset>> = {
-  'win32-x64': { name: 'sfagents-screen-win-x64.zip', sha256: '5d42cfc5e79fe41dd3501f93a4f9be61abd7965b488ebd58b1abf426b1ffc27d', exe: 'sfagents-screen/sfagents-screen.exe' },
-  'linux-x64': { name: 'sfagents-screen-linux-x64.tar.gz', sha256: 'b0faf12223eaabca78ed3615d697a2e286e543a50b63509bf6aa0fd3de271f5a', exe: 'sfagents-screen/bin/sfagents-screen' },
+  'win32-x64': { name: 'sfagents-screen-win-x64.zip', sha256: '4c2921f46e662391fe0025994d2d8f4f35694e2b4552d366e4ac5953a244dd4c', exe: 'sfagents-screen/sfagents-screen.exe' },
+  'linux-x64': { name: 'sfagents-screen-linux-x64.tar.gz', sha256: '652ae926d400fd34aa5cd69f7bc71705a8570438acdb0331f4f1b459eb580cef', exe: 'sfagents-screen/bin/sfagents-screen' },
 };
 
 /** The page's names for this computer, as MoonlightWeb's native host has them. */
