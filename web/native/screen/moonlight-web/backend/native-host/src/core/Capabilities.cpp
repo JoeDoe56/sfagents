@@ -1,0 +1,181 @@
+/*
+ * MoonlightWeb — native capture & encoding engine.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "mw/native/Capabilities.h"
+
+#include <algorithm>
+#include <cctype>
+
+namespace mw::native {
+
+const char* toString(Codec c)
+{
+    switch (c) {
+    case Codec::Av1: return "AV1";
+    case Codec::Hevc: return "HEVC";
+    case Codec::H264: return "H.264";
+    }
+    return "unknown";
+}
+
+const char* toString(EncoderApi a)
+{
+    switch (a) {
+    case EncoderApi::None: return "none";
+    case EncoderApi::Nvenc: return "NVENC";
+    case EncoderApi::Amf: return "AMF";
+    case EncoderApi::Vpl: return "oneVPL";
+    case EncoderApi::VaApi: return "VA-API";
+    case EncoderApi::VideoToolbox: return "VideoToolbox";
+    case EncoderApi::MediaFoundation: return "Media Foundation";
+    case EncoderApi::Software: return "software";
+    }
+    return "unknown";
+}
+
+const char* toString(CaptureApi a)
+{
+    switch (a) {
+    case CaptureApi::None: return "none";
+    case CaptureApi::DxgiDuplication: return "DXGI Desktop Duplication";
+    case CaptureApi::WindowsGraphicsCapture: return "Windows.Graphics.Capture";
+    case CaptureApi::PipeWire: return "PipeWire";
+    case CaptureApi::ScreenCaptureKit: return "ScreenCaptureKit";
+    case CaptureApi::Kms: return "DRM/KMS";
+    }
+    return "unknown";
+}
+
+const char* toString(Unavailability u)
+{
+    switch (u) {
+    case Unavailability::None: return "available";
+    case Unavailability::NoDisplay: return "no display attached";
+    case Unavailability::NoCaptureApi: return "no usable capture API";
+    case Unavailability::CapturePermission: return "screen capture permission not granted";
+    case Unavailability::NoEncoder: return "no usable encoder";
+    case Unavailability::NoInteractiveSession: return "no interactive desktop session";
+    case Unavailability::OsTooOld: return "operating system too old";
+    case Unavailability::ArchNotSupported: return "architecture not supported";
+    case Unavailability::ProbeFailed: return "probe failed";
+    }
+    return "unknown";
+}
+
+const char* toString(DisplayKind k)
+{
+    switch (k) {
+    case DisplayKind::Unknown: return "unknown";
+    case DisplayKind::BuiltIn: return "builtin";
+    case DisplayKind::External: return "external";
+    case DisplayKind::Virtual: return "virtual";
+    }
+    return "unknown";
+}
+
+DisplayKind displayKindFromString(const std::string& s)
+{
+    if (s == "builtin") return DisplayKind::BuiltIn;
+    if (s == "external") return DisplayKind::External;
+    if (s == "virtual") return DisplayKind::Virtual;
+    return DisplayKind::Unknown;
+}
+
+bool nameLooksVirtual(const std::string& monitorName)
+{
+    std::string lower(monitorName);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // "VDD by MTT", Parsec's and SudoVDA's drivers, and the dummy plugs sold
+    // for headless machines, which name themselves after what they are.
+    for (const char* marker : {"virtual", "vdd", "parsec", "sudovda", "dummy", "headless"}) {
+        if (lower.find(marker) != std::string::npos) return true;
+    }
+    return false;
+}
+
+DisplayKind classifyOutputTechnology(long long technology, const std::string& monitorName)
+{
+    // DISPLAYCONFIG_OUTPUT_TECHNOLOGY, from wingdi.h. Spelled as numbers so the
+    // rule can be tested on every platform.
+    constexpr long long kOther = -1;
+    constexpr long long kOtherUnsigned = 0xFFFFFFFFLL;
+    constexpr long long kLvds = 6;
+    constexpr long long kDisplayPortEmbedded = 11;
+    constexpr long long kUdiEmbedded = 13;
+    constexpr long long kIndirectWired = 16;
+    constexpr long long kIndirectVirtual = 17;
+    constexpr long long kInternal = 0x80000000LL;
+
+    if (nameLooksVirtual(monitorName)) return DisplayKind::Virtual;
+    switch (technology) {
+    case kInternal:
+    case kLvds:
+    case kDisplayPortEmbedded:
+    case kUdiEmbedded: return DisplayKind::BuiltIn;
+    case kIndirectVirtual: return DisplayKind::Virtual;
+    // An indirect driver is also what a DisplayLink dock uses, and that is a
+    // real monitor with a real EDID. Without a name, nothing is plugged in.
+    case kIndirectWired:
+    case kOther:
+    case kOtherUnsigned: return monitorName.empty() ? DisplayKind::Virtual : DisplayKind::External;
+    default: return DisplayKind::External;
+    }
+}
+
+DisplayKind classifyConnectorName(const std::string& connector)
+{
+    if (connector.empty()) return DisplayKind::Unknown;
+    const std::string type = connector.substr(0, connector.find('-'));
+    std::string lower(type);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // The kernel's own connector type names (drm_connector.c).
+    if (lower == "edp" || lower == "lvds" || lower == "dsi") return DisplayKind::BuiltIn;
+    // virtio-gpu, vkms and qxl all expose "Virtual"; a writeback connector
+    // scans out to memory.
+    if (lower == "virtual" || lower == "writeback") return DisplayKind::Virtual;
+    return DisplayKind::External;
+}
+
+bool GpuInfo::supports444(Codec codec) const
+{
+    return std::find(codecs444.begin(), codecs444.end(), codec) != codecs444.end();
+}
+
+bool Capabilities::anyGpuEncodes() const
+{
+    for (const GpuInfo& gpu : gpus) {
+        // An encoder that can produce no codec is no encoder at all — see
+        // Selector::firstEncodingGpu for the machine that taught us that.
+        if (!gpu.encoders.empty() && !gpu.codecs.empty()) return true;
+    }
+    return false;
+}
+
+const GpuInfo* Capabilities::gpuFor(const DisplayInfo& display) const
+{
+    for (const GpuInfo& gpu : gpus) {
+        if (gpu.id == display.gpuId) return &gpu;
+    }
+    // A display whose GPU we could not identify is not a fatal error on its own
+    // — the caller falls back to the first GPU that has an encoder, paying one
+    // cross-GPU copy (§6) rather than refusing to stream.
+    return nullptr;
+}
+
+} // namespace mw::native

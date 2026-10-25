@@ -1,0 +1,178 @@
+diff --git a/include/rtc/global.hpp b/include/rtc/global.hpp
+index b3335734..f6889dfb 100644
+--- a/include/rtc/global.hpp
++++ b/include/rtc/global.hpp
+@@ -51,6 +51,16 @@ struct SctpSettings {
+ 
+ RTC_CPP_EXPORT void SetSctpSettings(SctpSettings s);
+ 
++// DSCP (6 bits, 0-63) of outgoing packets, process-wide. Not set means the
++// RFC 8837 defaults: EF for audio tracks, AF42 for other media, AF11 for SCTP.
++struct DscpSettings {
++	optional<unsigned int> audio; // audio tracks
++	optional<unsigned int> video; // other media tracks
++	optional<unsigned int> data;  // SCTP (data channels)
++};
++
++RTC_CPP_EXPORT void SetDscpSettings(DscpSettings s);
++
+ // Optional global preload and cleanup
+ RTC_CPP_EXPORT void Preload();
+ RTC_CPP_EXPORT std::shared_future<void> Cleanup();
+diff --git a/src/global.cpp b/src/global.cpp
+index c85bebd5..7a58e4a7 100644
+--- a/src/global.cpp
++++ b/src/global.cpp
+@@ -16,6 +16,7 @@
+ //
+ #include "global.hpp"
+ 
++#include "impl/dscp.hpp"
+ #include "impl/init.hpp"
+ 
+ #include <mutex>
+@@ -86,6 +87,15 @@ void InitLogger(plog::Severity severity, plog::IAppender *appender) {
+ void SetThreadPoolSize(unsigned int count) { impl::Init::Instance().setThreadPoolSize(count); }
+ void SetSctpSettings(SctpSettings s) { impl::Init::Instance().setSctpSettings(std::move(s)); }
+ 
++void SetDscpSettings(DscpSettings s) {
++	const auto store = [](std::atomic<int> &to, const optional<unsigned int> &v) {
++		to.store(v ? int(*v & 0x3F) : -1, std::memory_order_relaxed);
++	};
++	store(impl::dscp::audioValue(), s.audio);
++	store(impl::dscp::videoValue(), s.video);
++	store(impl::dscp::dataValue(), s.data);
++}
++
+ void Preload() { impl::Init::Instance().preload(); }
+ std::shared_future<void> Cleanup() { return impl::Init::Instance().cleanup(); }
+ 
+diff --git a/src/impl/dscp.hpp b/src/impl/dscp.hpp
+new file mode 100644
+index 00000000..f655b621
+--- /dev/null
++++ b/src/impl/dscp.hpp
+@@ -0,0 +1,47 @@
++/**
++ * Copyright (c) 2026 MoonlightWeb
++ *
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
++ */
++
++#ifndef RTC_IMPL_DSCP_H
++#define RTC_IMPL_DSCP_H
++
++#include <atomic>
++
++namespace rtc::impl::dscp {
++
++// The DSCP of outgoing packets, process-wide (rtc::SetDscpSettings). -1 is
++// not set: the RFC 8837 values below.
++inline std::atomic<int> &audioValue() {
++	static std::atomic<int> v{-1};
++	return v;
++}
++inline std::atomic<int> &videoValue() {
++	static std::atomic<int> v{-1};
++	return v;
++}
++inline std::atomic<int> &dataValue() {
++	static std::atomic<int> v{-1};
++	return v;
++}
++
++// See https://www.rfc-editor.org/rfc/rfc8837.html#section-5
++inline unsigned int audio() {
++	const int v = audioValue().load(std::memory_order_relaxed);
++	return v >= 0 ? unsigned(v) : 46; // EF: Expedited Forwarding
++}
++inline unsigned int video() {
++	const int v = videoValue().load(std::memory_order_relaxed);
++	return v >= 0 ? unsigned(v) : 36; // AF42: Assured Forwarding class 4, medium drop probability
++}
++inline unsigned int data() {
++	const int v = dataValue().load(std::memory_order_relaxed);
++	return v >= 0 ? unsigned(v) : 10; // AF11: Assured Forwarding class 1, low drop probability
++}
++
++} // namespace rtc::impl::dscp
++
++#endif
+diff --git a/src/impl/dtlssrtptransport.cpp b/src/impl/dtlssrtptransport.cpp
+index 24f73830..ad730242 100644
+--- a/src/impl/dtlssrtptransport.cpp
++++ b/src/impl/dtlssrtptransport.cpp
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include "dtlssrtptransport.hpp"
++#include "dscp.hpp"
+ #include "logcounter.hpp"
+ #include "rtp.hpp"
+ #include "tls.hpp"
+@@ -126,9 +127,9 @@ bool DtlsSrtpTransport::sendMedia(message_ptr message) {
+ 	message->resize(size);
+ 
+ 	if (message->dscp == 0) { // Track might override the value
+-		// Set recommended medium-priority DSCP value
++		// Set recommended medium-priority DSCP value, or the one set by SetDscpSettings()
+ 		// See https://www.rfc-editor.org/rfc/rfc8837.html#section-5
+-		message->dscp = 36; // AF42: Assured Forwarding class 4, medium drop probability
++		message->dscp = dscp::video(); // AF42 by default
+ 	}
+ 
+ 	return Transport::outgoing(message); // bypass DTLS DSCP marking
+diff --git a/src/impl/sctptransport.cpp b/src/impl/sctptransport.cpp
+index 552ee94b..f0c51513 100644
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -9,6 +9,7 @@
+ #include "sctptransport.hpp"
+ #include "dtlstransport.hpp"
+ #include "internals.hpp"
++#include "dscp.hpp"
+ #include "logcounter.hpp"
+ #include "utils.hpp"
+ 
+@@ -468,9 +469,9 @@ void SctpTransport::incoming(message_ptr message) {
+ }
+ 
+ bool SctpTransport::outgoing(message_ptr message) {
+-	// Set recommended medium-priority DSCP value
++	// Set recommended medium-priority DSCP value, or the one set by SetDscpSettings()
+ 	// See https://www.rfc-editor.org/rfc/rfc8837.html#section-5
+-	message->dscp = 10; // AF11: Assured Forwarding class 1, low drop probability
++	message->dscp = dscp::data(); // AF11 by default: Assured Forwarding class 1
+ 	return Transport::outgoing(std::move(message));
+ }
+ 
+diff --git a/src/impl/track.cpp b/src/impl/track.cpp
+index fa004eca..5338ab9e 100644
+--- a/src/impl/track.cpp
++++ b/src/impl/track.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "track.hpp"
+ #include "internals.hpp"
++#include "dscp.hpp"
+ #include "logcounter.hpp"
+ #include "peerconnection.hpp"
+ #include "rtp.hpp"
+@@ -212,12 +213,12 @@ bool Track::transportSend([[maybe_unused]] message_ptr message) {
+ 		if (!transport)
+ 			throw std::runtime_error("Track is not open");
+ 
+-		// Set recommended medium-priority DSCP value
++		// Set recommended medium-priority DSCP value, or the one set by SetDscpSettings()
+ 		// See https://www.rfc-editor.org/rfc/rfc8837.html#section-5
+ 		if (mMediaDescription.type() == "audio")
+-			message->dscp = 46; // EF: Expedited Forwarding
++			message->dscp = dscp::audio(); // EF by default: Expedited Forwarding
+ 		else
+-			message->dscp = 36; // AF42: Assured Forwarding class 4, medium drop probability
++			message->dscp = dscp::video(); // AF42 by default
+ 	}
+ 
+ 	return transport->sendMedia(message);

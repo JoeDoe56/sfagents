@@ -1,0 +1,118 @@
+;
+; MoonlightWebVHid.inf - "MoonlightWeb Virtual HID", the HID passthrough's driver.
+; WinUHid's INF (third_party/winuhid, MIT) under our own names: hardware id, DLL,
+; UMDF service, catalog and strings, so it never meets a WinUHid installed by
+; someone else.
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = MoonlightWebVHid.cat
+DriverVer   = ; set by stampinf
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard, NT$ARCH$.10.0...19041, NT$ARCH$.10.0...22000
+
+[Standard.NT$ARCH$.10.0...19041]
+%DeviceName% = MwVHid_Win10, Root\MoonlightWebVHid
+
+[Standard.NT$ARCH$.10.0...22000]
+%DeviceName% = MwVHid_Win11, Root\MoonlightWebVHid
+
+[SourceDisksFiles]
+MoonlightWebVHid.dll = 1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[DestinationDirs]
+UMDriverCopy = 13
+
+; =================== Windows 11+ ===================================
+
+[MwVHid_Win11.NT]
+CopyFiles = UMDriverCopy
+Include = wudfrd.inf
+Include = hidvhf.inf
+Needs = WUDFRD_UpperFilter.NT
+Needs = vhfservice.NT
+
+[MwVHid_Win11.NT.HW]
+Include = wudfrd.inf
+Include = hidvhf.inf
+Needs = WUDFRD_UpperFilter.NT.HW
+Needs = vhfservice.NT.HW
+AddReg = MwVHid_AddReg
+
+[MwVHid_Win11.NT.Services]
+Include = wudfrd.inf
+Include = hidvhf.inf
+Needs = WUDFRD_UpperFilter.NT.Services
+Needs = vhfservice.NT.Services
+
+[MwVHid_Win11.NT.Filters]
+Include = WUDFRD.inf
+Needs = WUDFRD_UpperFilter.NT.Filters
+
+[MwVHid_Win11.NT.Wdf]
+UmdfService = MoonlightWebVHid, MwVHid_Install
+UmdfServiceOrder = MoonlightWebVHid
+
+; =================== Windows 10 ====================================
+
+[MwVHid_Win10.NT]
+CopyFiles = UMDriverCopy
+Include = hidvhf.inf
+Needs = vhfservice.NT
+
+[MwVHid_Win10.NT.HW]
+Include = hidvhf.inf
+Needs = vhfservice.NT.HW
+AddReg = MwVHid_AddReg
+
+[MwVHid_Win10.NT.Services]
+Include = hidvhf.inf
+Needs = vhfservice.NT.Services
+AddService = WUDFRd, 0x1f8, WUDFRD_ServiceInstall
+
+[MwVHid_Win10.NT.Filters]
+AddFilter = WUDFRd,, WUDFRD_UpperFilterPosition
+
+[MwVHid_Win10.NT.Wdf]
+UmdfService = MoonlightWebVHid, MwVHid_Install
+UmdfServiceOrder = MoonlightWebVHid
+
+[WUDFRD_UpperFilterPosition]
+FilterPosition = Upper
+
+[WUDFRD_ServiceInstall]
+DisplayName = %WudfRdDisplayName%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\WUDFRd.sys
+
+; =================== Generic =======================================
+
+[MwVHid_Install]
+UmdfLibraryVersion = $UMDFVERSION$
+ServiceBinary = %13%\MoonlightWebVHid.dll
+
+[MwVHid_AddReg]
+; Only administrators, SYSTEM and other UMDF drivers may open the control device
+; (WinUHid's rule): an emulated HID device must not let a process bypass UIPI.
+HKR,,Security,,"D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;GA;;;UD)"
+
+[UMDriverCopy]
+MoonlightWebVHid.dll
+
+[Strings]
+ManufacturerName = "MoonlightWeb"
+DiskName = "MoonlightWeb Virtual HID Installation Disk"
+DeviceName = "MoonlightWeb Virtual HID"
+
+WudfRdDisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"

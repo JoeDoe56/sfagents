@@ -1,0 +1,12 @@
+diff --git a/src/message.cpp b/src/message.cpp
+index 0ce3256..c2ac8ca 100644
+--- a/src/message.cpp
++++ b/src/message.cpp
+@@ -39,6 +39,7 @@ message_ptr make_message(size_t size, message_ptr orig) {
+ 	message->stream = orig->stream;
+ 	message->reliability = orig->reliability;
+ 	message->frameInfo = orig->frameInfo;
++	message->dscp = orig->dscp; // DtlsSrtpTransport copies every packet: keep the track's class
+ 	return message;
+ }
+ 

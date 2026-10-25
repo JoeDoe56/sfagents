@@ -1,0 +1,493 @@
+/*
+ * MoonlightWeb — native capture & encoding engine.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "Selector.h"
+#include "Log.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace mw::native {
+namespace {
+
+const DisplayInfo* findDisplay(const Capabilities& caps, int displayId)
+{
+    // A displayId of -1 means "whatever the user is most likely to want", which
+    // is the primary display. This is what makes the single-display case a
+    // one-click experience: nothing to choose, nothing to pass.
+    if (displayId < 0) {
+        for (const DisplayInfo& d : caps.displays) {
+            if (d.primary) return &d;
+        }
+        return caps.displays.empty() ? nullptr : &caps.displays.front();
+    }
+
+    for (const DisplayInfo& d : caps.displays) {
+        if (d.id == displayId) return &d;
+    }
+    return nullptr;
+}
+
+bool gpuHasCodec(const GpuInfo& gpu, Codec codec)
+{
+    return std::find(gpu.codecs.begin(), gpu.codecs.end(), codec) != gpu.codecs.end();
+}
+
+/// The first GPU that can genuinely encode. Only reached when the display's own
+/// GPU cannot — see Selection::crossGpuCopy.
+///
+/// "Can encode" requires a codec, not merely an encoder API. The distinction is
+/// not academic: this bench has an AMD iGPU that reports the AMF runtime with an
+/// empty codec list (AMF's own capability query is not written yet). Falling
+/// back to it would pay for a cross-GPU copy and then fail codec negotiation
+/// anyway — abandoning a GPU that could actually have done the job.
+const GpuInfo* firstEncodingGpu(const Capabilities& caps)
+{
+    for (const GpuInfo& gpu : caps.gpus) {
+        if (!gpu.encoders.empty() && !gpu.codecs.empty()) return &gpu;
+    }
+    return nullptr;
+}
+
+bool hasCodec(const std::vector<Codec>& codecs, Codec codec)
+{
+    return std::find(codecs.begin(), codecs.end(), codec) != codecs.end();
+}
+
+} // namespace
+
+/// Hardware before software, then the platform probe's own order.
+///
+/// "Hardware first" is not a preference, it is the difference between a stream
+/// and a slideshow on the machines this tier exists for. A Media Foundation
+/// transform backed by fixed-function silicon costs the CPU nothing; OpenH264
+/// costs it every macroblock, on a machine that by definition had no encoder to
+/// spare.
+const FallbackEncoder* bestFallback(const Capabilities& caps)
+{
+    const FallbackEncoder* best = nullptr;
+    for (const FallbackEncoder& fb : caps.fallbacks) {
+        if (fb.api == EncoderApi::None || fb.codecs.empty()) continue;
+        if (!best) {
+            best = &fb;
+            continue;
+        }
+        if (fb.hardware && !best->hardware) best = &fb;
+    }
+    return best;
+}
+
+bool select(const Capabilities& caps, const SessionConfig& config, Selection& out,
+            std::string& error)
+{
+    // Every field is decided below or defaulted here — a Selection handed in
+    // twice must not carry the first answer's fallback flags into the second
+    // (caught by the test suite, 07/09/2026).
+    out = Selection{};
+
+    if (config.clientCodecs.empty()) {
+        // Not a default we can invent: an empty list would have the engine
+        // guessing what the browser can decode, and a wrong guess is a black
+        // screen rather than a clean refusal.
+        error = "the client listed no codecs it can decode";
+        return false;
+    }
+
+    out.display = findDisplay(caps, config.displayId);
+    if (!out.display) {
+        error = "display " + std::to_string(config.displayId) + " does not exist";
+        return false;
+    }
+
+    // ── GPU: the display's own, unless it cannot encode ──────────────────────
+    //
+    // Capturing on GPU A to encode on GPU B costs a VRAM→RAM→VRAM round trip
+    // that dwarfs every other cost in the pipeline, so the display's own GPU
+    // wins whenever it can encode at all — even if another GPU in the machine
+    // would encode "better".
+    out.gpu = caps.gpuFor(*out.display);
+    out.crossGpuCopy = false;
+
+    /// Set only on the last-resort path below; null means the codec walk reads
+    /// the GPU's list, as it always has.
+    const FallbackEncoder* fallback = nullptr;
+
+    // The bench may name the encoder's GPU outright — that is how an encoder
+    // that drives no display (an iGPU beside a discrete card) gets measured at
+    // all. A real session never sets this. The copy it costs is declared.
+    //
+    // Whether the forced GPU still has to be able to encode depends on what the
+    // machine looks like: with some other GPU encoding, forcing an encoder-less
+    // one is a bench mistake worth refusing outright, because the session would
+    // otherwise die at init with a vendor error that says nothing. With NO GPU
+    // encoding, the fallback tier below is what will run, and "which adapter"
+    // is exactly the question the bench is asking — a Media Foundation
+    // transform is enumerated per adapter LUID, so this is the only way to tell
+    // one vendor's transform from another's on a multi-GPU machine.
+    const bool forcedEncodeGpu = config.encodeGpuId >= 0;
+    if (forcedEncodeGpu) {
+        const GpuInfo* forced = nullptr;
+        for (const GpuInfo& gpu : caps.gpus)
+            if (gpu.id == config.encodeGpuId) forced = &gpu;
+        if (!forced) {
+            error = "GPU " + std::to_string(config.encodeGpuId) + " does not exist";
+            return false;
+        }
+        const bool anyGpuEncodes = firstEncodingGpu(caps) != nullptr;
+        if ((forced->encoders.empty() || forced->codecs.empty()) && anyGpuEncodes) {
+            error = "GPU " + std::to_string(config.encodeGpuId) + " ('" + forced->name +
+                    "') has no usable encoder";
+            return false;
+        }
+        out.crossGpuCopy = out.gpu != forced;
+        if (out.crossGpuCopy)
+            log::warning("[native] encoder GPU forced to '" + forced->name +
+                         "' (bench) — a cross-GPU copy per frame");
+        out.gpu = forced;
+    }
+
+    // Same rule as the fallback below: an encoder with no codec cannot encode,
+    // so a display whose GPU is in that state must look elsewhere rather than
+    // fail codec negotiation a few lines later.
+    if (!out.gpu || out.gpu->encoders.empty() || out.gpu->codecs.empty()) {
+        const GpuInfo* other = firstEncodingGpu(caps);
+        if (other) {
+            // Deliberate, and always worth saying out loud: this is the one case
+            // where the zero-copy promise is given up, and a silent regression
+            // here would look like "the engine just got slower".
+            out.crossGpuCopy = (out.gpu != nullptr);
+            log::warning(std::string("[native] display's GPU cannot encode — falling back to '") +
+                         other->name + "' with a cross-GPU copy per frame");
+            out.gpu = other;
+        } else {
+            // ── Nothing in this machine encodes. The fallback tier ───────────
+            //
+            // Reached only here, which is the whole design: while any GPU can
+            // encode, this branch does not exist and every selection is what it
+            // always was.
+            //
+            // `out.gpu` deliberately stays the display's own adapter, null or
+            // not, UNLESS the bench named another one. Capture and colour
+            // conversion run on the display's adapter either way (NativeHost
+            // takes `captureAdapterHandle` from the display's GPU, never from
+            // this one), so moving `out.gpu` moves the encoder alone — which is
+            // what a cross-GPU copy is for, and what lets one machine's two
+            // vendors' fallback transforms be compared.
+            fallback = bestFallback(caps);
+            if (!fallback) {
+                error = "no GPU on this machine has a usable encoder, and no fallback "
+                        "encoder is available either";
+                return false;
+            }
+            out.fallbackEncoder = true;
+            out.cpuEncoder = !fallback->hardware;
+            // Kept only when the bench asked for it: on its own the fallback
+            // tier encodes where it captures and costs no copy at all.
+            out.crossGpuCopy = forcedEncodeGpu && out.crossGpuCopy;
+        }
+    }
+
+    // ── Codec: the client's preference order, filtered by the GPU ────────────
+    //
+    // The client's order is authoritative, not ours: it already reflects what
+    // that browser decodes in hardware. Walking it in order and taking the
+    // first the GPU can also produce is the whole of §27 — and is why no codec
+    // question is ever put to the user.
+    //
+    // 4:4:4 narrows that walk first. The capability is per codec (NVENC has it
+    // on H.264 and HEVC, not AV1), so a client preferring AV1 with 4:4:4 on
+    // must land on the first codec that can actually carry it, not on AV1
+    // with the chroma silently dropped — the setting exists for text, and a
+    // stream that ignores it looks broken. Only when no shared codec has 4:4:4
+    // does the walk fall back to the plain one, and the session says 4:2:0.
+    //
+    // Whose list is walked is the only thing the fallback tier changes here. It
+    // is named once, so every rule below — the preference order, the 4:4:4
+    // narrowing, the "no codec in common" refusal — is the same code on both
+    // paths and cannot drift.
+    const std::vector<Codec>& available = fallback ? fallback->codecs : out.gpu->codecs;
+    const std::string encoderName = fallback ? fallback->name : (out.gpu ? out.gpu->name : "");
+
+    bool found = false;
+    out.yuv444 = false;
+    if (config.yuv444) {
+        for (Codec candidate : config.clientCodecs) {
+            // A fallback encoder carries no 4:4:4: Media Foundation's H.264
+            // transforms take NV12 and OpenH264 encodes 4:2:0 only. So this
+            // narrowing pass simply finds nothing and the plain walk below
+            // decides — which is the honest outcome, not a special case.
+            if (fallback) break;
+            if (!gpuHasCodec(*out.gpu, candidate) || !out.gpu->supports444(candidate)) continue;
+            out.codec = candidate;
+            out.yuv444 = true;
+            found = true;
+            break;
+        }
+    }
+    for (Codec candidate : config.clientCodecs) {
+        if (found) break;
+        if (!hasCodec(available, candidate)) continue;
+        out.codec = candidate;
+        found = true;
+    }
+    if (!found) {
+        error = fallback ? "this browser decodes no codec the fallback encoder can produce"
+                         : "this GPU and this browser have no video codec in common";
+        return false;
+    }
+    if (config.yuv444 && !out.yuv444) {
+        log::info(std::string("[native] 4:4:4 requested but no codec this browser and '") +
+                  encoderName + "' share can carry it — streaming 4:2:0 " + toString(out.codec));
+    } else if (out.yuv444 && out.codec != config.clientCodecs.front() &&
+               gpuHasCodec(*out.gpu, config.clientCodecs.front())) {
+        log::info(std::string("[native] 4:4:4 steers the codec to ") + toString(out.codec) + " — " +
+                  toString(config.clientCodecs.front()) + " has no 4:4:4 on this encoder");
+    }
+
+    out.encoder = fallback ? fallback->api : out.gpu->encoders.front();
+
+    if (fallback) {
+        // Said out loud, once, at the only moment it can be said accurately.
+        // This is a machine that would have been refused a native stream
+        // altogether until now, so the line has to name what saved it and at
+        // what cost — a reader who sees "software" and no explanation will go
+        // looking for the setting that turned the GPU off.
+        log::warning(std::string("[native] no GPU on this machine can encode — falling back to ") +
+                     fallback->name +
+                     (fallback->hardware ? " (hardware, via the OS)" : " (on the CPU)"));
+    }
+
+    // ── HDR: only when it is real all the way through ────────────────────────
+    //
+    // Asked for is not the same as achievable. Rather than fail — the user
+    // asked to stream, not to negotiate — the session runs SDR and reports it,
+    // and the stats overlay is where the difference shows.
+    //
+    // The fallback tier never carries it: 10-bit is a second reason for a weak
+    // machine to fall behind, and a browser that is handed PQ it cannot place
+    // shows a washed-out picture rather than an error (§21.10).
+    out.hdrCapable = !fallback && out.gpu->supports10Bit &&
+                     (out.codec == Codec::Hevc || out.codec == Codec::Av1);
+    out.hdr = config.hdr && out.hdrCapable && out.display->hdrActive;
+    if (config.hdr && !out.hdr) {
+        log::info("[native] HDR requested but not achievable here — streaming SDR");
+    }
+
+    // ── HDR and 4:4:4 are exclusive, and HDR wins ───────────────────────────
+    //
+    // 10-bit 4:4:4 exists in HEVC (Y410, profile 4) and no browser displays it:
+    // Chrome 152 accepts `hvc1.4.156`, decodes it in hardware and renders a
+    // green rectangle (measured 04/09/2026). So the pair has no encoding that
+    // could be watched, and the conversion pass refuses it outright rather
+    // than produce one.
+    //
+    // Granting both here would therefore kill the session at init() — the same
+    // shape as bug B7, where a capability nothing downstream honoured turned a
+    // ticked box into a dead stream. HDR is the one kept: it changes every
+    // pixel of a picture, where 4:4:4 changes the edges of text, and it is the
+    // one the user can see is missing.
+    if (out.hdr && out.yuv444) {
+        out.yuv444 = false;
+        log::info("[native] 4:4:4 and HDR cannot ride together (no browser decodes 10-bit "
+                  "4:4:4) — keeping HDR, streaming 4:2:0");
+    }
+
+    // ── Geometry: zero means "native", which is the default ─────────────────
+    out.width = config.width > 0 ? config.width : out.display->width;
+    out.height = config.height > 0 ? config.height : out.display->height;
+
+    // The frame keeps the display's shape; only its height is the client's.
+    // A frame of another shape is not letterboxed on every path — the
+    // bilinear conversion pass (Windows and Linux, software tier) stretches
+    // the desktop across it — so a 16:9 screen asked for 1664x1080 came out
+    // squeezed into 3:2 (Arc A380, 14/09/2026). Nothing then marks the
+    // picture as wrong: no bars for the browser's aspect probe to measure, a
+    // request honoured to the pixel. (The resample path of 17/09/2026 and
+    // macOS letterbox instead; the shape is still settled here, once.)
+    //
+    // Never upscaled, on any tier (Bruno's rule, 16/09/2026; the fallback tier
+    // alone had it before). A client whose setting is 1440p asking a 1080p
+    // display would have the host convert and encode 1.8× the pixels for no
+    // information at all — measured on the fallback tier: the Snapdragon's
+    // transform took 21 ms a picture at 1440p, the Debian VM's CPU encoder
+    // likewise (07/09/2026) — and a GPU spends bitrate on them just the same.
+    // The browser scales the picture up itself.
+    //
+    // Two readings of the request besides "this height" (frameForDisplay):
+    // a box to fit — the largest frame of the display's shape inside it — and,
+    // for a client asking for its own screen's size, the one case that may
+    // upscale, since a pixel of the frame is then a pixel of that screen
+    // (SessionConfig::fitRequestedBox, allowUpscale).
+    const FrameSize asked{out.width, out.height};
+    const FramePolicy policy = policyOf(config);
+    const FrameSize shaped =
+        frameForDisplay({out.display->width, out.display->height}, asked, policy);
+    if (shaped.width != asked.width || shaped.height != asked.height) {
+        log::info("[native] " + std::to_string(asked.width) + "x" + std::to_string(asked.height) +
+                  " asked of a " + std::to_string(out.display->width) + "x" +
+                  std::to_string(out.display->height) + " display — streaming " +
+                  std::to_string(shaped.width) + "x" + std::to_string(shaped.height) +
+                  (policy.fitBox                   ? ", the display's shape inside that box"
+                   : shaped.height != asked.height ? ", the display's own size — never upscaled"
+                                                   : ", the display's own shape"));
+    } else if (policy.allowUpscale &&
+               (shaped.width > out.display->width || shaped.height > out.display->height)) {
+        log::info("[native] " + std::to_string(shaped.width) + "x" + std::to_string(shaped.height) +
+                  " asked of a " + std::to_string(out.display->width) + "x" +
+                  std::to_string(out.display->height) +
+                  " display — upscaled, as the client's own screen size");
+    }
+    out.width = shaped.width;
+    out.height = shaped.height;
+
+    if (config.fps > 0) {
+        out.fps = config.fps;
+    } else {
+        // Round to nearest: a 143.98 Hz panel should stream at 144, not 143.
+        out.fps = (out.display->refreshMilliHz + 500) / 1000;
+    }
+    if (out.fps <= 0) out.fps = 60;
+
+    return true;
+}
+
+bool fallBackFromMatch(SessionConfig& config)
+{
+    if (!config.matchClientDisplay) return false;
+    config.matchClientDisplay = false;
+    config.allowUpscale = false;
+    config.fitRequestedBox = true;
+    if (config.fallbackWidth > 0 && config.fallbackHeight > 0) {
+        config.width = config.fallbackWidth;
+        config.height = config.fallbackHeight;
+    } else if (config.requestedWidth > 0 && config.requestedHeight > 0) {
+        config.width = config.requestedWidth;
+        config.height = config.requestedHeight;
+    }
+    return true;
+}
+
+bool sizeVirtualMonitorToClient(Capabilities& caps, SessionConfig& config)
+{
+    if (!config.matchClientDisplay || config.width <= 0 || config.height <= 0) return false;
+    DisplayInfo* made = nullptr;
+    for (DisplayInfo& d : caps.displays)
+        if (d.id == config.displayId && isMadeForStreamKey(d.key)) made = &d;
+    if (!made) return false;
+    const auto pin = [](int v) {
+        return std::min(kMadeDisplayMax, std::max(kMadeDisplayMin, v)) & ~1;
+    };
+    made->width = pin(config.width);
+    made->height = pin(config.height);
+    config.matchClientDisplay = false;
+    return true;
+}
+
+FrameSize alignedToBlocks(FrameSize frame, int block)
+{
+    if (block <= 1 || (block & (block - 1)) != 0) return frame;
+    if (frame.width <= 0 || frame.height <= 0) return frame;
+    const int w = frame.width & ~(block - 1);
+    const int h = frame.height & ~(block - 1);
+    if (w == frame.width && h == frame.height) return frame;
+    if (w < block || h < block) return FrameSize{std::max(w, block), std::max(h, block)};
+
+    // Both sides are now whole blocks, but rounding them apart moved the
+    // shape. Walk down the block grid from there — at most a few steps, since
+    // one side is at most one block short of right — and keep the pair whose
+    // shape is closest to the one asked for. The search is bounded: a frame
+    // stays within a handful of blocks of the size it came in as.
+    const double wanted = double(frame.width) / double(frame.height);
+    FrameSize best{w, h};
+    double bestErr = std::abs(double(w) / double(h) - wanted);
+    const int steps = 16;
+    for (int i = 0; i <= steps; ++i) {
+        const int cw = w - i * block;
+        if (cw < block) break;
+        // The height that comes closest to the shape at this width, snapped
+        // to the grid, never above what was asked for.
+        int ch = int(std::lround(double(cw) / wanted)) & ~(block - 1);
+        if (ch > h) ch = h;
+        if (ch < block) continue;
+        const double err = std::abs(double(cw) / double(ch) - wanted);
+        // A tie goes to the larger frame, which is the one found first.
+        if (err < bestErr - 1e-12) {
+            bestErr = err;
+            best = FrameSize{cw, ch};
+        }
+    }
+    return best;
+}
+
+FrameSize alignedToGrid(FrameSize frame, int blockWidth, int blockHeight)
+{
+    if (blockWidth < 1 || blockHeight < 1) return frame;
+    if (frame.width <= 0 || frame.height <= 0) return frame;
+    const int w = frame.width / blockWidth * blockWidth;
+    const int h = frame.height / blockHeight * blockHeight;
+    if (w == frame.width && h == frame.height) return frame;
+    if (w < blockWidth || h < blockHeight)
+        return FrameSize{std::max(w, blockWidth), std::max(h, blockHeight)};
+    // Down the width's grid, the height that keeps the shape best at each
+    // width; the first exact shape ends it, a tie goes to the larger frame.
+    const double wanted = double(frame.width) / double(frame.height);
+    FrameSize best{w, h};
+    double bestErr = std::abs(double(w) / double(h) - wanted);
+    for (int cw = w; cw >= blockWidth && bestErr > 1e-12 && cw * 2 >= w; cw -= blockWidth) {
+        int ch = int(std::lround(double(cw) / wanted)) / blockHeight * blockHeight;
+        if (ch > h) ch = h;
+        if (ch < blockHeight) continue;
+        const double err = std::abs(double(cw) / double(ch) - wanted);
+        if (err < bestErr - 1e-12) {
+            bestErr = err;
+            best = FrameSize{cw, ch};
+        }
+    }
+    return best;
+}
+
+FrameSize frameForDisplay(FrameSize display, FrameSize frame, FramePolicy policy)
+{
+    if (display.width <= 0 || display.height <= 0 || frame.width <= 0 || frame.height <= 0)
+        return frame;
+
+    FrameSize out = frame;
+    const double displayAspect = static_cast<double>(display.width) / display.height;
+    const double frameAspect = static_cast<double>(frame.width) / frame.height;
+    if (std::abs(frameAspect - displayAspect) / displayAspect > 0.005) {
+        if (!policy.fitBox) {
+            out.width = static_cast<int>(std::lround(frame.height * displayAspect)) & ~1;
+        } else if (frameAspect > displayAspect) {
+            // The box is wider than the display: its height is the limit.
+            out.width = static_cast<int>(std::lround(frame.height * displayAspect)) & ~1;
+        } else {
+            // The box is taller: its width is the limit.
+            out.height = static_cast<int>(std::lround(frame.width / displayAspect)) & ~1;
+        }
+    }
+    // Encoders take even sizes only; a box is whatever the client's screen is.
+    out.width &= ~1;
+    out.height &= ~1;
+
+    if (!policy.allowUpscale && (out.width > display.width || out.height > display.height)) {
+        out.width = display.width & ~1;
+        out.height = display.height & ~1;
+    }
+    return out;
+}
+
+} // namespace mw::native

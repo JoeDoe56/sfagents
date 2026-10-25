@@ -1,0 +1,1121 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "MoonlightShim.h"
+#include "AnnexBFiller.h"
+#include "InputWatchdog.h"
+
+#include "common/MacActivity.h"
+
+extern "C" {
+#include "Limelight.h"
+#include "PlatformSockets.h"
+}
+
+#include <QDebug>
+#include <QThread>
+#include <QMetaObject>
+#include <QMutexLocker>
+#include <QSet>
+#include <QTimer>
+#include <cstring>
+#include <cstdarg>
+
+#ifdef Q_OS_WIN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+std::atomic<MoonlightShim*> MoonlightShim::s_Instance{nullptr};
+
+MoonlightShim::MoonlightShim(QObject* parent)
+    : IMediaEngine(parent)
+{
+    // What letting go means on the GameStream wire. Each guard is the same
+    // one the input wrappers use: the watchdog may fire around a teardown,
+    // and a Li* call after LiStopConnection is not one to make.
+    InputWatchdog::Sink sink;
+    sink.releaseKey = [this](const HeldKey& k) {
+        if (!m_Connected.load(std::memory_order_acquire)) return;
+        LiSendKeyboardEvent2(k.keyCode | 0x8000, KEY_ACTION_UP, 0, k.flags);
+    };
+    sink.releaseButton = [this](int button) {
+        if (!m_Connected.load(std::memory_order_acquire)) return;
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, static_cast<char>(button));
+    };
+    sink.neutralizePad = [this](short controller, short mask) {
+        if (!m_Connected.load(std::memory_order_acquire)) return;
+        LiSendMultiControllerEvent(controller, mask, 0, 0, 0, 0, 0, 0, 0);
+    };
+    m_Watchdog = new InputWatchdog(std::move(sink), this);
+}
+
+MoonlightShim::~MoonlightShim()
+{
+    // Use blocking stop to ensure cleanup completes before destruction.
+    // Non-blocking stopConnection() defers LiStopConnection() via the
+    // QThread::finished signal, but the destructor cannot wait for that
+    // event asynchronously. A blocking call ensures LiStopConnection()
+    // runs before s_Instance is cleared and this object is destroyed.
+    if (!m_CleanupDone.load(std::memory_order_acquire)) {
+        blockingStopConnection();
+    }
+    // Only clear if we are still the registered instance. During an overlapping
+    // teardown a newer session's shim may already own s_Instance — never clobber
+    // it (that would silently drop the new connection's decode callbacks).
+    MoonlightShim* expected = this;
+    s_Instance.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+}
+
+void MoonlightShim::startConnection(const InitParams& params)
+{
+    if (m_WorkerThread) {
+        qWarning() << "[MoonlightShim] Connection already in progress";
+        return;
+    }
+
+    // Keep macOS from App Nap'ing this windowless process while streaming —
+    // timer coalescing on a background process stalls the relay event loop
+    // past the 3-frame pending bound and turns the stream into IDR churn.
+    // Released in finishCleanup() (single guaranteed teardown point).
+    MacActivity::beginStreaming();
+    m_ActivityHeld = true;
+
+    s_Instance.store(this, std::memory_order_release);
+
+    m_WorkerThread = QThread::create([this, params]() {
+        SERVER_INFORMATION serverInfo;
+        LiInitializeServerInformation(&serverInfo);
+
+        QByteArray addrBytes = params.hostAddress.toUtf8();
+        QByteArray appVerBytes = params.appVersion.toUtf8();
+        QByteArray gfeVerBytes = params.gfeVersion.toUtf8();
+        QByteArray rtspUrlBytes = params.rtspSessionUrl.toUtf8();
+
+        serverInfo.address = addrBytes.constData();
+        serverInfo.serverInfoAppVersion = appVerBytes.constData();
+        serverInfo.serverInfoGfeVersion = gfeVerBytes.isEmpty() ? nullptr : gfeVerBytes.constData();
+        serverInfo.rtspSessionUrl = rtspUrlBytes.isEmpty() ? nullptr : rtspUrlBytes.constData();
+        serverInfo.serverCodecModeSupport = params.serverCodecModeSupport;
+
+        STREAM_CONFIGURATION streamConfig;
+        LiInitializeStreamConfiguration(&streamConfig);
+        streamConfig.width = params.width;
+        streamConfig.height = params.height;
+        streamConfig.fps = params.fps;
+        streamConfig.bitrate = params.bitrateKbps;
+        streamConfig.packetSize = params.packetSize;
+        streamConfig.streamingRemotely = STREAM_CFG_LOCAL;
+        streamConfig.audioConfiguration = params.audioConfiguration;
+        streamConfig.supportedVideoFormats = params.supportedVideoFormats;
+        streamConfig.clientRefreshRateX100 = 6000;
+        streamConfig.colorSpace = params.colorSpace;
+        streamConfig.colorRange = params.colorRange;
+        streamConfig.encryptionFlags = ENCFLG_AUDIO | ENCFLG_VIDEO;
+
+        memcpy(streamConfig.remoteInputAesKey, params.aesKey.constData(), 16);
+        memset(streamConfig.remoteInputAesIv, 0, 16);
+        uint32_t iv = static_cast<uint32_t>(params.rikeyid);
+        streamConfig.remoteInputAesIv[0] = (iv >> 24) & 0xFF;
+        streamConfig.remoteInputAesIv[1] = (iv >> 16) & 0xFF;
+        streamConfig.remoteInputAesIv[2] = (iv >> 8) & 0xFF;
+        streamConfig.remoteInputAesIv[3] = iv & 0xFF;
+
+        DECODER_RENDERER_CALLBACKS drCallbacks;
+        LiInitializeVideoCallbacks(&drCallbacks);
+        drCallbacks.setup = drSetup;
+        drCallbacks.start = drStart;
+        drCallbacks.stop = drStop;
+        drCallbacks.cleanup = drCleanup;
+        drCallbacks.submitDecodeUnit = drSubmitDecodeUnit;
+        drCallbacks.capabilities = CAPABILITY_DIRECT_SUBMIT;
+
+        AUDIO_RENDERER_CALLBACKS arCallbacks;
+        LiInitializeAudioCallbacks(&arCallbacks);
+        arCallbacks.init = arInit;
+        arCallbacks.start = arStart;
+        arCallbacks.stop = arStop;
+        arCallbacks.cleanup = arCleanup;
+        arCallbacks.decodeAndPlaySample = arDecodeAndPlaySample;
+        arCallbacks.capabilities = CAPABILITY_DIRECT_SUBMIT;
+        // Mobile: advertise a "slow" decoder so moonlight-common-c requests 10ms
+        // Opus frames instead of 5ms — halves the packet rate (less RTP/FEC/crypto
+        // overhead on constrained networks) with negligible quality loss.
+        if (params.slowOpus) arCallbacks.capabilities |= CAPABILITY_SLOW_OPUS_DECODER;
+
+        CONNECTION_LISTENER_CALLBACKS clCallbacks;
+        LiInitializeConnectionCallbacks(&clCallbacks);
+        clCallbacks.stageStarting = clStageStarting;
+        clCallbacks.stageComplete = clStageComplete;
+        clCallbacks.stageFailed = clStageFailed;
+        clCallbacks.connectionStarted = clConnectionStarted;
+        clCallbacks.connectionTerminated = clConnectionTerminated;
+        clCallbacks.logMessage = clLogMessage;
+        clCallbacks.rumble = clRumble;
+        clCallbacks.connectionStatusUpdate = clConnectionStatusUpdate;
+        clCallbacks.setHdrMode = clSetHdrMode;
+
+        // Silently retry transient early-stage failures. Right after a MWServer
+        // (re)start Sunshine can reset the RTSP handshake (stage 4) or refuse the
+        // control stream (stage 8) for a second or two — commonly because it is
+        // still releasing a previous session. These recover on their own; a short
+        // wait + retry avoids bouncing the failure to the browser (which the user
+        // otherwise works around by clicking Launch several times). On failure
+        // LiStartConnection() cleans up internally, so we must NOT call
+        // LiStopConnection() between attempts — just call it again. Later stages
+        // (video/input start) are not retried here.
+        constexpr int kMaxAttempts = 4;
+        constexpr int kRetryDelayMs = 750;
+        int err = 0;
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            // The user may have quit (browser close / /quit) during the retry
+            // wait: LiInterruptConnection() was called, so don't start again.
+            if (m_Stopping.load()) break;
+
+            m_LastFailedStage.store(0, std::memory_order_release);
+            err = LiStartConnection(&serverInfo, &streamConfig, &clCallbacks, &drCallbacks,
+                                    &arCallbacks, nullptr, 0, nullptr, 0);
+            if (err == 0) break; // connected
+
+            int failedStage = m_LastFailedStage.load(std::memory_order_acquire);
+            bool retriable = failedStage > STAGE_NONE && failedStage <= STAGE_CONTROL_STREAM_START;
+            if (m_Stopping.load() || !retriable || attempt == kMaxAttempts) break;
+
+            qWarning() << "[MoonlightShim] Stage" << failedStage << "failed (err=" << err
+                       << ") — transient, retry" << attempt << "/" << (kMaxAttempts - 1) << "in"
+                       << kRetryDelayMs << "ms";
+
+            // Interruptible wait: bail out at once if the user quits mid-retry.
+            for (int waited = 0; waited < kRetryDelayMs && !m_Stopping.load(); waited += 50)
+                QThread::msleep(50);
+        }
+
+        if (err != 0 && !m_Stopping.load()) {
+            int failedStage = m_LastFailedStage.load(std::memory_order_acquire);
+            // Preserve the "Stage N failed: E" wording the frontend already parses
+            // when a stage callback fired; otherwise fall back to the raw error.
+            QString msg = failedStage > STAGE_NONE
+                              ? QString("Stage %1 failed: %2")
+                                    .arg(failedStage)
+                                    .arg(m_LastFailedError.load(std::memory_order_acquire))
+                              : QString("LiStartConnection failed: error %1 (socket=%2)")
+                                    .arg(err)
+                                    .arg(LastSocketFail());
+            qWarning() << "[MoonlightShim] Connection failed after" << kMaxAttempts
+                       << "attempt(s):" << msg;
+            emit connectionFailed(msg);
+        }
+    });
+
+    m_WorkerThread->start();
+}
+
+void MoonlightShim::stopConnection()
+{
+    // The shim shares the relay's session thread. When stopConnection() is
+    // called cross-thread (main: Session::quit, /quit), marshal it so the
+    // QThread::finished connect/deleteLater bookkeeping runs on the owning
+    // thread. Queued (non-blocking) avoids deadlock; LiInterruptConnection
+    // inside still fires promptly (it only sets an atomic flag).
+    if (QThread::currentThread() != this->thread()) {
+        QMetaObject::invokeMethod(this, [this]() { stopConnection(); }, Qt::QueuedConnection);
+        return;
+    }
+
+    // Atomic exchange prevents re-entrant calls (may be called from multiple
+    // paths: relay->stop(), Session::quit(), ~MoonlightShim()).
+    if (m_Stopping.exchange(true)) {
+        qInfo() << "[MoonlightShim::stopConnection] Already stopping, skip re-entrant call";
+        return;
+    }
+
+    qInfo() << "[MoonlightShim::stopConnection] ENTER"
+            << "m_Connected=" << m_Connected.load() << "m_WorkerThread=" << m_WorkerThread;
+
+    m_Connected = false;
+
+    // LiInterruptConnection() is thread-safe — just sets an atomic flag in
+    // moonlight-common-c. The worker thread's LiStartConnection() will check
+    // this flag (in ENet recv loops) and return early.
+    LiInterruptConnection();
+
+    // Take ownership of the worker thread pointer. From this point on,
+    // m_WorkerThread is nullptr — the thread will be cleaned up via the
+    // captured lambda or by blockingStopConnection().
+    QThread* thread = m_WorkerThread;
+    m_WorkerThread = nullptr;
+
+    if (!thread) {
+        qInfo() << "[MoonlightShim::stopConnection] No worker thread existed";
+        // LiStartConnection() was never called; no LiStopConnection() needed.
+        return;
+    }
+
+    // Thread exists — check if it already finished.
+    if (thread->isFinished()) {
+        qInfo() << "[MoonlightShim::stopConnection] Worker thread already finished, calling "
+                   "LiStopConnection() now";
+        thread->deleteLater();
+        finishCleanup();
+        return;
+    }
+
+    // Thread is still running.  Defer cleanup via the QThread::finished signal:
+    // the lambda will execute on the main thread (this QObject's thread) after
+    // the worker thread exits LiStartConnection() and run() returns.
+    //
+    // Race condition: between isFinished() and connect() below, the thread
+    // could finish and emit finished().  To handle this, we check isFinished()
+    // again AFTER connect().
+    qInfo() << "[MoonlightShim::stopConnection] Deferring LiStopConnection() via QThread::finished";
+
+    connect(thread, &QThread::finished, this, [this, thread]() {
+        thread->deleteLater();
+        finishCleanup();
+    });
+
+    // Post-connect race check: did the thread finish between isFinished() and connect()?
+    if (thread->isFinished()) {
+        qInfo() << "[MoonlightShim::stopConnection] Race: thread finished between isFinished() and "
+                   "connect()";
+        // The finished signal was already emitted (or was queued cross-thread).
+        // cleanupFn is safe to call directly; m_CleanupDone atomically guards
+        // against the queued event running it a second time.
+        finishCleanup();
+    }
+}
+
+void MoonlightShim::blockingStopConnection()
+{
+    // Called from the destructor when deferred cleanup hasn't completed yet.
+    // May also be called if stopConnection() was never invoked.
+    if (!m_Stopping.exchange(true)) {
+        m_Connected = false;
+        LiInterruptConnection();
+    }
+
+    QThread* thread = m_WorkerThread;
+    m_WorkerThread = nullptr;
+
+    if (thread) {
+        if (thread->isRunning()) {
+            qInfo() << "[MoonlightShim::blockingStopConnection] Waiting for worker thread ...";
+            if (!thread->wait(10000)) {
+                qWarning() << "[MoonlightShim::blockingStopConnection] TIMEOUT (10s)";
+            }
+        }
+        thread->deleteLater();
+    }
+
+    if (!m_CleanupDone.load(std::memory_order_acquire)) {
+        finishCleanup();
+    }
+}
+
+void MoonlightShim::finishCleanup()
+{
+    // Atomic guard: LiStopConnection() must be called exactly once, no matter
+    // how many paths race to invoke this function (finished signal, direct call
+    // from stopConnection, direct call from blockingStopConnection).
+    if (m_CleanupDone.exchange(true)) {
+        qInfo() << "[MoonlightShim::finishCleanup] Already done, skipping";
+        return;
+    }
+
+    qInfo() << "[MoonlightShim::finishCleanup] Calling LiStopConnection() ...";
+    LiStopConnection();
+    qInfo() << "[MoonlightShim::finishCleanup] LiStopConnection() returned OK";
+
+    if (m_ActivityHeld) {
+        m_ActivityHeld = false;
+        MacActivity::endStreaming();
+    }
+
+    emit connectionStopped();
+}
+
+void MoonlightShim::interruptConnection()
+{
+    LiInterruptConnection();
+}
+
+// --- Video callbacks (called from moonlight internal threads) ---
+
+int MoonlightShim::drSetup(int videoFormat, int width, int height, int redrawRate, void*, int)
+{
+    qInfo() << "[MoonlightShim] drSetup: videoFormat=" << Qt::hex << videoFormat << Qt::dec << width
+            << "x" << height << "@" << redrawRate;
+
+    // Store the negotiated video format so the session can report the
+    // actual codec to the frontend (not just the user preference).
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (instance) {
+        instance->m_NegotiatedVideoFormat.store(videoFormat, std::memory_order_release);
+    }
+
+    return 0;
+}
+
+void MoonlightShim::drStart() {}
+void MoonlightShim::drStop() {}
+void MoonlightShim::drCleanup() {}
+
+int MoonlightShim::drSubmitDecodeUnit(PDECODE_UNIT decodeUnit)
+{
+    // Take a local copy of the atomic s_Instance to close the TOCTOU window.
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (!instance) return DR_OK;
+
+    // Bail early during shutdown
+    if (instance->m_Stopping.load(std::memory_order_acquire)) {
+        return DR_OK;
+    }
+
+    // The host is alive and encoding — recorded before the drop below, which
+    // says something about the relay thread, not about Sunshine. Read by the
+    // encoder wake-up to tell "the host has nothing to send" apart from "the
+    // host is not capturing at all".
+    instance->m_LastHostFrameTimeUs.store(std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now().time_since_epoch())
+                                              .count(),
+                                          std::memory_order_release);
+    instance->m_ConsecutiveWakeNudges.store(0, std::memory_order_release);
+
+    // Worker→relay queue bound: if the relay thread is backed up, drop deltas
+    // here (before the buffer copy) so latency cannot build in the event queue.
+    // Keyframes always pass; the relay arms awaiting-IDR via the dropped flag.
+    //
+    // 12, not 3: video arrives from the host over the network and Wi-Fi
+    // aggregation delivers frames in bursts (3-4 at once every few seconds on a
+    // MacBook backend). The relay drains the queue in well under a frame
+    // interval since it moved to a dedicated thread, so a burst is transient —
+    // but with a bound of 3 every burst dropped a delta and forced an IDR
+    // round-trip (~200 KB keyframe), i.e. a visible stutter. 12 absorbs ~200 ms
+    // of burst at 60 fps while still capping runaway latency if the relay
+    // thread genuinely stalls.
+    static constexpr int kMaxPendingVideoFrames = 12;
+    if (decodeUnit->frameType != 1 &&
+        instance->m_PendingVideoFrames.load(std::memory_order_acquire) >= kMaxPendingVideoFrames) {
+        instance->m_WorkerDroppedDelta.store(true, std::memory_order_release);
+        int64_t dropCount = instance->m_WorkerDropCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        // qWarning (not stderr): this drop is the usual trigger of IDR churn and
+        // must be visible in the log file to diagnose it from a user capture.
+        if (dropCount <= 3 || dropCount % 120 == 0) {
+            qWarning() << "[MoonlightShim] Dropped delta worker-side (relay thread backlog),"
+                       << "total=" << dropCount;
+        }
+        return DR_OK;
+    }
+
+    // Record frame submit time for decode latency measurement.
+    // The relay reads this in sendFragmented() to compute end-to-end pipeline latency.
+    auto submitTime = std::chrono::steady_clock::now();
+    instance->m_FrameSubmitTimeUs.store(
+        std::chrono::duration_cast<std::chrono::microseconds>(submitTime.time_since_epoch())
+            .count(),
+        std::memory_order_release);
+
+    // ── End-to-end latency tracking ─────────────────────────────────────────
+    // Extract the frame's presentation time from the decode unit.
+    // presentationTimeUs has its epoch at the first captured frame (set to 0).
+    // The frame's capture time on the steady_clock:
+    //   captureSteadyMs = (firstFrameArrivalTimeUs + presentationTimeUs) / 1000
+    instance->m_FramePresentationTimeUs.store(decodeUnit->presentationTimeUs,
+                                              std::memory_order_release);
+
+    // Track host processing latency (capture → encode delay on Sunshine).
+    // FrameHostProcessingLatency is in 1/10 ms units. Value is 0 when unknown.
+    instance->m_FrameHostProcessingLatencyTenthMs.store(decodeUnit->frameHostProcessingLatency,
+                                                        std::memory_order_release);
+    if (decodeUnit->frameHostProcessingLatency != 0) {
+        instance->m_HostProcWindowTotalTenthMs.fetch_add(decodeUnit->frameHostProcessingLatency,
+                                                         std::memory_order_relaxed);
+        instance->m_HostProcWindowCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Track the steady_clock arrival time of the first frame.
+    // This serves as the reference epoch for capture time calculation:
+    //   captureSteadyMs = (firstFrameArrivalTimeUs + presentationTimeUs) / 1000
+    // The frontend estimates current steady_clock time from periodic stats
+    // messages (streamSteadyMs + performance.now() delta) and subtracts
+    // the capture time to get end-to-end latency.
+    if (instance->m_FirstFrameArrivalTimeUs.load(std::memory_order_acquire) == 0) {
+        int64_t nowUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(submitTime.time_since_epoch())
+                .count();
+        instance->m_FirstFrameArrivalTimeUs.store(nowUs, std::memory_order_release);
+        qInfo() << "[MoonlightShim] First frame arrival at steadyUs=" << nowUs
+                << "presentationTimeUs=" << decodeUnit->presentationTimeUs
+                << "hostProcessingLatency=" << decodeUnit->frameHostProcessingLatency;
+    }
+
+    // If a keyframe arrives and we had an outstanding IDR request, measure RTT.
+    // hostRttMs = round-trip / 2 (one-way latency from backend to Sunshine).
+    if (decodeUnit->frameType == 1) { // FRAME_TYPE_IDR
+        int64_t reqTs = instance->m_IdrRequestTimeUs.load(std::memory_order_acquire);
+        if (reqTs > 0) {
+            int64_t nowUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(submitTime.time_since_epoch())
+                    .count();
+            double rttUs = static_cast<double>(nowUs - reqTs);
+            // Only update if RTT is plausible (< 10s)
+            if (rttUs > 0 && rttUs < 10'000'000) {
+                instance->m_HostRttMs.store(rttUs / 2000.0, std::memory_order_release);
+            }
+            // Reset the request timestamp to avoid reusing stale measurements
+            instance->m_IdrRequestTimeUs.store(0, std::memory_order_release);
+        }
+    }
+
+    // Each LENTRY from moonlight-common-c already contains an Annex B start code
+    // (3 or 4 bytes: 00 00 01 or 00 00 00 01) followed by NAL data. Just concatenate
+    // them as-is to form a valid Annex B byte stream. No need to prepend start codes.
+    int bufCount = 0;
+    int totalLen = 0;
+    PLENTRY entry = decodeUnit->bufferList;
+    while (entry) {
+        totalLen += entry->length;
+        bufCount++;
+        entry = entry->next;
+    }
+
+    QByteArray frameData(totalLen, Qt::Uninitialized);
+    char* ptr = frameData.data();
+    entry = decodeUnit->bufferList;
+    while (entry) {
+        memcpy(ptr, entry->data, entry->length);
+        ptr += entry->length;
+        entry = entry->next;
+    }
+
+    static int frameCount = 0;
+    frameCount++;
+    if (frameCount <= 3) {
+        fprintf(stderr, "[MoonlightShim] drSubmitDecodeUnit frame=%d type=%d size=%d bufs=%d\n",
+                decodeUnit->frameNumber, decodeUnit->frameType, totalLen, bufCount);
+
+        // Log first 32 bytes of the first frame in hex
+        if (frameCount == 1) {
+            fprintf(stderr, "[MoonlightShim] First 32 bytes: ");
+            for (int i = 0; i < 32 && i < totalLen; i++) {
+                fprintf(stderr, "%02x ", (unsigned char)frameData[i]);
+            }
+            fprintf(stderr, "\n");
+
+            // Log first 4 buffer entries individually
+            PLENTRY e = decodeUnit->bufferList;
+            for (int i = 0; i < 4 && e; i++) {
+                fprintf(stderr, "[MoonlightShim]   buf[%d] len=%d first8=", i, e->length);
+                for (int j = 0; j < 8 && j < e->length; j++) {
+                    fprintf(stderr, "%02x ", (unsigned char)e->data[j]);
+                }
+                fprintf(stderr, "\n");
+                e = e->next;
+            }
+        }
+        fflush(stderr);
+    }
+
+    // Filler NALs out before anything else sees the frame: a CBR encoder's
+    // padding is bandwidth on the link and, placed ahead of the slice, a
+    // keyframe some decoders refuse (AnnexBFiller.h). AV1 has no start codes.
+    const int videoFormat = instance->m_NegotiatedVideoFormat.load(std::memory_order_acquire);
+    if (videoFormat & (VIDEO_FORMAT_MASK_H264 | VIDEO_FORMAT_MASK_H265)) {
+        const size_t kept = AnnexBFiller::strip(reinterpret_cast<uint8_t*>(frameData.data()),
+                                                static_cast<size_t>(frameData.size()),
+                                                (videoFormat & VIDEO_FORMAT_MASK_H265) != 0);
+        if (kept != static_cast<size_t>(frameData.size())) {
+            const int64_t strippedBytes = frameData.size() - static_cast<int64_t>(kept);
+            frameData.truncate(static_cast<int>(kept));
+            const int64_t frames =
+                instance->m_FillerFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+            const int64_t total =
+                instance->m_FillerBytes.fetch_add(strippedBytes, std::memory_order_relaxed) +
+                strippedBytes;
+            if (frames == 1 || frames % 1800 == 0) {
+                qInfo() << "[MoonlightShim] Host pads its frames with filler data — not sent:"
+                        << strippedBytes << "bytes off frame" << decodeUnit->frameNumber << "("
+                        << kept << "kept);" << frames << "frames," << (total / 1024) << "KB so far";
+            }
+        }
+    }
+
+    // Measure the time spent in buffer concatenation — contributes to decode latency.
+    auto concatEnd = std::chrono::steady_clock::now();
+    instance->m_LastDecodeLatencyUs.store(
+        std::chrono::duration_cast<std::chrono::microseconds>(concatEnd - submitTime).count(),
+        std::memory_order_release);
+
+    // Use the local copy — safe even if main thread clears s_Instance concurrently.
+    // Count the in-flight frame before emitting (decremented in relay onVideoFrame).
+    instance->m_PendingVideoFrames.fetch_add(1, std::memory_order_acq_rel);
+    emit instance->videoFrameReady(frameData, decodeUnit->frameType, decodeUnit->frameNumber,
+                                   static_cast<qint64>(decodeUnit->presentationTimeUs));
+    return DR_OK;
+}
+
+// --- Audio callbacks ---
+
+int MoonlightShim::arInit(int, const POPUS_MULTISTREAM_CONFIGURATION opusConfig, void*, int)
+{
+    // Capture the Opus frame size so the relay can pace the RTP audio timestamp
+    // by a clean per-packet increment (avoids robotic audio from a jittery clock).
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (instance && opusConfig && opusConfig->samplesPerFrame > 0) {
+        instance->m_AudioSamplesPerFrame.store(opusConfig->samplesPerFrame,
+                                               std::memory_order_release);
+    }
+    return 0;
+}
+
+void MoonlightShim::arStart() {}
+void MoonlightShim::arStop() {}
+void MoonlightShim::arCleanup() {}
+
+void MoonlightShim::arDecodeAndPlaySample(char* sampleData, int sampleLength)
+{
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (!instance) return;
+    if (instance->m_Stopping.load(std::memory_order_acquire)) return;
+    QByteArray data(sampleData, sampleLength);
+    emit instance->audioSampleReady(data);
+}
+
+// --- Connection listener callbacks ---
+
+void MoonlightShim::clStageStarting(int stage)
+{
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (!instance || instance->m_Stopping.load()) return;
+    emit instance->stageChanged(stage);
+}
+
+void MoonlightShim::clStageComplete(int stage)
+{
+    Q_UNUSED(stage);
+}
+
+void MoonlightShim::clStageFailed(int stage, int errorCode)
+{
+    fprintf(stderr, "[MoonlightShim] Stage %d failed, error=%d\n", stage, errorCode);
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (!instance || instance->m_Stopping.load()) return;
+    // Record the failure only — do NOT emit connectionFailed here. Emitting on the
+    // first stage failure would abort the whole session before any retry: right
+    // after a MWServer (re)start Sunshine can transiently reset the RTSP handshake
+    // (stage 4) or refuse the control stream (stage 8). startConnection()'s retry
+    // loop reads these after LiStartConnection() returns and decides whether to
+    // retry silently or surface the error.
+    instance->m_LastFailedStage.store(stage, std::memory_order_release);
+    instance->m_LastFailedError.store(errorCode, std::memory_order_release);
+}
+
+void MoonlightShim::clConnectionStarted()
+{
+    fprintf(stderr, "[MoonlightShim] Connection started\n");
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (!instance || instance->m_Stopping.load()) return;
+    instance->m_Connected.store(true, std::memory_order_release);
+    instance->m_ConnectedTimeUs.store(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count(),
+                                      std::memory_order_release);
+    emit instance->connectionStarted();
+}
+
+void MoonlightShim::clConnectionTerminated(int errorCode)
+{
+    fprintf(stderr, "[MoonlightShim] Connection terminated, code=%d socketErr=%d\n", errorCode,
+            LastSocketFail());
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (!instance || instance->m_Stopping.load()) return;
+    instance->m_Connected.store(false, std::memory_order_release);
+    emit instance->connectionTerminated(errorCode);
+}
+
+void MoonlightShim::clLogMessage(const char* format, ...)
+{
+    char buffer[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    // No fflush: stderr is unbuffered by default and this path can be hot.
+    fprintf(stderr, "[moonlight] %s", buffer);
+}
+
+void MoonlightShim::clRumble(unsigned short controller, unsigned short low, unsigned short high)
+{
+    MoonlightShim* instance = s_Instance.load(std::memory_order_acquire);
+    if (!instance || instance->m_Stopping.load()) return;
+    // Undo the numbering shift applied on the way out (applyControllerOffset).
+    // The host answers with the number IT knows, so a session with an offset —
+    // every invited player — would otherwise hand the browser an index its
+    // navigator.getGamepads() has nothing at, and the pad would simply never
+    // buzz. The owner's own sessions run at offset 0 and are unaffected, which
+    // is why this stayed invisible.
+    //
+    // A saturated shift cannot be inverted exactly, but reaching the clamp
+    // already means two client pads collapsed onto one host pad, and that
+    // ambiguity is inherent rather than introduced here.
+    const int clientNumber = qMax(0, static_cast<int>(controller) - instance->m_ControllerOffset);
+    // Forward to the relay (queued: this runs on the moonlight worker thread).
+    emit instance->rumble(clientNumber, low, high);
+}
+void MoonlightShim::clConnectionStatusUpdate(int) {}
+void MoonlightShim::clSetHdrMode(bool) {}
+
+// --- Input wrappers ---
+
+void MoonlightShim::sendKeyEvent(short keyCode, bool down, char modifiers, char flags, bool hold)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    HeldKey k;
+    k.keyCode = keyCode;
+    k.modifiers = modifiers;
+    k.flags = flags;
+    k.hold = hold;
+    m_Watchdog->noteKey(k, down);
+    LiSendKeyboardEvent2(keyCode | 0x8000, down ? KEY_ACTION_DOWN : KEY_ACTION_UP, modifiers,
+                         flags);
+}
+
+void MoonlightShim::captureHostLockState(bool hostIsSelf)
+{
+#ifdef Q_OS_WIN
+    if (hostIsSelf) {
+        int state = 0;
+        if (GetKeyState(VK_NUMLOCK) & 0x01) state |= 0x1;
+        if (GetKeyState(VK_CAPITAL) & 0x01) state |= 0x2;
+        if (GetKeyState(VK_SCROLL) & 0x01) state |= 0x4;
+        m_HostLockState.store(state, std::memory_order_release);
+        qInfo() << "[MoonlightShim] Host lock state captured:"
+                << "NumLock" << bool(state & 0x1) << "CapsLock" << bool(state & 0x2) << "ScrollLock"
+                << bool(state & 0x4);
+        return;
+    }
+#else
+    Q_UNUSED(hostIsSelf);
+#endif
+    m_HostLockState.store(-1, std::memory_order_release);
+}
+
+void MoonlightShim::syncLockKeys(bool numLock, bool capsLock, bool scrollLock)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    // -1 = no snapshot (remote host / unsupported platform): fall back to each
+    // lock's hardware default rather than to a blanket "all off". NumLock is on
+    // at boot on virtually every desktop — the BIOS sets it and the desktop
+    // environment restores it — while Caps and Scroll are off.
+    //
+    // Guessing OFF for NumLock is what broke numpads on Linux hosts: the
+    // client's NumLock is normally on too, so the sync tapped a host that was
+    // already aligned and turned its numpad into a cursor pad. Windows never
+    // showed it because Sunshine injects VK_NUMPAD1 literally there and the
+    // host's lock state never enters the picture; on Linux the same key becomes
+    // evdev KEY_KP1, which xkb reads as End while NumLock is off.
+    const int hostState = m_HostLockState.load(std::memory_order_acquire);
+    const bool hostKnown = hostState >= 0;
+    const struct
+    {
+        short vk;
+        int bit;
+        const char* name;
+        bool client;
+        bool assumed; // state to presume when the host's is unreadable
+    } locks[] = {
+        {0x90, 0x1, "NumLock", numLock, true},        // VK_NUMLOCK
+        {0x14, 0x2, "CapsLock", capsLock, false},     // VK_CAPITAL
+        {0x91, 0x4, "ScrollLock", scrollLock, false}, // VK_SCROLL
+    };
+    for (const auto& lock : locks) {
+        const bool host = hostKnown ? bool(hostState & lock.bit) : lock.assumed;
+        if (host == lock.client) continue;
+        qInfo() << "[MoonlightShim] Lock sync:" << lock.name << "host" << host << "-> client"
+                << lock.client;
+        sendKeyEvent(lock.vk, true, 0, 0);
+        sendKeyEvent(lock.vk, false, 0, 0);
+    }
+}
+
+void MoonlightShim::sendUtf8Text(const QString& text)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    if (text.isEmpty()) return;
+    QByteArray utf8 = text.toUtf8();
+    LiSendUtf8TextEvent(utf8.constData(), static_cast<unsigned int>(utf8.size()));
+}
+
+void MoonlightShim::sendSecureAttention()
+{
+    // GameStream has no message for it, so what goes over the wire is the
+    // combination itself — the same three keys a physical keyboard sends. On a
+    // host whose own service can raise the secure desktop (Sunshine running as
+    // one) that is what it takes; anywhere else it is three ordinary keys, and
+    // the prompt stays out of reach. Better than refusing: the common case on
+    // the other side is an ordinary desktop, where Ctrl+Alt+Suppr does open the
+    // security screen when the host can show it.
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    constexpr short kCtrl = 0x11, kAlt = 0x12, kDelete = 0x2E;
+    sendKeyEvent(kCtrl, true, 0, 0);
+    sendKeyEvent(kAlt, true, 0, 0);
+    sendKeyEvent(kDelete, true, 0, 0);
+    sendKeyEvent(kDelete, false, 0, 0);
+    sendKeyEvent(kAlt, false, 0, 0);
+    sendKeyEvent(kCtrl, false, 0, 0);
+}
+
+void MoonlightShim::sendKeyChar(const QString& ch, bool down, char /*modifiers*/,
+                                const CharKeyHints& /*hints*/)
+{
+    // The modifier mask is dropped on purpose: on GameStream the modifier
+    // state belongs to the host, and a text event carries none anyway. So are
+    // the hints: no plan sends a chord here as text (InputMsg::resolveKey).
+    // Only the press: the text event types the character outright, so acting on
+    // the release too would double every keystroke.
+    if (down) sendUtf8Text(ch);
+}
+
+int MoonlightShim::hostIpTtl() const
+{
+    return LiGetHostIpTtl();
+}
+
+void MoonlightShim::sendMouseMove(short deltaX, short deltaY)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    LiSendMouseMoveEvent(deltaX, deltaY);
+}
+
+void MoonlightShim::sendMousePosition(short x, short y, short referenceWidth, short referenceHeight)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    LiSendMousePositionEvent(x, y, referenceWidth, referenceHeight);
+}
+
+void MoonlightShim::sendMouseButton(bool down, int button, bool hold)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    m_Watchdog->noteButton(button, down, hold);
+    LiSendMouseButtonEvent(down ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE,
+                           static_cast<char>(button));
+}
+
+// Hold back everything that is not yet a whole notch, returning the amount to
+// send (0 = nothing yet). Mirrors what Sunshine itself does when its
+// `high_resolution_scrolling` option is off — done here so it holds whatever
+// that install's setting is, and so it covers every client and every input path
+// (wheel, trackpad gesture, touch drag) at once.
+//
+// Only for a host that needs it. Linux throws sub-notch amounts away: inputtino
+// computes REL_WHEEL = amount / 120 with no accumulator, so every delta a
+// trackpad or a touch drag produces floors to zero clicks and survives only if
+// the session consumes the REL_WHEEL_HI_RES companion event, which X11 sessions
+// routinely do not. Windows and macOS both keep the leftovers, and quantizing
+// them is a real loss — it turns a trackpad or a high-res wheel into a ratchet.
+// Which host is which is HostOsProbe's job; this is only the mechanism.
+static short quantizeScroll(short amount, int& carry)
+{
+    constexpr int kWheelDelta = 120;
+    // Most notches that still fit the packet's signed 16-bit field. A burst
+    // large enough to hit this stays in the carry and rides the next event out.
+    constexpr int kMaxNotches = 32767 / kWheelDelta; // 273 → 32760
+
+    carry += amount;
+    int notches = carry / kWheelDelta; // truncates toward zero, so a reversal
+    if (notches == 0) return 0;        // never strands what the carry holds
+    notches = qBound(-kMaxNotches, notches, kMaxNotches);
+    carry -= notches * kWheelDelta;
+    return static_cast<short>(notches * kWheelDelta);
+}
+
+// The exact amount, plus whatever a spell of quantization left behind. Without
+// draining the carry here, turning quantization off mid-stream — which is what
+// happens when the host's OS is only established once its packets arrive —
+// would strand up to a notch of travel for the rest of the session.
+static short exactScroll(short amount, int& carry)
+{
+    const int total = qBound(-32768, carry + amount, 32767);
+    carry = 0;
+    return static_cast<short>(total);
+}
+
+void MoonlightShim::sendMouseScroll(short scrollAmount)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    scrollAmount = m_QuantizeScroll.load(std::memory_order_relaxed)
+                       ? quantizeScroll(scrollAmount, m_VScrollCarry)
+                       : exactScroll(scrollAmount, m_VScrollCarry);
+    if (scrollAmount == 0) return;
+    LiSendHighResScrollEvent(scrollAmount);
+}
+
+void MoonlightShim::sendMouseHScroll(short scrollAmount)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    scrollAmount = m_QuantizeScroll.load(std::memory_order_relaxed)
+                       ? quantizeScroll(scrollAmount, m_HScrollCarry)
+                       : exactScroll(scrollAmount, m_HScrollCarry);
+    if (scrollAmount == 0) return;
+    // Sunshine-only extension: returns LI_ERR_UNSUPPORTED on other hosts, which
+    // is fine — vertical scrolling keeps working either way.
+    LiSendHighResHScrollEvent(scrollAmount);
+}
+
+// Standard gamepad button set exposed by the browser Gamepad API
+// ("standard mapping"): A/B/X/Y, dpad, bumpers, start/back, stick clicks, guide.
+static constexpr int kStandardGamepadButtons =
+    A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG | LEFT_FLAG | RIGHT_FLAG | LB_FLAG |
+    RB_FLAG | PLAY_FLAG | BACK_FLAG | LS_CLK_FLAG | RS_CLK_FLAG | SPECIAL_FLAG;
+
+// How many pads a shifted session may address. Four, like the native host's
+// XInput ceiling, so a guest gets the same answer whichever host they land on.
+// The wire itself goes further — moonlight-common-c numbers pads 0..15 and the
+// mask has sixteen bits, which Sunshine and Apollo honour — so this is one
+// constant to raise if a fifth player ever matters more than that symmetry.
+static constexpr int kMaxShiftedGamepads = 4;
+
+// Shift a client's controller number (and its mask bit) into this session's own
+// range. Concurrent sessions each number their pads from 0, so without the
+// offset every invited player's gamepad lands on the host's controller 0 and
+// they fight over one virtual pad.
+//
+// Past the ceiling the number used to be clamped to the last pad, which put two
+// players on one controller — the very collision the offset exists to prevent.
+// Now the pad is refused (false), and the caller says so once, at the arrival,
+// exactly as VigemGamepad::arrive does past its four slots.
+bool MoonlightShim::applyControllerOffset(short& controllerNumber, short& activeGamepadMask) const
+{
+    if (m_ControllerOffset <= 0) return true;
+    const int shifted = controllerNumber + m_ControllerOffset;
+    if (shifted < 0 || shifted >= kMaxShiftedGamepads) return false;
+    controllerNumber = static_cast<short>(shifted);
+    // The mask says which pads exist; move this session's bits with the number.
+    activeGamepadMask =
+        static_cast<short>((static_cast<int>(activeGamepadMask) & 0xF) << m_ControllerOffset);
+    activeGamepadMask = static_cast<short>(activeGamepadMask | (1 << shifted));
+    return true;
+}
+
+void MoonlightShim::sendControllerArrival(uint8_t controllerNumber, uint16_t activeGamepadMask,
+                                          uint8_t type, bool hasRumble)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    short num = static_cast<short>(controllerNumber);
+    short mask = static_cast<short>(activeGamepadMask);
+    if (!applyControllerOffset(num, mask)) {
+        // Said here, where the client announces the pad, and not on every
+        // state update that follows. A pad that silently does nothing is the
+        // worst way for a guest to learn there was no slot for it.
+        qWarning() << "[MoonlightShim] gamepad" << (controllerNumber + m_ControllerOffset)
+                   << "has no slot on this host —" << kMaxShiftedGamepads
+                   << "at most for shifted sessions; it is ignored";
+        return;
+    }
+    // Browser triggers are always analog; rumble depends on the gamepad's
+    // vibrationActuator (reported by the client). Gyro/touchpad/LED are not
+    // reachable via the Gamepad API, so they are not advertised.
+    uint16_t caps = LI_CCAP_ANALOG_TRIGGERS;
+    if (hasRumble) caps |= LI_CCAP_RUMBLE;
+    LiSendControllerArrivalEvent(static_cast<uint8_t>(num), static_cast<uint16_t>(mask), type,
+                                 kStandardGamepadButtons, caps);
+}
+
+void MoonlightShim::sendControllerState(short controllerNumber, short activeGamepadMask,
+                                        int buttonFlags, unsigned char leftTrigger,
+                                        unsigned char rightTrigger, short leftStickX,
+                                        short leftStickY, short rightStickX, short rightStickY)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    // Refused at the arrival, already logged there: nothing to send for it.
+    if (!applyControllerOffset(controllerNumber, activeGamepadMask)) return;
+    // Tracked AFTER the shift, so the watchdog neutralizes the pad under the
+    // number the host knows it by. A removal — empty state with the mask bit
+    // cleared — reads as at-rest and simply drops out of the set.
+    m_Watchdog->notePad(controllerNumber, activeGamepadMask,
+                        InputWatchdog::padAtRest(buttonFlags, leftTrigger, rightTrigger, leftStickX,
+                                                 leftStickY, rightStickX, rightStickY));
+    LiSendMultiControllerEvent(controllerNumber, activeGamepadMask, buttonFlags, leftTrigger,
+                               rightTrigger, leftStickX, leftStickY, rightStickX, rightStickY);
+}
+
+void MoonlightShim::sendControllerRemoval(uint8_t controllerNumber, uint16_t activeGamepadMask)
+{
+    // GameStream has no removal message: an empty state whose mask bit is
+    // cleared is the removal, and the host reads it as one. Deliberately the
+    // same call the relays used to make directly — the interface gained a name
+    // for the intent, this end did not change what goes on the wire.
+    sendControllerState(static_cast<short>(controllerNumber), static_cast<short>(activeGamepadMask),
+                        0, 0, 0, 0, 0, 0, 0);
+}
+
+// --- Input watchdog --------------------------------------------------------
+// Contract and rationale: InputWatchdog.h. The state and the timer live
+// there; this end only feeds it and puts its decisions on the wire.
+
+qint64 MoonlightShim::noteClientAlive()
+{
+    return m_Watchdog->noteClientAlive();
+}
+
+void MoonlightShim::releaseHeldInputs(bool includeHold)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+    m_Watchdog->release(includeHold);
+}
+
+void MoonlightShim::syncHeldInputs(const QVector<HeldKey>& keys, quint32 buttonMask,
+                                   bool buttonsHold)
+{
+    if (!m_Connected.load(std::memory_order_acquire)) return;
+
+    const InputWatchdog::SyncDiff diff = m_Watchdog->sync(keys, buttonMask, buttonsHold);
+
+    for (const HeldKey& k : diff.release)
+        LiSendKeyboardEvent2(k.keyCode | 0x8000, KEY_ACTION_UP, 0, k.flags);
+    for (const HeldKey& k : diff.press)
+        LiSendKeyboardEvent2(k.keyCode | 0x8000, KEY_ACTION_DOWN, k.modifiers, k.flags);
+    for (int b : diff.buttonsUp)
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, static_cast<char>(b));
+    for (int b : diff.buttonsDown)
+        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, static_cast<char>(b));
+
+    if (!diff.press.isEmpty() || !diff.buttonsDown.isEmpty()) {
+        qInfo() << "[MoonlightShim] Input resync: re-pressed" << diff.press.size() << "key(s) and"
+                << diff.buttonsDown.size() << "button(s) released during a stall";
+    }
+}
+
+void MoonlightShim::requestIdrFrame()
+{
+    if (!m_Connected.load(std::memory_order_acquire)) {
+        qWarning() << "[MoonlightShim] requestIdrFrame skipped — not connected";
+        return;
+    }
+    // Record the request timestamp for RTT measurement.
+    // When the next keyframe arrives in drSubmitDecodeUnit(), we compute
+    // hostRttMs = (now - requestTimestamp) / 2 (half round-trip).
+    m_IdrRequestTimeUs.store(std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count(),
+                             std::memory_order_release);
+    qInfo() << "[MoonlightShim] Calling LiRequestIdrFrame() to request IDR from Sunshine";
+    LiRequestIdrFrame();
+
+    // The request above is worthless while the host captures nothing: give it
+    // something to capture — now if the host is already silent, and on the
+    // timer for the far more common case where the request rides the last
+    // frame the host had to send.
+    maybeWakeHostEncoder();
+    armEncoderWakeTimer();
+}
+
+void MoonlightShim::armEncoderWakeTimer()
+{
+    // QTimer is thread-affine; IDR requests come from the relay thread.
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this]() { armEncoderWakeTimer(); }, Qt::QueuedConnection);
+        return;
+    }
+    if (!m_EncoderWakeTimer) {
+        m_EncoderWakeTimer = new QTimer(this);
+        m_EncoderWakeTimer->setTimerType(Qt::CoarseTimer);
+        connect(m_EncoderWakeTimer, &QTimer::timeout, this, &MoonlightShim::onEncoderWakeTick);
+    }
+    if (!m_EncoderWakeTimer->isActive()) m_EncoderWakeTimer->start(1000);
+}
+
+void MoonlightShim::onEncoderWakeTick()
+{
+    if (!m_Connected.load(std::memory_order_acquire)) {
+        if (m_EncoderWakeTimer) m_EncoderWakeTimer->stop();
+        return;
+    }
+    // Zeroed by the keyframe that answers it (see drSubmitDecodeUnit), so a
+    // non-zero timestamp means a client is still waiting for a picture.
+    if (m_IdrRequestTimeUs.load(std::memory_order_acquire) == 0) {
+        if (m_EncoderWakeTimer) m_EncoderWakeTimer->stop();
+        return;
+    }
+    maybeWakeHostEncoder();
+}
+
+void MoonlightShim::maybeWakeHostEncoder()
+{
+    if (!m_WakeNudgeAllowed.load(std::memory_order_acquire)) return;
+
+    const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+
+    // A host that sent a frame recently is encoding: the IDR just requested
+    // will ride its next capture, no nudge needed. Before the first frame of a
+    // session there is nothing to compare against — measure from the moment
+    // the connection came up instead, so a session whose very first keyframe
+    // was lost on the browser link (the standby leg of a quality switch, a
+    // relaunch on a congested link) still gets woken up.
+    const int64_t lastFrameUs = m_LastHostFrameTimeUs.load(std::memory_order_acquire);
+    const int64_t sinceRefUs =
+        lastFrameUs != 0 ? lastFrameUs : m_ConnectedTimeUs.load(std::memory_order_acquire);
+    if (sinceRefUs == 0) return; // no connection yet: nothing to wake
+    const int64_t sinceUs = nowUs - sinceRefUs;
+    if (sinceUs < static_cast<int64_t>(kEncoderIdleMs) * 1000) return;
+
+    const int64_t lastNudgeUs = m_LastWakeNudgeUs.load(std::memory_order_acquire);
+    if (lastNudgeUs != 0 && nowUs - lastNudgeUs < static_cast<int64_t>(kWakeNudgeCooldownMs) * 1000)
+        return;
+
+    // Reset by every frame the host sends: the cap counts attempts within one
+    // stall, not over the session. Once spent, the pointer is not what stands
+    // between us and a frame — stop shaking it.
+    const int attempt = m_ConsecutiveWakeNudges.load(std::memory_order_acquire) + 1;
+    if (attempt > kMaxWakeNudges) return;
+    m_ConsecutiveWakeNudges.store(attempt, std::memory_order_release);
+    m_LastWakeNudgeUs.store(nowUs, std::memory_order_release);
+
+    qInfo() << "[MoonlightShim] Host silent for" << (sinceUs / 1000)
+            << "ms with an IDR pending — nudging the pointer to force a capture (attempt" << attempt
+            << "of" << kMaxWakeNudges << ")";
+    // One pixel out and back: enough damage for Sunshine to capture, small
+    // enough to be invisible in a game. Both events are sent even at a screen
+    // edge, where the host clamps one of them (worst case: a 1px drift).
+    LiSendMouseMoveEvent(1, 0);
+    LiSendMouseMoveEvent(-1, 0);
+}
+
+double MoonlightShim::hostRttMs() const
+{
+    // ENet control-stream RTT (same source as moonlight-qt's "Average network
+    // latency"). Only valid between LiStartConnection and LiStopConnection.
+    if (m_Connected.load(std::memory_order_acquire)) {
+        uint32_t rttMs = 0;
+        uint32_t rttVarianceMs = 0;
+        if (LiGetEstimatedRttInfo(&rttMs, &rttVarianceMs) && rttMs > 0) {
+            return rttMs / 2.0;
+        }
+    }
+    return m_HostRttMs.load(std::memory_order_acquire);
+}
+
+double MoonlightShim::takeHostProcessingLatencyMs()
+{
+    const int64_t count = m_HostProcWindowCount.exchange(0, std::memory_order_acq_rel);
+    const int64_t totalTenthMs =
+        m_HostProcWindowTotalTenthMs.exchange(0, std::memory_order_acq_rel);
+    if (count <= 0) return 0.0;
+    return (totalTenthMs / 10.0) / count;
+}

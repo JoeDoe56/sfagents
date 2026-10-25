@@ -1,0 +1,70 @@
+diff --git a/src/udp.c b/src/udp.c
+index fddd773..0afe85c 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -247,15 +247,9 @@ int udp_sendto_self(socket_t sock, const char *data, size_t size) {
+ }
+ 
+ int udp_set_diffserv(socket_t sock, int ds) {
+-#ifdef _WIN32
+-	// IP_TOS has been intentionally broken on Windows in favor of a convoluted proprietary
+-	// mechanism called qWave. Thank you Microsoft!
+-	// TODO: Investigate if DSCP can be still set directly without administrator flow configuration.
+-	(void)sock;
+-	(void)ds;
+-	JLOG_INFO("IP Differentiated Services are not supported on Windows");
+-	return -1;
+-#else
++	// Windows ignored IP_TOS on user sockets for a long time, in favor of qWave. Current versions
++	// honour it again for the values WebRTC uses (EF, AF4x, AF1x); values from CS6 up need
++	// administrator rights and fail with WSAEACCES.
+ 	addr_record_t name;
+ 	name.len = sizeof(name.addr);
+ 	name.socktype = SOCK_DGRAM;
+@@ -267,7 +261,7 @@ int udp_set_diffserv(socket_t sock, int ds) {
+ 	switch (name.addr.ss_family) {
+ 	case AF_INET:
+ #ifdef IP_TOS
+-		if (setsockopt(sock, IPPROTO_IP, IP_TOS, &ds, sizeof(ds)) < 0) {
++		if (setsockopt(sock, IPPROTO_IP, IP_TOS, (const char *)&ds, sizeof(ds)) < 0) {
+ 			JLOG_WARN("Setting IP ToS failed, errno=%d", sockerrno);
+ 			return -1;
+ 		}
+@@ -277,25 +271,26 @@ int udp_set_diffserv(socket_t sock, int ds) {
+ 		return -1;
+ #endif
+ 
+-	case AF_INET6:
++	case AF_INET6: {
++		int ok = 0;
+ #ifdef IPV6_TCLASS
+-		if (setsockopt(sock, IPPROTO_IPV6, IPV6_TCLASS, &ds, sizeof(ds)) < 0) {
++		if (setsockopt(sock, IPPROTO_IPV6, IPV6_TCLASS, (const char *)&ds, sizeof(ds)) == 0)
++			ok = 1;
++#endif
++#ifdef IP_TOS
++		// A dual-stack socket also needs IP_TOS for IPv4-mapped peers on some systems
++		if (setsockopt(sock, IPPROTO_IP, IP_TOS, (const char *)&ds, sizeof(ds)) == 0)
++			ok = 1;
++#endif
++		if (!ok) {
+ 			JLOG_WARN("Setting IPv6 traffic class failed, errno=%d", sockerrno);
+ 			return -1;
+ 		}
+-#ifdef IP_TOS
+-		// Attempt to also set IP_TOS for IPv4, in case the system requires it
+-		setsockopt(sock, IPPROTO_IP, IP_TOS, &ds, sizeof(ds));
+-#endif
+ 		return 0;
+-#else
+-		JLOG_INFO("Setting IPv6 traffic class is not supported");
+-		return -1;
+-#endif
++	}
+ 	default:
+ 		return -1;
+ 	}
+-#endif
+ }
+ 
+ uint16_t udp_get_port(socket_t sock) {

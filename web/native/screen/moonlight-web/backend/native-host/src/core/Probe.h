@@ -1,0 +1,95 @@
+/*
+ * MoonlightWeb — native capture & encoding engine.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include "mw/native/Capabilities.h"
+#include "mw/native/SessionConfig.h"
+
+#include <vector>
+
+// The platform seam for capability detection.
+//
+// Each OS backend implements these three; core/Probe.cpp owns the order they
+// are asked in and the rules for combining their answers, so the "why is the
+// engine unavailable" logic exists exactly once instead of three times.
+
+namespace mw::native {
+
+/// The full capability probe: asks the platform seam below in a fixed order and
+/// combines the answers. NativeHost::probe() forwards to this; platform code
+/// calls it directly when it needs a fresh view of the machine.
+Capabilities probe();
+
+} // namespace mw::native
+
+namespace mw::native::platform {
+
+/// Whether this process can reach an interactive desktop at all.
+///
+/// This is the check that Windows makes unavoidable: MoonlightWeb normally runs
+/// as an NSSM service in session 0, where neither DXGI Desktop Duplication nor
+/// SendInput work — so a native session has to be launched into the console
+/// session instead. Answering it here, before anything else is attempted, is
+/// what turns a confusing cascade of API failures into one clear verdict.
+///
+/// Non-Windows platforms answer from their own display-server presence.
+bool hasInteractiveSession();
+
+/// Whether the OS is recent enough for the APIs this engine requires:
+/// Windows 10 2004+, macOS 12.3+, or Linux with PipeWire 0.3 and a ScreenCast
+/// portal.
+bool isOsSupported();
+
+/// Enumerate GPUs and displays, and work out which GPU drives which display
+/// (§12 — the association that decides whether the pipeline is zero-copy).
+///
+/// Fills `caps.gpus`, `caps.displays` and `caps.capture`. Returns the reason on
+/// failure, or Unavailability::None on success. Must not throw.
+Unavailability enumerate(Capabilities& caps);
+
+/// Fill `caps.fallbacks` with the encoders this OS can offer when no GPU has
+/// one: a hardware Media Foundation transform, the OS's own software transform,
+/// OpenH264 on the CPU — whatever this platform actually has.
+///
+/// Called by probe() **only** when no GPU can encode, because it is allowed to
+/// be expensive (enumerating transforms, instantiating a codec) where the rest
+/// of the probe is not — it runs on every host-list refresh.
+///
+/// Contract: push best first, hardware before CPU. A platform with nothing to
+/// offer leaves the vector empty, which is a clean "this machine cannot stream"
+/// rather than a failure. Must not throw.
+void probeFallbackEncoders(Capabilities& caps);
+
+/// The codecs a session's own settings unlock on top of the probe's, added to
+/// the GPUs that carry them, before the Selector walks the client's list:
+/// on Linux, AV1 where the session asks for the Vulkan Video chain and the
+/// GPU's Vulkan driver encodes AV1 (C13.12) — the one encoder Linux has for
+/// it. Returns the codecs added, so that a session whose added codec turns
+/// out not to run (its pixel proof) knows what the GPU encodes without it.
+/// The other platforms add nothing. Must not throw.
+std::vector<Codec> offerSessionCodecs(Capabilities& caps, const SessionConfig& config);
+
+/// Whether a virtual gamepad can be created on this machine right now, asked of
+/// the driver rather than of the registry (see VirtualGamepad).
+///
+/// Part of the platform seam and not of enumerate(): a platform with no backend
+/// answers `supported = false` here without that being a capture failure. Must
+/// not throw.
+VirtualGamepad probeVirtualGamepad();
+
+} // namespace mw::native::platform

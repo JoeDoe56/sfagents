@@ -1,0 +1,16 @@
+{
+  "project": "MoonlightWeb",
+  "url": "https://github.com/linckosz/moonlight-web",
+  "license": "GPL-3.0-or-later",
+  "commit": "ac6d705bd2a298e8517cf64cb31e7174cf85b8c1",
+  "copied": [
+    "LICENSE",
+    "COPYRIGHT",
+    "backend/native-host (without tests/, tools/ and its opus and openh264 submodules)",
+    "backend/src: the files sources.cmake lists",
+    "backend/third_party/patches",
+    "backend/installer/drivers/vdd (the MIT-licensed virtual display driver, signed)"
+  ],
+  "fetched": "scripts/build-screen.mjs: libdatachannel, moonlight-common-c, opus and openh264 at the commits this MoonlightWeb commit pins them at",
+  "changed": []
+}
