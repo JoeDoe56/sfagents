@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { AppSettings, ConversationService, MemorySecretStore, ProviderRegistry, loadAgentTree } from '@sfagents/core';
-import { WebServer } from '@sfagents/web';
+import { ProvidersApi, WebServer } from '@sfagents/web';
 import { baseAgent, makeTempDir, scriptedFactory, writeAgent, writeJson } from './helpers.js';
 
 async function start(options: { agent?: Record<string, unknown>; keyring?: boolean; watch?: boolean; files?: Record<string, unknown> } = {}) {
@@ -125,6 +125,66 @@ describe('settings and providers in the web interface', () => {
     } finally {
       await none.stop();
     }
+  });
+});
+
+describe('provider sign-in', () => {
+  test('ChatGPT and Claude sign-ins open on this computer and add the provider by themselves', async () => {
+    const home = makeTempDir();
+    const registry = new ProviderRegistry({ dir: home, secrets: new MemorySecretStore(), cleanup: async () => {} });
+    const events: Array<[string, any]> = [];
+    const opened: string[] = [];
+    const finishers: Record<string, { resolve: (v: any) => void; reject: (e: Error) => void }> = {};
+    const pending = (kind: string, url: string) => {
+      let resolve!: (v: any) => void;
+      let reject!: (e: Error) => void;
+      const done = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+      done.catch(() => {});
+      finishers[kind] = { resolve, reject };
+      return { url, done, cancel: () => reject(new Error('Cancelled.')) } as any;
+    };
+    const homes: string[] = [];
+    const api = new ProvidersApi({
+      registry,
+      settings: new AppSettings(home),
+      running: {},
+      broadcast: (e, d) => events.push([e, d]),
+      log: () => {},
+      signIn: {
+        codex: async (h) => (homes.push(h), fs.mkdirSync(h, { recursive: true }), pending('openai', 'https://auth.openai.com/oauth/authorize?x=1')),
+        claude: async () => pending('anthropic', 'https://claude.com/cai/oauth/authorize?state=s'),
+        open: async (url) => (opened.push(url), true),
+      },
+    });
+    const started = (await api.handle('POST', ['providers', 'signin'], { kind: 'openai', name: 'OpenAI 1' })) as any;
+    assert.equal(started.opened, true);
+    assert.deepEqual(opened, ['https://auth.openai.com/oauth/authorize?x=1'], 'the page opens in this computer\'s browser');
+    await api.handle('POST', ['providers', 'signin', started.id], { action: 'reopen' });
+    assert.equal(opened.length, 2);
+    await assert.rejects(() => api.handle('POST', ['providers', 'signin', started.id], { code: 'abc' }), /finishes in the browser/);
+    finishers['openai']!.resolve({ email: 'me@example.com' });
+    await new Promise((r) => setTimeout(r, 20));
+    const added = registry.find('OpenAI 1')!;
+    assert.equal(added.account, 'me@example.com');
+    assert.equal(registry.stateDir(added), homes[0], 'Codex keeps the sign-in under the new provider\'s folder');
+    assert.deepEqual(await registry.secret(added.id), { codex: true });
+    assert.ok(events.some(([e, d]) => e === 'signin' && d.state === 'done' && d.provider.name === 'OpenAI 1'));
+
+    const claude = (await api.handle('POST', ['providers', 'signin'], { kind: 'anthropic', name: 'Claude 1' })) as any;
+    finishers['anthropic']!.resolve('sk-ant-oat01-token');
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(await registry.secret(registry.find('Claude 1')!.id), { token: 'sk-ant-oat01-token' });
+    void claude;
+
+    // A failed sign-in leaves no provider and no Codex folder.
+    const failed = (await api.handle('POST', ['providers', 'signin'], { kind: 'openai', name: 'OpenAI 2' })) as any;
+    finishers['openai']!.reject(new Error('Sign-in was cancelled or failed.'));
+    await new Promise((r) => setTimeout(r, 1100));
+    assert.equal(registry.find('OpenAI 2'), undefined);
+    assert.equal(fs.existsSync(homes[1]!), false);
+    assert.ok(events.some(([e, d]) => e === 'signin' && d.id === failed.id && d.state === 'failed'));
+    api.close();
+    registry.close();
   });
 });
 

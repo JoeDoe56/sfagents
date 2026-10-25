@@ -54,3 +54,14 @@ Dictation downloads, on first use, a llama.cpp release
 (https://github.com/ggml-org/llama.cpp, MIT License) and Qwen3-ASR-1.7B in
 unsloth's GGUF conversion (https://huggingface.co/unslothai/Qwen3-ASR-1.7B-GGUF,
 Apache License 2.0). Neither is included in SF Agents.
+
+web/public/icons/provider-anthropic.svg and provider-openrouter.svg are the
+Anthropic and OpenRouter marks from Simple Icons (https://simpleicons.org,
+CC0 1.0); provider-openai.svg is the OpenAI mark from LobeHub Icons
+(https://github.com/lobehub/lobe-icons, MIT License,
+licenses/lobe-icons-MIT.txt). The marks are their
+owners' trademarks and identify the providers only.
+
+ChatGPT access uses OpenAI's Codex CLI (@openai/codex, Apache License 2.0),
+installed as a dependency and run as a separate program; none of its code
+is included here.

@@ -694,6 +694,7 @@ function connect() {
     setGradientSeed(info.model);
     agentSheet?.setAgent?.(info);
   });
+  es.addEventListener('usage', (e) => agentSheet?.setUsage?.(JSON.parse(e.data)));
   es.addEventListener('dictation', (e) => dictationEvent(JSON.parse(e.data)));
   es.addEventListener('remote', (e) => remoteEvent(JSON.parse(e.data)));
   es.addEventListener('notice', (e) => {

@@ -5,25 +5,27 @@
  *   sfagents providers                         list them
  *   sfagents providers add openrouter [--name N]   asks for the key (hidden)
  *   sfagents providers add custom --url URL [--name N]
- *   sfagents providers add openai [--name N]   ChatGPT sign-in in the browser
- *   sfagents providers add anthropic [--name N]  Claude sign-in in the browser
+ *   sfagents providers add openai [--name N]   ChatGPT sign-in (through Codex) in this computer's browser
+ *   sfagents providers add anthropic [--name N]  Claude sign-in in this computer's browser
  *   sfagents providers rename <name> <new name>
  *   sfagents providers remove <name>
  *   sfagents providers web-key [remove]        the Bright Data key for agents' web access (asks for it, hidden)
  *   sfagents settings [set <key> <value> | reset <key>]
  */
 
+import fs from 'node:fs';
 import readline from 'node:readline';
+import { randomUUID } from 'node:crypto';
 import {
   AppSettings,
   ClaudeSignIn,
-  OpenAISignIn,
+  CodexSignIn,
   PROVIDER_KIND_LABELS,
   PROVIDER_KINDS,
   ProviderRegistry,
   SETTINGS,
-  chatGPTHostId,
   getErrorMessage,
+  openInBrowser,
   type ProviderKind,
 } from '@sfagents/core';
 import { createStyle } from '../terminal/style.js';
@@ -109,29 +111,32 @@ export async function providersCommand(
           return OK;
         }
         if (kind === 'openai') {
-          const signIn = await OpenAISignIn.start({ hostId: chatGPTHostId(registry) });
+          const id = randomUUID();
+          const home = registry.stateDir({ id, kind });
+          let signIn: CodexSignIn;
+          try {
+            signIn = await CodexSignIn.start({ home });
+          } catch (error) {
+            fs.rmSync(home, { recursive: true, force: true });
+            throw error;
+          }
+          const opened = await openInBrowser(signIn.url);
           streams.stderr.write(
-            `Open this address and sign in with ChatGPT:\n\n  ${signIn.url}\n\nOn this computer the sign-in finishes by itself. On another device, the last page won't load: paste its address here.\n`,
+            `${opened ? 'A ChatGPT sign-in page opened in your browser.' : 'Open this address in a browser on this computer:'}\n\n  ${signIn.url}\n\nSign in there and close the tab; this finishes by itself. (It must be this computer's browser.)\n`,
           );
-          const pasted = prompt('Address of the last page (or wait): ', streams).then(
-            (line) => (line ? signIn.complete(line) : signIn.done),
-            () => signIn.done,
-          );
-          const result = await Promise.race([signIn.done, pasted]);
-          const record = await registry.add({ name, kind, account: result.email, secret: result.secret });
-          streams.stdout.write(`\n${style.green('✓')} Signed in${result.email ? ` as ${result.email}` : ''}. Added "${record.name}".\n`);
-          process.stdin.pause();
+          try {
+            const result = await signIn.done;
+            const record = await registry.add({ id, name, kind, account: result.email, secret: { codex: true } });
+            streams.stdout.write(`${style.green('✓')} Signed in${result.email ? ` as ${result.email}` : ''}. Added "${record.name}".\n`);
+          } catch (error) {
+            fs.rmSync(home, { recursive: true, force: true });
+            throw error;
+          }
           return OK;
         }
         const signIn = await ClaudeSignIn.start();
-        streams.stderr.write(`Open this address and sign in with your Claude account:\n\n  ${signIn.url}\n\n`);
-        let token: string;
-        try {
-          const code = await prompt('Paste the code Claude shows: ', streams);
-          token = await signIn.complete(code);
-        } finally {
-          signIn.cancel();
-        }
+        streams.stderr.write(`A Claude sign-in page opened in your browser. Sign in there and close the tab; this finishes by itself. (It must be this computer's browser.)\n`);
+        const token = await signIn.done;
         const record = await registry.add({ name, kind, account: 'Claude plan', secret: { token } });
         streams.stdout.write(`${style.green('✓')} Signed in. Added "${record.name}".\n`);
         return OK;

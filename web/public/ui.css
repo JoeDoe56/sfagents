@@ -308,6 +308,15 @@
 .usage-pct { flex: none; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { .usage-fill { transition: none; } }
 
+/* The plan's 5-hour and weekly limits: one capsule, split in two. */
+.plan-track { --h: 26px; display: flex; gap: 2px; height: var(--h); border-radius: calc(var(--h) / 2); overflow: hidden; font-variant-numeric: tabular-nums; }
+.plan-seg { position: relative; flex: 1 1 0; min-width: 0; background: rgba(120, 120, 128, 0.28); }
+.plan-seg .usage-fill { background: #30d158; }
+.plan-seg.warn .usage-fill { background: #ff9f0a; }
+.plan-seg.full .usage-fill { background: #ff453a; }
+.plan-caption { margin: 6px 4px 0; font-size: 12px; line-height: 16px; color: var(--label-2); text-align: center; }
+.ag-unit.plan-bar { margin: 0 0 10px; }
+
 /* ------------------------------------------------------------------ the agent sheet */
 
 /* Calendar's pop-up button: a grey capsule, the choice and a pair of chevrons. */
@@ -382,6 +391,7 @@
 .st-add > i { color: var(--blue) !important; }
 .st-add > i:last-child { width: 19px; height: 19px; }
 .st-status { min-height: 18px; }
+.st-status.st-done { display: flex; align-items: center; justify-content: center; gap: 6px; color: #30d158; font-weight: 600; }
 .st-problem { margin-bottom: 14px; }
 
 /* Content of an sfgl/ui sheet made by openSheet: the sheets' own side margins. */

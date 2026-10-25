@@ -11,15 +11,13 @@
  * next takes over for the same request, and stays current afterwards.
  */
 
-import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { AgentDefinition, ProviderChoice } from '../agents/definition.js';
 import { OPENROUTER_BASE_URL, OpenAICompatibleProvider } from './openai-compatible.js';
 import { ProviderError, type ModelProvider, type ModelRequest, type ModelStreamEvent } from './types.js';
 import type { AnthropicSecret, CustomSecret, OpenAISecret, OpenRouterSecret, ProviderRecord, ProviderRegistry } from './registry.js';
-import { ChatGPTProvider, OpenAITokens, isAccountLimitStatus } from './openai-chatgpt.js';
+import { CodexProvider, isAccountLimitStatus } from './codex.js';
 import { ClaudeSubscriptionProvider } from './claude-subscription.js';
-import { readJsonFile, writeFileAtomic } from '../settings/home.js';
+import type { PlanUsage, PlanUsageStore } from './usage.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 export const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
@@ -40,7 +38,10 @@ export class UnknownProviderError extends Error {
   }
 }
 
-export type ProviderFactory = (definition: Readonly<AgentDefinition>) => ModelProvider;
+export type ProviderFactory = ((definition: Readonly<AgentDefinition>) => ModelProvider) & {
+  /** Reads the plan usage of an added provider now, when its kind can (ChatGPT through Codex). */
+  readPlanUsage?: (record: ProviderRecord) => Promise<PlanUsage | undefined>;
+};
 
 /** Names of environment variables that hold provider credentials for a set of agents. */
 export function credentialEnvNames(definitions: Iterable<Readonly<AgentDefinition>>): string[] {
@@ -81,6 +82,8 @@ interface FactoryOptions {
   registry?: ProviderRegistry;
   accounts?: AccountState;
   fetcher?: typeof fetch;
+  /** Where ChatGPT and Claude providers report the plan's 5-hour and weekly usage. */
+  usage?: PlanUsageStore;
 }
 
 /** Errors after which another account may succeed. */
@@ -132,26 +135,14 @@ export class FailoverProvider implements ModelProvider {
   }
 }
 
-/** A stable id for OpenAI's sign-in, per installation (not secret). */
-function openAIHostId(dir: string): string {
-  const file = path.join(dir, 'openai-host.json');
-  const existing = readJsonFile<{ id?: string }>(file, {});
-  if (existing.id) return existing.id;
-  const id = `urn:uuid:${randomUUID()}`;
-  writeFileAtomic(file, JSON.stringify({ id }));
-  return id;
-}
-
-export function chatGPTHostId(registry: ProviderRegistry): string {
-  return openAIHostId(registry.dir);
-}
-
 export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | FactoryOptions = process.env): ProviderFactory {
-  const options: FactoryOptions = 'registry' in envOrOptions || 'accounts' in envOrOptions || 'env' in envOrOptions || 'fetcher' in envOrOptions ? (envOrOptions as FactoryOptions) : { env: envOrOptions as NodeJS.ProcessEnv };
+  const options: FactoryOptions =
+    'registry' in envOrOptions || 'accounts' in envOrOptions || 'env' in envOrOptions || 'fetcher' in envOrOptions || 'usage' in envOrOptions
+      ? (envOrOptions as FactoryOptions)
+      : { env: envOrOptions as NodeJS.ProcessEnv };
   const env = options.env ?? process.env;
   const accounts = options.accounts ?? new AccountState();
   const cache = new Map<string, ModelProvider>();
-  const tokens = new Map<string, OpenAITokens>();
 
   const lazySecret = <T>(record: ProviderRecord): (() => Promise<T>) => {
     return async () => {
@@ -185,27 +176,26 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
         break;
       }
       case 'openai': {
-        const secret = lazySecret<OpenAISecret>(record);
-        let inner: ChatGPTProvider | null = null;
+        const secret = lazySecret<OpenAISecret | { refreshToken?: string }>(record);
+        const codex = new CodexProvider(record.name, record.id, options.registry!.stateDir(record), { usage: options.usage });
+        let checked = false;
         provider = {
           id: record.name,
           async *stream(request) {
-            if (!inner) {
-              let t = tokens.get(record.id);
-              if (!t) {
-                t = new OpenAITokens(await secret(), (next) => options.registry!.setSecret(record.id, next), options.fetcher);
-                tokens.set(record.id, t);
-              }
-              inner = new ChatGPTProvider(record.name, t, options.fetcher);
+            if (!checked) {
+              // Added before SF Agents used Codex: that sign-in can't be carried over.
+              if (!('codex' in (await secret()))) throw new ProviderError(`Provider "${record.name}" was signed in the old way. Remove it and add it again in Settings → Providers.`, 401);
+              checked = true;
             }
-            yield* inner.stream(request);
+            yield* codex.stream(request);
           },
-        };
+          readPlanUsage: () => codex.readPlanUsage(),
+        } as ModelProvider & { readPlanUsage(): Promise<PlanUsage | undefined> };
         break;
       }
       case 'anthropic': {
         const secret = lazySecret<AnthropicSecret>(record);
-        provider = new ClaudeSubscriptionProvider(record.name, async () => (await secret()).token, path.join(options.registry!.dir, 'claude', record.id));
+        provider = new ClaudeSubscriptionProvider(record.name, async () => (await secret()).token, options.registry!.stateDir(record), { usage: options.usage, usageKey: record.id });
         break;
       }
     }
@@ -238,7 +228,7 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
     return provider;
   };
 
-  return (definition) => {
+  const factory: ProviderFactory = (definition) => {
     let choices = definition.providers?.length ? definition.providers : [{ provider: definition.provider, model: definition.model }];
     const picked = accounts.get(definition.id);
     // An account picked by hand that the agent file doesn't list goes first, with the agent's model.
@@ -248,6 +238,11 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
     if (choices.length === 1) return single(choices[0]!, definition);
     return new FailoverProvider(definition.id, choices, (c) => single(c, definition), accounts);
   };
+  factory.readPlanUsage = async (record) => {
+    const p = fromRecord(record) as ModelProvider & { readPlanUsage?: () => Promise<PlanUsage | undefined> };
+    return p.readPlanUsage ? p.readPlanUsage() : options.usage?.get(record.id);
+  };
+  return factory;
 }
 
 /** Whether an agent's providers can be built now (for early "not set up" errors). Returns the problems. */

@@ -26,6 +26,7 @@ import {
 } from './types.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { ensureDir } from '../settings/home.js';
+import { toEpochMs, toPercent, type PlanUsage, type PlanUsageStore, type UsageWindow } from './usage.js';
 
 const require = createRequire(import.meta.url);
 const PREFIX = 'mcp__sfagents__';
@@ -82,20 +83,47 @@ interface Pty {
 }
 
 /**
- * `claude setup-token` in a pseudo-terminal: it shows a sign-in address;
- * after signing in, Claude shows a code, which goes back to `complete`; the
- * CLI then prints the token, which is captured and never shown.
+ * `claude setup-token` in a pseudo-terminal. Claude opens its sign-in page in
+ * this computer's browser by itself, and the page returns to a listener
+ * Claude runs here; Claude then prints the long-lived token, which `done`
+ * captures (it is never shown). Signing in from another device is not
+ * supported: that page ends with a code instead.
  */
 export class ClaudeSignIn {
+  /** The sign-in address Claude printed (for display only: it ends with a code to paste, which SF Agents does not take). */
   readonly url: string;
+  readonly done: Promise<string>;
   private output = '';
   private exited = false;
+  private finished = false;
   private readonly dir: string;
 
-  private constructor(private readonly pty: Pty, url: string, dir: string, output: string) {
+  private constructor(private readonly pty: Pty, url: string, dir: string, output: string, timeoutMs: number) {
     this.url = url;
     this.dir = dir;
     this.output = output;
+    this.done = new Promise<string>((resolve, reject) => {
+      const finish = (error: Error | null, token?: string) => {
+        if (this.finished) return;
+        this.finished = true;
+        clearTimeout(timer);
+        clearInterval(poll);
+        this.cancel();
+        if (error) reject(error);
+        else resolve(token!);
+      };
+      const timer = setTimeout(() => finish(new ProviderError('Sign-in timed out after 10 minutes. Start again.', 408)), timeoutMs);
+      timer.unref?.();
+      const poll = setInterval(() => {
+        const text = strip(this.output);
+        const token = /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}/.exec(text)?.[0];
+        if (token) finish(null, token);
+        else if (/OAuth error|invalid_grant|code (?:has )?expired|Login failed/i.test(text)) finish(new ProviderError('Claude did not complete the sign-in. Start again.', 400));
+        else if (this.exited) finish(new ProviderError('Claude sign-in ended without a token.', 400));
+      }, 200);
+      this.abort = (e) => finish(e);
+    });
+    this.done.catch(() => {});
     pty.onData((d) => {
       this.output = (this.output + d).slice(-65536);
     });
@@ -104,7 +132,9 @@ export class ClaudeSignIn {
     });
   }
 
-  static async start(options: { executable?: string; timeoutMs?: number } = {}): Promise<ClaudeSignIn> {
+  private abort: (e: Error) => void = () => {};
+
+  static async start(options: { executable?: string; timeoutMs?: number; signInTimeoutMs?: number } = {}): Promise<ClaudeSignIn> {
     let pty: typeof import('node-pty');
     try {
       pty = await import('node-pty');
@@ -137,7 +167,7 @@ export class ClaudeSignIn {
         });
       });
       sub.dispose();
-      return new ClaudeSignIn(child, url, dir, output);
+      return new ClaudeSignIn(child, url, dir, output, options.signInTimeoutMs ?? 600_000);
     } catch (error) {
       child.kill();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -145,41 +175,11 @@ export class ClaudeSignIn {
     }
   }
 
-  /** Sends the code Claude showed after sign-in; resolves with the long-lived token. */
-  async complete(code: string, timeoutMs = 60000): Promise<string> {
-    const clean = code.trim();
-    if (!clean || /\s/.test(clean) || clean.length > 2000) throw new ProviderError('Paste the code exactly as Claude shows it.', 400);
-    const before = this.output.length;
-    this.pty.write(clean);
-    await new Promise((r) => setTimeout(r, 150));
-    this.pty.write('\r');
-    try {
-      return await new Promise<string>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new ProviderError('Claude did not confirm the code. Check it and try again.', 400)), timeoutMs);
-        const poll = setInterval(() => {
-          const text = strip(this.output);
-          const token = /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}/.exec(text)?.[0];
-          if (token) {
-            clearTimeout(timer);
-            clearInterval(poll);
-            resolve(token);
-          } else if (/OAuth error|invalid code|invalid_grant|code (?:has )?expired/i.test(strip(this.output.slice(before)))) {
-            clearTimeout(timer);
-            clearInterval(poll);
-            reject(new ProviderError('Claude did not accept that code. Start the sign-in again.', 400));
-          } else if (this.exited) {
-            clearTimeout(timer);
-            clearInterval(poll);
-            reject(new ProviderError('Claude sign-in ended without a token.', 400));
-          }
-        }, 100);
-      });
-    } finally {
-      this.cancel();
-    }
-  }
-
   cancel(): void {
+    if (!this.finished) {
+      this.abort(new ProviderError('Sign-in cancelled.', 400));
+      return;
+    }
     if (!this.exited) this.pty.kill();
     this.output = '';
     fs.rmSync(this.dir, { recursive: true, force: true });
@@ -276,7 +276,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
     readonly id: string,
     private readonly token: () => Promise<string>,
     stateDir: string,
-    private readonly options: { executable?: string; timeoutMs?: number; sdk?: unknown } = {},
+    private readonly options: { executable?: string; timeoutMs?: number; sdk?: unknown; usage?: PlanUsageStore; usageKey?: string } = {},
   ) {
     // The SDK keeps settings and caches here; never a credential (the token comes in the environment).
     this.configDir = ensureDir(stateDir);
@@ -365,6 +365,9 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
           } else if (delta?.type === 'thinking_delta' && delta.thinking) {
             yield { type: 'reasoning', text: delta.thinking };
           }
+        } else if (message.type === 'rate_limit_event') {
+          const u = claudePlanUsage(message.rate_limit_info);
+          if (u && this.options.usage) this.options.usage.update(this.options.usageKey ?? this.id, u);
         } else if (message.type === 'assistant' && !text) {
           for (const block of message.message?.content ?? []) if (block.type === 'text' && !calls.length) text += block.text;
         } else if (message.type === 'result') {
@@ -397,6 +400,33 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
     if (calls.length) message.tool_calls = calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.rawArguments } }));
     yield { type: 'done', message, toolCalls: calls, finishReason: calls.length ? 'tool_calls' : 'stop', usage };
   }
+}
+
+function claudeWindow(utilization: unknown, resetsAt: unknown): UsageWindow | undefined {
+  if (typeof utilization !== 'number' || !Number.isFinite(utilization)) return undefined;
+  // Claude reports a fraction (0.42); the /usage data uses percentages.
+  return { usedPercent: toPercent(utilization, utilization <= 1), resetsAt: toEpochMs(typeof resetsAt === 'string' ? Date.parse(resetsAt) : (resetsAt as number)) };
+}
+
+/** The SDK's rate-limit event to plan usage: the overall 5-hour and weekly windows (not the per-model ones). */
+export function claudePlanUsage(info: any): Partial<PlanUsage> | null {
+  if (!info || typeof info !== 'object') return null;
+  const out: Partial<PlanUsage> = {};
+  const windows = info.unifiedWindows;
+  if (windows && typeof windows === 'object') {
+    out.fiveHour = claudeWindow(windows.five_hour?.utilization, windows.five_hour?.resets_at);
+    out.weekly = claudeWindow(windows.seven_day?.utilization, windows.seven_day?.resets_at);
+  }
+  if (info.rateLimitType === 'five_hour') out.fiveHour ??= claudeWindow(info.utilization, info.resetsAt);
+  if (info.rateLimitType === 'seven_day') out.weekly ??= claudeWindow(info.utilization, info.resetsAt);
+  const limited = info.status === 'rejected';
+  // A rejection names the window that ran out, even without a figure.
+  if (limited && info.rateLimitType === 'five_hour') out.fiveHour ??= { usedPercent: 100, resetsAt: toEpochMs(info.resetsAt) };
+  if (limited && info.rateLimitType === 'seven_day') out.weekly ??= { usedPercent: 100, resetsAt: toEpochMs(info.resetsAt) };
+  if (!out.fiveHour) delete out.fiveHour;
+  if (!out.weekly) delete out.weekly;
+  out.limitReached = limited;
+  return out.fiveHour || out.weekly || limited ? out : null;
 }
 
 function classify(detail: string): ProviderError {

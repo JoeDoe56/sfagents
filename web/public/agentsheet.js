@@ -223,6 +223,72 @@ export function usageBar(label) {
   };
 }
 
+// ------------------------------------------------------------------ the plan's usage
+
+function resetText(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const left = ms - Date.now();
+  if (left <= 0) return 'now';
+  if (left < 24 * 3600_000) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toLocaleDateString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * One bar for the plan's two limits, split in two like a drive's: the
+ * 5-hour window on the left, the week on the right, each filled to its
+ * share used. The reset times are on the line below.
+ */
+export function planBar() {
+  const root = el('div', 'plan-bar ag-unit');
+  const bar = el('div', 'plan-track');
+  const caption = el('p', 'plan-caption');
+  const parts = {};
+  for (const [key, label] of [['fiveHour', '5 Hours'], ['weekly', 'Week']]) {
+    const seg = el('div', 'plan-seg');
+    const fill = el('span', 'usage-fill');
+    const text = el('span', 'usage-text');
+    const pctNode = el('span', 'usage-pct', '—');
+    text.append(el('span', 'usage-name', label), pctNode);
+    seg.append(fill, text);
+    bar.append(seg);
+    parts[key] = { seg, fill, pct: pctNode, label };
+  }
+  root.append(bar, caption);
+  return {
+    element: root,
+    /** `info` is /api/agent/usage's answer. */
+    set(info) {
+      root.hidden = !info?.supported;
+      if (!info?.supported) return;
+      const u = info.usage;
+      const resets = [];
+      for (const key of ['fiveHour', 'weekly']) {
+        const p = parts[key];
+        const w = u?.[key];
+        const f = w ? w.usedPercent / 100 : 0;
+        p.fill.style.width = `${(Math.max(0, Math.min(1, f)) * 100).toFixed(2)}%`;
+        p.seg.classList.toggle('warn', !!w && f >= 0.8 && f < 0.9);
+        p.seg.classList.toggle('full', !!w && f >= 0.9);
+        p.pct.textContent = w ? pct(f) : '—';
+        p.seg.setAttribute('aria-label', w ? `${p.label}: ${pct(f)} used${w.resetsAt ? `, resets ${resetText(w.resetsAt)}` : ''}` : `${p.label}: not reported yet`);
+        if (w?.resetsAt) resets.push(`${key === 'fiveHour' ? '5-hour' : 'Weekly'} limit resets ${resetText(w.resetsAt)}`);
+      }
+      if (u?.limitReached) resets.unshift('Limit reached');
+      caption.textContent = resets.length
+        ? resets.join(' · ')
+        : info.error
+          ? `Usage unavailable: ${info.error}`
+          : u
+            ? ''
+            : info.kind === 'anthropic'
+              ? 'Claude reports usage during a reply; it shows here after the next one.'
+              : 'Usage shows here once the account reports it.';
+      caption.hidden = !caption.textContent;
+    },
+  };
+}
+
 // ------------------------------------------------------------------ the sheet
 
 const CATEGORY_COLORS = {
@@ -244,6 +310,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
   let context = null;
   let slider = null;
   let bar = null;
+  let plan = null;
   const parts = {};
   // The project's agents (for the menu), what is saved, and what is staged.
   let agents = [];
@@ -366,13 +433,15 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       });
       effort.append(label, slider.element);
 
+      plan = planBar();
+      plan.set(null);
       bar = usageBar('Context');
       bar.set(0, 1, '');
       const marker = el('div', 'ag-medium-end');
       marker.dataset.mediumEnd = '';
 
       parts.details = el('div', 'ag-details');
-      body.append(line, effort, bar.element, marker, parts.details);
+      body.append(line, effort, plan.element, bar.element, marker, parts.details);
       // The slider's capsule is Liquid Glass, as ChatGPT's is.
       sheet.addGlass(slider.element.querySelector('.ag-track'), 'control');
     },
@@ -386,6 +455,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
         info = await postJson('/api/agent', body);
         saved = { agent: info.id, reasoning: info.reasoning, account: info.account ?? null };
         onSaved?.(info);
+        loadUsage();
         return true;
       } catch (error) {
         showError(error.message, "Couldn't change the agent");
@@ -399,12 +469,28 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
   });
 
   async function loadContext() {
+    loadUsage();
     try {
       context = await getJson('/api/agent/context');
       render();
     } catch (error) {
       parts.details.replaceChildren(el('p', 'sf-section-note', error.message));
     }
+  }
+
+  async function loadUsage() {
+    try {
+      showUsage(await getJson('/api/agent/usage'));
+    } catch {
+      // the bar keeps what it showed
+    }
+  }
+
+  function showUsage(info) {
+    // The server sends the account the agent replies with now.
+    const was = plan.element.hidden;
+    plan.set(info);
+    if (was !== plan.element.hidden) requestAnimationFrame(() => ctx.refresh());
   }
 
   async function loadAgent() {
@@ -554,11 +640,14 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
 
   current = {
     refresh: () => loadContext(),
+    setUsage: (info) => showUsage(info),
     setAgent: (a) => {
       // Another window changed it: follow, unless this sheet has its own changes.
       const untouched = !changed();
+      const account = saved.account;
       info = { ...info, ...a };
       saved = { agent: info.id, reasoning: info.reasoning ?? null, account: info.account ?? null };
+      if (saved.account !== account) loadUsage();
       if (untouched) {
         Object.assign(staged, saved);
         showStaged();

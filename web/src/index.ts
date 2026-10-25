@@ -4,6 +4,8 @@
 
 export { WebServer, DEFAULT_HOST, DEFAULT_PORT, PUBLIC_DIR, parsePublicOrigin } from './server.js';
 export { WebAuth, AuthError, newAccessToken, SESSION_COOKIE } from './auth.js';
+export { ProvidersApi } from './providers-api.js';
+export type { SignInStarters } from './providers-api.js';
 export type { WebServerOptions } from './server.js';
 export { Up2kStore, Up2kError, up2kChunkSize, chunkHash, DEFAULT_MAX_UPLOAD_BYTES } from './up2k.js';
 export type { HandshakeRequest, HandshakeResponse } from './up2k.js';

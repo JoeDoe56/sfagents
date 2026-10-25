@@ -19,7 +19,6 @@ export {
   createDefaultProviderFactory,
   credentialEnvNames,
   checkProviders,
-  chatGPTHostId,
   shouldFailOver,
   AccountState,
   FailoverProvider,
@@ -30,9 +29,27 @@ export {
 export * from './providers/registry.js';
 export { KeyringSecretStore, MemorySecretStore, KeyringUnavailableError, KEYRING_SERVICE } from './providers/secrets.js';
 export type { SecretStore } from './providers/secrets.js';
-export { OpenAISignIn, OpenAITokens, ChatGPTProvider, SignInError, listChatGPTModels, toResponsesInput, OPENAI_RESOURCE } from './providers/openai-chatgpt.js';
-export type { OpenAISignInResult } from './providers/openai-chatgpt.js';
-export { ClaudeSignIn, ClaudeSubscriptionProvider, CLAUDE_MODELS, CLAUDE_MODEL_ALIASES, claudeExecutable, findAuthUrl, prepareClaudeRequest } from './providers/claude-subscription.js';
+export {
+  CodexAppServer,
+  CodexProvider,
+  CodexSignIn,
+  CodexRpcError,
+  CODEX_CONFIG,
+  CODEX_DISABLED_FEATURES,
+  codexArgs,
+  codexEnv,
+  codexError,
+  codexExecutable,
+  codexPlanUsage,
+  codexSignOut,
+  defaultAnswer as codexDefaultAnswer,
+  isAccountLimitStatus,
+  toCodexItems,
+} from './providers/codex.js';
+export type { CodexConnection, CodexProviderOptions, CodexSignInResult } from './providers/codex.js';
+export { PlanUsageStore, toPercent, toEpochMs } from './providers/usage.js';
+export type { PlanUsage, UsageWindow } from './providers/usage.js';
+export { ClaudeSignIn, ClaudeSubscriptionProvider, CLAUDE_MODELS, CLAUDE_MODEL_ALIASES, claudeExecutable, claudePlanUsage, findAuthUrl, prepareClaudeRequest } from './providers/claude-subscription.js';
 export { sfagentsHome, writeFileAtomic, readJsonFile } from './settings/home.js';
 export { AppSettings, SETTINGS, SettingsError, parseSetting, settingSpec } from './settings/settings.js';
 export type { SettingSpec, SettingValue } from './settings/settings.js';
@@ -47,6 +64,7 @@ export { ToolErrorType } from './tools/tool-error.js';
 export { ToolNames, BUILTIN_TOOL_IDS } from './tools/tool-names.js';
 export { stripAnsiAndControl } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
+export { openInBrowser } from './utils/open-url.js';
 export * from './conversation/types.js';
 export { parseConversation, serializeConversation, serializeRecord, decorationFor } from './conversation/format.js';
 export { ConversationState, SemanticError } from './conversation/state.js';
