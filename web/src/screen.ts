@@ -557,6 +557,7 @@ export class ScreenMirror {
       this.prune();
       return { code: 200, body: { ...result.body, slot: 0, dual_supported: false, stream_id: id } };
     }
+    this.log(`screen: the stream did not start (${result.code}): ${String(result.body['error'] ?? result.body['status'] ?? '')}${tail.trim() ? `\n${tail.trim().split('\n').slice(-15).join('\n')}` : ''}`);
     if (this.stream === stream) await this.stop(false);
     return result;
   }

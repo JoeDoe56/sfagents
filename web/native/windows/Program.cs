@@ -18,9 +18,16 @@ internal static class Program
             if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows sensor adapter only.");
             if (args.Length == 2 && args[0] == "--pipe-worker" && IsPipeName(args[1]))
             {
-                // CurrentUserOnly: connect only to a pipe this Windows account made.
-                using var pipe = new NamedPipeClientStream(".", args[1], PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                // Connect only to a pipe this Windows account made. Not with
+                // PipeOptions.CurrentUserOnly: .NET compares the pipe's owner
+                // with the token's default owner, which in an elevated token is
+                // Administrators, so the elevated worker refused its own
+                // account's broker. The owner is compared with the user instead.
+                using var pipe = new NamedPipeClientStream(".", args[1], PipeDirection.InOut, PipeOptions.Asynchronous);
                 await pipe.ConnectAsync(120_000);
+                var owner = pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier));
+                if (owner is null || !owner.Equals(WindowsIdentity.GetCurrent().User))
+                    throw new UnauthorizedAccessException("The sensor pipe belongs to another account.");
                 using var input = new StreamReader(pipe);
                 using var output = new StreamWriter(pipe) { AutoFlush = true };
                 await Serve(input, output);
