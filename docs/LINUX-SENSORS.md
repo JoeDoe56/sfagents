@@ -1,12 +1,16 @@
 # Built-in Linux hardware monitoring
 
 On Linux, SF Agents starts its bundled LibreHardwareMonitor-Linux adapter when
-the resource monitor first requests a reading. Its collectors and a private
+it starts. There is no setting for it and nothing to connect it to. Its collectors and a private
 CPython runtime ship with the web package. No Python installation, pip packages,
 separate LHM server, systemd service or open sensor port is needed. The adapter
 closes with SF Agents, including any in-flight sensor commands, and receives
-no agent API keys. It runs at SF Agents' ordinary privilege level; it never
-invokes sudo or requests elevation.
+no agent API keys. When `smartctl` or `ipmitool` is installed, which read
+drive temperatures and the BMC only as root, `sfagents web` asks once as it
+starts for the `sudo` password, in the terminal, and runs the adapter as root
+with the cached credentials (`sudo -n`). That is the only administrator
+prompt SF Agents shows; SF Agents itself and the agents' tools stay at your
+own level. Declined, or with no terminal to ask in, the adapter runs as you.
 
 The backend is Insight-IT GmbH's independent MIT-licensed implementation,
 version 1.2.0 at commit `d6646e75f617d61527911a7d446dc0cfce8b6932`:
@@ -38,10 +42,9 @@ and SMART every five minutes. Slow commands run independently. The monitor
 still uses native CPU utilization, rather than the upstream load-average
 approximation, and keeps native disk/network and AMD GPU support.
 
-`--lhm <url>` / `SFAGENTS_LHM_URL` selects an external LHM-compatible server;
-`--lhm off` disables the bundled adapter and uses native readers alone.
-Helper errors also fall back to native readings with a diagnostic hint.
-`--sensor-admin` is Windows-only and does not elevate Linux processes.
+Helper errors fall back to native readings with a diagnostic hint. A root
+adapter that fails (for example after sudo's cached credentials expired)
+is started again as you.
 
 ## Build and distribution
 

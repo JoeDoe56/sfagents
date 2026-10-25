@@ -1,24 +1,15 @@
 /**
- * Libre Hardware Monitor (https://github.com/LibreHardwareMonitor/LibreHardwareMonitor,
- * MPL-2.0) as the resource monitor's source of readings.
+ * Hardware sensor readings in Libre Hardware Monitor's terms
+ * (https://github.com/LibreHardwareMonitor/LibreHardwareMonitor, MPL-2.0).
  *
- * Libre Hardware Monitor is a Windows app that reads the machine's sensors
- * (CPU and GPU load and temperatures, VRAM, memory, drive and network
- * activity, and much more). Its "Remote Web Server" (Options → Remote Web
- * Server → Run; port 8085 by default) serves the whole sensor tree as JSON
- * at /data.json. This module supports an explicitly configured external
- * server. Windows and Linux use bundled platform adapters by default;
- * macOS uses native readers.
- *
- * The tree (LibreHardwareMonitor.Windows.Forms/Utilities/HttpServer.cs):
- * computer → hardware (HardwareId, e.g. "/intelcpu/0", "/gpu-nvidia/0",
- * "/ram", "/nvme/0", "/nic/{guid}") → sensor type groups → sensors with
- * SensorId ("/intelcpu/0/load/0"), Type ("Load", "Temperature", …), a
- * formatted Value in the app's language and units, and RawValue (a number
- * in base units: °C, %, bytes, bytes per second; null or "NaN" when there
- * is no reading). Versions before RawValue are read from the formatted
- * value. Data sensors were gigabytes (and SmallData megabytes) before they
- * became bytes; both are handled.
+ * SF Agents' own sensor programs report them: on Windows the bundled
+ * LibreHardwareMonitorLib adapter (web/native/windows), on Linux the bundled
+ * LibreHardwareMonitor-Linux collectors (web/native/linux). Both answer over
+ * stdin/stdout (sensor-process.ts) with a flat list of sensors: the hardware
+ * they belong to (HardwareId, e.g. "/intelcpu/0", "/gpu-nvidia/0", "/ram",
+ * "/nvme/0", "/nic/{guid}"), the sensor's id ("/intelcpu/0/load/0"), its
+ * type ("Load", "Temperature", ...) and its value in base units. This module
+ * picks out what the resource monitor shows.
  */
 
 export interface LhmSensor {
@@ -47,77 +38,6 @@ export interface LhmReadings {
   /** read and write: fractions of time the busiest drive spent reading or writing; rates in bytes per second. */
   disk: { read: number | null; write: number | null; readRate: number; writeRate: number } | null;
   network: { down: number; up: number } | null;
-}
-
-interface LhmNode {
-  Text?: unknown;
-  Value?: unknown;
-  RawValue?: unknown;
-  SensorId?: unknown;
-  HardwareId?: unknown;
-  Type?: unknown;
-  Children?: unknown;
-}
-
-const UNIT_SCALE: Record<string, number> = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3, tb: 1024 ** 4 };
-
-/** A number from Libre Hardware Monitor's formatted text ("45,5 °C", "1.2 MB/s", "16.0 GB"), in base units. */
-export function parseLhmValue(text: string, type: string): number | null {
-  const m = /(-?\d+(?:[.,]\d+)?)\s*([^\d\s]*)/.exec(text.trim().replace(/ /g, ' '));
-  if (!m) return null;
-  let v = Number(m[1]!.replace(',', '.'));
-  if (!Number.isFinite(v)) return null;
-  const unit = m[2]!.toLowerCase();
-  if (type === 'Temperature' && unit.includes('f')) v = (v - 32) / 1.8;
-  if (type === 'Data' || type === 'SmallData' || type === 'Throughput') {
-    const base = unit.replace('/s', '').replace('ib', 'b');
-    if (base in UNIT_SCALE) v *= UNIT_SCALE[base]!;
-    else if (type === 'Data') v *= UNIT_SCALE.gb!;
-    else if (type === 'SmallData') v *= UNIT_SCALE.mb!;
-  }
-  return v;
-}
-
-function rawNumber(raw: unknown): number | null | undefined {
-  if (raw === undefined) return undefined;
-  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
-  if (typeof raw === 'string') {
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
-/** Every sensor in a data.json tree, with values in base units. Returns null if this is not a sensor tree. */
-export function parseLhmTree(json: unknown): LhmSensor[] | null {
-  const root = json as LhmNode;
-  if (!root || typeof root !== 'object' || !Array.isArray(root.Children)) return null;
-  if (root.Text !== 'Sensor' && root.Text !== undefined) return null;
-  const out: LhmSensor[] = [];
-  const visit = (node: LhmNode, hardwareId: string, hardware: string) => {
-    if (typeof node.HardwareId === 'string') {
-      hardwareId = node.HardwareId;
-      hardware = typeof node.Text === 'string' ? node.Text : hardware;
-    }
-    if (typeof node.SensorId === 'string' && typeof node.Type === 'string') {
-      const id = node.SensorId;
-      const type = node.Type;
-      // Before HardwareId was written out: "/intelcpu/0/load/0" belongs to "/intelcpu/0".
-      const hw = hardwareId || id.split('/').slice(0, -2).join('/');
-      const raw = rawNumber(node.RawValue);
-      let value: number | null;
-      if (raw === undefined) value = typeof node.Value === 'string' ? parseLhmValue(node.Value, type) : null;
-      else if (raw === null) value = null;
-      else if (type === 'SmallData') value = raw * UNIT_SCALE.mb!;
-      // Data was in gigabytes before it became bytes; nothing reported here is under a megabyte.
-      else if (type === 'Data') value = raw < 1e6 ? raw * UNIT_SCALE.gb! : raw;
-      else value = raw;
-      out.push({ hardwareId: hw, hardware, id, name: typeof node.Text === 'string' ? node.Text : '', type, value });
-    }
-    if (Array.isArray(node.Children)) for (const child of node.Children as LhmNode[]) if (child && typeof child === 'object') visit(child, hardwareId, hardware);
-  };
-  visit(root, '', '');
-  return out;
 }
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? null : Math.max(0, Math.min(1, v / 100)));
@@ -254,49 +174,3 @@ export function lhmReadings(sensors: LhmSensor[]): LhmReadings {
   return { cpu, gpu, memory, disk, network, power };
 }
 
-export const DEFAULT_LHM_URL = 'http://127.0.0.1:8085';
-const MAX_TREE_BYTES = 8 * 1024 * 1024;
-
-/** Reads a Libre Hardware Monitor web server. */
-export class LhmClient {
-  hint: string | null = null;
-  private readonly url: URL;
-  private readonly auth: string | undefined;
-  private failedAt = 0;
-
-  /** @param base the server, optionally with user:password for its Basic authentication. */
-  constructor(base: string = DEFAULT_LHM_URL, private readonly retryMs = 10_000) {
-    const u = new URL(base);
-    if (u.username || u.password) this.auth = 'Basic ' + Buffer.from(`${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`).toString('base64');
-    u.username = '';
-    u.password = '';
-    this.url = new URL('data.json', u.href.endsWith('/') ? u.href : u.href + '/');
-  }
-
-  /** The sensors, or null when the server is not there or not answering like Libre Hardware Monitor (retried after a pause). */
-  async read(): Promise<LhmSensor[] | null> {
-    if (this.failedAt && Date.now() - this.failedAt < this.retryMs) return null;
-    try {
-      const res = await fetch(this.url, {
-        headers: { Accept: 'application/json', ...(this.auth ? { Authorization: this.auth } : {}) },
-        redirect: 'error',
-        signal: AbortSignal.timeout(1500),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const length = Number(res.headers.get('content-length'));
-      if (length > MAX_TREE_BYTES) throw new Error('too large');
-      const text = await res.text();
-      if (text.length > MAX_TREE_BYTES) throw new Error('too large');
-      // "NaN" readings are written as bare literals.
-      const sensors = parseLhmTree(JSON.parse(text.replace(/:\s*(-?Infinity|NaN)\b/g, ':null')));
-      if (!sensors) throw new Error('not a sensor tree');
-      this.failedAt = 0;
-      this.hint = null;
-      return sensors;
-    } catch {
-      this.failedAt = Date.now();
-      this.hint = 'The external Libre Hardware Monitor server is unavailable. Check its Remote Web Server setting and address.';
-      return null;
-    }
-  }
-}

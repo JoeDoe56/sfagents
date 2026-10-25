@@ -1,7 +1,7 @@
 # Built-in Windows hardware monitoring
 
 On Windows, SF Agents starts its bundled LibreHardwareMonitor library adapter
-when the resource monitor first requests a reading. No LibreHardwareMonitor
+when it starts. There is no setting for it and nothing to connect it to. No LibreHardwareMonitor
 desktop app or web server is needed. The adapter includes its .NET runtime.
 It reads sensors only, and cannot change fans, execute commands or serve HTTP.
 It closes when SF Agents closes. The agent's API keys are not passed to it.
@@ -40,18 +40,20 @@ includes the .NET runtime, so users need no separate .NET installation.
 
 Ordinary-user mode reads the sensors Windows exposes. CPU temperatures and
 some storage counters need the signed PawnIO driver and administrator access.
-`sfagents web` installs PawnIO at its first start, silently, from the
-official, pinned, checksum-verified installer, in the same administrator
-approval as Remote Desktop's MoonlightWeb (`npm run sensors:setup` does the
-same by hand). Opening the monitor never installs anything.
 
-The `sensors.admin` setting (on by default on Windows; `--sensor-admin` for
-one run) requests elevation for the sensor worker only. SF Agents, model tools, and its web server stay at their normal
-privilege level. The broker uses a local named pipe restricted to the same
-Windows account; closing the broker closes the elevated worker too.
-Rejecting the prompt or a helper failure falls back to OS readings, with
-a diagnostic hint on the monitor. Missing readings remain unavailable.
+`sfagents web` asks for administrator rights once, as it starts, in a single
+UAC prompt that covers everything SF Agents does with them
+(`web/src/privileges.ts`). The elevated PowerShell behind that prompt
+installs PawnIO when it is missing, silently, from the official, pinned,
+checksum-verified installer (`npm run sensors:setup` does the same by hand),
+then starts the sensor worker (`SfAgents.Sensors.exe --pipe-worker <pipe>`)
+and exits. Opening the monitor never asks for anything.
 
-`--lhm <url>` still selects an explicit external LHM web server, including
-its existing authentication support. `--lhm off` disables LHM and reads only
-the OS. These overrides take precedence over the embedded adapter.
+Only the sensor worker is elevated. SF Agents, model tools, and its web
+server stay at their normal privilege level. SF Agents talks to the worker
+through an unelevated broker (`--broker <pipe>`) that owns a named pipe
+restricted to the same Windows account; the worker connects to it only if
+this account made it. Closing the broker closes the elevated worker too.
+Declining the prompt, or a worker that does not connect, falls back to the
+unelevated adapter, with a diagnostic hint on the monitor. Missing readings
+remain unavailable.

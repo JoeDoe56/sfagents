@@ -1,0 +1,56 @@
+{
+  "project": "MoonlightWeb",
+  "url": "https://github.com/linckosz/moonlight-web",
+  "license": "GPL-3.0-or-later",
+  "commit": "ac6d705bd2a298e8517cf64cb31e7174cf85b8c1",
+  "generator": "scripts/vendor-screen-page.mjs",
+  "copied": "frontend/js: 89 modules the stream view needs; frontend/css: tokens.css, base.css, layout.css, components.css, views/gamepad.css, stream.css; frontend/locales/en.json (MoonlightWeb renamed SF Agents)",
+  "generated": "js/screen-app.js, from the members of frontend/js/app.js the script lists",
+  "changed": [
+    {
+      "file": "js/audio/AudioPipeline.js",
+      "from": "'/js/audio/audio-processor.js",
+      "to": "'/screen/js/audio/audio-processor.js"
+    },
+    {
+      "file": "js/i18n/i18n.js",
+      "from": "`/locales/${code}.json`",
+      "to": "`/screen/locales/${code}.json`"
+    },
+    {
+      "file": "js/ui/StreamView.js",
+      "from": "fetch('/api/health'",
+      "to": "fetch('/api/screen/health'"
+    },
+    {
+      "file": "js/ui/StreamView.js",
+      "from": "this._playerMode ? '/api/share/player/leave' : `/api/hosts/${this.host.uuid}/quit`",
+      "to": "'/api/screen/quit'"
+    },
+    {
+      "file": "js/i18n/i18n.js",
+      "from": "    { code: 'fr', label: 'Français' },\n    { code: 'zh', label: '简体中文' },\n",
+      "to": ""
+    },
+    {
+      "file": "js/ui/StreamView.js",
+      "from": "    _ensureHidPassthrough() {\n",
+      "to": "    _ensureHidPassthrough() {\n        return null;\n"
+    }
+  ],
+  "replaced": [
+    "js/net/tunnelBridge.js",
+    "js/stream/ultra/UltraPlayer.js",
+    "js/api/BackendClient.js",
+    "js/util/ClientLog.js",
+    "js/ui/bmcLogo.js",
+    "js/util/supportNudge.js",
+    "js/ui/ShareMenu.js",
+    "js/hid/HidPassthrough.js",
+    "js/api/UltraSink.js"
+  ],
+  "own": [
+    "js/screen-history.js",
+    "js/screen-main.js"
+  ]
+}

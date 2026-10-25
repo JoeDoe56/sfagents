@@ -1,0 +1,33 @@
+{
+  "project": "MoonlightWeb",
+  "url": "https://github.com/linckosz/moonlight-web",
+  "license": "GPL-3.0-or-later",
+  "commit": "ac6d705bd2a298e8517cf64cb31e7174cf85b8c1",
+  "copied": [
+    "LICENSE",
+    "COPYRIGHT",
+    "backend/native-host (without tests/, tools/ and its opus and openh264 submodules)",
+    "backend/src: the files sources.cmake lists",
+    "backend/third_party/patches",
+    "backend/installer/drivers/vdd (the MIT-licensed virtual display driver, signed)"
+  ],
+  "fetched": "scripts/build-screen.mjs: libdatachannel, moonlight-common-c, opus and openh264 at the commits this MoonlightWeb commit pins them at",
+  "changed": [
+    {
+      "file": "backend/src/streaming/Session.cpp",
+      "why": "The GameStream engine (MoonlightShim, moonlight-common-c's connection code) is gone: a session streams the native host only. Includes <QPointer> it used to get through MoonlightShim.h."
+    },
+    {
+      "file": "backend/src/common/Edition.cpp",
+      "why": "With MW_SFAGENTS the product is named \"SF Agents\": the virtual display, its scheduled task and its staging folder carry SF Agents' name, apart from a MoonlightWeb install on the same machine."
+    },
+    {
+      "file": "backend/src/backend/streambackend/NativeHostBackend.cpp",
+      "why": "With MW_SFAGENTS the host is named after the computer alone."
+    }
+  ],
+  "removed": [
+    "backend/src/streaming/MoonlightShim.cpp",
+    "backend/src/streaming/MoonlightShim.h"
+  ]
+}

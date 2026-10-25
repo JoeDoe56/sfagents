@@ -1,0 +1,515 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <QByteArray>
+#include <QJsonObject>
+#include <QObject>
+#include <QString>
+#include <QVector>
+#include <atomic>
+#include <cstdint>
+
+class FrameSentSink;
+
+/// What a keystroke says about itself beside its character
+/// (IMediaEngine::sendKeyChar). Outside the engine on purpose: a nested class
+/// with member initializers is not complete enough for a default argument
+/// (`= {}`) inside its enclosing class, which GCC and Clang reject.
+struct CharKeyHints
+{
+    /// A chord of the touch keyboard's bar (Ctrl latched, then z): the host
+    /// key carrying the character, under whatever modifiers are held, none
+    /// added and none lifted.
+    bool chord = false;
+    /// The key's US position, for a host whose layout has no key for the
+    /// character — a chord on a Cyrillic layout keeps its shortcut.
+    short positionVk = 0;
+    /// AltGr, or a Mac's Option, chose the character on the client: the Ctrl
+    /// and Alt the viewer holds are a level for the host, not a shortcut.
+    bool altGraph = false;
+};
+
+/**
+ * How this host can be made to type the character the client's keyboard layout
+ * produced, rather than whatever its own layout puts at that key's position.
+ *
+ * It lives here, next to the engine, for the same reason scroll quantization
+ * does: it is a property of the host that the session establishes once and the
+ * input path then reads. What each value means, and why the host's source code
+ * says so, is documented on the enum in InputMessageCodec.h.
+ *
+ * What the host CAN do, whatever the owner chose: the choice is
+ * LayoutFidelity, beside it. A toolbar chord (Ctrl+z from the touch keyboard's
+ * bar) is resolved by its character on every host that can, whatever that
+ * choice says — it names a shortcut, not a position.
+ */
+enum class KeyboardMode
+{
+    Positional,
+    Native,
+    SunshineWindows,
+    // No SunshineMacos: a Sunshine host on macOS stays Positional, on purpose.
+    // InputMessageCodec.h says why.
+};
+
+/**
+ * When the characters of the client's layout win over key positions — the
+ * owner's choice, keyboard_layout_fidelity in settings.json.
+ */
+enum class LayoutFidelity
+{
+    /// The desktop types the client's characters; gaming mode plays by key
+    /// positions, as a keyboard plugged into the host would.
+    Auto,
+    /// The client's characters, gaming mode included.
+    Always,
+    /// Key positions everywhere, the host's layout decides — as every
+    /// Moonlight client does.
+    Never,
+};
+
+/**
+ * @brief What produces a stream's video, audio and input, whatever the source.
+ *
+ * The relays (DataChannelRelay, MediaTrackRelay, StreamRelay) and the WSS
+ * fallback in SignalingServer speak only to this. They do not know, and must
+ * not learn, whether the frames come from a remote GameStream host or from this
+ * machine's own screen.
+ *
+ * Two implementations:
+ *  - MoonlightShim — moonlight-common-c against Sunshine / Apollo / Wolf. This
+ *    is the path every existing host uses and its behaviour must not change.
+ *  - NativeMediaEngine — MoonlightWeb's own capture and encoding, for streaming
+ *    the machine it runs on (backend/native-host/).
+ *
+ * Which one a session gets is decided in exactly one place: the media-engine
+ * branch in StreamSession::onLaunchResult(), keyed on MediaDescriptor::type.
+ *
+ * ── On the split between pure and defaulted ────────────────────────────────
+ *
+ * Pure virtual = every engine must genuinely do this.
+ *
+ * Virtual with a default = the concept only exists for GameStream, and a native
+ * engine answering "nothing to report" is the honest answer rather than a stub
+ * it was forced to write. `hostRttMs()` is the clearest case: there is no host
+ * round trip when the host is this process, and reporting 0 is true, whereas
+ * inventing a number would put a fiction in the stats overlay.
+ *
+ * ── Threading ──────────────────────────────────────────────────────────────
+ *
+ * Unchanged from MoonlightShim, because the relays' assumptions are unchanged:
+ * the input methods are called from relay/libdatachannel threads and must be
+ * safe there; the metric accessors are read from the relay thread while the
+ * producer writes them elsewhere, so implementations use atomics.
+ */
+class IMediaEngine : public QObject
+{
+    Q_OBJECT
+
+public:
+    explicit IMediaEngine(QObject* parent = nullptr)
+        : QObject(parent)
+    {}
+    ~IMediaEngine() override = default;
+
+    /// A press currently applied to the host, kept so the watchdog can release
+    /// it and a heartbeat can restore it.
+    ///
+    /// Lives here rather than in an implementation because the input watchdog
+    /// is session logic, not GameStream logic: a key held through a link stall
+    /// sticks down just the same when the host is this machine.
+    struct HeldKey
+    {
+        short keyCode = 0;
+        char modifiers = 0;
+        char flags = 0;
+        bool hold = false;
+    };
+
+    // ── Lifecycle ───────────────────────────────────────────────────────────
+    //
+    // Starting is deliberately absent: it takes engine-specific parameters (an
+    // RTSP session URL and an AES key for GameStream, a display id for native)
+    // and belongs to the branch that already knows which engine it built.
+
+    virtual void stopConnection() = 0;
+
+    /// Tear the connection down without waiting for it to unwind cleanly. Used
+    /// on the teardown paths where the caller is about to exit anyway.
+    virtual void interruptConnection() = 0;
+
+    virtual bool isConnected() const = 0;
+
+    // ── Video ───────────────────────────────────────────────────────────────
+
+    /// Ask for a keyframe. Rate-limited by the caller, never here.
+    virtual void requestIdrFrame() = 0;
+
+    /// Balance the producer→consumer pending-frame counter. Called by the relay
+    /// at the head of its frame handler, once per frame delivered.
+    virtual void videoFrameDelivered() = 0;
+
+    /// Consume the producer-side delta-drop flag (true once per drop episode).
+    /// The relay uses it to arm awaiting-IDR recovery.
+    virtual bool takeWorkerDroppedDelta() = 0;
+
+    virtual int64_t workerDropCount() const = 0;
+    virtual int pendingVideoFrames() const = 0;
+
+    /// The video format actually in use, as a VIDEO_FORMAT_* mask
+    /// (0x0001 H.264, 0x0100 HEVC, 0x0200 AV1); 0 before it is known.
+    virtual int negotiatedVideoFormat() const = 0;
+
+    // ── Audio ───────────────────────────────────────────────────────────────
+
+    /// Opus samples per channel per packet at 48 kHz (240 = 5 ms, 480 = 10 ms).
+    /// The relay advances the RTP timestamp by exactly this, which is what
+    /// keeps the browser's NetEq from time-stretching into robotic audio.
+    virtual int audioSamplesPerFrame() const = 0;
+
+    // ── Input ───────────────────────────────────────────────────────────────
+    //
+    // `hold` marks a press the client wants kept down through a brief link
+    // stall (movement keys in gaming mode) — see the watchdog notes below.
+
+    virtual void sendKeyEvent(short keyCode, bool down, char modifiers, char flags,
+                              bool hold = false) = 0;
+    virtual void sendUtf8Text(const QString& text) = 0;
+
+    /// One key whose character the host must honour instead of its position,
+    /// because the client's keyboard layout disagrees with the US layout the
+    /// protocol assumes (see InputMessageCodec.h). `down` is the real key
+    /// transition: an engine that can press a character as a key uses both
+    /// edges, one that can only inject text acts on the press and ignores the
+    /// release. Distinct from sendUtf8Text, which carries a whole string from
+    /// a soft keyboard and has no key transition at all.
+    /// `modifiers` is the client's own statement of what it holds, in the
+    /// same encoding as sendKeyEvent's. The character path used to drop it,
+    /// which left the macOS backend with no way to notice that its own idea
+    /// of the modifiers had drifted.
+    /// `hints` is what else the keystroke says about itself (CharKeyHints).
+    using CharKeyHints = ::CharKeyHints;
+    virtual void sendKeyChar(const QString& ch, bool down, char modifiers = 0,
+                             const CharKeyHints& hints = {}) = 0;
+
+    /// Ctrl+Alt+Suppr on the host.
+    ///
+    /// Not a key combination: Windows reserves it in the kernel, so no amount
+    /// of injected keys produces it and every engine has to ask the OS by name.
+    /// A native host does it through SendSAS, and only when its worker runs as
+    /// SYSTEM; a GameStream host is sent the three keys and left to make of
+    /// them what its own service can. Either way the client may ask, and the
+    /// engine says in the log what became of it.
+    virtual void sendSecureAttention() = 0;
+
+    virtual void sendMouseMove(short deltaX, short deltaY) = 0;
+    virtual void sendMousePosition(short x, short y, short referenceWidth,
+                                   short referenceHeight) = 0;
+    virtual void sendMouseButton(bool down, int button, bool hold = false) = 0;
+    virtual void sendMouseScroll(short scrollAmount) = 0;
+    virtual void sendMouseHScroll(short scrollAmount) = 0;
+
+    virtual void sendControllerArrival(uint8_t controllerNumber, uint16_t activeGamepadMask,
+                                       uint8_t type, bool hasRumble) = 0;
+    virtual void sendControllerState(short controllerNumber, short activeGamepadMask,
+                                     int buttonFlags, unsigned char leftTrigger,
+                                     unsigned char rightTrigger, short leftStickX, short leftStickY,
+                                     short rightStickX, short rightStickY) = 0;
+
+    /// The client says this pad is gone — unplugged, or the page closing.
+    ///
+    /// Its own call rather than "an empty state with the mask bit cleared",
+    /// because the two engines need genuinely different things from it. A
+    /// GameStream host reads the cleared mask bit and that IS the removal, so
+    /// nothing changes there. The native engine owns a virtual device it
+    /// created: an all-zero state only centres it, and the pad stays plugged
+    /// in — a controller nobody is holding, left in the Windows game controller
+    /// list for the rest of the session and visible to the next game launched.
+    virtual void sendControllerRemoval(uint8_t controllerNumber, uint16_t activeGamepadMask) = 0;
+
+    /// Shift this session's controller numbering so concurrent sessions do not
+    /// collapse onto the host's controller 0. Zero keeps the browser's own.
+    virtual void setControllerOffset(int offset) = 0;
+
+    /// Align the host's toggle locks with the client's.
+    virtual void syncLockKeys(bool numLock, bool capsLock, bool scrollLock) = 0;
+
+    /// Reconcile the host with the client's authoritative held-input state (its
+    /// heartbeat): press what the watchdog released but the user still holds,
+    /// release what drifted. `buttonMask` is 1 << (button - 1).
+    virtual void syncHeldInputs(const QVector<HeldKey>& keys, quint32 buttonMask,
+                                bool buttonsHold) = 0;
+
+    /// Release every held key/button (and neutralize every non-idle gamepad).
+    /// `includeHold` also releases the inputs flagged `hold`.
+    virtual void releaseHeldInputs(bool includeHold) = 0;
+
+    /// Refresh the client-liveness timestamp. Called from every relay on every
+    /// inbound client message, whatever its type. Returns the silence this
+    /// message ended when the input watchdog had fired on it (ms), else 0.
+    virtual qint64 noteClientAlive() = 0;
+
+    // ── Metrics ─────────────────────────────────────────────────────────────
+
+    /// Host processing latency (capture→encode, ms) averaged over the frames
+    /// since the previous call. Read-and-reset: one consumer only.
+    ///
+    /// Measured rather than reported when the host is this machine, which is
+    /// the one metric the native engine can state with certainty.
+    virtual double takeHostProcessingLatencyMs() = 0;
+
+    /// steady_clock µs at which the latest frame entered this engine (absolute).
+    virtual int64_t frameSubmitTimeUs() const = 0;
+
+    /// Presentation time of the latest frame, in µs SINCE THE FIRST FRAME of the
+    /// session. Same unit and epoch as the `presentationTimeUs` argument of
+    /// videoFrameReady. Never an absolute stamp: the relay reconstructs
+    /// steady-clock capture time as
+    ///   firstFrameArrivalSteadyMs() + presentationTimeUs / 1000
+    /// and an absolute value here would count the clock twice.
+    virtual int64_t framePresentationTimeUs() const = 0;
+
+    /// steady_clock ms of the epoch the presentation times count from. For
+    /// GameStream that is when the first frame reached us; for the native engine
+    /// it is the first frame's display present.
+    virtual int64_t firstFrameArrivalSteadyMs() const = 0;
+
+    /// Where the sender thread reports when each frame left the process, or
+    /// null when this engine has no use for it. Only an engine that stamps its
+    /// own frames can close the timeline; a GameStream frame arrives with no
+    /// host-side stamps to close.
+    virtual FrameSentSink* frameSentSink() { return nullptr; }
+
+    /// Per-stage host latency over the window since the previous call — mean
+    /// and tail of acquire, convert, encode, queue, send and total — as a JSON
+    /// object for the stats message, or an empty object when the engine does
+    /// not measure them. Read-and-reset: one consumer only.
+    virtual QJsonObject takeStageStats() { return {}; }
+
+    /// Whether the capture held its display over the session (the native
+    /// engine's CaptureHold, for the server's `vddmatch`), once
+    /// stopConnection() returned: an empty object when nothing was judged.
+    virtual QJsonObject captureHoldReport() const { return {}; }
+
+    // ── GameStream-only, with truthful defaults ─────────────────────────────
+
+    /// One-way latency to the host, in ms. Zero when the host is this process:
+    /// there is no round trip to measure, and a fabricated number would be
+    /// worse than an absent one.
+    virtual double hostRttMs() const { return 0.0; }
+
+    /// IP TTL of the first datagram received from the host — the one thing on
+    /// the wire that hints at the host's OS family (see HostOsProbe.h). Zero
+    /// when nothing has been read, and permanently zero when there is no wire.
+    virtual int hostIpTtl() const { return 0; }
+
+    /// Quantize scroll to whole 120-unit notches, for a host that discards
+    /// sub-notch amounts. Meaningless when we inject the scroll ourselves.
+    virtual void setScrollQuantization(bool enabled) { Q_UNUSED(enabled); }
+
+    /// How far this host can be pushed to honour the client's keyboard layout.
+    /// Set once per session from the host's OS, and read by the input path on
+    /// every keystroke. Defaults to Positional — the behaviour every Moonlight
+    /// client has always had — so an engine that says nothing loses nothing.
+    virtual void setKeyboardMode(KeyboardMode mode)
+    {
+        m_KeyboardMode.store(mode, std::memory_order_relaxed);
+    }
+    KeyboardMode keyboardMode() const { return m_KeyboardMode.load(std::memory_order_relaxed); }
+
+    /// When the client's characters win over key positions on this session —
+    /// the owner's choice, set once per session beside the mode. Defaults to
+    /// Never, the positions, for the same reason.
+    void setLayoutFidelity(LayoutFidelity fidelity)
+    {
+        m_LayoutFidelity.store(fidelity, std::memory_order_relaxed);
+    }
+    LayoutFidelity layoutFidelity() const
+    {
+        return m_LayoutFidelity.load(std::memory_order_relaxed);
+    }
+
+    /// Whether the client's key presses come from its gaming mouse mode, as
+    /// their `gaming` flag says. True when that changed: the session logs one
+    /// line per change, since under "auto" it decides positions or characters.
+    bool noteGamingKeys(bool gaming)
+    {
+        const int now = gaming ? 1 : 0;
+        return m_GamingKeys.exchange(now, std::memory_order_relaxed) != now;
+    }
+
+    /// Snapshot the host's real lock-key state. Only possible when the streamed
+    /// host IS this machine — which is always true for a native engine and
+    /// conditional for GameStream, hence the parameter.
+    virtual void captureHostLockState(bool hostIsSelf) { Q_UNUSED(hostIsSelf); }
+
+    /// Whether this session may nudge the host pointer to unstick a still
+    /// screen. Off for a guest who was not given keyboard/mouse.
+    virtual void setWakeNudgeAllowed(bool allowed) { Q_UNUSED(allowed); }
+
+    /// Whether the stream repairs itself by intra-refresh rather than by
+    /// keyframes.
+    ///
+    /// False for GameStream, and truthfully so: what a remote host's encoder
+    /// does is not ours to know, so the relay keeps its keyframe recovery.
+    /// Only the native engine can answer this, and only once its encoder has
+    /// accepted the request — which is why it is a live question rather than a
+    /// flag set at construction.
+    virtual bool intraRefreshActive() const { return false; }
+
+    /// The HID passthrough (docs/design/hid-passthrough-study.md, plan P2): a
+    /// device the page reads through WebHID, recreated on the host. Only the
+    /// native engine can; a GameStream host has no way to, and says so.
+    virtual QString hidUnavailableReason() const
+    {
+        return QStringLiteral("the HID passthrough needs MoonlightWeb's native host");
+    }
+    /// The page's hidattach. Empty on success, otherwise why the device was
+    /// refused (for the page and the log).
+    virtual QString hidAttach(int slot, const QJsonObject& message)
+    {
+        Q_UNUSED(slot);
+        Q_UNUSED(message);
+        return hidUnavailableReason();
+    }
+    /// The relay sent the page its hidattached {ok: true}. A wheel kept from
+    /// the last stream answers with what rebuilds its force feedback, which
+    /// the page can only play once it knows the device is there.
+    virtual void hidAttached(int slot) { Q_UNUSED(slot); }
+    /// One message of the 'hid' channel: [slot][report id][seq u16 LE][report].
+    /// Called on the channel's own thread; never blocks.
+    virtual void hidInput(const uint8_t* frame, size_t size)
+    {
+        Q_UNUSED(frame);
+        Q_UNUSED(size);
+    }
+    virtual void hidDetach(int slot) { Q_UNUSED(slot); }
+    /// The page's hidreply: the real device's answer to an hidrequest, to
+    /// inject once into the recreated one.
+    virtual void hidReply(int slot, int reportId, const QByteArray& data)
+    {
+        Q_UNUSED(slot);
+        Q_UNUSED(reportId);
+        Q_UNUSED(data);
+    }
+    /// Whether the page should relay the host OS's Logitech HID++ requests to
+    /// the real wheel (filtered there) and answer with hidreply. Linux only:
+    /// hid-logitech-hidpp binds to the recreated wheel by its VID/PID and
+    /// waits on those answers at probe (unanswered, input stalled ~15 s).
+    /// Its force feedback refuses a non-USB device, so none comes this way.
+    /// Announced in hidcaps as `hidpp`.
+    virtual bool hidRelaysHidpp() const { return false; }
+    /// Whether a recreated device can carry force feedback back to the page
+    /// (a PID block pid.dll drives on Windows, a uinput device whose effects
+    /// the host services on Linux). Announced in hidcaps.
+    virtual bool hidForceFeedback() const { return false; }
+
+signals:
+    /// presentationTimeUs travels WITH the frame through the queued connection:
+    /// relays must not re-read a "latest frame" atomic at drain time, or a
+    /// drained burst gets stamped with one shared timestamp and defeats the
+    /// frontend's out-of-order frame filter on reordering links.
+    ///
+    /// It is RELATIVE: µs since the session's first frame, whose steady-clock
+    /// time is firstFrameArrivalSteadyMs(). See framePresentationTimeUs().
+    void videoFrameReady(QByteArray data, int frameType, int frameNumber,
+                         qint64 presentationTimeUs);
+    void audioSampleReady(QByteArray data);
+
+    void stageChanged(int stage);
+    void connectionStarted();
+    void connectionFailed(const QString& error);
+    void connectionTerminated(int errorCode);
+    void connectionStopped();
+
+    /// The host asked to rumble a controller (forwarded to the browser).
+    void rumble(int controllerNumber, int lowFreqMotor, int highFreqMotor);
+
+    /// The host's OS asked something of a recreated HID device (an output
+    /// report, a feature): forwarded to the page, on the engine's thread.
+    /// kind: 0 output, 1 get feature, 2 set feature.
+    void hidRequest(int slot, int kind, int reportId, QByteArray data);
+
+    /// A force-feedback operation a game asked of a recreated device, as the
+    /// page's hidffb message (mw::native::HidFfb): op, effect, kind, fields.
+    void hidFfb(QJsonObject message);
+
+    /// The mouse pointer's SHAPE changed, and the browser is the one drawing it.
+    ///
+    /// Native host only, and only in desktop mode — see setCompositeCursor.
+    /// Carries no position: the browser already knows where its own pointer is,
+    /// sooner and more accurately than this could say.
+    ///
+    /// `visible` and `png` are separate on purpose. Desktop Duplication only
+    /// hands over a shape when it CHANGES, so a session can legitimately know
+    /// that a pointer is on the display without ever having been shown what it
+    /// looks like. `visible` with an empty `png` means exactly that — draw
+    /// something ordinary — while `visible == false` means draw nothing at all.
+    ///
+    /// `kind` names the pointer as a CSS cursor keyword when it is one of the
+    /// system's standard shapes, and is empty for an application's own artwork.
+    /// It lets a client show ITS native pointer, changing with the content,
+    /// instead of the host's foreign-looking bitmap — see CursorUpdate::kind.
+    ///
+    /// `scale` brings the bitmap and its hotspot from the host desktop's pixels
+    /// into the streamed frame's, which differ whenever the client asked for a
+    /// resolution the host is not running at — see CursorUpdate::scale. It moves
+    /// under a running session, so an update is emitted when it changes alone.
+    void cursorShapeChanged(QByteArray png, int hotspotX, int hotspotY, bool visible, QString kind,
+                            double scale);
+
+    /// Where the host's pointer IS, in frame pixels, for a client that draws
+    /// the pointer without a pointer device of its own to know — a touch
+    /// screen. Native host only, only while the client draws, and throttled at
+    /// the source (CursorPositionGate): a correction for the client's own
+    /// estimate, not a replay of every mouse event. `visible == false` means
+    /// the pointer left the streamed display.
+    void cursorMoved(double x, double y, bool visible);
+
+    /// The viewer's presses stopped reaching the host, or started again.
+    /// Native host only. `reason` is "policy" (this viewer is not this
+    /// machine's administrator and the focused window runs as one) or "uipi"
+    /// (the host process itself is not elevated and the OS refuses); `window`
+    /// names what is in the way. Forwarded to the browser as-is, so the
+    /// viewer sees why the cursor went dead instead of guessing.
+    void inputGateChanged(bool blocked, QString reason, QString window);
+
+    /// The host's display changed mode, shape or dynamic range under the
+    /// session. Native host only, on change only — see mw::native::
+    /// DisplayFormat. `frameWidth`/`frameHeight` are what is encoded from now
+    /// on; `hdr` whether those frames are HDR, `displayHdr` whether the display
+    /// is, and `hdrCapable` whether a session asking for HDR would get it on an
+    /// HDR display. The browser decides from these whether to relaunch.
+    void displayFormatChanged(int displayWidth, int displayHeight, int frameWidth, int frameHeight,
+                              bool displayHdr, bool hdr, bool hdrCapable);
+
+    /// The guests' shared feed goes to @p codec for everyone ("h264": a guest
+    /// whose browser decodes no HEVC joined it), and the feed this session
+    /// carries ends in a moment. Native host, guests on the shared feed only.
+    /// Forwarded to the browser, which comes back in that codec the way its
+    /// own codec fallback does.
+    void sharedFeedCodecChanged(QString codec);
+
+protected:
+    /// Written once by the session thread at stream start, read on every
+    /// keystroke by whichever thread owns the input channel — hence atomic.
+    std::atomic<KeyboardMode> m_KeyboardMode{KeyboardMode::Positional};
+    std::atomic<LayoutFidelity> m_LayoutFidelity{LayoutFidelity::Never};
+    std::atomic<int> m_GamingKeys{-1};
+};

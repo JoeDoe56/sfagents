@@ -1,0 +1,1021 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+import * as iosAudioUnlock from '../audio/iosAudioUnlock.js';
+import { closeHidChannel, createHidChannel, sendHidFrame } from '../hid/hidWire.js';
+import { armAudioPlayRetry } from '../util/audioAutoplay.js';
+import { forceOpusStereo } from '../util/SdpUtils.js';
+import { openSignalingSocket } from '../net/tunnelBridge.js';
+import {
+    beginHandshake,
+    helloMessage,
+    signAnswer,
+    verifyHostSignature,
+    extractFingerprint,
+    IDENTITY_REFUSED,
+    isBindRefusedClose,
+} from '../util/pairingCrypto.js';
+import { defaultIceServers } from './IceServers.js';
+import { isViewMessage } from './hostMessages.js';
+import { setAudioJitterBufferTarget } from '../util/AudioJitter.js';
+import {
+    armDscpCarrier,
+    dscpCarrierMode,
+    prepareDscpCarrier,
+    recvonlyExceptCarrier,
+} from '../util/DscpCarrier.js';
+
+/**
+ * Describe a WebSocket close code for diagnostic logging.
+ * Returns a human-readable English string suitable for console output.
+ */
+function wsCloseDescription(code) {
+    switch (code) {
+        case 1000:
+            return 'normal closure';
+        case 1001:
+            return 'endpoint going away';
+        case 1002:
+            return 'protocol error';
+        case 1003:
+            return 'unsupported data';
+        case 1005:
+            return 'no status code (normal)';
+        case 1006:
+            return 'abnormal closure — DNS / TLS / network timeout';
+        case 1007:
+            return 'invalid frame payload data';
+        case 1008:
+            return 'policy violation';
+        case 1009:
+            return 'message too big';
+        case 1010:
+            return 'mandatory extension';
+        case 1011:
+            return 'internal server error';
+        case 1015:
+            return 'TLS handshake failure — check system date/time';
+        default:
+            return 'code=' + code;
+    }
+}
+
+/**
+ * WebRTC Media Track wrapper for Moonlight streaming.
+ *
+ * Alternative to WebRtcDataChannel that uses RTP media tracks for video
+ * instead of DataChannels.  The browser's native RTCPeerConnection
+ * handles the H.264 RTP stream, decoding it directly to a <video> element.
+ *
+ * Audio is a native RTP Opus track too; only input uses a DataChannel (JSON).
+ *
+ * Signaling flow (same as WebRtcDataChannel):
+ *   1. Connect to signaling WS (URL given by backend /start response).
+ *   2. Receive SDP offer from backend (contains m=video + m=application).
+ *   3. Create RTCPeerConnection, set remote description, generate answer.
+ *   4. Send SDP answer back via signaling WS.
+ *   5. Exchange ICE candidates bidirectionally.
+ *   6. Once the input DataChannel opens + video track active, close signaling WS.
+ *
+ * DataChannel layout (must match MediaTrackRelay backend):
+ *   - Input DC: negotiated=true, id=1, label="input" (JSON, same as WebRtcDataChannel)
+ *   - id=0 is reserved-unused (the audio DC this replaced with an RTP track)
+ *
+ * Video and audio arrive via pc.ontrack (H.264 RTP + Opus RTP), rendered to
+ * the <video> / <audio> elements.
+ */
+export class WebRtcMedia {
+    /**
+     * @param {string} signalingUrl - URL of the backend's SignalingServer WS.
+     * @param {object} [options]
+     * @param {object[]} [options.iceServers] - Optional ICE servers (STUN/TURN).
+     * @param {HTMLVideoElement} [options.videoElement] - <video> element for rendering.
+     * @param {HTMLAudioElement} [options.audioElement] - <audio> element for the
+     *   native RTP Opus track. Normally assigned by StreamView after construction.
+     */
+    constructor(signalingUrl, options = {}) {
+        this.signalingUrl = signalingUrl;
+        this.signalingWs = null;
+        this.pc = null;
+        this.dataChannels = { input: null };
+        this.connected = false;
+        // A share-link guest, never paired: no MW-BIND hello (StreamView sets it).
+        this._unpairedGuest = false;
+
+        // ICE config — populated dynamically by the host's ice-config message,
+        // which is authoritative and may legitimately be an empty list (LAN).
+        // The fallback below only applies when no such message ever arrives.
+        this._dynamicIceServers = null;
+        this._defaultIceServers = defaultIceServers();
+
+        // Video element for native decoding of RTP media track
+        this.videoElement = options.videoElement || null;
+        // Audio element for native decoding of the RTP Opus track. Set by StreamView.
+        this.audioElement = options.audioElement || null;
+        // Cleanup for the autoplay gesture retry, when play() was rejected.
+        this._audioRetryCleanup = null;
+
+        // Callbacks — set by the caller
+        this.onOpen = null; // All channels/tracks open
+        this.onClose = null; // Disconnected / error
+        this.onError = null; // Error event
+        this.onAudio = null; // (sample: Uint8Array) PCM16 audio
+        this.onStats = null; // (msg: object) stats/pong messages from backend
+        this.onTakeover = null; // () session taken over by another device
+        this.onRevoked = null; // () this device's access was revoked by the admin
+        this.onSessionEnded = null; // () the owner ended the session we were invited to
+        this.onHostEnded = null; // () the host ended the stream on purpose (app closed there)
+        this.onHostLost = null; // () the host side failed (Sunshine crashed, encoder died)
+
+        // Stats
+        this.stats = { framesReceived: 0, chunksReceived: 0, framesDropped: 0, framesAssembled: 0 };
+
+        // Audio reassembly buffers (same format as WebRtcDataChannel)
+        this._reassembly = new Map();
+        this._cleanupTimer = null;
+
+        // Logging
+        this._logCount = 0;
+        this._frameLogCount = 0;
+
+        // Guard
+        this._stopping = false;
+        this._closed = false; // separate from _stopping: markStopping() must not block close()
+
+        // WS open/error tracking for better error diagnostics
+        this._wsHadOpen = false;
+        this._wsHadError = false;
+
+        // ICE state tracking
+        this._iceConnected = false;
+
+        // Grace period for WS close after ICE connected
+        this._wsCloseTimer = null;
+        this.WS_GRACE_PERIOD_MS = 10000;
+
+        // Constants (must match backend)
+        this.FRAG_HEADER_SIZE = 17;
+        this.CLEANUP_INTERVAL_MS = 500;
+        this.FRAME_TIMEOUT_MS = 500;
+
+        // DataChannel labels (must match backend MediaTrackRelay)
+        this.DC_AUDIO_LABEL = 'audio';
+        this.DC_INPUT_LABEL = 'input';
+    }
+
+    /**
+     * Set or replace the <video> element for native RTP decoding.
+     * Safe to call before or after connect().
+     */
+    setVideoElement(videoEl) {
+        this.videoElement = videoEl;
+    }
+
+    /**
+     * Set the video receiver's jitter-buffer target (adaptive buffer, ms).
+     * Raising it lets Chrome's dejitter buffer absorb network jitter AND makes
+     * the backend NACK retransmission effective (a packet retransmitted within
+     * the buffer window arrives before its playout deadline). playoutDelayHint
+     * (seconds) moves in lockstep so it does not clamp the buffer back down.
+     * No-op on browsers without jitterBufferTarget (Firefox/Safari).
+     */
+    setVideoJitterBufferTarget(ms) {
+        if (!this.pc || typeof this.pc.getReceivers !== 'function') return;
+        const targetMs = Math.max(0, ms | 0);
+        try {
+            for (const receiver of this.pc.getReceivers()) {
+                const track = receiver.track;
+                if (!track || track.kind !== 'video') continue;
+                if (receiver.jitterBufferTarget !== undefined) {
+                    receiver.jitterBufferTarget = targetMs;
+                }
+                if ('playoutDelayHint' in receiver) {
+                    receiver.playoutDelayHint = targetMs / 1000;
+                }
+            }
+        } catch (e) {
+            console.warn('[WebRtcMedia] setVideoJitterBufferTarget failed:', e.message);
+        }
+    }
+
+    /**
+     * Start the WebRTC connection: connect signaling WS, create PeerConnection,
+     * wait for offer from backend, answer, exchange ICE.
+     */
+    connect() {
+        if (this._stopping) return;
+
+        console.log('[WebRtcMedia] Connecting to signaling:', this.signalingUrl);
+        this.signalingWs = openSignalingSocket(this.signalingUrl);
+
+        this.signalingWs.onopen = () => {
+            this._wsHadOpen = true;
+            console.log('[WebRtcMedia] Signaling WS connected, waiting for SDP offer...');
+            this._createPeerConnection();
+            // MW-BIND-v1: announce our key and nonce. The host holds its SDP
+            // offer until this arrives, since its signature covers the nonce.
+            // Not for a share-link guest: see WebRtcDataChannel.
+            if (this._unpairedGuest) return;
+            beginHandshake().then((identity) => {
+                this._mwBind = identity;
+                if (identity) this._sendSignaling(helloMessage(identity));
+            });
+        };
+
+        this.signalingWs.onmessage = (evt) => {
+            if (this._stopping) return;
+            try {
+                const msg = JSON.parse(evt.data);
+                this._handleSignalingMessage(msg);
+            } catch (e) {
+                console.warn('[WebRtcMedia] Invalid signaling message:', e.message);
+            }
+        };
+
+        this.signalingWs.onerror = (err) => {
+            console.error(
+                '[WebRtcMedia] Signaling WS onerror' +
+                    (this._wsHadOpen ? ' (after open)' : ' (BEFORE open)'),
+            );
+            this._wsHadError = true;
+            if (!this._stopping) {
+                // onerror fires before onclose but carries no close code.
+                // Let onclose handle the user-facing error (it has the code).
+                // Only trigger now if we were already connected (runtime error).
+                if (this._wsHadOpen) {
+                    this._onError('Erreur de connexion au serveur de streaming');
+                }
+            }
+        };
+
+        this.signalingWs.onclose = (evt) => {
+            const desc = wsCloseDescription(evt.code);
+            console.log(
+                '[WebRtcMedia] Signaling WS closed: ' +
+                    desc +
+                    ' (code=' +
+                    evt.code +
+                    ')' +
+                    (evt.reason ? ', reason=' + evt.reason : ''),
+            );
+
+            if (this.connected || this._stopping) return;
+
+            if (this._iceConnected) {
+                console.log(
+                    '[WebRtcMedia] WS closed after ICE connected — waiting ' +
+                        this.WS_GRACE_PERIOD_MS / 1000 +
+                        's for DataChannels...',
+                );
+                this._wsCloseTimer = setTimeout(() => {
+                    if (!this.connected && !this._stopping) {
+                        this._onError(
+                            'DataChannels not established after ' +
+                                this.WS_GRACE_PERIOD_MS / 1000 +
+                                's',
+                        );
+                    }
+                }, this.WS_GRACE_PERIOD_MS);
+            } else {
+                // Close code tells us what went wrong
+                if (isBindRefusedClose(evt)) {
+                    // The host refused our key: final, like a refusal of its own
+                    // signature here (see IDENTITY_REFUSED).
+                    this._onError(IDENTITY_REFUSED);
+                } else if (evt.code === 1015) {
+                    this._onError(
+                        'Erreur de securite TLS. ' + "Verifiez la date et l'heure du systeme.",
+                    );
+                } else if (evt.code === 1006 || !this._wsHadOpen) {
+                    this._onError(
+                        'Connexion au serveur de streaming impossible. ' +
+                            'Verifiez votre pare-feu, antivirus (HTTPS Scanning), ' +
+                            'ou proxy.',
+                    );
+                } else {
+                    this._onError('Connexion au serveur de streaming interrompue');
+                }
+            }
+        };
+
+        // Start cleanup timer for stale audio frames
+        this._cleanupTimer = setInterval(
+            () => this._cleanupStaleFrames(),
+            this.CLEANUP_INTERVAL_MS,
+        );
+    }
+
+    /** One HID passthrough report frame; false when the channel is not open. */
+    sendHid(frame) {
+        return sendHidFrame(this._hidDc, frame);
+    }
+
+    /** Send JSON input message over the input DataChannel. */
+    send(obj) {
+        if (this.dataChannels.input && this.dataChannels.input.readyState === 'open') {
+            this.dataChannels.input.send(JSON.stringify(obj));
+        } else {
+            if (this._logCount < 5) {
+                console.warn('[WebRtcMedia] Input DC not open, dropping message:', obj.type);
+                this._logCount++;
+            }
+        }
+    }
+
+    /** Cancel any scheduled WS close timer. */
+    _clearWsCloseTimer() {
+        if (this._wsCloseTimer) {
+            clearTimeout(this._wsCloseTimer);
+            this._wsCloseTimer = null;
+        }
+    }
+
+    /** Mark as stopping without closing — suppresses "closed unexpectedly" noise. */
+    markStopping() {
+        this._stopping = true;
+    }
+
+    /** Close all connections and clean up. */
+    close() {
+        if (this._closed) return; // idempotent — but markStopping() must NOT short-circuit this
+        this._closed = true;
+        this._stopping = true;
+        console.log('[WebRtcMedia] Closing...');
+
+        this._clearWsCloseTimer();
+
+        // Stop cleanup timer
+        if (this._cleanupTimer) {
+            clearInterval(this._cleanupTimer);
+            this._cleanupTimer = null;
+        }
+
+        // Clear reassembly buffers
+        this._reassembly.clear();
+
+        // Release video element
+        if (this.videoElement) {
+            this.videoElement.srcObject = null;
+        }
+
+        // Drop the autoplay gesture retry: quitting before ever interacting must
+        // not leave a listener on window.
+        if (this._audioRetryCleanup) {
+            this._audioRetryCleanup();
+            this._audioRetryCleanup = null;
+        }
+
+        closeHidChannel(this._hidDc);
+        this._hidDc = null;
+
+        // Close DataChannels
+        for (const [label, dc] of Object.entries(this.dataChannels)) {
+            if (dc && dc.readyState !== 'closed') {
+                try {
+                    dc.close();
+                } catch (e) {
+                    /* ignore */
+                }
+            }
+            this.dataChannels[label] = null;
+        }
+
+        // Close PeerConnection
+        if (this.pc) {
+            try {
+                this.pc.close();
+            } catch (e) {
+                /* ignore */
+            }
+            this.pc = null;
+        }
+
+        // Close signaling WS
+        if (this.signalingWs) {
+            this.signalingWs.onopen = null;
+            this.signalingWs.onmessage = null;
+            this.signalingWs.onerror = null;
+            this.signalingWs.onclose = null;
+            if (
+                this.signalingWs.readyState === WebSocket.OPEN ||
+                this.signalingWs.readyState === WebSocket.CONNECTING
+            ) {
+                try {
+                    this.signalingWs.close();
+                } catch (e) {
+                    /* ignore */
+                }
+            }
+            this.signalingWs = null;
+        }
+
+        this.connected = false;
+        console.log('[WebRtcMedia] Closed');
+    }
+
+    // =========================================================================
+    // PeerConnection setup
+    // =========================================================================
+
+    /**
+     * The one place the PeerConnection's configuration is described.
+     *
+     * setConfiguration() may only change what the spec allows to change, and
+     * every field left out reverts to ITS DEFAULT rather than staying as it is:
+     * passing `{iceServers}` alone silently asks for bundlePolicy 'balanced',
+     * which is not what the connection was built with, and Chrome rejects the
+     * whole call ("Attempted to modify the PeerConnection's configuration in an
+     * unsupported way"). The host's ICE servers were then never applied and the
+     * browser kept using the public fallback list the host had replaced.
+     */
+    _rtcConfiguration(iceServers) {
+        /** @type {RTCConfiguration} */
+        return {
+            iceServers: iceServers,
+            iceTransportPolicy: 'all',
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require',
+        };
+    }
+
+    _createPeerConnection() {
+        console.log('[WebRtcMedia] Creating RTCPeerConnection');
+
+        // What the host said, or the fallback list when it said nothing. An
+        // empty array from the host is an answer — "no STUN" — and survives the
+        // `||` because an empty array is truthy.
+        const iceServers = this._dynamicIceServers || this._defaultIceServers;
+        const config = this._rtcConfiguration(iceServers);
+        console.log('[WebRtcMedia] ICE servers:', JSON.stringify(iceServers));
+
+        this.pc = new RTCPeerConnection(config);
+
+        // --- ICE candidate handler (filter TURN, prioritize UDP) ---
+        this.pc.onicecandidate = (evt) => {
+            if (
+                !evt.candidate ||
+                !this.signalingWs ||
+                this.signalingWs.readyState !== WebSocket.OPEN
+            ) {
+                return;
+            }
+
+            // Drop TURN relay candidates — direct connection only (no TURN server)
+            if (evt.candidate.candidate.indexOf(' typ relay ') !== -1) {
+                console.log('[WebRtcMedia] Dropping TURN relay candidate');
+                return;
+            }
+
+            this._sendSignaling({
+                type: 'ice',
+                candidate: evt.candidate.candidate,
+                mid: evt.candidate.sdpMid || '0',
+            });
+        };
+
+        // --- ICE state ---
+        this.pc.oniceconnectionstatechange = () => {
+            const state = this.pc.iceConnectionState;
+            console.log('[WebRtcMedia] ICE state:', state);
+            if (state === 'connected' || state === 'completed') {
+                this._iceConnected = true;
+            } else if (state === 'disconnected' || state === 'failed') {
+                if (!this._stopping) {
+                    this._clearWsCloseTimer();
+                    this._onError('ICE ' + state);
+                }
+            }
+        };
+
+        // --- Video track handler (native RTP decoding) ---
+        this.pc.ontrack = (event) => {
+            console.log(
+                '[WebRtcMedia] Track received: kind=' + event.track.kind + ' id=' + event.track.id,
+            );
+
+            if (event.track.kind === 'video') {
+                // Disable the jitter buffer for VIDEO only (minimum latency):
+                // deliver frames as soon as they arrive. NOT applied to audio —
+                // the audio jitter buffer is what masks packet loss (with Opus
+                // in-band FEC + PLC), so zeroing it would reintroduce dropouts.
+                try {
+                    const r = event.receiver;
+                    if (r.jitterBufferTarget !== undefined) r.jitterBufferTarget = 0;
+                    if (typeof r.setJitterBufferMinimumDelay === 'function') {
+                        r.setJitterBufferMinimumDelay(0);
+                    }
+                    if ('playoutDelayHint' in r) r.playoutDelayHint = 0;
+                } catch (e) {
+                    console.warn(
+                        '[WebRtcMedia] Failed to set video jitter buffer target:',
+                        e.message,
+                    );
+                }
+
+                console.log('[WebRtcMedia] Video track received, attaching to <video> element');
+                if (this.videoElement) {
+                    const stream = new MediaStream([event.track]);
+                    this.videoElement.srcObject = stream;
+                    this.videoElement.play().catch((e) => {
+                        console.warn('[WebRtcMedia] <video> play() failed:', e.message);
+                    });
+                } else {
+                    console.warn('[WebRtcMedia] No video element set for video track');
+                }
+
+                // Log resolution once metadata loads
+                if (this.videoElement) {
+                    this.videoElement.onloadedmetadata = () => {
+                        console.log(
+                            '[WebRtcMedia] Video resolution: ' +
+                                this.videoElement.videoWidth +
+                                'x' +
+                                this.videoElement.videoHeight,
+                        );
+                    };
+                }
+
+                // Proactive IDR request 250ms after playback starts.
+                // The first keyframe may have been lost during ICE negotiation;
+                // this ensures the decoder has a clean reference frame to start from.
+                if (this.videoElement) {
+                    this.videoElement.oncanplay = () => {
+                        setTimeout(() => {
+                            this.send({ type: 'request_idr' });
+                        }, 250);
+                    };
+                }
+            } else if (event.track.kind === 'audio') {
+                // Native RTP Opus audio: the browser decodes it (jitter buffer +
+                // FEC + PLC). On mobile playStream routes it through the
+                // gesture-blessed element (autoplay unlock); on desktop it returns
+                // false and we play it on our own <audio> element.
+                console.log('[WebRtcMedia] Audio track received');
+                // The browser's buffer is the whole of the audio latency: aim
+                // it, as the video receiver's is aimed from the stats loop.
+                setAudioJitterBufferTarget(this.pc);
+                const stream = new MediaStream([event.track]);
+                if (!iosAudioUnlock.playStream(stream) && this.audioElement) {
+                    this.audioElement.srcObject = stream;
+                    const p = this.audioElement.play();
+                    if (p && p.catch)
+                        p.catch((e) => {
+                            // Autoplay policy rejected it (cold Media Engagement
+                            // profile, Safari/Firefox defaults). Retry on the next
+                            // gesture — in a stream the mouse-capture click always
+                            // comes — instead of staying silent for the session.
+                            console.warn('[WebRtcMedia] audio play() failed:', e.message);
+                            this._audioRetryCleanup = armAudioPlayRetry(this.audioElement);
+                        });
+                }
+            }
+        };
+
+        // --- Create negotiated DataChannels for audio + input ---
+        this._createDataChannels();
+
+        console.log('[WebRtcMedia] PC created, waiting for SDP offer...');
+    }
+
+    _createDataChannels() {
+        // NOTE: no audio DataChannel — audio is a native RTP Opus track now.
+
+        // Input DataChannel (ID=1, ordered=true, reliable)
+        const inputInit = {
+            negotiated: true,
+            id: 1,
+            ordered: true,
+        };
+        this.dataChannels.input = this.pc.createDataChannel(this.DC_INPUT_LABEL, inputInit);
+        this._setupDataChannel(this.DC_INPUT_LABEL, this.dataChannels.input);
+
+        // The HID passthrough's reports (DC#4, hid/hidWire.js), not waited for.
+        this._hidDc = createHidChannel(this.pc);
+
+        console.log('[WebRtcMedia] DataChannels created (input=1; audio is an RTP track)');
+    }
+
+    _setupDataChannel(label, dc) {
+        dc.binaryType = 'arraybuffer';
+
+        dc.onopen = () => {
+            console.log('[WebRtcMedia] DC "' + label + '" open');
+
+            // All DataChannels open together (same SCTP association)
+            if (this._allDcOpen()) {
+                console.log('[WebRtcMedia] All DataChannels open!');
+                this.connected = true;
+                this._clearWsCloseTimer();
+                if (this.onOpen) this.onOpen();
+                this._closeSignalingWs();
+            }
+        };
+
+        dc.onclose = () => {
+            console.log('[WebRtcMedia] DC "' + label + '" closed');
+            if (!this._stopping && this.connected) {
+                this._onError('DataChannel "' + label + '" closed unexpectedly');
+            }
+        };
+
+        dc.onerror = (err) => {
+            if (!this._stopping) {
+                console.warn('[WebRtcMedia] DC "' + label + '" error:', err);
+            }
+        };
+
+        dc.onmessage = (evt) => {
+            if (this._stopping) return;
+
+            if (label === this.DC_AUDIO_LABEL) {
+                this._onAudioChunk(evt.data);
+            } else if (label === this.DC_INPUT_LABEL) {
+                try {
+                    const msg = JSON.parse(evt.data);
+                    if (isViewMessage(msg.type)) {
+                        if (this.onStats) this.onStats(msg);
+                    } else if (msg.type === 'takeover') {
+                        // Exit notice from MediaTrackRelay::sendExitNotice, sent
+                        // on this DC just before the relay closes it.
+                        if (this.onTakeover) this.onTakeover();
+                    } else if (msg.type === 'revoked') {
+                        if (this.onRevoked) this.onRevoked();
+                    } else if (msg.type === 'session-ended') {
+                        if (this.onSessionEnded) this.onSessionEnded();
+                    } else if (msg.type === 'host-ended') {
+                        if (this.onHostEnded) this.onHostEnded();
+                    } else if (msg.type === 'host-lost') {
+                        if (this.onHostLost) this.onHostLost();
+                    } else {
+                        console.log('[WebRtcMedia] Input DC message:', msg);
+                    }
+                } catch (e) {
+                    console.warn('[WebRtcMedia] Invalid input DC message:', evt.data);
+                }
+            }
+        };
+    }
+
+    _allDcOpen() {
+        // Audio is an RTP track now (not a DataChannel) — only the input channel
+        // gates the "connected" state here.
+        return this.dataChannels.input && this.dataChannels.input.readyState === 'open';
+    }
+
+    // =========================================================================
+    // Signaling handlers
+    // =========================================================================
+
+    _handleSignalingMessage(msg) {
+        if (msg.type === 'sdp') {
+            this._handleSdpOffer(msg);
+        } else if (msg.type === 'ice') {
+            this._handleIceCandidate(msg.candidate, msg.mid);
+        } else if (msg.type === 'ice-config') {
+            // Dynamic ICE server configuration from backend.
+            console.log('[WebRtcMedia] Received ice-config:', JSON.stringify(msg.iceServers));
+            this._dynamicIceServers = msg.iceServers;
+            if (this.pc) {
+                try {
+                    this.pc.setConfiguration(this._rtcConfiguration(this._dynamicIceServers));
+                    console.log('[WebRtcMedia] Updated PC ICE servers via setConfiguration');
+                } catch (e) {
+                    console.warn('[WebRtcMedia] Failed to update PC ICE config:', e.message);
+                }
+            }
+        } else {
+            console.warn('[WebRtcMedia] Unknown signaling message type:', msg.type);
+        }
+    }
+
+    /**
+     * Validate that the browser supports the video codec advertised in the SDP.
+     * Parses the m=video line and checks against RTCRtpReceiver.getCapabilities().
+     */
+    _validateCodecSupport(sdp) {
+        try {
+            const caps = RTCRtpReceiver.getCapabilities('video');
+            if (!caps) {
+                console.warn('[WebRtcMedia] Cannot check codec support — no capabilities');
+                return true; // Assume supported
+            }
+
+            // Extract codec names from the SDP offer
+            const rtpmapRe = /a=rtpmap:\d+\s+(\w+)/gi;
+            const sdpCodecs = new Set();
+            let m;
+            while ((m = rtpmapRe.exec(sdp)) !== null) {
+                sdpCodecs.add(m[1].toUpperCase());
+            }
+
+            const browserCodecs = new Set();
+            for (const c of caps.codecs) {
+                browserCodecs.add(c.mimeType.replace('video/', '').toUpperCase());
+            }
+
+            console.log('[WebRtcMedia] SDP codecs:', [...sdpCodecs], 'Browser codecs:', [
+                ...browserCodecs,
+            ]);
+
+            for (const codec of sdpCodecs) {
+                if (browserCodecs.has(codec)) {
+                    return true;
+                }
+            }
+
+            console.warn(
+                '[WebRtcMedia] No matching codec found — browser may not support this stream',
+            );
+            return false;
+        } catch (e) {
+            console.warn('[WebRtcMedia] Codec validation error:', e.message);
+            return true; // Don't block on validation errors
+        }
+    }
+
+    async _handleSdpOffer(msg) {
+        const sdp = msg.sdp;
+        console.log('[WebRtcMedia] Received SDP offer, length=' + sdp.length);
+
+        // ── MW-BIND-v1 step 2 ───────────────────────────────────────────────
+        // Verify the host BEFORE creating any DTLS state, so that a failure
+        // leaves nothing negotiated with whoever sent this.
+        if (this._mwBind?.hostPublicKey) {
+            const ok = await verifyHostSignature(this._mwBind, msg);
+            if (!ok) {
+                // Final: see IDENTITY_REFUSED — the launch ends here, whatever
+                // transports are left in the chain.
+                console.error(
+                    '[MW-BIND] This host could not prove its identity — refusing to connect. ' +
+                        'If you re-installed MoonlightWeb on it, pair again with a PIN.',
+                );
+                this._onError(IDENTITY_REFUSED);
+                return;
+            }
+            console.log('[MW-BIND] Host signature verified');
+        } else if (!msg.nonce) {
+            // The host did not sign: this session has no pairing key bound.
+            // Normal on the host machine itself (local privilege, no session),
+            // where there is no relay to guard against anyway.
+            console.log('[MW-BIND] Unsigned offer — this session has no pairing key');
+        } else if (this._mwBind) {
+            console.warn('[MW-BIND] No stored host identity — cannot verify this offer');
+        }
+
+        try {
+            // Validate codec support before committing
+            const codecOk = this._validateCodecSupport(sdp);
+            if (!codecOk) {
+                console.warn('[WebRtcMedia] Codec not supported by browser — transport may fail');
+            }
+
+            const remoteDesc = new RTCSessionDescription({
+                type: 'offer',
+                sdp: sdp,
+            });
+            await this.pc.setRemoteDescription(remoteDesc);
+            console.log('[WebRtcMedia] Remote description set (offer)');
+            await this._flushPendingCandidates();
+
+            // The bench's silent carrier (DscpCarrier.js), off by default.
+            const carrier = dscpCarrierMode();
+            prepareDscpCarrier(this.pc, carrier);
+
+            // Create answer with receive-only constraints (lowest latency)
+            const answer = await this.pc.createAnswer({
+                offerToReceiveVideo: true,
+                offerToReceiveAudio: true,
+            });
+
+            // Apply low-latency SDP transformations before setLocalDescription
+            let answerSdp = answer.sdp;
+            // Direction: receive only (client is viewer, never sends media),
+            // but for the bench's silent carrier
+            answerSdp = recvonlyExceptCarrier(answerSdp, carrier);
+            // Strip ULPFEC/RED (redundant FEC adds bandwidth & latency). Only the
+            // FEC payload types' lines are removed — the video codec's fmtp
+            // (packetization-mode/profile-level-id) is kept intact.
+            const fecPts = new Set();
+            const fecRe = /^a=rtpmap:(\d+)\s+(?:ulpfec|red)\b.*$/gim;
+            let fecMatch;
+            while ((fecMatch = fecRe.exec(answerSdp)) !== null) {
+                fecPts.add(fecMatch[1]);
+            }
+            for (const pt of fecPts) {
+                const lineRe = new RegExp('^a=(?:rtpmap|fmtp|rtcp-fb):' + pt + '\\b.*$', 'gim');
+                answerSdp = answerSdp.replace(lineRe, '');
+            }
+            answerSdp = answerSdp.replace(/\n{2,}/g, '\n');
+            // NACK retransmission is kept enabled: on an RTP track it is a good
+            // quality/latency tradeoff under light loss (paired with the
+            // backend RtcpNackResponder).
+            // Stereo Opus decode: without stereo=1 in the answer fmtp the
+            // browser decodes MONO and downmixes (L+R)/2 → ~-6 dB quieter.
+            answerSdp = forceOpusStereo(answerSdp);
+
+            const modifiedAnswer = new RTCSessionDescription({
+                type: 'answer',
+                sdp: answerSdp,
+            });
+            await this.pc.setLocalDescription(modifiedAnswer);
+            console.log('[WebRtcMedia] Local description set (answer, low-latency), sending...');
+            armDscpCarrier(this.pc, carrier);
+
+            // Send answer via signaling WS, signed when this browser is paired.
+            const answerMsg = {
+                type: 'sdp',
+                sdp: this.pc.localDescription.sdp,
+            };
+
+            // MW-BIND-v1 step 3: sign the fingerprint of the answer we just
+            // committed to. The host refuses an answer whose signature is
+            // missing or does not verify.
+            if (this._mwBind && msg.nonce) {
+                const sig = await signAnswer(
+                    this._mwBind,
+                    msg.host_id || this._mwBind.hostId || '',
+                    msg.nonce,
+                    extractFingerprint(sdp),
+                    answerMsg.sdp,
+                );
+                if (!sig) {
+                    console.error(
+                        '[MW-BIND] Could not sign this connection — refusing to continue.',
+                    );
+                    this._onError(IDENTITY_REFUSED);
+                    return;
+                }
+                answerMsg.sig = sig;
+            }
+
+            this._sendSignaling(answerMsg);
+        } catch (e) {
+            console.error('[WebRtcMedia] SDP handling error:', e.message);
+            this._onError('SDP negotiation failed: ' + e.message);
+        }
+    }
+
+    /**
+     * Add a remote ICE candidate, or hold it until there is a remote
+     * description to add it to.
+     *
+     * Trickle ICE has no ordering guarantee, and addIceCandidate() on a
+     * PeerConnection with no remote description throws — after which the
+     * candidate is gone. That is not theoretical: the host holds its offer back
+     * until the MW-BIND hello while its candidates go out immediately, so every
+     * session lost the host's own candidates this way (five per stream on
+     * 2026-08-30) and had to rediscover the host's address peer-reflexively.
+     */
+    async _handleIceCandidate(candidate, mid) {
+        if (this._stopping) return;
+
+        if (!this.pc || !this.pc.remoteDescription) {
+            (this._pendingRemoteCandidates ||= []).push({ candidate, mid });
+            return;
+        }
+
+        try {
+            const iceCandidate = new RTCIceCandidate({
+                candidate: candidate,
+                sdpMid: mid,
+            });
+            await this.pc.addIceCandidate(iceCandidate);
+            if (this._logCount < 5) {
+                console.log('[WebRtcMedia] Added ICE candidate, mid=' + mid);
+                this._logCount++;
+            }
+        } catch (e) {
+            console.warn('[WebRtcMedia] Failed to add ICE candidate:', e.message);
+        }
+    }
+
+    /** Flush the candidates held by _handleIceCandidate. Call right after
+     *  setRemoteDescription resolves. */
+    async _flushPendingCandidates() {
+        const held = this._pendingRemoteCandidates;
+        if (!held || held.length === 0) return;
+        this._pendingRemoteCandidates = [];
+        console.log(
+            '[WebRtcMedia] Applying ' + held.length + ' ICE candidate(s) held before the offer',
+        );
+        for (const c of held) await this._handleIceCandidate(c.candidate, c.mid);
+    }
+
+    _sendSignaling(obj) {
+        if (this.signalingWs && this.signalingWs.readyState === WebSocket.OPEN) {
+            this.signalingWs.send(JSON.stringify(obj));
+        }
+    }
+
+    _closeSignalingWs() {
+        if (this.signalingWs) {
+            console.log('[WebRtcMedia] Closing signaling WS (DataChannels established)');
+            this.signalingWs.onopen = null;
+            this.signalingWs.onmessage = null;
+            this.signalingWs.onerror = null;
+            this.signalingWs.onclose = null;
+            if (
+                this.signalingWs.readyState === WebSocket.OPEN ||
+                this.signalingWs.readyState === WebSocket.CONNECTING
+            ) {
+                try {
+                    this.signalingWs.close();
+                } catch (e) {
+                    /* ignore */
+                }
+            }
+            this.signalingWs = null;
+        }
+    }
+
+    // =========================================================================
+    // Audio chunk reassembly (same format as WebRtcDataChannel)
+    // =========================================================================
+
+    _onAudioChunk(data) {
+        this.stats.chunksReceived++;
+
+        if (data instanceof ArrayBuffer) {
+            data = new Uint8Array(data);
+        } else if (data instanceof Blob) {
+            return;
+        }
+
+        if (data.byteLength < this.FRAG_HEADER_SIZE) return;
+
+        // Parse header (big endian, same format as WebRtcDataChannel)
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        const payloadSize = view.getUint32(9, false);
+        const payload = new Uint8Array(
+            data.buffer,
+            data.byteOffset + this.FRAG_HEADER_SIZE,
+            payloadSize,
+        );
+
+        // Audio packets are typically single-chunk, so we emit directly
+        if (this.onAudio) {
+            this.onAudio(payload);
+        }
+    }
+
+    // =========================================================================
+    // Audio reassembly cleanup
+    // =========================================================================
+
+    _cleanupStaleFrames() {
+        const now = performance.now();
+        const toDelete = [];
+
+        for (const [frameId, entry] of this._reassembly) {
+            if (entry.completed) {
+                toDelete.push(frameId);
+                continue;
+            }
+
+            const age = now - entry.firstChunkTime;
+            if (age > this.FRAME_TIMEOUT_MS) {
+                this.stats.framesDropped++;
+                if (this._frameLogCount < 5) {
+                    console.warn(
+                        '[WebRtcMedia] Dropping stale audio frame #' +
+                            frameId +
+                            ': age=' +
+                            Math.round(age) +
+                            'ms',
+                    );
+                    this._frameLogCount++;
+                }
+                toDelete.push(frameId);
+            }
+        }
+
+        for (const id of toDelete) {
+            this._reassembly.delete(id);
+        }
+    }
+
+    // =========================================================================
+    // Error handling
+    // =========================================================================
+
+    _onError(message) {
+        console.error('[WebRtcMedia] Error:', message);
+        if (this.onError) this.onError(new Error(message));
+        if (this.onClose) this.onClose();
+        this.close();
+    }
+}

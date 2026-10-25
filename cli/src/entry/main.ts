@@ -46,7 +46,7 @@ import {
   type ConversationFlags,
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
-import { DEFAULT_HOST, DEFAULT_PORT, WebAuth, WebServer, parsePublicOrigin } from '@sfagents/web';
+import { DEFAULT_HOST, DEFAULT_PORT, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
 import { providersCommand, settingsCommand } from './providers.js';
 
 export const VERSION = '0.1.0';
@@ -90,16 +90,12 @@ Options:
       --public-origin <url> (web) Accept this exact external origin behind a reverse proxy
       --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
                             the agent and its tools to your network)
-      --lhm <url|off>       (web) Read an external Libre Hardware Monitor web server instead of the
-                            bundled sensors (user:password@ for its sign-in); off: OS readings only
-      --sensor-admin        (web, Windows) Ask to elevate only the built-in sensor helper
   -v, --version             Print the version
   -h, --help                Show this help
 
 Environment:
   OPENROUTER_API_KEY        API key for provider "openrouter" (may be set in <config dir>/.env)
   SFAGENTS_HOME             Folder for settings.json and providers.json (default: the per-user app folder)
-  SFAGENTS_LHM_URL          Same as --lhm
   SFAGENTS_DEBUG=1          Debug logging to stderr`;
 
 interface Streams {
@@ -152,8 +148,6 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         port: { type: 'string' },
         'public-origin': { type: 'string' },
         host: { type: 'string' },
-        lhm: { type: 'string' },
-        'sensor-admin': { type: 'boolean', default: false },
         'new-token': { type: 'boolean', default: false },
         name: { type: 'string' },
         url: { type: 'string' },
@@ -307,25 +301,6 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         streams.stderr.write(`--port must be a number from 0 to 65535, got "${values.port}".\n`);
         return EXIT_CONFIG;
       }
-      const storedLhm = setting<string>('sensors.lhm', 'auto');
-      const lhmSetting = values.lhm ?? process.env.SFAGENTS_LHM_URL ?? (storedLhm === 'auto' ? undefined : storedLhm);
-      let lhmUrl: string | null | undefined;
-      if (lhmSetting !== undefined && lhmSetting !== '') {
-        if (lhmSetting === 'off') lhmUrl = null;
-        else {
-          let parsed: URL | undefined;
-          try {
-            parsed = new URL(lhmSetting);
-          } catch {
-            parsed = undefined;
-          }
-          if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
-            streams.stderr.write(`--lhm must be an http:// address or "off", got "${lhmSetting}".\n`);
-            return EXIT_CONFIG;
-          }
-          lhmUrl = parsed.href;
-        }
-      }
       let publicOrigin: string | undefined;
       try {
         publicOrigin = values['public-origin'] === undefined ? undefined : parsePublicOrigin(values['public-origin']);
@@ -342,7 +317,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       return serveWeb(
         tree,
         conversation,
-        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, lhmUrl, sensorAdmin: values['sensor-admin'] || setting('sensors.admin', process.platform === 'win32'), settings: appSettings, newToken: values['new-token'] },
+        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, settings: appSettings, newToken: values['new-token'] },
         streams,
       );
     }
@@ -436,7 +411,7 @@ async function runOnce(
 async function serveWeb(
   tree: AgentTree,
   conversation: ConversationService,
-  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; lhmUrl?: string | null; sensorAdmin?: boolean; settings: AppSettings; newToken?: boolean },
+  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; settings: AppSettings; newToken?: boolean },
   streams: Streams,
 ): Promise<number> {
   const style = createStyle(streams.stderr as NodeJS.WriteStream);
@@ -475,16 +450,21 @@ async function serveWeb(
       return EXIT_FAILURE;
     }
   }
+  // One administrator approval for everything SF Agents does with administrator
+  // rights, asked for now rather than when a feature is first used.
+  // Screen mirroring's setup (its helper, the virtual display) is part of it.
+  const screen = new ScreenMirror({ log: (line) => streams.stderr.write(`${line}\n`) });
+  const privileges = process.env['SFAGENTS_NO_SETUP'] === '1' ? undefined : await acquirePrivileges({ screen, log: (line) => streams.stderr.write(`${line}\n`) });
   const server = new WebServer({
     auth,
+    screen,
     tree,
     conversation,
+    privileges,
     port: opts.port,
     host: opts.host,
     publicOrigin: opts.publicOrigin,
     approveAll: opts.yes,
-    lhmUrl: opts.lhmUrl,
-    sensorAdmin: opts.sensorAdmin,
     registry: providers().registry,
     accounts: providers().accounts,
     settings: opts.settings,
@@ -502,8 +482,8 @@ async function serveWeb(
     return EXIT_FAILURE;
   }
   for (const n of conversation.notices) streams.stderr.write(`${n.message}\n`);
-  // What the features need beyond the package (Remote Desktop's MoonlightWeb, the
-  // dictation model, the sensor driver), set up in the background.
+  // What the features need beyond the package (the screen mirroring helper, the
+  // dictation model), set up in the background.
   if (process.env['SFAGENTS_NO_SETUP'] !== '1') void server.setupFeatures();
   streams.stdout.write(`SF Agents web interface: ${url}\n`);
   if (opts.publicOrigin) streams.stdout.write(`Reverse proxy origin: ${opts.publicOrigin}\n`);

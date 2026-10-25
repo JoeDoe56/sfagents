@@ -26,6 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import type { Privileges } from './privileges.js';
 import { lhmReadings, type LhmReadings, type LhmReader, type LhmSensor } from './lhm.js';
 import { WindowsSensorClient } from './windows-sensors.js';
 import { LinuxSensorClient } from './linux-sensors.js';
@@ -332,9 +333,10 @@ const DRIVE_TTL_MS = 10_000;
 const WINDOWS_HINT = 'Windows hardware sensors (Libre Hardware Monitor) are unavailable; the monitor is using operating-system readings.';
 
 export interface SystemMonitorOptions {
-  /** An explicit external reader; null disables the embedded platform adapter. */
+  /** Tests: a reader in place of the bundled sensor program, or null for none. */
   lhm?: LhmReader | null;
-  elevateWindowsSensors?: boolean;
+  /** What the administrator approval at startup gave the sensor programs (privileges.ts). */
+  privileges?: Pick<Privileges, 'windowsSensors' | 'linuxSudo'>;
   log?: (message: string) => void;
 }
 
@@ -354,8 +356,8 @@ export class SystemMonitor {
     options: SystemMonitorOptions = {},
   ) {
     this.lhm = options.lhm === undefined
-      ? (this.source.platform === 'win32' ? new WindowsSensorClient({ elevate: options.elevateWindowsSensors, log: options.log })
-        : this.source.platform === 'linux' ? new LinuxSensorClient({ log: options.log }) : null)
+      ? (this.source.platform === 'win32' ? new WindowsSensorClient({ elevated: options.privileges?.windowsSensors, log: options.log })
+        : this.source.platform === 'linux' ? new LinuxSensorClient({ sudo: options.privileges?.linuxSudo, log: options.log }) : null)
       : options.lhm;
   }
 
@@ -367,6 +369,11 @@ export class SystemMonitor {
       this.pending = undefined;
     });
     return this.pending;
+  }
+
+  /** Starts the sensor program now, so its first reading is ready when the monitor opens. */
+  warm(): void {
+    void this.lhm?.read();
   }
 
   async close(): Promise<void> {

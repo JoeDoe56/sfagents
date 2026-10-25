@@ -15,8 +15,8 @@ export interface SettingSpec {
   label: string;
   /** One line shown under the control. */
   hint: string;
-  group: 'Web server' | 'Remote Desktop' | 'Hardware sensors' | 'Terminal output';
-  type: 'port' | 'host' | 'boolean' | 'lhm' | 'server';
+  group: 'Web server' | 'Remote Desktop' | 'Terminal output';
+  type: 'port' | 'host' | 'boolean';
   default: SettingValue;
   /** Applies on the next start of `sfagents web` (or `start`), not at once. */
   restart: boolean;
@@ -34,34 +34,6 @@ export const SETTINGS: readonly SettingSpec[] = [
     type: 'host',
     default: '127.0.0.1',
     restart: true,
-  },
-  {
-    key: 'remote.server',
-    label: 'MoonlightWeb',
-    hint: '"auto" finds MoonlightWeb on this computer (or starts the one installed); or the local address of a MoonlightWeb server, such as http://127.0.0.1:8080.',
-    group: 'Remote Desktop',
-    type: 'server',
-    default: 'auto',
-    restart: false,
-  },
-  {
-    key: 'sensors.lhm',
-    label: 'Sensor source',
-    hint: '"auto" uses the bundled sensors; "off" uses the operating system\'s readings only; or the address of a Libre Hardware Monitor web server.',
-    group: 'Hardware sensors',
-    type: 'lhm',
-    default: 'auto',
-    restart: true,
-  },
-  {
-    key: 'sensors.admin',
-    label: 'Elevated sensor helper',
-    hint: 'Ask to elevate only the read-only sensor helper (CPU temperatures need it on Windows).',
-    group: 'Hardware sensors',
-    type: 'boolean',
-    default: process.platform === 'win32',
-    restart: true,
-    platform: 'win32',
   },
   { key: 'cli.showReasoning', label: 'Show reasoning', hint: 'Print model reasoning in the terminal when the provider returns it.', group: 'Terminal output', type: 'boolean', default: false, restart: false },
   { key: 'cli.showContext', label: 'Show context size', hint: 'Print the estimated size of each turn\'s working context in the terminal.', group: 'Terminal output', type: 'boolean', default: false, restart: false },
@@ -94,28 +66,6 @@ export function parseSetting(key: string, value: unknown): SettingValue {
       const s = typeof value === 'string' ? value.trim() : '';
       if (!s || s.length > 255 || /[\s/@]/.test(s)) throw new SettingsError(`${spec.label} must be an IP address or host name.`);
       return s;
-    }
-    case 'server': {
-      const s = typeof value === 'string' ? value.trim() : '';
-      if (s === 'auto') return s;
-      try {
-        const u = new URL(s);
-        if ((u.protocol === 'http:' || u.protocol === 'https:') && u.pathname === '/') return u.origin;
-      } catch {
-        // fall through
-      }
-      throw new SettingsError(`${spec.label} must be "auto" or an http(s) address with no path.`);
-    }
-    case 'lhm': {
-      const s = typeof value === 'string' ? value.trim() : '';
-      if (s === 'auto' || s === 'off') return s;
-      try {
-        const u = new URL(s);
-        if (u.protocol === 'http:' || u.protocol === 'https:') return s;
-      } catch {
-        // fall through
-      }
-      throw new SettingsError(`${spec.label} must be "auto", "off" or an http(s) address.`);
     }
   }
 }

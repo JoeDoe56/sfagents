@@ -1,0 +1,99 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <QString>
+#include <QJsonObject>
+#include <QSettings>
+
+class NvApp
+{
+public:
+    NvApp() = default;
+
+    NvApp(int id, const QString& name, bool hdrSupported = false)
+        : m_Id(id)
+        , m_Name(name)
+        , m_HdrSupported(hdrSupported)
+    {}
+
+    explicit NvApp(QSettings& settings)
+    {
+        m_Id = settings.value("id").toInt();
+        m_Name = settings.value("name").toString();
+        m_HdrSupported = settings.value("hdr").toBool();
+    }
+
+    bool isInitialized() const { return m_Id != 0 && !m_Name.isEmpty(); }
+
+    int id() const { return m_Id; }
+    QString name() const { return m_Name; }
+    bool hdrSupported() const { return m_HdrSupported; }
+
+    /// Whether asking this host for cover art is worth a request.
+    ///
+    /// True everywhere a host keeps a library: the art may still be missing for
+    /// one app, and the grid falls back to an icon when the image does not
+    /// load. False says there is none to have, ever — the native host's "apps"
+    /// are monitors — and it exists so that case costs no request at all
+    /// instead of one 404 per display on every render.
+    bool hasBoxArt() const { return m_HasBoxArt; }
+    void setHasBoxArt(bool has) { m_HasBoxArt = has; }
+
+    /// What the browser needs to draw the machine behind an app: set only by
+    /// the native host, whose apps are the displays of the machine it runs on
+    /// (OS, kind of screen, monitor name, a stable key). Empty everywhere else,
+    /// and then left out of the JSON, so no other backend's list changes.
+    const QJsonObject& device() const { return m_Device; }
+    void setDevice(const QJsonObject& device) { m_Device = device; }
+
+    QJsonObject toJson() const
+    {
+        QJsonObject obj;
+        obj["id"] = m_Id;
+        obj["name"] = m_Name;
+        obj["hdrSupported"] = m_HdrSupported;
+        obj["boxArt"] = m_HasBoxArt;
+        if (!m_Device.isEmpty()) obj["device"] = m_Device;
+        return obj;
+    }
+
+    void serialize(QSettings& settings) const
+    {
+        settings.setValue("id", m_Id);
+        settings.setValue("name", m_Name);
+        settings.setValue("hdr", m_HdrSupported);
+    }
+
+    bool operator==(const NvApp& other) const
+    {
+        return m_Id == other.m_Id && m_Name == other.m_Name &&
+               m_HdrSupported == other.m_HdrSupported && m_Device == other.m_Device;
+    }
+
+    bool operator!=(const NvApp& other) const { return !(*this == other); }
+
+private:
+    int m_Id = 0;
+    QString m_Name;
+    bool m_HdrSupported = false;
+    /// Default true: every GameStream host serves /appasset, and only a backend
+    /// that knows there is nothing behind it says otherwise.
+    bool m_HasBoxArt = true;
+    QJsonObject m_Device;
+};

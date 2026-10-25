@@ -51,6 +51,28 @@ test('malformed responses, process failure and timeouts fall back without hangin
   }
 });
 
+test('the elevated helper is used first, and a failure falls back to the helper at the user\'s own level', async () => {
+  const logs: string[] = [];
+  // "node --broker <pipe>" is not a sensor helper: it exits at once, like a worker that never connected.
+  const reader = new WindowsSensorClient({ command: process.execPath, args: [fixture, 'ok'], timeoutMs: 1500, retryMs: 0, elevated: { pipe: 'sfagents-sensors-test', approved: Promise.resolve(true) }, log: (l) => logs.push(l) });
+  try {
+    const first = await reader.read();
+    assert.equal(first?.[0]?.value, 1);
+    assert.match(logs.join('\n'), /elevated helper failed/);
+    assert.equal((await reader.read())?.[0]?.value, 2);
+  } finally { await reader.close(); }
+});
+
+test('a declined approval reads at the user\'s own level without trying the elevated helper', async () => {
+  const logs: string[] = [];
+  const reader = new WindowsSensorClient({ command: process.execPath, args: [fixture, 'ok'], timeoutMs: 1500, retryMs: 0, elevated: { pipe: 'sfagents-sensors-test', approved: Promise.resolve(false) }, log: (l) => logs.push(l) });
+  try {
+    await new Promise((r) => setImmediate(r));
+    assert.equal((await reader.read())?.[0]?.value, 1);
+    assert.deepEqual(logs, []);
+  } finally { await reader.close(); }
+});
+
 test('closing cancels an in-flight read', async () => {
   const reader = client('hang');
   const pending = reader.read();

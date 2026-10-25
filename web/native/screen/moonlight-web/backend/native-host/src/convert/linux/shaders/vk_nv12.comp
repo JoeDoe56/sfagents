@@ -1,0 +1,74 @@
+#version 450
+// VulkanConvert's conversion: the picture — the scanout, or the resampled one —
+// with the pointer drawn on it, into the two planes of the surface VA-API
+// encodes from, in place. GlConvert's kCommon, kLumaMain and kChromaMain
+// transcribed line for line: BT.709, limited ("TV") range, the same colour space
+// on every platform. GL draws luma and chroma as two passes; here one
+// invocation per luma sample writes it, and the even ones the chroma sample
+// they lead, read at the chroma sample's own centre — where GL's half-size pass
+// reads it, so that the bilinear fetch there is the same 2x2 average.
+//
+// No flip: row 0 of an image is its first row in memory, which is what the
+// encoder and the buffer the compositor wrote both mean by "top" (GlConvert
+// says why GL's vertex shader does not flip either).
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D Source;
+layout(set = 0, binding = 1) uniform sampler2D CursorPixels;
+layout(set = 0, binding = 2) uniform sampler2D CursorInvert;
+layout(set = 0, binding = 3, r8) uniform writeonly image2D Luma;
+layout(set = 0, binding = 4, rg8) uniform writeonly image2D Chroma;
+
+layout(push_constant) uniform Push
+{
+    // xy: the cursor's top-left in source UV. zw: its size in source UV.
+    vec4 CursorRect;
+    // xy: the picture's top-left in Source's UV. zw: its size. (0,0,1,1) but
+    // for a screen of an X11 desktop over several, which reads its window of
+    // the root window's buffer (KmsFrame::sourceX; GlConvert's SourceRect).
+    vec4 SourceRect;
+    ivec2 size; // the luma plane
+    float CursorEnabled;
+} pc;
+
+// The desktop with the mouse pointer drawn on it: the scanout does not contain
+// the pointer (it is on its own hardware plane), so it is put back here,
+// costing one fetch on the pixels it covers.
+vec3 Scene(vec2 p)
+{
+    // Held half a texel inside the picture, so a bilinear read at its edge
+    // never takes a pixel of the screen beside it; for a whole image that is
+    // the edge clamp the sampler already does.
+    vec2 texel = 1.0 / vec2(textureSize(Source, 0));
+    vec2 q = clamp(pc.SourceRect.xy + p * pc.SourceRect.zw, pc.SourceRect.xy + 0.5 * texel,
+                   pc.SourceRect.xy + pc.SourceRect.zw - 0.5 * texel);
+    vec3 rgb = texture(Source, q).rgb;
+    if (pc.CursorEnabled < 0.5) return rgb;
+    vec2 c = (p - pc.CursorRect.xy) / pc.CursorRect.zw;
+    if (c.x < 0.0 || c.y < 0.0 || c.x > 1.0 || c.y > 1.0) return rgb;
+    if (texture(CursorInvert, c).r > 0.5) return 1.0 - rgb;
+    vec4 cursor = texture(CursorPixels, c);
+    return mix(rgb, cursor.rgb, cursor.a);
+}
+
+const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
+const float kLumaScale = 219.0 / 255.0;
+const float kLumaBias = 16.0 / 255.0;
+const float kChromaScale = 224.0 / 255.0;
+const float kChromaBias = 128.0 / 255.0;
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.size.x || p.y >= pc.size.y) return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(pc.size);
+    imageStore(Luma, p, vec4(dot(Scene(uv), kLuma) * kLumaScale + kLumaBias));
+    if ((p.x & 1) == 0 && (p.y & 1) == 0) {
+        ivec2 c = p >> 1;
+        vec3 rgb = Scene((vec2(c) + 0.5) / vec2(pc.size >> 1));
+        float y = dot(rgb, kLuma);
+        // The BT.709 denominators: 2*(1-Kb) and 2*(1-Kr).
+        vec2 o = vec2((rgb.b - y) / 1.8556, (rgb.r - y) / 1.5748) * kChromaScale + kChromaBias;
+        imageStore(Chroma, c, vec4(o, 0.0, 0.0));
+    }
+}

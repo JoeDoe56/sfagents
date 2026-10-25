@@ -16,19 +16,20 @@ internal static class Program
         try
         {
             if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows sensor adapter only.");
-            if (args.Length == 2 && args[0] == "--pipe-worker" && args[1].StartsWith("sfagents-sensors-"))
+            if (args.Length == 2 && args[0] == "--pipe-worker" && IsPipeName(args[1]))
             {
-                using var pipe = new NamedPipeClientStream(".", args[1], PipeDirection.InOut, PipeOptions.Asynchronous);
-                await pipe.ConnectAsync(60_000);
+                // CurrentUserOnly: connect only to a pipe this Windows account made.
+                using var pipe = new NamedPipeClientStream(".", args[1], PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                await pipe.ConnectAsync(120_000);
                 using var input = new StreamReader(pipe);
                 using var output = new StreamWriter(pipe) { AutoFlush = true };
                 await Serve(input, output);
             }
-            else if (args.SequenceEqual(new[] { "--elevate" }) && !IsAdministrator())
+            else if (args.Length == 2 && args[0] == "--broker" && IsPipeName(args[1]))
             {
-                await Broker();
+                await Broker(args[1]);
             }
-            else if (args.Length == 0 || args.SequenceEqual(new[] { "--elevate" }))
+            else if (args.Length == 0)
             {
                 await Serve(Console.In, Console.Out);
             }
@@ -42,22 +43,22 @@ internal static class Program
         }
     }
 
+    private static bool IsPipeName(string name) =>
+        name.StartsWith("sfagents-sensors-") && name.Length <= 64 && name.All(c => char.IsAsciiLetterOrDigit(c) || c == '-');
+
     private static bool IsAdministrator() => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
-    // Only the optional sensor worker elevates; the broker and SF Agents stay
-    // unprivileged. The pipe is restricted to this Windows account, including
-    // its elevated token, and disappears when the broker exits.
-    private static async Task Broker()
+    // Only the sensor worker is elevated; the broker and SF Agents stay
+    // unprivileged. SF Agents' administrator approval at startup starts the
+    // worker (web/src/privileges.ts), which connects here. The pipe is
+    // restricted to this Windows account, including its elevated token, and
+    // disappears when the broker exits. SF Agents stops the broker if the
+    // approval is not given.
+    private static async Task Broker(string name)
     {
-        var name = "sfagents-sensors-" + Guid.NewGuid().ToString("N");
         using var pipe = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        var info = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-        info.ArgumentList.Add("--pipe-worker");
-        info.ArgumentList.Add(name);
-        using var worker = Process.Start(info) ?? throw new IOException("Could not start the sensor worker.");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
-        await pipe.WaitForConnectionAsync(timeout.Token);
+        await pipe.WaitForConnectionAsync();
         using var input = new StreamReader(pipe);
         using var output = new StreamWriter(pipe) { AutoFlush = true };
         while (await Console.In.ReadLineAsync() is { } request)
@@ -96,7 +97,7 @@ internal static class Program
                 var hasCpuTemperature = readings.Any(s => s.HardwareId.Contains("cpu/") && s.Type == "Temperature" && s.Value.HasValue);
                 string? hint = hasCpuTemperature ? null : IsAdministrator()
                     ? "CPU temperature is unavailable. Install the signed PawnIO driver if it is missing; some hardware may not expose this sensor."
-                    : "CPU temperatures need administrator access to the sensor helper. Start with --sensor-admin to show the Windows permission prompt.";
+                    : "CPU temperatures need administrator rights, which SF Agents asks for when it starts. Restart SF Agents and approve the prompt.";
                 await output.WriteLineAsync(JsonSerializer.Serialize(new { sensors = readings, processes = CountProcesses(), hint }, Json));
                 await output.FlushAsync();
             }

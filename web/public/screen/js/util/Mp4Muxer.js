@@ -1,0 +1,906 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * NAL unit utilities for H.264 and HEVC with WebCodecs-based decoding.
+ *
+ * Provides Annex B splitting, parameter set extraction (SPS/PPS for H.264,
+ * VPS/SPS/PPS for HEVC), avcC/hvcC description building, and codec string
+ * generation for VideoDecoder.configure().
+ */
+
+// --- NAL type constants ---
+
+const H264_SPS = 7;
+const H264_PPS = 8;
+
+const HEVC_VPS = 32;
+const HEVC_SPS = 33;
+const HEVC_PPS = 34;
+
+export const CODEC_H264 = 'h264';
+export const CODEC_HEVC = 'hevc';
+export const CODEC_AV1 = 'av1';
+
+/**
+ * Auto-detects codec type from NAL unit types found in an Annex B buffer.
+ * Returns CODEC_H264, CODEC_HEVC, or null if undetermined.
+ */
+export function detectCodec(buffer) {
+    if (!buffer || buffer.length < 4) return null;
+    // Scan for start codes and check the first NAL type
+    const nals = splitNals(buffer);
+    for (const n of nals) {
+        if (n.length < 1) continue;
+        // H.264: 1-byte NAL header, type in lower 5 bits
+        // HEVC: 2-byte NAL header, type in bits 1-6 of first byte
+        const h264Type = n[0] & 0x1f;
+        if (h264Type === H264_SPS || h264Type === H264_PPS) return CODEC_H264;
+
+        if (n.length >= 2) {
+            const hevcType = (n[0] >> 1) & 0x3f;
+            if (hevcType === HEVC_VPS || hevcType === HEVC_SPS || hevcType === HEVC_PPS)
+                return CODEC_HEVC;
+        }
+    }
+    // Default to H.264 (most common fallback)
+    return CODEC_H264;
+}
+
+export class NalParser {
+    constructor() {
+        this.codec = null; // CODEC_H264 or CODEC_HEVC
+        this.sps = null;
+        this.pps = null;
+        this.vps = null; // HEVC only
+    }
+
+    /**
+     * Feed an Annex B buffer and extract parameter sets if not already known.
+     * Returns true if we now have all required parameter sets.
+     */
+    feed(buffer) {
+        if (this.isReady()) return true;
+
+        const nals = splitNals(buffer);
+
+        // Auto-detect codec on first valid NAL
+        if (!this.codec) {
+            for (const n of nals) {
+                if (n.length < 1) continue;
+                if ((n[0] & 0x1f) === H264_SPS) {
+                    this.codec = CODEC_H264;
+                    break;
+                }
+                if (n.length >= 2 && ((n[0] >> 1) & 0x3f) === HEVC_VPS) {
+                    this.codec = CODEC_HEVC;
+                    break;
+                }
+                if (n.length >= 2 && ((n[0] >> 1) & 0x3f) === HEVC_SPS) {
+                    this.codec = CODEC_HEVC;
+                    break;
+                }
+            }
+            if (!this.codec) this.codec = CODEC_H264; // fallback
+        }
+
+        for (const n of nals) {
+            if (this.codec === CODEC_HEVC && n.length >= 2) {
+                const type = (n[0] >> 1) & 0x3f;
+                if (type === HEVC_VPS) this.vps = n;
+                else if (type === HEVC_SPS) this.sps = n;
+                else if (type === HEVC_PPS) this.pps = n;
+            } else if (n.length >= 1) {
+                const type = n[0] & 0x1f;
+                if (type === H264_SPS) this.sps = n;
+                else if (type === H264_PPS) this.pps = n;
+            }
+        }
+        return this.isReady();
+    }
+
+    isReady() {
+        if (this.codec === CODEC_HEVC) return !!(this.vps && this.sps && this.pps);
+        return !!(this.sps && this.pps);
+    }
+
+    /**
+     * Whether a buffer carries a parameter set that differs from the one this
+     * parser holds — a new SPS means a new picture size, profile or level.
+     *
+     * A host may change these in the middle of a stream, at a keyframe, and the
+     * native host's CPU tier does exactly that when it trades pixels for encode
+     * time. The decoder was configured with the OLD sets as its description and
+     * the chunks have theirs stripped, so the new keyframe is decoded against a
+     * picture of the wrong size: green blocks, and the right part of the frame
+     * a flat bright green (issue #15, 12/09/2026). The caller reconfigures when
+     * this says yes. A buffer with no parameter set at all says no.
+     *
+     * A set that differs only in its level, or in HEVC's tier, is the same
+     * picture and says no. The encoder picks both from the bitrate it is set
+     * to, and the native host moves that under a running stream: NVENC's next
+     * IDR then announced Main 4.1 or High 5.0 in turn, at stream start and
+     * again after each resize, and every flip started a new decoder and asked
+     * for another keyframe (15/09/2026). A level describes what the stream may
+     * demand of a decoder, not how to decode it — the decoder configured with
+     * the old one decodes the new stream all the same.
+     */
+    changedBy(buffer) {
+        if (!this.isReady()) return false;
+        for (const n of splitNals(buffer)) {
+            if (this.codec === CODEC_HEVC) {
+                if (n.length < 2) continue;
+                const type = (n[0] >> 1) & 0x3f;
+                if (type === HEVC_VPS && !sameParameterSet(this.vps, n, HEVC_VPS_PTL)) return true;
+                if (type === HEVC_SPS && !sameParameterSet(this.sps, n, HEVC_SPS_PTL)) return true;
+                if (type === HEVC_PPS && !sameParameterSet(this.pps, n, null)) return true;
+            } else {
+                if (n.length < 1) continue;
+                const type = n[0] & 0x1f;
+                if (type === H264_SPS && !sameParameterSet(this.sps, n, H264_SPS_LEVEL))
+                    return true;
+                if (type === H264_PPS && !sameParameterSet(this.pps, n, null)) return true;
+            }
+        }
+        return false;
+    }
+
+    reset() {
+        this.codec = null;
+        this.sps = null;
+        this.pps = null;
+        this.vps = null;
+    }
+}
+
+// Where the bytes that only carry a level sit, counted in a parameter set with
+// its emulation prevention removed: [byte, mask] pairs to ignore.
+// HEVC profile_tier_level() starts after the 2-byte NAL header plus 4 bytes of
+// VPS fields, or plus 1 byte of SPS fields; its first byte holds the tier flag
+// (0x20) and general_level_idc is 11 bytes further on.
+const HEVC_VPS_PTL = [
+    [6, 0x20],
+    [17, 0xff],
+];
+const HEVC_SPS_PTL = [
+    [3, 0x20],
+    [14, 0xff],
+];
+// H.264: NAL header, profile_idc, constraint flags, then level_idc.
+const H264_SPS_LEVEL = [[3, 0xff]];
+
+/**
+ * Whether two parameter sets are the same once the level (and HEVC tier)
+ * fields listed in @p ignored are left out. Compared without emulation
+ * prevention: an escape byte can appear or vanish with the level byte next to
+ * it, which would shift everything behind it.
+ */
+function sameParameterSet(held, incoming, ignored) {
+    if (!held) return false;
+    if (held.length === incoming.length) {
+        let identical = true;
+        for (let i = 0; i < held.length; i++) {
+            if (held[i] !== incoming[i]) {
+                identical = false;
+                break;
+            }
+        }
+        if (identical) return true;
+    }
+    if (!ignored) return false;
+    const a = removeEmulationPrevention(held);
+    const b = removeEmulationPrevention(incoming);
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        let mask = 0xff;
+        for (const [at, bits] of ignored) if (at === i) mask &= ~bits;
+        if ((a[i] & mask) !== (b[i] & mask)) return false;
+    }
+    return true;
+}
+
+/**
+ * Remove H.264/HEVC emulation prevention bytes (00 00 03) from a NAL unit.
+ *
+ * Annex B requires inserting 0x03 after any 0x00 0x00 pair when the next
+ * byte could form a start code (0x00, 0x01, 0x02, 0x03).  The decoder
+ * must remove these before interpreting the RBSP.
+ *
+ * This function returns a NEW Uint8Array without the 0x03 bytes.
+ * It correctly handles the escape case 00 00 03 03 → 00 00 03.
+ */
+export function removeEmulationPrevention(buffer) {
+    const result = [];
+    let i = 0;
+    while (i < buffer.length) {
+        if (
+            i + 2 < buffer.length &&
+            buffer[i] === 0 &&
+            buffer[i + 1] === 0 &&
+            buffer[i + 2] === 3
+        ) {
+            // Skip the emulation prevention byte (0x03), keep the two zeros
+            result.push(0, 0);
+            i += 3;
+        } else {
+            result.push(buffer[i]);
+            i++;
+        }
+    }
+    return new Uint8Array(result);
+}
+
+/**
+ * Split an Annex B byte stream into individual NAL units (without start codes).
+ * Handles both 3-byte (00 00 01) and 4-byte (00 00 00 01) start codes.
+ */
+export function splitNals(annexB) {
+    const nals = [];
+    let i = 0;
+    const len = annexB.length;
+    while (i < len - 3) {
+        if (annexB[i] === 0 && annexB[i + 1] === 0) {
+            let sc = 0;
+            if (annexB[i + 2] === 1) sc = 3;
+            else if (i + 3 < len && annexB[i + 2] === 0 && annexB[i + 3] === 1) sc = 4;
+            if (sc) {
+                const start = i + sc;
+                let end = len;
+                for (let j = start; j < len - 3; j++) {
+                    if (annexB[j] === 0 && annexB[j + 1] === 0) {
+                        if (
+                            annexB[j + 2] === 1 ||
+                            (j + 3 < len && annexB[j + 2] === 0 && annexB[j + 3] === 1)
+                        ) {
+                            end = j;
+                            break;
+                        }
+                    }
+                }
+                nals.push(annexB.slice(start, end));
+                i = end;
+                continue;
+            }
+        }
+        i++;
+    }
+    return nals;
+}
+
+// --- H.264 ---
+
+/**
+ * Build an avcC description record (AVCDecoderConfigurationRecord).
+ */
+export function buildAvccDescription(sps, pps) {
+    if (!sps || !pps) return null;
+    const len = 11 + sps.length + pps.length;
+    const buf = new Uint8Array(len);
+    let off = 0;
+
+    buf[off++] = 0x01; // configurationVersion
+    buf[off++] = sps[1]; // AVCProfileIndication
+    buf[off++] = sps[2]; // profile_compatibility
+    buf[off++] = sps[3]; // AVCLevelIndication
+    buf[off++] = 0xff; // lengthSizeMinusOne = 3 (4-byte length prefixes)
+    buf[off++] = 0xe1; // numOfSequenceParameterSets = 1
+
+    buf[off++] = (sps.length >> 8) & 0xff;
+    buf[off++] = sps.length & 0xff;
+    buf.set(sps, off);
+    off += sps.length;
+
+    buf[off++] = 0x01; // numOfPictureParameterSets = 1
+
+    buf[off++] = (pps.length >> 8) & 0xff;
+    buf[off++] = pps.length & 0xff;
+    buf.set(pps, off);
+
+    return buf;
+}
+
+/**
+ * Build an avc1 codec string from SPS data.
+ * Format: avc1.{profile}{constraint}{level}  (3 hex bytes)
+ */
+export function getH264CodecString(sps) {
+    if (!sps || sps.length < 4) return 'avc1.64002A';
+    const p = sps[1].toString(16).padStart(2, '0');
+    const c = sps[2].toString(16).padStart(2, '0');
+    const l = sps[3].toString(16).padStart(2, '0');
+    return `avc1.${p}${c}${l}`;
+}
+
+// --- HEVC ---
+
+/**
+ * Build an hvcC description record (HEVCDecoderConfigurationRecord)
+ * from VPS, SPS, and PPS NAL units (without start codes).
+ *
+ * The HEVC NAL header is 2 bytes: forbidden_zero_bit(1) + nal_unit_type(6)
+ * + nuh_layer_id(6) + nuh_temporal_id_plus1(3).
+ *
+ * We extract the profile_tier_level from the SPS and build a minimal hvcC.
+ */
+export function buildHvcCDescription(vps, sps, pps) {
+    if (!vps || !sps || !pps || sps.length < 15) return null;
+
+    // Build hvcC (HEVCDecoderConfigurationRecord) per ISO 14496-15.
+    //
+    // SPS layout (after 2-byte NAL header, with emulation prevention REMOVED):
+    //   byte 2: sps_video_parameter_set_id(4) | sps_max_sub_layers_minus1(3) | temporal_id_nesting(1)
+    //   bytes 3-14: profile_tier_level general fields (12 bytes, always present):
+    //     byte 3:  general_profile_space(2) | general_tier_flag(1) | general_profile_idc(5)
+    //     bytes 4-7:  general_profile_compatibility_flags (4)
+    //     bytes 8-13: general_constraint_indicator_flags (6)
+    //     byte 14: general_level_idc
+    //
+    // Fixed hvcC header: 22 bytes (configurationVersion + PTL + fixed fields).
+    // Each NAL array entry: 5 (1 type + 2 count + 2 length) + nal_unit.
+    //
+    // IMPORTANT: The raw NAL units in the bitstream may contain emulation
+    // prevention bytes (00 00 03).  The hvcC header PTL fields MUST be read
+    // after removing emulation prevention bytes (which shift byte offsets).
+    //
+    // The NAL arrays in the hvcC, per ISO 14496-15, keep emulation prevention
+    // bytes.  However, Chromium's WebCodecs implementation for HEVC validates
+    // the hvcC by re-parsing the SPS from the NAL array and comparing the PTL
+    // values against the header.  If the raw SPS has emulation prevention bytes
+    // in the PTL region, the re-parsed PTL values shift and do NOT match the
+    // cleaned header PTL, causing isConfigSupported() to reject the config.
+    //
+    // Workaround: use de-emulated NAL units in the NAL arrays too.  This is
+    // technically non-compliant with ISO 14496-15 but is required for Chrome
+    // compatibility when the bitstream has emulation prevention in the PTL
+    // byte range (bytes 3-14 of the SPS).
+
+    // Strip emulation prevention from all parameter sets for consistency
+    // between the PTL header and the NAL array data.
+    const cleanVps = removeEmulationPrevention(vps);
+    const cleanSps = removeEmulationPrevention(sps);
+    const cleanPps = removeEmulationPrevention(pps);
+
+    // Extract HDR info from clean SPS: chroma_format_idc and bit depth.
+    const spsInfo = parseHevcSpsInfo(cleanSps);
+
+    // Fixed header: 1 (version) + 12 (PTL) + 2 + 1 + 1 + 1 + 1 + 2 + 1 + 1 = 23
+    // Each NAL array entry: 5 (1 type + 2 count + 2 length) + NAL data
+    const hvcCLen = 23 + 5 + cleanVps.length + 5 + cleanSps.length + 5 + cleanPps.length;
+    const buf = new Uint8Array(hvcCLen);
+    let off = 0;
+
+    // configurationVersion
+    buf[off++] = 0x01;
+
+    // profile_tier_level general fields — extract from de-emulated SPS.
+    // Emulation prevention bytes (00 00 03) in the SPS would corrupt the
+    // fixed-field offsets, so we clean them first.
+    buf.set(cleanSps.slice(3, 15), off);
+    off += 12;
+
+    // min_spatial_segmentation_idc: reserved(4) + 0
+    buf[off++] = 0xf0;
+    buf[off++] = 0x00;
+
+    // parallelismType: reserved(6) + 0
+    buf[off++] = 0xfc;
+
+    // chromaFormat: reserved(6) + chroma_format_idc (0=monochrome, 1=4:2:0, 2=4:2:2, 3=4:4:4)
+    buf[off++] = 0xfc | (spsInfo.chromaFormat & 0x03);
+
+    // bitDepthLumaMinus8: reserved(5) + bitDepthLumaMinus8
+    buf[off++] = 0xf8 | (spsInfo.bitDepthLumaMinus8 & 0x07);
+
+    // bitDepthChromaMinus8: reserved(5) + bitDepthChromaMinus8
+    buf[off++] = 0xf8 | (spsInfo.bitDepthChromaMinus8 & 0x07);
+
+    // avgFrameRate (0 = unspecified)
+    buf[off++] = 0x00;
+    buf[off++] = 0x00;
+
+    // constantFrameRate(2)=0 | numTemporalLayers(3)=1 | temporalIdNested(1)=1 | lengthSizeMinusOne(2)=3
+    buf[off++] = 0x0f;
+
+    // numOfArrays = 3 (VPS, SPS, PPS)
+    buf[off++] = 0x03;
+
+    // VPS array (de-emulated)
+    buf[off++] = 0x00 | HEVC_VPS;
+    buf[off++] = 0x00;
+    buf[off++] = 0x01;
+    buf[off++] = (cleanVps.length >> 8) & 0xff;
+    buf[off++] = cleanVps.length & 0xff;
+    buf.set(cleanVps, off);
+    off += cleanVps.length;
+
+    // SPS array (de-emulated)
+    buf[off++] = 0x00 | HEVC_SPS;
+    buf[off++] = 0x00;
+    buf[off++] = 0x01;
+    buf[off++] = (cleanSps.length >> 8) & 0xff;
+    buf[off++] = cleanSps.length & 0xff;
+    buf.set(cleanSps, off);
+    off += cleanSps.length;
+
+    // PPS array (de-emulated)
+    buf[off++] = 0x00 | HEVC_PPS;
+    buf[off++] = 0x00;
+    buf[off++] = 0x01;
+    buf[off++] = (cleanPps.length >> 8) & 0xff;
+    buf[off++] = cleanPps.length & 0xff;
+    buf.set(cleanPps, off);
+
+    return buf;
+}
+
+/** MSB-first bit reader with Exp-Golomb support (HEVC/H.264 RBSP). */
+class SpsBitReader {
+    constructor(bytes) {
+        this.bytes = bytes;
+        this.bitPos = 0;
+    }
+    u(n) {
+        let v = 0;
+        for (let i = 0; i < n; i++) {
+            const byteIdx = this.bitPos >> 3;
+            if (byteIdx >= this.bytes.length) throw new Error('SpsBitReader overrun');
+            const bit = (this.bytes[byteIdx] >> (7 - (this.bitPos & 7))) & 1;
+            v = (v << 1) | bit;
+            this.bitPos++;
+        }
+        return v;
+    }
+    ue() {
+        let zeros = 0;
+        while (this.u(1) === 0) {
+            zeros++;
+            if (zeros > 31) throw new Error('ue overrun');
+        }
+        if (zeros === 0) return 0;
+        return (1 << zeros) - 1 + this.u(zeros);
+    }
+    se() {
+        const k = this.ue();
+        return k & 1 ? (k + 1) / 2 : -(k / 2);
+    }
+}
+
+/**
+ * Parse chroma_format_idc and bit depths from a de-emulated HEVC SPS NAL unit
+ * (full NAL including the 2-byte header). Returns SDR 4:2:0 8-bit defaults on
+ * any parse error.
+ *
+ * Walks the SPS up to bit_depth_*_minus8 per ITU-T H.265 §7.3.2.2.1, handling
+ * the variable-length profile_tier_level and sub-layer ordering loops.
+ */
+function parseHevcSpsInfo(spsNal) {
+    // width/height: the picture after the conformance window, 0 when unread.
+    const result = {
+        chromaFormat: 1,
+        bitDepthLumaMinus8: 0,
+        bitDepthChromaMinus8: 0,
+        width: 0,
+        height: 0,
+    };
+    if (!spsNal || spsNal.length < 16) return result;
+
+    try {
+        // Skip the 2-byte HEVC NAL header.
+        const br = new SpsBitReader(spsNal.subarray(2));
+
+        br.u(4); // sps_video_parameter_set_id
+        const maxSubLayersMinus1 = br.u(3); // sps_max_sub_layers_minus1
+        br.u(1); // sps_temporal_id_nesting_flag
+
+        // profile_tier_level(1, maxSubLayersMinus1)
+        // general profile/tier/level (88 bits) + general_level_idc (8 bits)
+        br.u(2); // general_profile_space
+        br.u(1); // general_tier_flag
+        br.u(5); // general_profile_idc
+        br.u(32); // general_profile_compatibility_flag[32]
+        // 48 bits of general constraint/source flags
+        br.u(24);
+        br.u(24);
+        br.u(8); // general_level_idc
+
+        // sub_layer_profile_present_flag / sub_layer_level_present_flag
+        const subProfile = [];
+        const subLevel = [];
+        for (let i = 0; i < maxSubLayersMinus1; i++) {
+            subProfile.push(br.u(1));
+            subLevel.push(br.u(1));
+        }
+        if (maxSubLayersMinus1 > 0) {
+            for (let i = maxSubLayersMinus1; i < 8; i++) br.u(2); // reserved_zero_2bits
+        }
+        for (let i = 0; i < maxSubLayersMinus1; i++) {
+            if (subProfile[i]) {
+                br.u(2);
+                br.u(1);
+                br.u(5);
+                br.u(32);
+                br.u(24);
+                br.u(24);
+            }
+            if (subLevel[i]) br.u(8);
+        }
+
+        br.ue(); // sps_seq_parameter_set_id
+        const chromaFormatIdc = br.ue();
+        result.chromaFormat = chromaFormatIdc;
+        let separatePlanes = 0;
+        if (chromaFormatIdc === 3) separatePlanes = br.u(1); // separate_colour_plane_flag
+
+        const picWidth = br.ue(); // pic_width_in_luma_samples
+        const picHeight = br.ue(); // pic_height_in_luma_samples
+        // Conformance window offsets count in chroma samples (§7.4.3.2.1).
+        const chroma = separatePlanes ? 0 : chromaFormatIdc;
+        const subW = chroma === 1 || chroma === 2 ? 2 : 1;
+        const subH = chroma === 1 ? 2 : 1;
+        let cropW = 0,
+            cropH = 0;
+        if (br.u(1)) {
+            // conformance_window_flag
+            cropW = br.ue() + br.ue(); // conf_win_left_offset + right
+            cropH = br.ue() + br.ue(); // conf_win_top_offset + bottom
+        }
+        result.width = picWidth - subW * cropW;
+        result.height = picHeight - subH * cropH;
+
+        result.bitDepthLumaMinus8 = br.ue();
+        result.bitDepthChromaMinus8 = br.ue();
+    } catch (e) {
+        // Parse failure: keep SDR 4:2:0 8-bit defaults.
+    }
+
+    return result;
+}
+
+/**
+ * The picture size an H.264 SPS announces, after its frame cropping, from the
+ * de-emulated NAL unit (1-byte header included). Null on a parse error.
+ * ITU-T H.264 §7.3.2.1.1; crop units per §7.4.2.1.1.
+ */
+function parseH264PictureSize(spsNal) {
+    if (!spsNal || spsNal.length < 5) return null;
+    try {
+        const br = new SpsBitReader(spsNal.subarray(1));
+        const profileIdc = br.u(8);
+        br.u(16); // constraint_set flags, level_idc
+        br.ue(); // seq_parameter_set_id
+        let chromaFormatIdc = 1;
+        let separatePlanes = 0;
+        if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profileIdc)) {
+            chromaFormatIdc = br.ue();
+            if (chromaFormatIdc === 3) separatePlanes = br.u(1);
+            br.ue(); // bit_depth_luma_minus8
+            br.ue(); // bit_depth_chroma_minus8
+            br.u(1); // qpprime_y_zero_transform_bypass_flag
+            if (br.u(1)) {
+                // seq_scaling_matrix_present_flag: skip the lists, their
+                // sizes are all this parse needs.
+                const lists = chromaFormatIdc === 3 ? 12 : 8;
+                for (let i = 0; i < lists; i++) {
+                    if (!br.u(1)) continue;
+                    const size = i < 6 ? 16 : 64;
+                    let last = 8,
+                        next = 8;
+                    for (let j = 0; j < size && next !== 0; j++) {
+                        next = (last + br.se() + 256) % 256;
+                        if (next !== 0) last = next;
+                    }
+                }
+            }
+        }
+        br.ue(); // log2_max_frame_num_minus4
+        const pocType = br.ue();
+        if (pocType === 0) {
+            br.ue(); // log2_max_pic_order_cnt_lsb_minus4
+        } else if (pocType === 1) {
+            br.u(1); // delta_pic_order_always_zero_flag
+            br.se(); // offset_for_non_ref_pic
+            br.se(); // offset_for_top_to_bottom_field
+            const cycle = br.ue();
+            for (let i = 0; i < cycle; i++) br.se();
+        }
+        br.ue(); // max_num_ref_frames
+        br.u(1); // gaps_in_frame_num_value_allowed_flag
+        const widthMbs = br.ue() + 1;
+        const heightMapUnits = br.ue() + 1;
+        const frameMbsOnly = br.u(1);
+        if (!frameMbsOnly) br.u(1); // mb_adaptive_frame_field_flag
+        br.u(1); // direct_8x8_inference_flag
+        let width = widthMbs * 16;
+        let height = (2 - frameMbsOnly) * heightMapUnits * 16;
+        if (br.u(1)) {
+            // frame_cropping_flag
+            const chroma = separatePlanes ? 0 : chromaFormatIdc;
+            const cropX = chroma === 1 || chroma === 2 ? 2 : 1;
+            const cropY = (chroma === 1 ? 2 : 1) * (2 - frameMbsOnly);
+            width -= cropX * (br.ue() + br.ue());
+            height -= cropY * (br.ue() + br.ue());
+        }
+        return width > 0 && height > 0 ? { width, height } : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * The size of the picture the stream's SPS announces, cropping applied — the
+ * size the host really encodes. Null until the parameter sets are known, or
+ * when the SPS cannot be read.
+ *
+ * VideoDecoder.configure() is given this as codedWidth/codedHeight. Chromium
+ * reads the size from the bitstream anyway, but Edge's hardware HEVC decoder
+ * on Windows takes the frames' visible rectangle from the configured size
+ * (Edge 153, Arc A380, 25/09/2026): configured at a fixed 1920×1080, a 1440p
+ * stream came out as its top-left 1920×1080 and a 720p one as 1280×736, the
+ * padding rows included — issue #23. With no size at all it assumed 1280×720.
+ */
+export function getPictureSize(parser) {
+    if (!parser || !parser.isReady()) return null;
+    const sps = removeEmulationPrevention(parser.sps);
+    if (parser.codec === CODEC_HEVC) {
+        const info = parseHevcSpsInfo(sps);
+        return info.width > 0 && info.height > 0
+            ? { width: info.width, height: info.height }
+            : null;
+    }
+    return parseH264PictureSize(sps);
+}
+
+/**
+ * Build an hvc1 codec string from SPS data.
+ * Format: hvc1.{profile_idc}.{compat_byte}.L{level}.B0
+ */
+export function getHevcCodecString(sps) {
+    if (!sps || sps.length < 6) return 'hvc1.1.6.L93.B0';
+
+    // The SPS from the bitstream may contain emulation prevention bytes
+    // (00 00 03).  These must be removed before reading byte-offset fields
+    // because they shift the RBSP layout.  The NAL header (2 bytes) is not
+    // affected.
+    const rbsp = removeEmulationPrevention(sps.slice(2));
+
+    // After the 2-byte NAL header and 1 byte of SPS header fields:
+    // rbsp[0]: sps_video_parameter_set_id(4) | sps_max_sub_layers_minus1(3) | temporal_id_nesting(1)
+    // rbsp[1]: general_profile_space(2) + tier_flag(1) + general_profile_idc(5)
+    // rbsp[2..5]: general_profile_compatibility_flags (4 bytes)
+    // rbsp[6..11]: general_constraint_indicator_flags (6 bytes)
+    // rbsp[12]: general_level_idc
+
+    const profileIdc = rbsp.length > 1 ? rbsp[1] & 0x1f : 1;
+
+    // First constraint/feature byte: rbsp[6] = first constraint indicator byte
+    const constraintByte = rbsp.length > 6 ? rbsp[6] : 0x60;
+
+    // Level IDC: byte at offset 12 in rbsp
+    const levelIdc = rbsp.length > 12 ? rbsp[12] : 93;
+
+    // Validate: level_idc < 30 (3.0) is invalid for HEVC.  This catches
+    // the case where emulation prevention shifting produces level=0.
+    // A valid level_idc >= 30 (Level 3.0) and <= 186 (Level 6.2).
+    if (levelIdc < 30) {
+        // Fall back to a safe default: Main, Level 5.1 (common for 1080p60)
+        return 'hvc1.1.6.L153.B0';
+    }
+
+    return `hvc1.${profileIdc}.${constraintByte}.L${levelIdc}.B0`;
+}
+
+// --- Unified helpers ---
+
+/**
+ * Get codec string for the detected codec.
+ * Takes the parsed parameter sets from NalParser.
+ */
+export function getCodecString(parser) {
+    if (!parser.isReady()) return null;
+
+    if (parser.codec === CODEC_HEVC) {
+        return getHevcCodecString(parser.sps);
+    }
+    return getH264CodecString(parser.sps);
+}
+
+/**
+ * Build codec description (avcC or hvcC) from parsed parameter sets.
+ */
+export function buildDescription(parser) {
+    if (!parser.isReady()) return null;
+
+    if (parser.codec === CODEC_HEVC) {
+        return buildHvcCDescription(parser.vps, parser.sps, parser.pps);
+    }
+    return buildAvccDescription(parser.sps, parser.pps);
+}
+
+/**
+ * Returns true if the HEVC stream is 10-bit, which is what the HDR colour
+ * space (BT.2020 + PQ) is keyed on.
+ *
+ * Profile IDC 2 is Main10: 10-bit by definition. Profile IDC 4 is Format Range
+ * Extensions (RExt), which is NOT a bit depth: an 8-bit 4:4:4 desktop stream
+ * (Sunshine or the native host with chroma 4:4:4 on) is RExt too, and treating
+ * it as HDR hands an SDR picture to the PQ transfer — seen on macOS as a
+ * blown-out, over-saturated image. For RExt the SPS decides: pass the SPS NAL
+ * (with or without emulation prevention) and its bit_depth_luma_minus8 is
+ * read; without an SPS a RExt string is taken as 8-bit.
+ */
+export function isHevcHdrProfile(codecString, sps) {
+    if (!codecString) return false;
+    if (/^(hvc1|hev1)\.2\./.test(codecString)) return true;
+    if (!/^(hvc1|hev1)\.4\./.test(codecString)) return false;
+    if (!sps) return false;
+    const info = parseHevcSpsInfo(removeEmulationPrevention(sps));
+    return info.bitDepthLumaMinus8 >= 2;
+}
+
+/**
+ * Whether a codec string names a profile a 4:4:4 stream is carried in: HEVC
+ * Range Extensions (general_profile_idc 4) or H.264 High 4:4:4 Predictive
+ * (profile_idc 244, 0xF4). A 4:2:0 profile configures fine for such a stream
+ * and then fails every frame.
+ * @param {string} codecString
+ * @returns {boolean}
+ */
+export function isChroma444Profile(codecString) {
+    return /^(hvc1|hev1)\.4\./.test(codecString || '') || /^avc1\.f4/i.test(codecString || '');
+}
+
+/**
+ * Common H.264 codec strings for fallback.
+ * Listed in order of preference (most common for 1080p60 first).
+ */
+export const H264_FALLBACK_CODEC_STRINGS = [
+    'avc1.64002A', // High 4.2
+    'avc1.640028', // High 4.0
+    'avc1.64001F', // High 3.1
+    'avc1.64001E', // High 3.0
+    'avc1.4D002A', // Main 4.2
+    'avc1.4D0028', // Main 4.0
+    'avc1.42002A', // Baseline 4.2
+    'avc1.42001E', // Baseline 3.0
+];
+
+/**
+ * Common HEVC codec strings for fallback (hvc1 — AVCC format with description).
+ * HDR Main10 profiles are listed first (hvc1.2.x, hev1.2.x) so that the
+ * primary codec string is HDR when negotiated.
+ */
+export const HEVC_FALLBACK_CODEC_STRINGS = [
+    'hvc1.2.4.L153.B0', // Main10 (HDR), High tier, Level 5.1
+    'hvc1.2.4.L150.B0', // Main10 (HDR), High tier, Level 5.0
+    'hvc1.1.6.L153.B0', // Main, High tier, Level 5.1 (most common for 1080p60)
+    'hvc1.1.6.L150.B0', // Main, High tier, Level 5.0
+    'hvc1.1.6.L123.B0', // Main, High tier, Level 4.1
+    'hvc1.1.6.L120.B0', // Main, High tier, Level 4.0
+    'hvc1.1.6.L93.B0', // Main, High tier, Level 3.1
+    'hvc1.1.2.L153.B0', // Main, Main tier, Level 5.1
+    'hvc1.1.2.L150.B0', // Main, Main tier, Level 5.0
+];
+
+/**
+ * HEVC codec strings with hev1 brand — used for no-description configs.
+ * hev1 allows Annex B stream data (start codes), which Chromium's
+ * keyframe validator (AnalyzeAnnexB) requires.
+ */
+export const HEVC_ANNEXB_CODEC_STRINGS = [
+    'hev1.2.4.L153.B0', // Main10 (HDR), High tier, Level 5.1
+    'hev1.2.4.L150.B0', // Main10 (HDR), High tier, Level 5.0
+    'hev1.1.6.L153.B0',
+    'hev1.1.6.L150.B0',
+    'hev1.1.6.L123.B0',
+    'hev1.1.6.L120.B0',
+    'hev1.1.6.L93.B0',
+    'hev1.1.2.L153.B0',
+    'hev1.1.2.L150.B0',
+];
+
+/**
+ * Convert raw Annex B data (with start codes) to the format expected by
+ * the VideoDecoder's EncodedVideoChunk.
+ *
+ * Two output modes:
+ *   Annex B (useAnnexB=true):  4-byte start codes, all NALs kept.
+ *      Used when no codec description is provided — the decoder
+ *      auto-detects the format.  Also required by Chromium's keyframe
+ *      validator (AnalyzeAnnexB) which only handles Annex B.
+ *   AVCC (useAnnexB=false):    4-byte big-endian length prefix per NAL unit.
+ *      Used when a codec description (avcC/hvcC) is provided.
+ *
+ * When stripParams is true AND useAnnexB is false, SPS/PPS (H.264) or
+ * VPS/SPS/PPS + pre-IRAP NALs (HEVC) are stripped — the decoder already
+ * has them via the description.  The pre-IRAP strip is CRITICAL for
+ * Chrome/Edge which validate that the first NAL in AVCC data is an IRAP.
+ */
+export function toAvcc(annexB, stripParams = false, codec = null, useAnnexB = false) {
+    const nals = splitNals(annexB);
+    // Two-pass build: select the NALs to keep, then copy them into one
+    // preallocated buffer with set() (memcpy). This runs per frame on the
+    // decode path — appending byte-by-byte to a dynamic Array costs
+    // milliseconds on large keyframes and thrashes the GC on mobile.
+    const kept = [];
+    let total = 0;
+    let hevcFoundIrap = false;
+
+    for (const n of nals) {
+        if (n.length < 1) continue;
+
+        // Stripping logic: only active for AVCC mode (not Annex B).
+        // In Annex B mode, all NALs are kept — the decoder auto-detects
+        // the format and AnalyzeAnnexB can parse start codes directly.
+        if (stripParams && !useAnnexB) {
+            if (codec === CODEC_HEVC && n.length >= 2) {
+                const hevcType = (n[0] >> 1) & 0x3f;
+                // Strip VPS/SPS/PPS (always safe — they're in the description)
+                if (hevcType === HEVC_VPS || hevcType === HEVC_SPS || hevcType === HEVC_PPS)
+                    continue;
+                // Strip non-IRAP NALs before the first IRAP (types 16-21).
+                // Chrome/Edge check the first NAL in AVCC data: if it's not
+                // an IRAP, decode() synchronously rejects the chunk.
+                if (!hevcFoundIrap) {
+                    const isIrap = hevcType >= 16 && hevcType <= 21;
+                    if (!isIrap) continue;
+                    hevcFoundIrap = true;
+                }
+            }
+            if (codec === CODEC_H264 || (!codec && n.length < 2)) {
+                const type = n[0] & 0x1f;
+                if (type === H264_SPS || type === H264_PPS) continue;
+            }
+        }
+
+        kept.push(n);
+        total += 4 + n.length; // 4-byte start code or length prefix + NAL
+    }
+
+    if (kept.length === 0 && nals.length > 0) {
+        console.warn(
+            '[toAvcc] PARTS IS EMPTY after stripping ' +
+                nals.length +
+                ' NALs, ' +
+                'stripParams=' +
+                stripParams +
+                ' codec=' +
+                codec +
+                ' useAnnexB=' +
+                useAnnexB,
+        );
+    }
+
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const n of kept) {
+        const l = n.length;
+        if (useAnnexB && codec === CODEC_HEVC) {
+            // Annex B: 4-byte start codes
+            out[off + 3] = 1; // bytes 0-2 already zero
+        } else {
+            // AVCC: 4-byte big-endian length prefix
+            out[off] = (l >> 24) & 0xff;
+            out[off + 1] = (l >> 16) & 0xff;
+            out[off + 2] = (l >> 8) & 0xff;
+            out[off + 3] = l & 0xff;
+        }
+        out.set(n, off + 4);
+        off += 4 + l;
+    }
+
+    return out;
+}

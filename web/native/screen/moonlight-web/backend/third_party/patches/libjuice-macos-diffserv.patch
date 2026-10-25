@@ -1,0 +1,55 @@
+diff --git a/src/udp.c b/src/udp.c
+index fddd773..8335ff3 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -201,6 +201,33 @@ int udp_recvfrom(socket_t sock, char *buffer, size_t size, addr_record_t *src) {
+ 	}
+ }
+ 
++#ifdef __APPLE__
++// macOS refuses IP_TOS on a dual-stack socket, and its IPV6_TCLASS marks IPv6 packets only: a
++// packet to an IPv4-mapped peer carries the traffic class itself, as ancillary data.
++static int udp_sendto_tclass(socket_t sock, const char *data, size_t size, const addr_record_t *dst,
++                             int tclass) {
++	struct iovec iov;
++	iov.iov_base = (void *)data;
++	iov.iov_len = size;
++	char control[CMSG_SPACE(sizeof(int))];
++	memset(control, 0, sizeof(control));
++	struct msghdr msg;
++	memset(&msg, 0, sizeof(msg));
++	msg.msg_name = (void *)&dst->addr;
++	msg.msg_namelen = dst->len;
++	msg.msg_iov = &iov;
++	msg.msg_iovlen = 1;
++	msg.msg_control = control;
++	msg.msg_controllen = sizeof(control);
++	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++	cmsg->cmsg_level = IPPROTO_IPV6;
++	cmsg->cmsg_type = IPV6_TCLASS;
++	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++	memcpy(CMSG_DATA(cmsg), &tclass, sizeof(int));
++	return (int)sendmsg(sock, &msg, 0);
++}
++#endif
++
+ int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst) {
+ #ifndef __linux__
+ 	addr_record_t tmp = *dst;
+@@ -208,8 +235,14 @@ int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t
+ 	name.len = sizeof(name.addr);
+ 	name.socktype = SOCK_DGRAM;
+ 	if (getsockname(sock, (struct sockaddr *)&name.addr, &name.len) == 0) {
+-		if (name.addr.ss_family == AF_INET6)
+-			addr_map_inet6_v4mapped(&tmp.addr, &tmp.len);
++		if (name.addr.ss_family == AF_INET6 && addr_map_inet6_v4mapped(&tmp.addr, &tmp.len)) {
++#ifdef __APPLE__
++			int tclass = 0;
++			socklen_t optlen = sizeof(tclass);
++			if (getsockopt(sock, IPPROTO_IPV6, IPV6_TCLASS, &tclass, &optlen) == 0 && tclass > 0)
++				return udp_sendto_tclass(sock, data, size, &tmp, tclass);
++#endif
++		}
+ 	} else {
+ 		JLOG_WARN("getsockname failed, errno=%d", sockerrno);
+ 	}
