@@ -49,8 +49,8 @@ interface Asset {
 
 /** Per platform-arch; an empty SHA-256 is a build not published yet. */
 export const SCREEN_ASSETS: Readonly<Record<string, Asset>> = {
-  'win32-x64': { name: 'sfagents-screen-win-x64.zip', sha256: '', exe: 'sfagents-screen/sfagents-screen.exe' },
-  'linux-x64': { name: 'sfagents-screen-linux-x64.tar.gz', sha256: '', exe: 'sfagents-screen/bin/sfagents-screen' },
+  'win32-x64': { name: 'sfagents-screen-win-x64.zip', sha256: 'd2866bd388cc8d564693875c025f814c7d3a5eccce53254269ab9892f9bf322f', exe: 'sfagents-screen/sfagents-screen.exe' },
+  'linux-x64': { name: 'sfagents-screen-linux-x64.tar.gz', sha256: '51036a0f1c617d8d59140f07c13c599b81f4b9045a4200b7a416d3e204a12b67', exe: 'sfagents-screen/bin/sfagents-screen' },
 };
 
 /** The page's names for this computer, as MoonlightWeb's native host has them. */
