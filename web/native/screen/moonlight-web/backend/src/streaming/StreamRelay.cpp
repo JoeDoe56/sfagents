@@ -1,0 +1,849 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "StreamRelay.h"
+#include "ClipboardBridge.h"
+#include "InputMessageCodec.h"
+#include "IMediaEngine.h"
+#include "NativeMediaEngine.h"
+
+extern "C" {
+#include "Limelight.h"
+}
+
+#include <QCoreApplication>
+#include <QThread>
+#include <QMetaObject>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QDebug>
+#include <QDateTime>
+#include <QMap>
+#include <QVector>
+#include <chrono>
+
+StreamRelay::StreamRelay(IMediaEngine* engine, quint16 wsPort, const QSslConfiguration& sslConfig,
+                         QObject* parent)
+    : QObject(parent)
+    , m_Shim(engine)
+    , m_WsPort(wsPort)
+{
+    qInfo() << "[StreamRelay] Created, wsPort=" << wsPort;
+
+    connect(m_Shim, &IMediaEngine::videoFrameReady, this, &StreamRelay::onVideoFrame);
+    connect(m_Shim, &IMediaEngine::audioSampleReady, this, &StreamRelay::onAudioSample);
+    connect(m_Shim, &IMediaEngine::connectionStarted, this, &StreamRelay::onShimConnectionStarted);
+    connect(m_Shim, &IMediaEngine::connectionFailed, this, &StreamRelay::onShimConnectionFailed);
+    connect(m_Shim, &IMediaEngine::connectionTerminated, this,
+            &StreamRelay::onShimConnectionTerminated);
+
+    // Forward host rumble requests to the browser over the WebSocket.
+    connect(m_Shim, &IMediaEngine::rumble, this, [this](int controller, int low, int high) {
+        if (!m_WsClient || m_WsClient->state() != QAbstractSocket::ConnectedState) return;
+        QJsonObject m;
+        m["type"] = "rumble";
+        m["index"] = controller;
+        m["low"] = low;
+        m["high"] = high;
+        m_WsClient->sendTextMessage(
+            QString::fromUtf8(QJsonDocument(m).toJson(QJsonDocument::Compact)));
+    });
+
+    // The input gate (native host) — see DataChannelRelay for the message.
+    connect(m_Shim, &IMediaEngine::inputGateChanged, this,
+            [this](bool blocked, QString reason, QString window) {
+                if (!m_WsClient || m_WsClient->state() != QAbstractSocket::ConnectedState) return;
+                QJsonObject m;
+                m["type"] = "inputgate";
+                m["blocked"] = blocked;
+                m["reason"] = reason;
+                m["window"] = window;
+                m_WsClient->sendTextMessage(
+                    QString::fromUtf8(QJsonDocument(m).toJson(QJsonDocument::Compact)));
+            });
+
+    // The host's display format (native host) — see DataChannelRelay.
+    connect(m_Shim, &IMediaEngine::displayFormatChanged, this,
+            [this](int displayWidth, int displayHeight, int frameWidth, int frameHeight,
+                   bool displayHdr, bool hdr, bool hdrCapable) {
+                if (!m_WsClient || m_WsClient->state() != QAbstractSocket::ConnectedState) return;
+                QJsonObject m;
+                m["type"] = "displayformat";
+                m["displayWidth"] = displayWidth;
+                m["displayHeight"] = displayHeight;
+                m["frameWidth"] = frameWidth;
+                m["frameHeight"] = frameHeight;
+                m["displayHdr"] = displayHdr;
+                m["hdr"] = hdr;
+                m["hdrCapable"] = hdrCapable;
+                m_WsClient->sendTextMessage(
+                    QString::fromUtf8(QJsonDocument(m).toJson(QJsonDocument::Compact)));
+            });
+
+    // The guests' shared feed changes codec (native host) — see DataChannelRelay.
+    connect(m_Shim, &IMediaEngine::sharedFeedCodecChanged, this, [this](QString codec) {
+        if (!m_WsClient || m_WsClient->state() != QAbstractSocket::ConnectedState) return;
+        QJsonObject m;
+        m["type"] = "feedcodec";
+        m["codec"] = codec;
+        m_WsClient->sendTextMessage(
+            QString::fromUtf8(QJsonDocument(m).toJson(QJsonDocument::Compact)));
+    });
+
+    // The pointer the client draws (native host, desktop mode): its shape, then
+    // where it is — see DataChannelRelay for both messages. Without them a wss
+    // client that asked the host to leave the picture clean drew a plain arrow
+    // that never changed shape.
+    connect(m_Shim, &IMediaEngine::cursorShapeChanged, this,
+            [this](QByteArray png, int hotspotX, int hotspotY, bool visible, QString kind,
+                   double scale) {
+                if (!m_WsClient || m_WsClient->state() != QAbstractSocket::ConnectedState) return;
+                QJsonObject m;
+                m["type"] = "cursor";
+                m["visible"] = visible;
+                m["hotspotX"] = hotspotX;
+                m["hotspotY"] = hotspotY;
+                m["scale"] = scale;
+                if (!kind.isEmpty()) m["kind"] = kind;
+                if (!png.isEmpty()) m["png"] = QString::fromLatin1(png.toBase64());
+                m_WsClient->sendTextMessage(
+                    QString::fromUtf8(QJsonDocument(m).toJson(QJsonDocument::Compact)));
+            });
+    connect(m_Shim, &IMediaEngine::cursorMoved, this, [this](double x, double y, bool visible) {
+        if (!m_WsClient || m_WsClient->state() != QAbstractSocket::ConnectedState) return;
+        QJsonObject m;
+        m["type"] = "cursorpos";
+        m["x"] = x;
+        m["y"] = y;
+        m["visible"] = visible;
+        m_WsClient->sendTextMessage(
+            QString::fromUtf8(QJsonDocument(m).toJson(QJsonDocument::Compact)));
+    });
+
+    bool secure = !sslConfig.isNull();
+    m_WsServer = new QWebSocketServer(
+        QString("Moonlight-Relay"),
+        secure ? QWebSocketServer::SecureMode : QWebSocketServer::NonSecureMode, this);
+    if (secure) m_WsServer->setSslConfiguration(sslConfig);
+
+    // Periodic stats timer — started when a client connects, stopped on
+    // disconnect. Mirrors DataChannelRelay so the WSS latency overlay works.
+    m_StatsTimer = new QTimer(this);
+    m_StatsTimer->setInterval(500);
+    connect(m_StatsTimer, &QTimer::timeout, this, &StreamRelay::sendStats);
+
+    qInfo() << "[StreamRelay] Constructor done, secure=" << secure;
+}
+
+StreamRelay::~StreamRelay()
+{
+    qInfo() << "[StreamRelay] Destructor";
+    stop();
+}
+
+void StreamRelay::setClipboardEnabled(bool enabled)
+{
+    m_ClipboardEnabled = enabled;
+    if (!enabled) return;
+    // Host clipboard changes → push to the browser over the WebSocket.
+    // Context 'this': the slot runs on the relay's (future) thread, which
+    // owns the socket. Auto-disconnected when the relay dies.
+    connect(ClipboardBridge::instance(), &ClipboardBridge::hostTextChanged, this,
+            [this](const QString& text) {
+                if (m_Stopping || !m_WsClient ||
+                    m_WsClient->state() != QAbstractSocket::ConnectedState)
+                    return;
+                QJsonObject m;
+                m["type"] = "clipboard";
+                m["text"] = text;
+                m_WsClient->sendTextMessage(
+                    QString::fromUtf8(QJsonDocument(m).toJson(QJsonDocument::Compact)));
+            });
+}
+
+bool StreamRelay::start()
+{
+    qInfo() << "[StreamRelay] Starting WS server on port" << m_WsPort;
+
+    // Loopback only, same reasoning as SignalingServer: the browser reaches this
+    // relay through HttpServer's /ws/stream proxy, which is where the Origin and
+    // session checks are enforced. Exposing it on every interface would let any
+    // page on the LAN open the video/input channel without passing them.
+    if (!m_WsServer->listen(QHostAddress::LocalHost, m_WsPort)) {
+        qWarning() << "[StreamRelay] WebSocket server failed to listen on port" << m_WsPort
+                   << "error:" << m_WsServer->errorString();
+        return false;
+    }
+
+    connect(m_WsServer, &QWebSocketServer::newConnection, this, &StreamRelay::onNewWsConnection);
+
+    qInfo() << "[StreamRelay] WS server listening OK, m_StreamStarted=" << m_StreamStarted;
+    m_Running = true;
+    return true;
+}
+
+void StreamRelay::notifyClientTakenOver()
+{
+    sendExitNotice("takeover");
+}
+
+void StreamRelay::notifyClientRevoked()
+{
+    sendExitNotice("revoked");
+}
+
+void StreamRelay::notifyClientSessionEnded()
+{
+    sendExitNotice("session-ended");
+}
+
+void StreamRelay::sendExitNotice(const char* type)
+{
+    // Exit notice over the WS before stop() closes it, so the browser can show
+    // a graceful exit instead of a generic disconnect. sendTextMessage() only
+    // queues into the socket's write buffer, and stop() closes right after —
+    // flush() hands the bytes to the OS, which then delivers them ahead of the
+    // TCP close. (The DataChannel relays need a stronger guarantee; see
+    // ExitNotice.h.)
+    if (!m_WsClient || m_Stopping) return;
+    QJsonObject obj{{"type", type}};
+    m_WsClient->sendTextMessage(
+        QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact)));
+    m_WsClient->flush();
+}
+
+void StreamRelay::stop()
+{
+    // Marshal onto the relay's session thread when called cross-thread (main:
+    // /quit, Session::quit). Queued (non-blocking) avoids deadlock; the WS
+    // server/client teardown must run on the thread that owns those sockets.
+    if (QThread::currentThread() != this->thread()) {
+        QMetaObject::invokeMethod(this, [this]() { stop(); }, Qt::QueuedConnection);
+        return;
+    }
+
+    qInfo() << "[StreamRelay::stop] ENTER, m_Stopping=" << m_Stopping << "m_Running=" << m_Running
+            << "m_WsClient=" << m_WsClient << "m_WsServer=" << m_WsServer << "m_Shim=" << m_Shim
+            << "frames sent=" << m_FrameCount;
+
+    // Guard against re-entrant calls: closing m_WsClient may fire the
+    // disconnected signal synchronously, triggering sessionEnded ->
+    // relay->stop() again from the sessionEnded lambda in main.cpp.
+    if (m_Stopping) {
+        qInfo() << "[StreamRelay::stop] Already stopping, skip re-entrant call";
+        return;
+    }
+    m_Stopping = true;
+
+    if (m_StatsTimer) m_StatsTimer->stop();
+
+    m_Running = false;
+    qInfo() << "[StreamRelay::stop] m_Running=false, pending video=" << m_PendingVideoFrames.size()
+            << "pending audio=" << m_PendingAudioFrames.size();
+
+    if (m_Shim) {
+        qInfo() << "[StreamRelay::stop] Calling m_Shim->stopConnection() ...";
+        m_Shim->stopConnection();
+        qInfo() << "[StreamRelay::stop] m_Shim->stopConnection() returned";
+    } else {
+        qInfo() << "[StreamRelay::stop] No m_Shim to stop";
+    }
+
+    if (m_WsClient) {
+        qInfo() << "[StreamRelay::stop] Closing WS client, closeCode=" << m_WsClient->closeCode()
+                << "state=" << m_WsClient->state();
+        qint64 beforeClose = QDateTime::currentMSecsSinceEpoch();
+        m_WsClient->close();
+        qint64 afterClose = QDateTime::currentMSecsSinceEpoch();
+        qInfo() << "[StreamRelay::stop] WS close() took" << (afterClose - beforeClose) << "ms"
+                << "new state=" << m_WsClient->state();
+        m_WsClient->deleteLater();
+        m_WsClient = nullptr;
+    } else {
+        qInfo() << "[StreamRelay::stop] No WS client to close";
+    }
+
+    if (m_WsServer) {
+        qInfo() << "[StreamRelay::stop] Closing WS server";
+        m_WsServer->close();
+        qInfo() << "[StreamRelay::stop] WS server closed";
+    } else {
+        qInfo() << "[StreamRelay::stop] No WS server to close";
+    }
+
+    qInfo() << "[StreamRelay::stop] EXIT";
+}
+
+QString StreamRelay::wsUrl() const
+{
+    // The browser connects via the HttpServer WSS proxy on the unified HTTPS port.
+    // The proxy routes /ws/stream to this StreamRelay's local WS port.
+    QString host = m_ServerHost;
+    if (m_HttpsPort != 443) host += ":" + QString::number(m_HttpsPort);
+    return QString("wss://%1%2/stream").arg(host, m_WsPath);
+}
+
+// --- Fragmented send (same format as DataChannelRelay) -------------------------
+// Splits data into chunks of up to kMaxPayloadSize bytes.
+// Each WebSocket message: [channel:1][frag_header:17][chunk_payload...]
+// Header format (17 bytes total):
+//   [frame_id:4][chunk_index:2][total_chunks:2][is_keyframe:1][payload_size:4][backend_ts:4]
+// All multi-byte fields in network byte order (big endian).
+
+void StreamRelay::sendVideoFragmentedWss(const QByteArray& data, bool isKeyframe)
+{
+    if (!m_WsClient || m_Stopping) return;
+    if (data.isEmpty()) return;
+
+    int totalSize = data.size();
+    int totalChunks = (totalSize + kMaxPayloadSize - 1) / kMaxPayloadSize;
+    uint32_t frameId = m_FrameId++;
+
+    // Compute backend timestamp for end-to-end latency
+    uint32_t backendTs = static_cast<uint32_t>(QDateTime::currentMSecsSinceEpoch() & 0xFFFFFFFF);
+
+    for (int chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+        int offset = chunkIdx * kMaxPayloadSize;
+        int payloadSize = std::min(kMaxPayloadSize, totalSize - offset);
+
+        QByteArray msg;
+        msg.reserve(1 + kFragHeaderSize + payloadSize);
+
+        // Channel byte (0x01 = video)
+        msg.append(static_cast<char>(0x01));
+
+        // Frame ID (4 bytes, big endian)
+        msg.append(static_cast<char>((frameId >> 24) & 0xFF));
+        msg.append(static_cast<char>((frameId >> 16) & 0xFF));
+        msg.append(static_cast<char>((frameId >> 8) & 0xFF));
+        msg.append(static_cast<char>(frameId & 0xFF));
+
+        // Chunk index (2 bytes, big endian)
+        uint16_t chunkIdx16 = static_cast<uint16_t>(chunkIdx);
+        msg.append(static_cast<char>((chunkIdx16 >> 8) & 0xFF));
+        msg.append(static_cast<char>(chunkIdx16 & 0xFF));
+
+        // Total chunks (2 bytes, big endian)
+        uint16_t totalChunks16 = static_cast<uint16_t>(totalChunks);
+        msg.append(static_cast<char>((totalChunks16 >> 8) & 0xFF));
+        msg.append(static_cast<char>(totalChunks16 & 0xFF));
+
+        // Is keyframe (1 byte)
+        msg.append(static_cast<char>(isKeyframe ? 0x01 : 0x00));
+
+        // Payload size (4 bytes, big endian)
+        uint32_t payloadSize32 = static_cast<uint32_t>(payloadSize);
+        msg.append(static_cast<char>((payloadSize32 >> 24) & 0xFF));
+        msg.append(static_cast<char>((payloadSize32 >> 16) & 0xFF));
+        msg.append(static_cast<char>((payloadSize32 >> 8) & 0xFF));
+        msg.append(static_cast<char>(payloadSize32 & 0xFF));
+
+        // Backend timestamp (4 bytes, big endian) — same value for all chunks
+        msg.append(static_cast<char>((backendTs >> 24) & 0xFF));
+        msg.append(static_cast<char>((backendTs >> 16) & 0xFF));
+        msg.append(static_cast<char>((backendTs >> 8) & 0xFF));
+        msg.append(static_cast<char>(backendTs & 0xFF));
+
+        // Chunk payload
+        msg.append(data.constData() + offset, payloadSize);
+
+        m_WsClient->sendBinaryMessage(msg);
+    }
+
+    m_FrameCount++;
+
+    if (m_FrameCount <= 3 || m_FrameCount % 300 == 0) {
+        qInfo() << "[StreamRelay] Fragmented sent frame #" << m_FrameCount
+                << "totalSize=" << totalSize << "chunks=" << totalChunks
+                << "isKeyframe=" << isKeyframe << "frameId=" << frameId;
+    }
+}
+
+// --- Video/audio forwarding -------------------------------------------------
+
+void StreamRelay::onVideoFrame(const QByteArray& data, int frameType, int frameNumber)
+{
+    // Balance the worker→main pending counter (incremented before each emit).
+    // Consume the worker-drop flag: recovery on this transport relies on
+    // client-side IDR requests (starvation/stale detection in the browser).
+    if (m_Shim) {
+        m_Shim->videoFrameDelivered();
+        m_Shim->takeWorkerDroppedDelta();
+    }
+
+    // Log first few frames only — periodic logging floods the console
+    static int logCounter = 0;
+    logCounter++;
+    bool shouldLog = (logCounter <= 5);
+
+    if (shouldLog) {
+        qint64 now = QDateTime::currentMSecsSinceEpoch();
+        qInfo() << "[StreamRelay] onVideoFrame #" << logCounter << "frameNum=" << frameNumber
+                << "type=" << frameType << "size=" << data.size()
+                << "WSclient=" << (m_WsClient != nullptr) << "running=" << m_Running
+                << "streamStarted=" << m_StreamStarted << "pending=" << m_PendingVideoFrames.size()
+                << "time=" << now;
+    }
+
+    if (!m_WsClient || !m_Running || !m_StreamStarted) {
+        // Buffer while waiting for WS client
+        if (m_Running && m_PendingVideoFrames.size() < 120) {
+            m_PendingVideoFrames.append(data);
+            if (m_PendingVideoFrames.size() <= 3 || m_PendingVideoFrames.size() % 60 == 0) {
+                qInfo() << "[StreamRelay] Buffering video frame, pending="
+                        << m_PendingVideoFrames.size();
+            }
+        }
+        return;
+    }
+
+    bool isKeyframe = (frameType == 1);
+
+    if (m_UseVideoFragmentation) {
+        // Flush pending frames using fragmentation protocol
+        while (!m_PendingVideoFrames.isEmpty()) {
+            sendVideoFragmentedWss(m_PendingVideoFrames.takeFirst(), true);
+        }
+        sendVideoFragmentedWss(data, isKeyframe);
+        return; // Fragmented path handles its own logging
+    }
+
+    // --- Legacy non-fragmented path (2-byte header) ---
+
+    // Flush pending frames (assume they could be keyframes)
+    if (!m_PendingVideoFrames.isEmpty()) {
+        qInfo() << "[StreamRelay] Flushing" << m_PendingVideoFrames.size()
+                << "pending video frames";
+        while (!m_PendingVideoFrames.isEmpty()) {
+            QByteArray msg;
+            msg.append(static_cast<char>(0x01));
+            msg.append(static_cast<char>(0x01)); // flags: assume keyframe
+            msg.append(m_PendingVideoFrames.takeFirst());
+            m_WsClient->sendBinaryMessage(msg);
+            m_FrameCount++;
+        }
+    }
+
+    // Protocol: [channel:1][flags:1][data:N]
+    // flags bit0: 1=IDR keyframe, 0=P-frame
+    QByteArray msg;
+    msg.append(static_cast<char>(0x01));
+    msg.append(static_cast<char>(isKeyframe ? 0x01 : 0x00));
+    msg.append(data);
+
+    m_WsClient->sendBinaryMessage(msg);
+    m_FrameCount++;
+}
+
+void StreamRelay::onAudioSample(const QByteArray& data)
+{
+    if (!m_WsClient || !m_Running || !m_StreamStarted) {
+        if (m_Running && m_PendingAudioFrames.size() < 120) {
+            m_PendingAudioFrames.append(data);
+        }
+        return;
+    }
+
+    // Helper to send a single audio frame with 17-byte frag header (matching _onAudioChunk)
+    auto sendAudioFragmented = [this](const QByteArray& audioData) {
+        uint32_t frameId = m_FrameId++;
+        uint32_t backendTs =
+            static_cast<uint32_t>(QDateTime::currentMSecsSinceEpoch() & 0xFFFFFFFF);
+
+        QByteArray msg;
+        msg.reserve(1 + kFragHeaderSize + audioData.size());
+
+        // Channel byte (0x02 = audio)
+        msg.append(static_cast<char>(0x02));
+
+        // Frame ID (4 bytes, big endian)
+        msg.append(static_cast<char>((frameId >> 24) & 0xFF));
+        msg.append(static_cast<char>((frameId >> 16) & 0xFF));
+        msg.append(static_cast<char>((frameId >> 8) & 0xFF));
+        msg.append(static_cast<char>(frameId & 0xFF));
+
+        // Chunk index (2 bytes, always 0 for single-chunk audio)
+        msg.append(static_cast<char>(0x00));
+        msg.append(static_cast<char>(0x00));
+
+        // Total chunks (2 bytes, always 1 for single-chunk audio)
+        msg.append(static_cast<char>(0x00));
+        msg.append(static_cast<char>(0x01));
+
+        // Is keyframe (1 byte, always 0 for audio)
+        msg.append(static_cast<char>(0x00));
+
+        // Payload size (4 bytes, big endian)
+        uint32_t payloadSize32 = static_cast<uint32_t>(audioData.size());
+        msg.append(static_cast<char>((payloadSize32 >> 24) & 0xFF));
+        msg.append(static_cast<char>((payloadSize32 >> 16) & 0xFF));
+        msg.append(static_cast<char>((payloadSize32 >> 8) & 0xFF));
+        msg.append(static_cast<char>(payloadSize32 & 0xFF));
+
+        // Backend timestamp (4 bytes, big endian)
+        msg.append(static_cast<char>((backendTs >> 24) & 0xFF));
+        msg.append(static_cast<char>((backendTs >> 16) & 0xFF));
+        msg.append(static_cast<char>((backendTs >> 8) & 0xFF));
+        msg.append(static_cast<char>(backendTs & 0xFF));
+
+        // Audio payload
+        msg.append(audioData);
+
+        m_WsClient->sendBinaryMessage(msg);
+    };
+
+    if (m_UseVideoFragmentation) {
+        // Flush pending audio using fragmented format
+        while (!m_PendingAudioFrames.isEmpty()) {
+            sendAudioFragmented(m_PendingAudioFrames.takeFirst());
+        }
+        sendAudioFragmented(data);
+        return;
+    }
+
+    // --- Legacy non-fragmented path (2-byte header) ---
+
+    while (!m_PendingAudioFrames.isEmpty()) {
+        QByteArray msg;
+        msg.append(static_cast<char>(0x02));
+        msg.append(static_cast<char>(0x00)); // flags unused
+        msg.append(m_PendingAudioFrames.takeFirst());
+        m_WsClient->sendBinaryMessage(msg);
+    }
+
+    QByteArray msg;
+    msg.append(static_cast<char>(0x02));
+    msg.append(static_cast<char>(0x00)); // flags unused
+    msg.append(data);
+    m_WsClient->sendBinaryMessage(msg);
+}
+
+// --- WebSocket handling ------------------------------------------------------
+
+void StreamRelay::onNewWsConnection()
+{
+    qInfo() << "[StreamRelay] onNewWsConnection, existing client=" << (m_WsClient != nullptr);
+
+    if (m_WsClient) {
+        QWebSocket* rejected = m_WsServer->nextPendingConnection();
+        qWarning() << "[StreamRelay] Rejecting second client";
+        rejected->close(QWebSocketProtocol::CloseCodeNormal, "Single client only");
+        rejected->deleteLater();
+        return;
+    }
+
+    m_WsClient = m_WsServer->nextPendingConnection();
+    if (!m_WsClient) {
+        qWarning() << "[StreamRelay] nextPendingConnection returned null";
+        return;
+    }
+
+    qInfo() << "[StreamRelay] WS client created, connecting signals...";
+
+    connect(m_WsClient, &QWebSocket::textMessageReceived, this, &StreamRelay::onWsTextMessage);
+    connect(m_WsClient, &QWebSocket::disconnected, this, &StreamRelay::onWsDisconnected);
+
+    // Log WS errors (QWebSocket::errorOccurred exists only since Qt 6.5)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    connect(m_WsClient, &QWebSocket::errorOccurred, [](QAbstractSocket::SocketError err) {
+        qWarning() << "[StreamRelay] WebSocket error:" << err;
+    });
+#else
+    connect(m_WsClient, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
+            [](QAbstractSocket::SocketError err) {
+                qWarning() << "[StreamRelay] WebSocket error:" << err;
+            });
+#endif
+
+    qInfo() << "[StreamRelay] WebSocket client connected OK, m_StreamStarted=" << m_StreamStarted
+            << "pending video=" << m_PendingVideoFrames.size();
+
+    // Drop frames buffered before the client connected: flushing them would
+    // send stale deltas mislabeled as keyframes, poisoning strict mobile
+    // decoders and saturating their decode queue. Start clean from a fresh IDR.
+    if (!m_PendingVideoFrames.isEmpty() || !m_PendingAudioFrames.isEmpty()) {
+        qInfo() << "[StreamRelay] Discarding" << m_PendingVideoFrames.size() << "stale video /"
+                << m_PendingAudioFrames.size() << "audio frames, requesting fresh IDR";
+        m_PendingVideoFrames.clear();
+        m_PendingAudioFrames.clear();
+    }
+    if (m_Shim) {
+        m_Shim->requestIdrFrame();
+    }
+
+    // Start periodic stats now that a client is connected.
+    if (m_StatsTimer && !m_StatsTimer->isActive()) {
+        m_StatsTimer->start();
+    }
+
+    if (m_ClipboardEnabled) {
+        // Advertise clipboard sync, then push the current host clipboard
+        // once so copy-before-connect pastes locally.
+        m_WsClient->sendTextMessage(
+            QStringLiteral("{\"type\":\"clipboardcaps\",\"available\":true}"));
+        ClipboardBridge::instance()->requestAnnounce();
+    }
+
+    emit clientConnected();
+}
+
+void StreamRelay::sendStats()
+{
+    if (m_Stopping) return;
+    if (!m_WsClient || m_WsClient->state() != QAbstractSocket::ConnectedState) return;
+
+    double hostRttMs = m_Shim ? m_Shim->hostRttMs() : 0.0;
+
+    QJsonObject stats;
+    stats["type"] = "stats";
+    stats["hostRttMs"] = hostRttMs;
+    // WSS has no per-frame decode-latency tracking; report 0.
+    stats["decodeLatencyUs"] = 0;
+    // Sunshine capture→encode latency (RTP extension), averaged over the frames
+    // of this stats window. 0 when the host doesn't report it.
+    stats["hostProcMs"] = m_Shim ? m_Shim->takeHostProcessingLatencyMs() : 0.0;
+
+    m_WsClient->sendTextMessage(
+        QString::fromUtf8(QJsonDocument(stats).toJson(QJsonDocument::Compact)));
+}
+
+void StreamRelay::onWsTextMessage(const QString& message)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8());
+    if (!doc.isObject()) {
+        qWarning() << "[StreamRelay] Invalid JSON from client:" << message.left(100);
+        return;
+    }
+
+    QJsonObject msg = doc.object();
+    QString type = msg["type"].toString();
+
+    // Log first few input messages of each type
+    static QMap<QString, int> inputCounts;
+    int& count = inputCounts[type];
+    count++;
+    if (count <= 2) {
+        qInfo() << "[StreamRelay] Input #" << count << "type=" << type;
+    }
+
+    // Any message at all proves the input link is alive — feeds the shim's
+    // dead-man switch (see IMediaEngine's input-watchdog contract).
+    if (m_Shim) m_Shim->noteClientAlive();
+
+    // An invited player only gets what the owner ticked. Dropped in silence.
+    if (!InputMsg::allowed(type, m_InputPolicy)) return;
+
+    if (type == "keydown" || type == "keyup") {
+        bool down = (type == "keydown");
+        // Shared codec, so this transport resolves IntlBackslash/IntlRo and the
+        // client's keyboard layout like the others instead of passing the raw
+        // VK through.
+        InputMsg::sendKey(*m_Shim, msg, down);
+    } else if (type == "inputstate") {
+        // Client heartbeat of its held-input state — full contract in
+        // IMediaEngine's input-watchdog contract. Filtered by the guest's
+        // policy, or a viewer could press keys with it.
+        const InputMsg::HeldState held = InputMsg::readHeldState(
+            msg, m_Shim->keyboardMode(), m_Shim->layoutFidelity(), m_InputPolicy);
+        m_Shim->syncHeldInputs(held.keys, held.buttons, held.buttonsHold);
+    } else if (type == "mousemove") {
+        // Absolute mouse position (non-gaming mode) — same handling as
+        // DataChannelRelay, otherwise the host cursor never moves in WSS.
+        if (msg.contains("x") && msg.contains("y") && msg.contains("referenceWidth") &&
+            msg.contains("referenceHeight")) {
+            short x = static_cast<short>(msg["x"].toInt(0));
+            short y = static_cast<short>(msg["y"].toInt(0));
+            short refW = static_cast<short>(msg["referenceWidth"].toInt(0));
+            short refH = static_cast<short>(msg["referenceHeight"].toInt(0));
+            m_Shim->sendMousePosition(x, y, refW, refH);
+        } else {
+            // Gaming mode: relative mouse movement
+            short dx = static_cast<short>(msg["dx"].toInt(0));
+            short dy = static_cast<short>(msg["dy"].toInt(0));
+            m_Shim->sendMouseMove(dx, dy);
+        }
+    } else if (type == "mousedown" || type == "mouseup") {
+        bool down = (type == "mousedown");
+        int button = msg["button"].toInt(1);
+        m_Shim->sendMouseButton(down, button, msg["hold"].toBool(false));
+    } else if (type == "mousewheel") {
+        short delta = static_cast<short>(msg["delta"].toInt(0));
+        m_Shim->sendMouseScroll(delta);
+    } else if (type == "mousehwheel") {
+        short delta = static_cast<short>(msg["delta"].toInt(0));
+        m_Shim->sendMouseHScroll(delta);
+    } else if (type == "secureattention") {
+        // Ctrl+Alt+Suppr: the one combination a browser can never deliver — the
+        // OS running the viewer eats it first — so it arrives as a message of
+        // its own, from the touch keyboard bar (Ctrl and Alt down, then Del).
+        // Whether it reaches the host's secure desktop
+        // depends on the host (IMediaEngine::sendSecureAttention).
+        m_Shim->sendSecureAttention();
+    } else if (type == "textinput") {
+        // Virtual/soft keyboard text (UTF-8) — forwarded as a text event.
+        m_Shim->sendUtf8Text(msg["text"].toString());
+    } else if (type == "locksync") {
+        // Align the host's toggle locks (Num/Caps/Scroll) with the client's,
+        // sent once per session on the browser's first real keyboard event.
+        m_Shim->syncLockKeys(msg["numLock"].toBool(false), msg["capsLock"].toBool(false),
+                             msg["scrollLock"].toBool(false));
+    } else if (type == "clipboardpaste") {
+        // Browser Ctrl/Cmd+V: commit the client text to the host clipboard,
+        // then inject the paste chord (main-thread hop keeps that order).
+        // Only meaningful when the streamed host is this machine.
+        if (m_ClipboardEnabled) {
+            ClipboardBridge::instance()->pasteFromClient(m_Shim, msg["text"].toString(),
+                                                         msg["injectCtrl"].toBool(false));
+        }
+    } else if (type == "unblockinput") {
+        // The way out of a closed input gate — native host only, full
+        // reasoning in DataChannelRelay's handler.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim)) native->releaseInputBlock();
+    } else if (type == "cursormode") {
+        // Who draws the pointer — native host only, full reasoning in
+        // DataChannelRelay's handler. Ignored here until 04/10/2026: on wss the
+        // host kept burning its pointer into a desktop-mode picture that the
+        // browser was drawing its own on, and the viewer saw two.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim))
+            native->setCompositeCursor(msg["composite"].toBool(true), msg["cursorPx"].toInt(0));
+    } else if (type == "framefloor") {
+        // How fast the client wants frames while the host's screen is still —
+        // native host only, full reasoning in DataChannelRelay's handler.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim))
+            native->setFrameFloorFps(msg["fps"].toInt(0));
+    } else if (type == "requestidr") {
+        // Browser lost its reference picture — forward to Sunshine (throttled).
+        // Without this, a single decode-queue overflow freezes the WSS stream
+        // forever (deltas dropped until a keyframe that never comes).
+        if (!m_IdrCooldownTimer.isValid() || m_IdrCooldownTimer.elapsed() >= 300) {
+            m_IdrCooldownTimer.restart();
+            qInfo() << "[StreamRelay] IDR request from browser — forwarding to Sunshine";
+            m_Shim->requestIdrFrame();
+        } else {
+            // Swallowed by cooldown — the browser retries every 1s, so log only.
+            qInfo() << "[StreamRelay] IDR request throttled (cooldown)";
+        }
+    } else if (type == "ping") {
+        // Echo a pong so the browser can compute its RTT (stats overlay),
+        // matching the DataChannelRelay behaviour.
+        if (m_WsClient && m_WsClient->state() == QAbstractSocket::ConnectedState) {
+            QJsonObject pong;
+            pong["type"] = "pong";
+            pong["seq"] = msg["seq"].toInt(0);
+            pong["ts"] = msg["ts"].toDouble(0);
+            m_WsClient->sendTextMessage(
+                QString::fromUtf8(QJsonDocument(pong).toJson(QJsonDocument::Compact)));
+        }
+    } else if (type == "gamepad") {
+        m_Shim->sendControllerState(
+            static_cast<short>(msg["index"].toInt(0)), static_cast<short>(msg["mask"].toInt(0)),
+            msg["buttons"].toInt(0), static_cast<unsigned char>(msg["lt"].toInt(0)),
+            static_cast<unsigned char>(msg["rt"].toInt(0)), static_cast<short>(msg["lx"].toInt(0)),
+            static_cast<short>(msg["ly"].toInt(0)), static_cast<short>(msg["rx"].toInt(0)),
+            static_cast<short>(msg["ry"].toInt(0)));
+    } else if (type == "gamepadconnect") {
+        m_Shim->sendControllerArrival(static_cast<uint8_t>(msg["index"].toInt(0)),
+                                      static_cast<uint16_t>(msg["mask"].toInt(0)),
+                                      static_cast<uint8_t>(msg["ctype"].toInt(0)),
+                                      msg["rumble"].toBool(false));
+    } else if (type == "gamepaddisconnect") {
+        // The pad is gone — see DataChannelRelay for why this is its own call
+        // and not an empty state. Same rule on every transport: this one was
+        // missed when the other two were converted, and a pad removed over WSS
+        // stayed plugged into the native host until the session ended.
+        m_Shim->sendControllerRemoval(static_cast<uint8_t>(msg["index"].toInt(0)),
+                                      static_cast<uint16_t>(msg["mask"].toInt(0)));
+    } else if (type == "linkstats") {
+        // The page reports its link on every transport; only the WebRTC
+        // relay has a governor to feed, so here it is simply not news.
+    } else {
+        qWarning() << "[StreamRelay] Unknown input type:" << type;
+    }
+}
+
+void StreamRelay::onWsDisconnected()
+{
+    qInfo() << "[StreamRelay::onWsDisconnected] ENTER, m_Running=" << m_Running
+            << "m_Stopping=" << m_Stopping << "m_StreamStarted=" << m_StreamStarted
+            << "frames sent=" << m_FrameCount << "pending video=" << m_PendingVideoFrames.size()
+            << "pending audio=" << m_PendingAudioFrames.size();
+
+    if (m_StatsTimer) m_StatsTimer->stop();
+
+    QString disconnectSource;
+    QWebSocketProtocol::CloseCode closeCode = QWebSocketProtocol::CloseCodeNormal;
+    QString closeReason;
+    if (m_WsClient) {
+        closeCode = m_WsClient->closeCode();
+        closeReason = m_WsClient->closeReason();
+        qInfo() << "[StreamRelay::onWsDisconnected] WS state=" << m_WsClient->state()
+                << "closeCode=" << closeCode << "closeReason=" << closeReason;
+        m_WsClient->deleteLater();
+        m_WsClient = nullptr;
+    } else {
+        qInfo() << "[StreamRelay::onWsDisconnected] m_WsClient already null";
+    }
+
+    m_StreamStarted = false;
+    m_PendingVideoFrames.clear();
+    m_PendingAudioFrames.clear();
+
+    qInfo() << "[StreamRelay::onWsDisconnected] Emitting clientDisconnected ...";
+    emit clientDisconnected();
+
+    qInfo() << "[StreamRelay::onWsDisconnected] Emitting sessionEnded ...";
+    emit sessionEnded();
+
+    qInfo() << "[StreamRelay::onWsDisconnected] EXIT";
+}
+
+// --- Connection management ---------------------------------------------------
+
+void StreamRelay::onShimConnectionStarted()
+{
+    qInfo() << "[StreamRelay] onShimConnectionStarted — ENet + video/audio streams established";
+    m_StreamStarted = true;
+}
+
+void StreamRelay::onShimConnectionFailed(const QString& error)
+{
+    qWarning() << "[StreamRelay] Stream connection failed:" << error;
+    m_Running = false;
+    emit sessionEnded();
+}
+
+void StreamRelay::onShimConnectionTerminated(int errorCode)
+{
+    qInfo() << "[StreamRelay::onShimConnectionTerminated] ENTER, errorCode=" << errorCode
+            << "m_Running=" << m_Running << "m_Stopping=" << m_Stopping
+            << "frames sent=" << m_FrameCount;
+    m_StreamStarted = false;
+
+    // Graceful termination: the host ended the stream on purpose (the app was
+    // closed there). Tell the browser before the socket drops. Any other code
+    // is the host side failing, not this socket: say that instead.
+    sendExitNotice(errorCode == ML_ERROR_GRACEFUL_TERMINATION ? "host-ended" : "host-lost");
+
+    // Always emit sessionEnded so cleanup runs, regardless of error code.
+    // Graceful termination (code 0) still needs relay/shim cleanup.
+    // The re-entrant guard in stop() prevents double-free if sessionEnded
+    // fires again from other paths (e.g. onWsDisconnected).
+    qInfo() << "[StreamRelay::onShimConnectionTerminated] Emitting sessionEnded ...";
+    emit sessionEnded();
+    qInfo() << "[StreamRelay::onShimConnectionTerminated] EXIT";
+}

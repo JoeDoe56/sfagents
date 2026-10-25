@@ -1,0 +1,1292 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "MediaTrackRelay.h"
+#include "ClipboardBridge.h"
+#include "InputMessageCodec.h"
+#include "PacketMarking.h"
+#include "IMediaEngine.h"
+#include "NativeMediaEngine.h"
+#include "ExitNotice.h"
+
+extern "C" {
+#include "Limelight.h"
+}
+
+#include <rtc/rtc.hpp>
+#include <rtc/plihandler.hpp>
+#include <rtc/rtcpnackresponder.hpp>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMetaObject>
+#include <QThread>
+#include <QDebug>
+#include <QMap>
+#include <algorithm>
+#include <cstring>
+#include <random>
+#include <chrono>
+
+MediaTrackRelay::MediaTrackRelay(IMediaEngine* engine, QObject* parent)
+    : RelayBase(parent)
+    , m_Shim(engine)
+    // The gate starts closed, so the first episode runs from here to the first
+    // keyframe on the track — that duration is the session's startup delay.
+    , m_GateClosedAt(std::chrono::steady_clock::now())
+{
+    qInfo() << "[MediaTrackRelay] Created";
+
+    // Video path threading (P2-B):
+    //   Default = DirectConnection: onVideoFrame runs on the capture (worker)
+    //   thread that emits the signal, removing one Qt event-loop hop before the
+    //   RTP send. The send path is serialized with stop()/sendBufferedKeyframe()
+    //   by m_VideoMutex. Set MW_MEDIA_QUEUED_VIDEO=1 to roll back to the old
+    //   main-thread queued path (no rebuild needed) if it misbehaves.
+    bool queuedVideo = qEnvironmentVariableIntValue("MW_MEDIA_QUEUED_VIDEO") != 0;
+    m_DirectVideoSend = !queuedVideo;
+    qInfo() << "[MediaTrackRelay] Video send mode:"
+            << (m_DirectVideoSend ? "direct (capture thread)" : "queued (main thread)");
+    connect(m_Shim, &IMediaEngine::videoFrameReady, this, &MediaTrackRelay::onVideoFrame,
+            m_DirectVideoSend ? Qt::DirectConnection : Qt::QueuedConnection);
+    connect(m_Shim, &IMediaEngine::audioSampleReady, this, &MediaTrackRelay::onAudioSample);
+    connect(m_Shim, &IMediaEngine::connectionTerminated, this,
+            &MediaTrackRelay::onShimConnectionTerminated);
+
+    // Forward host rumble requests to the browser over the input DC.
+    // 'this' as context → runs on the relay thread (signal is emitted from the
+    // moonlight worker thread).
+    connect(m_Shim, &IMediaEngine::rumble, this, [this](int controller, int low, int high) {
+        if (m_Stopping.load() || !m_InputDc) return;
+        QJsonObject m;
+        m["type"] = "rumble";
+        m["index"] = controller;
+        m["low"] = low;
+        m["high"] = high;
+        QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+        try {
+            m_InputDc->send(std::string(j.constData(), j.size()));
+        } catch (const std::exception&) {}
+    });
+
+    // What the host's OS asked of a recreated HID device — see DataChannelRelay.
+    connect(m_Shim, &IMediaEngine::hidRequest, this,
+            [this](int slot, int kind, int reportId, QByteArray data) {
+                if (m_Stopping.load() || !m_InputDc) return;
+                static const char* const kKinds[] = {"output", "getfeature", "setfeature"};
+                QJsonObject m;
+                m["type"] = "hidrequest";
+                m["slot"] = slot;
+                m["kind"] = QLatin1String(kKinds[qBound(0, kind, 2)]);
+                m["reportId"] = reportId;
+                m["data"] = QString::fromLatin1(data.toBase64());
+                QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+                try {
+                    m_InputDc->send(std::string(j.constData(), j.size()));
+                } catch (const std::exception&) {}
+            });
+
+    // Force feedback a game asked of a recreated wheel, for the page to play on
+    // the real one. Reliable and ordered like the rest of this channel: an
+    // effect's start must never overtake its parameters.
+    connect(m_Shim, &IMediaEngine::hidFfb, this, [this](QJsonObject m) {
+        if (m_Stopping.load() || !m_InputDc) return;
+        const QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+        try {
+            m_InputDc->send(std::string(j.constData(), j.size()));
+        } catch (const std::exception&) {}
+    });
+
+    // The input gate (native host) — see DataChannelRelay for the message.
+    connect(m_Shim, &IMediaEngine::inputGateChanged, this,
+            [this](bool blocked, QString reason, QString window) {
+                if (m_Stopping.load() || !m_InputDc) return;
+                QJsonObject m;
+                m["type"] = "inputgate";
+                m["blocked"] = blocked;
+                m["reason"] = reason;
+                m["window"] = window;
+                QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+                try {
+                    m_InputDc->send(std::string(j.constData(), j.size()));
+                } catch (const std::exception&) {}
+            });
+
+    // The host's display format (native host) — see DataChannelRelay.
+    connect(m_Shim, &IMediaEngine::displayFormatChanged, this,
+            [this](int displayWidth, int displayHeight, int frameWidth, int frameHeight,
+                   bool displayHdr, bool hdr, bool hdrCapable) {
+                if (m_Stopping.load() || !m_InputDc) return;
+                QJsonObject m;
+                m["type"] = "displayformat";
+                m["displayWidth"] = displayWidth;
+                m["displayHeight"] = displayHeight;
+                m["frameWidth"] = frameWidth;
+                m["frameHeight"] = frameHeight;
+                m["displayHdr"] = displayHdr;
+                m["hdr"] = hdr;
+                m["hdrCapable"] = hdrCapable;
+                QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+                try {
+                    m_InputDc->send(std::string(j.constData(), j.size()));
+                } catch (const std::exception&) {}
+            });
+
+    // The guests' shared feed changes codec (native host) — see DataChannelRelay.
+    connect(m_Shim, &IMediaEngine::sharedFeedCodecChanged, this, [this](QString codec) {
+        if (m_Stopping.load() || !m_InputDc) return;
+        QJsonObject m;
+        m["type"] = "feedcodec";
+        m["codec"] = codec;
+        QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+        try {
+            m_InputDc->send(std::string(j.constData(), j.size()));
+        } catch (const std::exception&) {}
+    });
+
+    // The mouse pointer's shape when the browser draws it (native host, desktop
+    // mode) — same message as DataChannelRelay's, same reasoning there. The
+    // input DC carries it here exactly as it does on the other transport.
+    connect(m_Shim, &IMediaEngine::cursorShapeChanged, this,
+            [this](QByteArray png, int hotspotX, int hotspotY, bool visible, QString kind,
+                   double scale) {
+                if (m_Stopping.load() || !m_InputDc) return;
+                QJsonObject m;
+                m["type"] = "cursor";
+                m["visible"] = visible;
+                m["hotspotX"] = hotspotX;
+                m["hotspotY"] = hotspotY;
+                m["scale"] = scale;
+                if (!kind.isEmpty()) m["kind"] = kind;
+                if (!png.isEmpty()) m["png"] = QString::fromLatin1(png.toBase64());
+                QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+                try {
+                    m_InputDc->send(std::string(j.constData(), j.size()));
+                } catch (const std::exception&) {}
+            });
+
+    // Its position too, for a touch screen drawing its own pointer — same
+    // message as DataChannelRelay's, same reasoning there.
+    connect(m_Shim, &IMediaEngine::cursorMoved, this, [this](double x, double y, bool visible) {
+        if (m_Stopping.load() || !m_InputDc) return;
+        QJsonObject m;
+        m["type"] = "cursorpos";
+        m["x"] = x;
+        m["y"] = y;
+        m["visible"] = visible;
+        QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+        try {
+            m_InputDc->send(std::string(j.constData(), j.size()));
+        } catch (const std::exception&) {}
+    });
+
+    // ICE connection timeout: emit iceTimedOut() if PC doesn't reach
+    // Connected within m_IceTimeoutMs after setRemoteDescription().
+    m_IceCheckTimer = new QTimer(this);
+    m_IceCheckTimer->setSingleShot(true);
+    connect(m_IceCheckTimer, &QTimer::timeout, this, &MediaTrackRelay::onIceCheckTimeout);
+
+    // Stats timer: sends periodic stats to the browser via Input DC.
+    m_StatsTimer = new QTimer(this);
+    m_StatsTimer->setInterval(1000); // matches moonlight-qt's stats window flip
+    connect(m_StatsTimer, &QTimer::timeout, this, &MediaTrackRelay::onStatsTimerTick);
+}
+
+void MediaTrackRelay::setClipboardEnabled(bool enabled)
+{
+    m_ClipboardEnabled = enabled;
+    if (!enabled) return;
+    // Host clipboard changes → push to the browser over the input DC.
+    // Context 'this': the slot runs on the relay's (future) thread; the DC
+    // send itself is thread-safe. Auto-disconnected when the relay dies.
+    connect(ClipboardBridge::instance(), &ClipboardBridge::hostTextChanged, this,
+            [this](const QString& text) {
+                if (m_Stopping.load() || !m_Connected || !m_InputDc) return;
+                QJsonObject m;
+                m["type"] = "clipboard";
+                m["text"] = text;
+                QByteArray j = QJsonDocument(m).toJson(QJsonDocument::Compact);
+                try {
+                    m_InputDc->send(std::string(j.constData(), j.size()));
+                } catch (const std::exception&) {}
+            });
+}
+
+MediaTrackRelay::~MediaTrackRelay()
+{
+    qInfo() << "[MediaTrackRelay] Destructor";
+    // Static call: dynamic dispatch is meaningless in a destructor.
+    MediaTrackRelay::stop();
+}
+
+bool MediaTrackRelay::prepare(const rtc::Configuration& config, bool isInternet)
+{
+    if (m_Pc) {
+        qWarning() << "[MediaTrackRelay] already prepared";
+        return false;
+    }
+
+    // A public peer needs a longer ICE deadline than a LAN one; see
+    // RelayBase::kIceTimeoutInternetMs.
+    m_IceTimeoutMs = isInternet ? kIceTimeoutInternetMs : kIceTimeoutLocalMs;
+
+    setupPeerConnection(config);
+    return true;
+}
+
+bool MediaTrackRelay::setRemoteDescription(const std::string& sdp)
+{
+    if (!m_Pc) {
+        qWarning() << "[MediaTrackRelay] No PeerConnection for setRemoteDescription";
+        return false;
+    }
+    try {
+        m_Pc->setRemoteDescription(rtc::Description(sdp));
+        qInfo() << "[MediaTrackRelay] Remote description set — starting ICE timeout ("
+                << m_IceTimeoutMs << "ms)";
+        if (m_IceCheckTimer) {
+            m_IceCheckTimer->start(m_IceTimeoutMs);
+        }
+        return true;
+    } catch (const std::exception& e) {
+        qWarning() << "[MediaTrackRelay] setRemoteDescription failed:" << e.what();
+        return false;
+    }
+}
+
+bool MediaTrackRelay::addRemoteCandidate(const std::string& candidate, const std::string& mid)
+{
+    if (!m_Pc) return false;
+    try {
+        m_Pc->addRemoteCandidate(rtc::Candidate(candidate, mid));
+        return true;
+    } catch (const std::exception& e) {
+        qWarning() << "[MediaTrackRelay] addRemoteCandidate failed:" << e.what();
+        return false;
+    }
+}
+
+void MediaTrackRelay::setupPeerConnection(const rtc::Configuration& config)
+{
+    qInfo() << "[MediaTrackRelay] Creating PeerConnection (media mode)";
+
+    PacketMarking::apply();
+    m_Pc = std::make_shared<rtc::PeerConnection>(config);
+
+    // --- Local description callback ---
+    m_Pc->onLocalDescription([this](const rtc::Description& sdp) {
+        qInfo() << "[MediaTrackRelay] Local SDP generated, type="
+                << QString::fromStdString(sdp.typeString())
+                << "hasAudioOrVideo=" << sdp.hasAudioOrVideo()
+                << "hasApplication=" << sdp.hasApplication();
+        emit signalingSdpReady(std::string(sdp));
+    });
+
+    // --- Local ICE candidate callback ---
+    m_Pc->onLocalCandidate([this](const rtc::Candidate& candidate) {
+        emitLocalCandidate(candidate, "[MediaTrackRelay]");
+    });
+
+    // --- State change callback ---
+    m_Pc->onStateChange([this](rtc::PeerConnection::State state) {
+        qInfo() << "[MediaTrackRelay] PC state changed to" << static_cast<int>(state);
+        if (state == rtc::PeerConnection::State::Connected) {
+            qInfo() << "[MediaTrackRelay] PeerConnection connected";
+            logSelectedCandidatePair(*m_Pc, "[MediaTrackRelay]");
+            // This callback runs on a libdatachannel thread; QTimer must be
+            // stopped from its owning (relay) thread.
+            QMetaObject::invokeMethod(
+                this,
+                [this]() {
+                    if (m_IceCheckTimer) m_IceCheckTimer->stop();
+                },
+                Qt::QueuedConnection);
+        } else if (state == rtc::PeerConnection::State::Disconnected ||
+                   state == rtc::PeerConnection::State::Failed ||
+                   state == rtc::PeerConnection::State::Closed) {
+            if (!m_Stopping.exchange(true)) {
+                m_Connected = false;
+                qInfo() << "[MediaTrackRelay] PC disconnected/failed/closed";
+                emit sessionEnded();
+            }
+        }
+    });
+
+    // --- Gathering state ---
+    m_Pc->onGatheringStateChange([this](rtc::PeerConnection::GatheringState state) {
+        qInfo() << "[MediaTrackRelay] ICE gathering state:" << static_cast<int>(state);
+    });
+
+    // Create the media tracks + DataChannels
+    createTracksAndChannels();
+}
+
+void MediaTrackRelay::createTracksAndChannels()
+{
+    if (!m_Pc) return;
+
+    qInfo() << "[MediaTrackRelay] Creating video+audio tracks + input DataChannel";
+
+    // ── Video track (H.264, server->browser, RTP) ──────────────────────────
+    // libdatachannel generates the SDP media section (m=video) automatically.
+    // H264RtpPacketizer with LongStartSequence handles Annex B -> RTP.
+    // Payload type 96 (dynamic, standard for H.264 in WebRTC).
+    {
+        auto videoDesc = rtc::Description::Video("video", rtc::Description::Direction::SendOnly);
+        videoDesc.addH264Codec(96); // Uses default profile: 42e01f, packetization-mode=1
+
+        // The SSRC has to be DECLARED in the media description, and before
+        // addTrack() — the description is what the PeerConnection turns into
+        // its ssrc→track routing table (updateTrackSsrcCache, built from the
+        // local description). An SSRC known only to the packetizer produces a
+        // stream the browser plays perfectly and whose RTCP feedback comes back
+        // to an address nobody claims: libdatachannel finds no track for it and
+        // drops it, silently, in both directions of usefulness.
+        //
+        // That is what made every NACK and every PLI a no-op here (2026-08-30:
+        // 63 NACKs and 6 PLIs from the receiver over one minute, not one of
+        // them reaching the RtcpNackResponder or the PliHandler chained below).
+        // With no retransmission and no keyframe on demand, a single lost
+        // packet froze the picture until the browser's own 2 s watchdog asked
+        // for an IDR over the DataChannel — the 2-4 s freezes, every 10-15 s.
+        std::random_device rd;
+        const uint32_t ssrc = static_cast<uint32_t>(rd());
+        videoDesc.addSSRC(ssrc, "video");
+
+        m_VideoTrack = m_Pc->addTrack(videoDesc);
+        if (m_VideoTrack) {
+            auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
+                ssrc, "video", 96, rtc::H264RtpPacketizer::ClockRate);
+            auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+                rtc::H264RtpPacketizer::Separator::LongStartSequence, rtpConfig);
+            // Chain: packetizer → RtcpNackResponder → PliHandler
+            //
+            // The NACK history is the only thing standing between a lost RTP
+            // packet and a multi-second freeze: unlike the DataChannel path
+            // (SCTP retransmits and reorders for us), a gap the receiver cannot
+            // repair costs it every frame until the next keyframe.
+            //
+            // 128 packets was far too short. At 1080p60 / 20 Mbps the track
+            // pushes ~2000 packets per second, so the history covered ~60 ms —
+            // less than the receiver's own NACK batching delay plus the round
+            // trip, and nothing at all next to a Wi-Fi stall (a Mac whose radio
+            // is taken over by AWDL loses hundreds of packets and sees its RTT
+            // go 28→74 ms). Every such NACK arrived after the packet had been
+            // evicted, leaving the PLI/keyframe path as the only recovery.
+            //
+            // kVideoNackHistory covers ~0.5 s at that bitrate for ~1.2 MB per
+            // session, which is what libwebrtc's own send history is sized for.
+            static constexpr size_t kVideoNackHistory = 1024;
+            auto nackResponder = std::make_shared<rtc::RtcpNackResponder>(kVideoNackHistory);
+            packetizer->addToChain(nackResponder);
+            // PLI handler requests a keyframe from Sunshine on decoder PLI.
+            // Throttled with backoff: PLI storms during sustained loss must not
+            // flood Sunshine with IDR requests (each IDR inflates the bitrate).
+            auto pliHandler = std::make_shared<rtc::PliHandler>([this]() {
+                if (m_Shim && !m_Stopping.load()) {
+                    // A PLI is the receiver's decoder reporting it has nothing
+                    // to show. Until now this path logged nothing at all, so it
+                    // was impossible to tell a PLI that never arrived from one
+                    // the cooldown swallowed.
+                    if (++m_PliCount % 10 == 1)
+                        qInfo() << "[MediaTrackRelay] PLI from receiver — decoder lost its"
+                                << "reference (count:" << m_PliCount << ")";
+                    sendIdrRequestThrottled(true);
+                }
+            });
+            nackResponder->addToChain(pliHandler);
+            m_VideoTrack->setMediaHandler(packetizer);
+
+            m_VideoTrack->onOpen([this]() {
+                qInfo() << "[MediaTrackRelay] Video Track open";
+                QMetaObject::invokeMethod(
+                    this, [this]() { sendBufferedKeyframe(); }, Qt::QueuedConnection);
+            });
+            m_VideoTrack->onClosed([this]() { qInfo() << "[MediaTrackRelay] Video Track closed"; });
+
+            qInfo() << "[MediaTrackRelay] Video track created (H.264, PT=96)";
+        } else {
+            qWarning() << "[MediaTrackRelay] Failed to create video track";
+        }
+    }
+
+    // ── Audio track (Opus, server->browser, RTP) ───────────────────────────
+    // Native RTP Opus track instead of a DataChannel: the browser decodes Opus
+    // with its own jitter buffer + in-band FEC + packet loss concealment, so a
+    // lost UDP packet is masked instead of head-of-line-blocking the whole audio
+    // stream (the periodic ~0.5s dropouts). useinbandfec=1 signals the decoder to
+    // use the FEC carried in the next Opus packet to reconstruct a lost one.
+    // stereo=1;sprop-stereo=1 is REQUIRED: without it libwebrtc instantiates a
+    // MONO Opus decoder and downmixes the stereo Sunshine stream (L+R)/2, which
+    // plays ~-6 dB quieter than moonlight-qt and loses the stereo image.
+    {
+        // Sendrecv only for the bench's silent carrier (PacketMarking::carrierOffered).
+        const bool carrier = PacketMarking::carrierOffered();
+        auto audioDesc =
+            rtc::Description::Audio("audio", carrier ? rtc::Description::Direction::SendRecv
+                                                     : rtc::Description::Direction::SendOnly);
+        audioDesc.addOpusCodec(111, "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1");
+
+        // Declared before addTrack for the same reason as the video SSRC above:
+        // without it the audio NACK responder below never sees a NACK either.
+        std::random_device rd;
+        const uint32_t ssrc = static_cast<uint32_t>(rd());
+        audioDesc.addSSRC(ssrc, "audio");
+
+        m_AudioTrack = m_Pc->addTrack(audioDesc);
+        if (m_AudioTrack) {
+            auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
+                ssrc, "audio", 111, rtc::OpusRtpPacketizer::DefaultClockRate);
+            auto packetizer = std::make_shared<rtc::OpusRtpPacketizer>(rtpConfig);
+            // NACK responder lets the browser request retransmission of a lost
+            // RTP packet (complements Opus FEC/PLC) with a small history buffer.
+            packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>(64));
+            m_AudioTrack->setMediaHandler(packetizer);
+            if (carrier) {
+                // The carrier's packets carry nothing: dropped as they come.
+                m_AudioTrack->onMessage([](rtc::message_variant) {});
+                qInfo() << "[MediaTrackRelay] Audio offered sendrecv (MW_DSCP_CARRIER bench key)";
+            }
+
+            m_AudioTrack->onOpen([this]() { qInfo() << "[MediaTrackRelay] Audio Track open"; });
+            m_AudioTrack->onClosed([this]() { qInfo() << "[MediaTrackRelay] Audio Track closed"; });
+
+            qInfo() << "[MediaTrackRelay] Audio track created (Opus, PT=111)";
+        } else {
+            qWarning() << "[MediaTrackRelay] Failed to create audio track";
+        }
+    }
+
+    // ── Input DataChannel (bidirectional, JSON text) ──────────────────────
+    {
+        rtc::DataChannelInit inputConfig;
+        inputConfig.negotiated = true;
+        inputConfig.id = 1;
+
+        m_InputDc = m_Pc->createDataChannel("input", inputConfig);
+        if (m_InputDc) {
+            m_InputDc->onOpen([this]() {
+                qInfo() << "[MediaTrackRelay] Input DataChannel open";
+                m_Connected = true;
+                emit dataChannelsOpen();
+
+                if (m_ClipboardEnabled) {
+                    // Advertise clipboard sync, then push the current host
+                    // clipboard once so copy-before-connect pastes locally.
+                    static const char kCaps[] = "{\"type\":\"clipboardcaps\",\"available\":true}";
+                    try {
+                        m_InputDc->send(std::string(kCaps));
+                    } catch (const std::exception&) {}
+                    ClipboardBridge::instance()->requestAnnounce();
+                }
+
+                sendHidCaps();
+                sendInputCaps(); // see DataChannelRelay
+
+                // Start periodic stats timer on the relay's own thread: this
+                // callback runs on a libdatachannel thread and QTimer::start()
+                // must be invoked from the timer's owning thread (otherwise Qt
+                // warns "Timers cannot be started from another thread" and the
+                // timer never fires → no stats reach the browser).
+                QMetaObject::invokeMethod(
+                    this,
+                    [this]() {
+                        if (m_StatsTimer) {
+                            m_StatsTimer->start();
+                            qInfo() << "[MediaTrackRelay] Stats timer started (2s interval)";
+                        }
+                    },
+                    Qt::QueuedConnection);
+            });
+            m_InputDc->onClosed(
+                [this]() { qInfo() << "[MediaTrackRelay] Input DataChannel closed"; });
+
+            m_InputDc->onMessage([this](const std::variant<rtc::binary, rtc::string>& msg) {
+                if (std::holds_alternative<rtc::string>(msg)) {
+                    std::string text = std::get<rtc::string>(msg);
+                    QMetaObject::invokeMethod(
+                        this, [this, text]() { onInputMessage(text); }, Qt::QueuedConnection);
+                }
+            });
+        }
+    }
+
+    // ── HID DataChannel (the HID passthrough's input reports) ─────────────
+    // See DataChannelRelay. Handled on the relay thread like this relay's
+    // input, which is where the policy and the engine are safe to touch.
+    {
+        rtc::DataChannelInit hidConfig;
+        hidConfig.negotiated = true;
+        hidConfig.id = 4;
+        hidConfig.reliability.unordered = true;
+        hidConfig.reliability.maxRetransmits = 0;
+        m_HidDc = m_Pc->createDataChannel("hid", hidConfig);
+        if (m_HidDc) {
+            m_HidDc->onMessage([this](const std::variant<rtc::binary, rtc::string>& msg) {
+                if (!std::holds_alternative<rtc::binary>(msg)) return;
+                const rtc::binary& b = std::get<rtc::binary>(msg);
+                QByteArray frame(reinterpret_cast<const char*>(b.data()),
+                                 static_cast<int>(b.size()));
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, frame]() {
+                        if (m_Stopping.load() || !m_InputPolicy.hid) return;
+                        m_Shim->hidInput(reinterpret_cast<const uint8_t*>(frame.constData()),
+                                         static_cast<size_t>(frame.size()));
+                    },
+                    Qt::QueuedConnection);
+            });
+        }
+    }
+
+    qInfo() << "[MediaTrackRelay] Tracks+Channels created (video=RTP, audio=RTP, input=DC#1)";
+}
+
+// ── Video forwarding (via RTP media track) ──────────────────────────────────────
+
+void MediaTrackRelay::closeDeltaGate(const char* reason)
+{
+    // Record the reason even when an episode is already running: the newest
+    // cause is the one that still holds the gate shut, and it is what the OPEN
+    // line should name.
+    m_GateCloseReason = reason;
+    if (!m_SentKeyframeOnTrack) return; // episode already running
+    m_SentKeyframeOnTrack = false;
+    m_GateClosedAt = std::chrono::steady_clock::now();
+    m_GatedFrameCount = 0;
+    qInfo() << "[MediaTrackRelay] Delta gate CLOSED —" << reason
+            << "— video is frozen until a fresh keyframe lands";
+}
+
+void MediaTrackRelay::openDeltaGate()
+{
+    if (m_SentKeyframeOnTrack) return;
+    m_SentKeyframeOnTrack = true;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - m_GateClosedAt)
+                        .count();
+    qInfo() << "[MediaTrackRelay] Delta gate OPEN — episode lasted" << ms << "ms,"
+            << m_GatedFrameCount << "deltas discarded (closed by:" << m_GateCloseReason << ")";
+}
+
+void MediaTrackRelay::onVideoFrame(const QByteArray& data, int frameType, int)
+{
+    // Balance the worker→main pending counter (incremented before each emit).
+    // A worker-side delta drop breaks the reference chain: every delta until
+    // the next keyframe is undecodable, yet RTP-wise nothing is missing (the
+    // dropped frame was never packetized), so the browser sees no loss and
+    // sends no NACK/PLI. Re-arm the keyframe gate and ask Sunshine for an IDR.
+    bool workerDroppedDelta = false;
+    if (m_Shim) {
+        m_Shim->videoFrameDelivered();
+        workerDroppedDelta = m_Shim->takeWorkerDroppedDelta();
+    }
+
+    if (m_Stopping.load()) {
+        static int dropCount = 0;
+        if (++dropCount <= 3) qInfo() << "[MediaTrackRelay] onVideoFrame dropped — m_Stopping=true";
+        return;
+    }
+
+    bool isKeyframe = (frameType == 1);
+
+    // Serialize the video send path with stop() and sendBufferedKeyframe().
+    // In direct mode this runs on the capture thread; the lock guarantees the
+    // Video Track and the buffered keyframe are not torn down mid-send.
+    std::lock_guard<std::mutex> lk(m_VideoMutex);
+
+    // Re-check after acquiring the lock: stop() may have run while we waited.
+    if (m_Stopping.load()) return;
+
+    if (workerDroppedDelta && !isKeyframe) {
+        closeDeltaGate("worker dropped a delta — reference chain broken");
+    }
+
+    // Buffer keyframes arriving before the Video Track is ready
+    if (isKeyframe && (!m_VideoTrack || !m_VideoTrack->isOpen())) {
+        m_BufferedKeyframe = data;
+        m_HaveBufferedKeyframe = true;
+        m_DeltaAfterBufferedKeyframe = false;
+        qInfo() << "[MediaTrackRelay] Buffered keyframe size=" << data.size()
+                << "(Track ready=" << (m_VideoTrack && m_VideoTrack->isOpen()) << ")";
+        return;
+    }
+
+    if (!m_VideoTrack || !m_VideoTrack->isOpen()) {
+        // A delta dropped after the buffered keyframe invalidates it: the
+        // deltas sent after track-open would reference this dropped frame.
+        if (m_HaveBufferedKeyframe) m_DeltaAfterBufferedKeyframe = true;
+        static int noTrackCount = 0;
+        if (++noTrackCount <= 5)
+            qInfo() << "[MediaTrackRelay] onVideoFrame dropped — Video Track not ready";
+        return;
+    }
+
+    // Keyframe gate: never send deltas whose reference frames were not sent on
+    // this track (before the first keyframe, or after a worker-side delta
+    // drop). The browser cannot detect them as loss — no NACK/PLI fires — so
+    // its decoder would wait for a keyframe forever (stream frozen at 0 fps).
+    // The throttled IDR request retries on every gated delta until Sunshine
+    // delivers a keyframe.
+    if (!isKeyframe && !m_SentKeyframeOnTrack) {
+        // Counted, not logged: the CLOSED/OPEN pair around the episode carries
+        // the story, and one line per gated frame would be 60 per second.
+        m_GatedFrameCount++;
+        sendIdrRequestThrottled();
+        return;
+    }
+
+    // Derive the RTP timestamp from real arrival time (any FPS, real jitter).
+    uint32_t rtpTs = computeRtpTimestamp();
+
+    // Create FrameInfo with isKeyFrame flag. The H264RtpPacketizer reads this
+    // to decide STAP-A (single NAL) vs FU-A (fragmented) packetization.
+    auto frameInfo = std::make_shared<rtc::FrameInfo>(rtpTs);
+    frameInfo->isKeyFrame = isKeyframe;
+
+    // Copy data into binary format for sendFrame
+    rtc::binary bin(static_cast<size_t>(data.size()));
+    if (data.size() > 0) {
+        std::memcpy(bin.data(), data.constData(), static_cast<size_t>(data.size()));
+    }
+
+    try {
+        m_VideoTrack->sendFrame(std::move(bin), *frameInfo);
+    } catch (const std::exception& e) {
+        if (!m_Stopping.load()) {
+            qWarning() << "[MediaTrackRelay] sendFrame error:" << e.what();
+        }
+        return;
+    }
+
+    if (isKeyframe) {
+        // Keyframe on the wire: open the delta gate and reset the IDR request
+        // backoff (recovery completed). Any still-buffered keyframe is older
+        // than this one — drop it so a queued sendBufferedKeyframe() cannot
+        // send it out of order behind us.
+        openDeltaGate();
+        m_BufferedKeyframe.clear();
+        m_HaveBufferedKeyframe = false;
+        m_DeltaAfterBufferedKeyframe = false;
+        m_IdrOutstanding.store(false, std::memory_order_release);
+        m_IdrCooldownMs.store(kIdrCooldownBaseMs, std::memory_order_release);
+    }
+
+    m_FrameCount++;
+}
+
+uint32_t MediaTrackRelay::computeRtpTimestamp()
+{
+    auto now = std::chrono::steady_clock::now();
+    if (!m_HaveFirstFrameTime) {
+        m_FirstFrameTime = now;
+        m_HaveFirstFrameTime = true;
+        return 0;
+    }
+    // 90 kHz clock: ticks = elapsed_seconds * 90000. uint32 wrap is expected.
+    auto elapsedUs =
+        std::chrono::duration_cast<std::chrono::microseconds>(now - m_FirstFrameTime).count();
+    return static_cast<uint32_t>((elapsedUs * 90000) / 1000000);
+}
+
+void MediaTrackRelay::sendBufferedKeyframe()
+{
+    // Same lock as onVideoFrame: the buffered keyframe may be written from the
+    // capture thread while this runs on the main thread (direct mode).
+    std::lock_guard<std::mutex> lk(m_VideoMutex);
+
+    if (!m_HaveBufferedKeyframe) return;
+    if (m_Stopping.load() || !m_VideoTrack || !m_VideoTrack->isOpen()) return;
+
+    // Stale references: deltas were dropped after this keyframe was buffered
+    // (track still closed), so the live deltas that follow reference frames
+    // the browser will never receive — undecodable, and invisible to NACK/PLI
+    // (no RTP gap). Send the keyframe anyway: it is the freshest displayable
+    // image, and Sunshine only encodes on screen damage — on a static host
+    // screen the requested fresh IDR may never come (the IDR flag applies to
+    // the NEXT encoded frame), so discarding this one means showing black
+    // until the host screen changes (2026-07-19 16:07 incident). The delta
+    // gate simply stays closed until a genuinely fresh keyframe lands.
+    const bool staleReferences = m_DeltaAfterBufferedKeyframe;
+
+    qInfo() << "[MediaTrackRelay] Sending buffered keyframe, size=" << m_BufferedKeyframe.size()
+            << (staleReferences ? "(stale references — delta gate stays closed)" : "");
+
+    auto frameInfo = std::make_shared<rtc::FrameInfo>(computeRtpTimestamp());
+    frameInfo->isKeyFrame = true;
+
+    rtc::binary bin(static_cast<size_t>(m_BufferedKeyframe.size()));
+    if (m_BufferedKeyframe.size() > 0) {
+        std::memcpy(bin.data(), m_BufferedKeyframe.constData(),
+                    static_cast<size_t>(m_BufferedKeyframe.size()));
+    }
+
+    try {
+        m_VideoTrack->sendFrame(std::move(bin), *frameInfo);
+        if (staleReferences) {
+            // Recovery still pending: a fresh IDR must land before any delta
+            // may flow (the gate keeps re-requesting on every gated delta).
+            closeDeltaGate("buffered keyframe had stale references");
+            sendIdrRequestThrottled();
+        } else {
+            // Keyframe sent: open the delta gate, reset the IDR request
+            // backoff.
+            openDeltaGate();
+            m_IdrOutstanding.store(false, std::memory_order_release);
+            m_IdrCooldownMs.store(kIdrCooldownBaseMs, std::memory_order_release);
+        }
+    } catch (const std::exception& e) {
+        qWarning() << "[MediaTrackRelay] sendBufferedKeyframe error:" << e.what();
+    }
+
+    m_BufferedKeyframe.clear();
+    m_HaveBufferedKeyframe = false;
+    m_DeltaAfterBufferedKeyframe = false;
+}
+
+// ── Audio forwarding (native RTP Opus track) ───────────────────────────────────
+
+void MediaTrackRelay::onAudioSample(const QByteArray& data)
+{
+    if (m_Stopping.load()) return;
+
+    // Serialize against track teardown in stop().
+    std::lock_guard<std::mutex> lk(m_AudioMutex);
+    if (m_Stopping.load() || !m_AudioTrack || !m_AudioTrack->isOpen()) {
+        static int notReady = 0;
+        if (++notReady <= 3)
+            qInfo() << "[MediaTrackRelay] onAudioSample dropped — audio track not ready";
+        return;
+    }
+
+    auto frameInfo = std::make_shared<rtc::FrameInfo>(m_AudioRtpTs);
+    // Advance by the negotiated Opus frame size (48 kHz clock): one clean tick per
+    // packet. A jittery arrival-time clock makes NetEq time-stretch → robotic audio.
+    m_AudioRtpTs += static_cast<uint32_t>(m_Shim ? m_Shim->audioSamplesPerFrame() : 240);
+
+    rtc::binary bin(static_cast<size_t>(data.size()));
+    if (data.size() > 0)
+        std::memcpy(bin.data(), data.constData(), static_cast<size_t>(data.size()));
+
+    try {
+        m_AudioTrack->sendFrame(std::move(bin), *frameInfo);
+    } catch (const std::exception& e) {
+        if (!m_Stopping.load())
+            qWarning() << "[MediaTrackRelay] audio sendFrame error:" << e.what();
+    }
+}
+
+void MediaTrackRelay::onShimConnectionTerminated(int errorCode)
+{
+    qInfo() << "[MediaTrackRelay] Shim connection terminated, code=" << errorCode;
+    // Graceful termination: the host ended the stream on purpose, typically
+    // because the app was closed there. Say so before the channels drop, or
+    // the browser reads the close as a connection error. Any other code is
+    // the host side failing (Sunshine crashed, its encoder hung the GPU, the
+    // native engine died): the browser link is fine, so say which side went.
+    sendExitNotice(errorCode == ML_ERROR_GRACEFUL_TERMINATION ? "host-ended" : "host-lost");
+    if (!m_Stopping.exchange(true)) {
+        m_Connected = false;
+        emit sessionEnded();
+    }
+}
+
+void MediaTrackRelay::endFromSignaling()
+{
+    // No exit notice: there is no channel to the page yet, only the signalling
+    // socket, which is the side that gave up.
+    if (!m_Stopping.exchange(true)) {
+        m_Connected = false;
+        if (m_IceCheckTimer) m_IceCheckTimer->stop();
+        emit sessionEnded();
+    }
+}
+
+// ── Input handling (from libdatachannel callback, marshaled to main thread) ──
+
+void MediaTrackRelay::onInputMessage(const std::string& message)
+{
+    if (m_Stopping.load() || !m_Connected) return;
+
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(message));
+    if (!doc.isObject()) {
+        qWarning() << "[MediaTrackRelay] Invalid input JSON";
+        return;
+    }
+
+    QJsonObject msg = doc.object();
+    QString type = msg["type"].toString();
+
+    // Any message at all proves the input link is alive — feeds the shim's
+    // dead-man switch (see IMediaEngine's input-watchdog contract).
+    if (m_Shim) m_Shim->noteClientAlive();
+
+    // An invited player only gets what the owner ticked. Dropped in silence.
+    if (!InputMsg::allowed(type, m_InputPolicy)) return;
+
+    if (type == "keydown" || type == "keyup") {
+        bool down = (type == "keydown");
+        InputMsg::sendKey(*m_Shim, msg, down);
+    } else if (type == "inputstate") {
+        // Client heartbeat: its authoritative held-input state, sent while (and
+        // only while) something is held. Re-presses whatever the watchdog
+        // released during a stall but the user is genuinely still holding —
+        // filtered by the guest's policy, or a viewer could press keys with it.
+        const InputMsg::HeldState held = InputMsg::readHeldState(
+            msg, m_Shim->keyboardMode(), m_Shim->layoutFidelity(), m_InputPolicy);
+        m_Shim->syncHeldInputs(held.keys, held.buttons, held.buttonsHold);
+    } else if (type == "mousemove") {
+        // Absolute mouse position (non-gaming mode)
+        if (msg.contains("x") && msg.contains("y") && msg.contains("referenceWidth") &&
+            msg.contains("referenceHeight")) {
+            short x = static_cast<short>(msg["x"].toInt(0));
+            short y = static_cast<short>(msg["y"].toInt(0));
+            short refW = static_cast<short>(msg["referenceWidth"].toInt(0));
+            short refH = static_cast<short>(msg["referenceHeight"].toInt(0));
+            m_Shim->sendMousePosition(x, y, refW, refH);
+        } else {
+            // Legacy / gaming mode: relative mouse movement
+            short dx = static_cast<short>(msg["dx"].toInt(0));
+            short dy = static_cast<short>(msg["dy"].toInt(0));
+            m_Shim->sendMouseMove(dx, dy);
+        }
+    } else if (type == "mousedown" || type == "mouseup") {
+        bool down = (type == "mousedown");
+        int button = msg["button"].toInt(1);
+        m_Shim->sendMouseButton(down, button, msg["hold"].toBool(false));
+    } else if (type == "mousewheel") {
+        short delta = static_cast<short>(msg["delta"].toInt(0));
+        m_Shim->sendMouseScroll(delta);
+    } else if (type == "mousehwheel") {
+        short delta = static_cast<short>(msg["delta"].toInt(0));
+        m_Shim->sendMouseHScroll(delta);
+    } else if (type == "secureattention") {
+        // Ctrl+Alt+Suppr: the one combination a browser can never deliver — the
+        // OS running the viewer eats it first — so it arrives as a message of
+        // its own, from the touch keyboard bar (Ctrl and Alt down, then Del).
+        // Whether it reaches the host's secure desktop
+        // depends on the host (IMediaEngine::sendSecureAttention).
+        m_Shim->sendSecureAttention();
+    } else if (type == "textinput") {
+        // Virtual/soft keyboard text (UTF-8) — forwarded as a text event.
+        m_Shim->sendUtf8Text(msg["text"].toString());
+    } else if (type == "locksync") {
+        // Align the host's toggle locks (Num/Caps/Scroll) with the client's,
+        // sent once per session on the browser's first real keyboard event.
+        m_Shim->syncLockKeys(msg["numLock"].toBool(false), msg["capsLock"].toBool(false),
+                             msg["scrollLock"].toBool(false));
+    } else if (type == "clipboardpaste") {
+        // Browser Ctrl/Cmd+V: commit the client text to the host clipboard,
+        // then inject the paste chord (main-thread hop keeps that order).
+        // Only meaningful when the streamed host is this machine.
+        if (m_ClipboardEnabled) {
+            ClipboardBridge::instance()->pasteFromClient(m_Shim, msg["text"].toString(),
+                                                         msg["injectCtrl"].toBool(false));
+        }
+    } else if (type == "unblockinput") {
+        // The way out of a closed input gate — native host only, full
+        // reasoning in DataChannelRelay's handler.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim)) native->releaseInputBlock();
+    } else if (type == "framefloor") {
+        // How fast the client wants frames while the host's screen is still —
+        // native host only, full reasoning in DataChannelRelay's handler.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim))
+            native->setFrameFloorFps(msg["fps"].toInt(0));
+    } else if (type == "cursormode") {
+        // Who draws the mouse pointer — native host only, full reasoning in
+        // DataChannelRelay's handler. This transport ignored the message until
+        // 2026-09-07: the host kept drawing the pointer into a picture that a
+        // still desktop refreshes at 2 fps, while the client, believing it had
+        // taken the pointer over, hid its own — none under the hand (issue #15,
+        // any browser without a hardware decoder lands here).
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim))
+            native->setCompositeCursor(msg["composite"].toBool(true), msg["cursorPx"].toInt(0));
+    } else if (type == "clientrefresh") {
+        // The client's screen changed mid-session — native host only, see
+        // DataChannelRelay's handler.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim))
+            native->setClientRefresh(msg["mhz"].toInt(0), msg["vsync"].toBool(false));
+    } else if (type == "clientbitrate") {
+        // The viewer's automatic bitrate following the streamed frame — native
+        // host only, see DataChannelRelay's handler.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim))
+            native->setClientBitrate(msg["kbps"].toInt(0));
+    } else if (type == "request_idr") {
+        qInfo() << "[MediaTrackRelay] Requesting IDR frame via DataChannel (browser)";
+        sendIdrRequestThrottled(true);
+    } else if (type == "requestidr") {
+        qInfo() << "[MediaTrackRelay] Requesting IDR frame from Sunshine (browser request)";
+        sendIdrRequestThrottled(true);
+    } else if (type == "clientstats") {
+        // Receiver-side RTP counters, logged only when one moves. On the media
+        // transport the host's own counters can be spotless while the viewer
+        // watches a frozen picture — the loss is on the wire and only the
+        // browser sees it (2026-08-30: 3523 frames sent, zero drops, three
+        // decoder stalls). This is that half of the picture, in the same file.
+        const int lost = msg["packetsLost"].toInt(0);
+        const int freezes = msg["freezeCount"].toInt(0);
+        const int nacks = msg["nackCount"].toInt(0);
+        const int plis = msg["pliCount"].toInt(0);
+        // On this transport the counters ARE the link report: packets lost
+        // since the last one go to the native engine's rate governor as gaps,
+        // the RTP jitter as the delay signal. Cumulative on the wire, deltas
+        // for the governor.
+        if (auto* native = qobject_cast<NativeMediaEngine*>(m_Shim)) {
+            mw::native::LinkFeedback fb;
+            fb.gaps = lost > m_LastPacketsLostReported ? lost - m_LastPacketsLostReported : 0;
+            fb.owdRiseMs = qRound(msg["jitterMs"].toDouble(0));
+            fb.receivedFps = msg["fps"].toInt(0);
+            native->reportLink(fb);
+        }
+        m_LastPacketsLostReported = lost;
+        const qint64 snapshot = lost + freezes + nacks + plis;
+        if (snapshot != m_LastClientStatsSnapshot) {
+            m_LastClientStatsSnapshot = snapshot;
+            qInfo() << "[MediaTrackRelay] Client RTP — packetsLost:" << lost << "nacks:" << nacks
+                    << "plis:" << plis << "freezes:" << freezes
+                    << "frozenMs:" << qRound(msg["totalFreezesDuration"].toDouble(0) * 1000)
+                    << "jitterMs:" << QString::number(msg["jitterMs"].toDouble(0), 'f', 1)
+                    << "decodedFps:" << msg["fps"].toInt(0);
+        }
+    } else if (type == "ping") {
+        // Respond with pong (mirror the browser's timestamp for RTT calculation).
+        int seq = msg["seq"].toInt(0);
+        double ts = msg["ts"].toDouble(0);
+        QJsonObject pong;
+        pong["type"] = "pong";
+        pong["seq"] = seq;
+        pong["ts"] = ts;
+        QByteArray pongJson = QJsonDocument(pong).toJson(QJsonDocument::Compact);
+        if (m_InputDc && !m_Stopping.load()) {
+            try {
+                m_InputDc->send(std::string(pongJson.constData(), pongJson.size()));
+            } catch (const std::exception& e) {
+                if (!m_Stopping.load()) {
+                    qWarning() << "[MediaTrackRelay] Pong send error:" << e.what();
+                }
+            }
+        }
+    } else if (type == "gamepad") {
+        // Full controller state snapshot from the browser Gamepad API.
+        m_Shim->sendControllerState(
+            static_cast<short>(msg["index"].toInt(0)), static_cast<short>(msg["mask"].toInt(0)),
+            msg["buttons"].toInt(0), static_cast<unsigned char>(msg["lt"].toInt(0)),
+            static_cast<unsigned char>(msg["rt"].toInt(0)), static_cast<short>(msg["lx"].toInt(0)),
+            static_cast<short>(msg["ly"].toInt(0)), static_cast<short>(msg["rx"].toInt(0)),
+            static_cast<short>(msg["ry"].toInt(0)));
+    } else if (type == "gamepadconnect") {
+        m_Shim->sendControllerArrival(static_cast<uint8_t>(msg["index"].toInt(0)),
+                                      static_cast<uint16_t>(msg["mask"].toInt(0)),
+                                      static_cast<uint8_t>(msg["ctype"].toInt(0)),
+                                      msg["rumble"].toBool(false));
+    } else if (type == "gamepaddisconnect") {
+        // The pad is gone — see DataChannelRelay for why this is its own call
+        // and not an empty state.
+        m_Shim->sendControllerRemoval(static_cast<uint8_t>(msg["index"].toInt(0)),
+                                      static_cast<uint16_t>(msg["mask"].toInt(0)));
+    } else if (type == "hidattach") {
+        // See DataChannelRelay.
+        const int slot = msg["slot"].toInt(-1);
+        const QString why = (slot < 0 || slot > 7) ? QStringLiteral("slot out of range")
+                                                   : m_Shim->hidAttach(slot, msg);
+        QJsonObject r{{QStringLiteral("type"), QStringLiteral("hidattached")},
+                      {QStringLiteral("slot"), slot},
+                      {QStringLiteral("ok"), why.isEmpty()},
+                      {QStringLiteral("why"), why}};
+        const QByteArray j = QJsonDocument(r).toJson(QJsonDocument::Compact);
+        try {
+            if (m_InputDc) m_InputDc->send(std::string(j.constData(), j.size()));
+        } catch (const std::exception&) {}
+        if (why.isEmpty()) m_Shim->hidAttached(slot);
+    } else if (type == "hiddetach") {
+        m_Shim->hidDetach(msg["slot"].toInt(-1));
+    } else if (type == "hidreply") {
+        // The real device's answer to an hidrequest (a HID++ reply under
+        // Linux): one report, at most the 63 bytes of HID++'s longest.
+        const QByteArray data = QByteArray::fromBase64(msg["data"].toString().toLatin1()).left(64);
+        m_Shim->hidReply(msg["slot"].toInt(-1), msg["reportId"].toInt(-1), data);
+    } else {
+        qWarning() << "[MediaTrackRelay] Unknown input type:" << type;
+    }
+}
+
+// ── Stats timer (1s interval) ───────────────────────────────────────────────────
+
+void MediaTrackRelay::onStatsTimerTick()
+{
+    if (m_Stopping.load() || !m_Connected) return;
+    if (!m_InputDc || !m_InputDc->isOpen()) return;
+
+    double hostRttMs = 0.0;
+    if (m_Shim) {
+        hostRttMs = m_Shim->hostRttMs();
+    }
+
+    // Drop-source counters, logged only when one moves. Until now this tick
+    // wrote nothing at all to the log, so a media session left no server-side
+    // trace of why the browser kept asking for IDRs.
+    {
+        const qint64 workerDrops = m_Shim ? m_Shim->workerDropCount() : 0;
+        const qint64 snapshot = workerDrops + m_GatedFrameCount;
+        if (snapshot != m_LastDropSnapshot) {
+            m_LastDropSnapshot = snapshot;
+            qInfo() << "[MediaTrackRelay] Drop counters — worker:" << workerDrops
+                    << "gatedDelta:" << m_GatedFrameCount
+                    << "gate:" << (m_SentKeyframeOnTrack ? "open" : "CLOSED")
+                    << "framesSent:" << m_FrameCount
+                    << "pendingVideoFrames:" << (m_Shim ? m_Shim->pendingVideoFrames() : 0);
+        }
+    }
+
+    QJsonObject stats;
+    stats["type"] = "stats";
+    stats["hostRttMs"] = hostRttMs;
+    // Media track mode: decode happens natively in the browser via RTP,
+    // so backend decode latency is not meaningful here.
+    stats["decodeLatencyUs"] = 0;
+    // Sunshine capture→encode latency (RTP extension), averaged over the frames
+    // of this stats window. 0 when the host doesn't report it.
+    stats["hostProcMs"] = m_Shim ? m_Shim->takeHostProcessingLatencyMs() : 0.0;
+    QByteArray statsJson = QJsonDocument(stats).toJson(QJsonDocument::Compact);
+
+    try {
+        m_InputDc->send(std::string(statsJson.constData(), statsJson.size()));
+    } catch (const std::exception& e) {
+        if (!m_Stopping.load()) {
+            qWarning() << "[MediaTrackRelay] Stats send error:" << e.what();
+        }
+    }
+}
+
+// ── ICE timeout ────────────────────────────────────────────────────────────────
+
+void MediaTrackRelay::onIceCheckTimeout()
+{
+    if (m_Stopping.load()) return;
+    if (m_Connected) return;
+    if (m_Pc) {
+        auto state = m_Pc->state();
+        if (state == rtc::PeerConnection::State::Connected) return;
+    }
+
+    qWarning() << "[MediaTrackRelay] ICE timeout — PC did not reach Connected within"
+               << m_IceTimeoutMs << "ms."
+               << "Emitting iceTimedOut().";
+
+    // In auto mode: the relay tracking will catch this and trigger tryNext().
+    // In explicit mode: SignalingServer will start WS fallback.
+    emit iceTimedOut();
+}
+
+// ── Stop ────────────────────────────────────────────────────────────────────────
+
+void MediaTrackRelay::notifyClientTakenOver()
+{
+    sendExitNotice("takeover");
+}
+
+void MediaTrackRelay::notifyClientRevoked()
+{
+    sendExitNotice("revoked");
+}
+
+void MediaTrackRelay::notifyClientSessionEnded()
+{
+    sendExitNotice("session-ended");
+}
+
+void MediaTrackRelay::sendExitNotice(const char* type)
+{
+    // Exit notice on the input DC before stop() closes it, so the browser can
+    // show a graceful exit instead of a generic disconnect. Flushed
+    // synchronously: stop() follows immediately and its close() would otherwise
+    // be free to discard the still-queued message (see ExitNotice.h).
+    if (!m_InputDc || m_Stopping.load()) return;
+    QByteArray json = QJsonDocument(QJsonObject{{"type", type}}).toJson(QJsonDocument::Compact);
+    if (!exitnotice::sendAndFlush(m_InputDc, std::string(json.constData(), json.size()))) {
+        qWarning() << "[MediaTrackRelay] Exit notice" << type << "not flushed before teardown";
+    }
+}
+
+void MediaTrackRelay::sendHidCaps()
+{
+    if (!m_InputDc || !m_InputDc->isOpen() || !m_Shim || m_Stopping.load()) return;
+    const QJsonObject caps = hidCapsMessage(m_InputPolicy, *m_Shim);
+    const QByteArray j = QJsonDocument(caps).toJson(QJsonDocument::Compact);
+    try {
+        m_InputDc->send(std::string(j.constData(), j.size()));
+    } catch (const std::exception&) {}
+}
+
+void MediaTrackRelay::sendInputCaps()
+{
+    if (!m_InputDc || !m_InputDc->isOpen() || m_Stopping.load()) return;
+    const QByteArray j = inputCapsMessage(m_InputPolicy);
+    try {
+        m_InputDc->send(std::string(j.constData(), j.size()));
+    } catch (const std::exception&) {}
+}
+
+void MediaTrackRelay::onHidPolicyChanged()
+{
+    // On the relay thread, where the hid channel's reports and the page's
+    // hidattach are handled too.
+    if (!m_Shim) return;
+    if (!m_InputPolicy.hid)
+        for (int slot = 0; slot < kHidSlots; ++slot)
+            m_Shim->hidDetach(slot);
+    sendHidCaps();
+}
+
+void MediaTrackRelay::stop()
+{
+    // Marshal onto the relay's session thread when called cross-thread (main:
+    // /quit, Session::quit, auto-fallback). Queued (non-blocking) avoids deadlock.
+    if (QThread::currentThread() != this->thread()) {
+        QMetaObject::invokeMethod(this, [this]() { stop(); }, Qt::QueuedConnection);
+        return;
+    }
+
+    if (m_Stopping.exchange(true)) {
+        qInfo() << "[MediaTrackRelay::stop] Already stopping, skip";
+        return;
+    }
+
+    qInfo() << "[MediaTrackRelay::stop] ENTER, frameCount=" << m_FrameCount;
+
+    // Stop timers
+    if (m_IceCheckTimer) {
+        m_IceCheckTimer->stop();
+    }
+    if (m_StatsTimer) {
+        m_StatsTimer->stop();
+    }
+
+    m_Connected = false;
+    {
+        // Serialize with the (possibly concurrent) capture-thread send path.
+        std::lock_guard<std::mutex> lk(m_VideoMutex);
+        m_BufferedKeyframe.clear();
+        m_HaveBufferedKeyframe = false;
+        m_DeltaAfterBufferedKeyframe = false;
+        m_SentKeyframeOnTrack = false;
+    }
+
+    // Reset IDR throttle state for the next session
+    m_IdrCooldownMs.store(kIdrCooldownBaseMs, std::memory_order_release);
+    m_LastIdrRequestMs.store(0, std::memory_order_release);
+    m_IdrOutstanding.store(false, std::memory_order_release);
+
+    // Close DataChannels
+    auto closeDc = [](std::shared_ptr<rtc::DataChannel>& dc, const char* name) {
+        if (dc) {
+            qInfo() << "[MediaTrackRelay] Closing" << name << "DataChannel";
+            try {
+                dc->close();
+            } catch (...) {}
+            dc.reset();
+        }
+    };
+
+    closeDc(m_InputDc, "input");
+    closeDc(m_HidDc, "hid");
+
+    // Close the audio track under the audio send lock, so an in-flight audio
+    // sendFrame finishes before the track is destroyed.
+    {
+        std::lock_guard<std::mutex> lk(m_AudioMutex);
+        if (m_AudioTrack) {
+            qInfo() << "[MediaTrackRelay] Closing audio track";
+            try {
+                m_AudioTrack->close();
+            } catch (...) {}
+            m_AudioTrack.reset();
+        }
+    }
+
+    // Close Video Track under the send lock, so an in-flight sendFrame on the
+    // capture thread finishes before the track is destroyed.
+    {
+        std::lock_guard<std::mutex> lk(m_VideoMutex);
+        if (m_VideoTrack) {
+            qInfo() << "[MediaTrackRelay] Closing video track";
+            try {
+                m_VideoTrack->close();
+            } catch (...) {}
+            m_VideoTrack.reset();
+        }
+    }
+
+    // Close PeerConnection
+    if (m_Pc) {
+        qInfo() << "[MediaTrackRelay] Closing PeerConnection";
+        try {
+            m_Pc->close();
+        } catch (...) {}
+        m_Pc.reset();
+    }
+
+    qInfo() << "[MediaTrackRelay::stop] EXIT";
+}
+
+void MediaTrackRelay::requestIdrFrame()
+{
+    if (m_Stopping.load() || !m_Shim) return;
+    qInfo() << "[MediaTrackRelay] requestIdrFrame: forwarding to the media engine";
+    sendIdrRequestThrottled();
+}
+
+void MediaTrackRelay::sendIdrRequestThrottled(bool receiverStalled)
+{
+    if (m_Stopping.load() || !m_Shim) return;
+
+    using namespace std::chrono;
+    const int64_t nowMs =
+        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    int64_t last = m_LastIdrRequestMs.load(std::memory_order_acquire);
+    // Every source shares the adaptive curve, PLIs included. Exempting them
+    // was tried on 2026-08-30 and made the stream far worse: with a 250 ms
+    // floor a receiver in trouble asks four times a second, each request costs
+    // a full keyframe, and the bitrate spike causes the loss that causes the
+    // next PLI. The original comment on kIdrCooldownMaxMs had it right — an IDR
+    // flood feeds the congestion it is trying to fix. `receiverStalled` is kept
+    // for the log line below, so a swallowed PLI is at least visible.
+    const int64_t cooldown = m_IdrCooldownMs.load(std::memory_order_acquire);
+    if (last != 0 && nowMs - last < cooldown) {
+        // Absorbed. Logged (rate-limited) because a swallowed request is
+        // invisible otherwise, and a swallowed one is what turns a decoder
+        // stall into a multi-second freeze.
+        if (++m_IdrAbsorbedCount % 20 == 1) {
+            qInfo() << "[MediaTrackRelay] IDR request absorbed by cooldown (" << cooldown
+                    << "ms, receiverStalled=" << receiverStalled
+                    << ") — absorbed so far:" << m_IdrAbsorbedCount;
+        }
+        return;
+    }
+    // CAS claims the send slot; a concurrent caller (PLI thread vs main thread)
+    // that loses the race is absorbed like a throttled request.
+    if (!m_LastIdrRequestMs.compare_exchange_strong(last, nowMs, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    // Backoff: previous request never produced a keyframe — double the cooldown
+    // (up to 5 s). Reset when a keyframe is sent (onVideoFrame keyframe path).
+    if (m_IdrOutstanding.exchange(true, std::memory_order_acq_rel)) {
+        m_IdrCooldownMs.store(std::min<int64_t>(cooldown * 2, kIdrCooldownMaxMs),
+                              std::memory_order_release);
+    }
+    m_Shim->requestIdrFrame();
+}

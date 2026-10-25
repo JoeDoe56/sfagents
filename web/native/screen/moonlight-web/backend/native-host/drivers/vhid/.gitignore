@@ -1,0 +1,5 @@
+# Local toolchain and output of build.ps1: the WDK and SDK from NuGet, nuget.exe, the build
+# (with its test certificate and key): never committed.
+packages/
+.tools/
+build/

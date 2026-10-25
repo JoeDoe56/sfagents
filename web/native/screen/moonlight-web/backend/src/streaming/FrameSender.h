@@ -1,0 +1,224 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include "SendPacer.h"
+
+#include <QByteArray>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+namespace rtc {
+class DataChannel;
+}
+class FrameSentSink;
+
+// Dedicated worker thread that performs the DataChannel send, offloading it
+// from whichever thread produces the frames: the relay thread for a GameStream
+// engine, the capture thread for the native one. dc->send() can block on a
+// full SCTP buffer, and neither of those threads may ever wait on the wire.
+//
+// Two kinds of job, one queue:
+//   - a whole frame (QByteArray): the worker fragments it and sends the chunks.
+//     This is the GameStream path, unchanged — the frame was already copied
+//     out of moonlight-common-c's buffers, so the copy into each chunk here is
+//     the only one that could be moved, and it is not worth changing that path.
+//   - ready fragments: the producer built the wire chunks itself, straight out
+//     of the encoder's buffer (buildFragments), and the worker only sends. This
+//     is the native path — the chunk write IS the one copy that frame pays
+//     outside the engine.
+//
+// Frame ordering per DataChannel is preserved: a single worker drains the queue
+// in FIFO order. The job holds a shared_ptr to the DataChannel so a send in
+// flight cannot outlive the channel (no use-after-free when the relay resets
+// its DC pointers during stop()).
+class FrameSender
+{
+public:
+    /// One wire chunk: the 17-byte header followed by up to kMaxPayloadSize
+    /// bytes of payload. The same type libdatachannel calls rtc::binary.
+    using Fragment = std::vector<std::byte>;
+
+    /// Queue cap for a GameStream engine: the historical value, unchanged.
+    static constexpr size_t kDefaultMaxQueued = 8;
+
+    struct Options
+    {
+        /// Register the worker as an MMCSS "Games" task (Windows only; silently
+        /// ignored when refused or elsewhere). The native engine's frames are
+        /// produced by a thread of that class, and the last hop before the wire
+        /// should not be the one the scheduler starves.
+        bool multimediaPriority = false;
+        /// How many DELTA frames may wait in the queue. kDefaultMaxQueued keeps
+        /// the historical behaviour (8 jobs, deltas evicted oldest-first only
+        /// when the queue is full). 1 means: a delta that has not left yet is
+        /// replaced by the next frame — a queued delta is latency, and the
+        /// picture repairs itself (intra-refresh) or asks for a keyframe.
+        /// Keyframes are never evicted.
+        size_t maxQueuedDeltas = kDefaultMaxQueued;
+    };
+
+    // No default argument on purpose: `Options options = {}` is legal C++ but
+    // Apple clang rejects it ("default member initializer needed within
+    // definition of enclosing class") because Options' initializers are not
+    // yet complete where the default is parsed. The one caller passes its
+    // options explicitly anyway.
+    explicit FrameSender(Options options);
+    ~FrameSender();
+
+    // Enqueue a frame for fragmentation + send on the worker thread.
+    // The fragment header carries frameId/backendTs computed by the caller so
+    // the worker stays purely mechanical. Keyframes are never dropped by the
+    // queue cap; deltas are dropped (oldest first) if the worker falls behind.
+    // Returns true if any queued delta was dropped to make room: those frames
+    // already carry a frameId, so the caller must start IDR recovery (the
+    // frames still queued after the hole reference a frame that will never be
+    // sent).
+    //
+    // `sink`, when given, is told on the worker thread when the frame's last
+    // fragment has been handed to the DataChannel, under `frameNumber` — the
+    // producer's own number for the frame, not `frameId`. It must outlive the
+    // sender: stop() joins the worker, and the relay stops the sender before
+    // anything it points at goes away.
+    //
+    // `evicted`, when given, receives the `frameNumber` of every delta thrown
+    // out to make room — the frames the receiver will never get, named by the
+    // one party that knows them for certain. A producer that stamps its
+    // frames can hand them to its encoder as reference invalidations at once,
+    // a round trip before the receiver notices the gap.
+    bool enqueue(std::shared_ptr<rtc::DataChannel> dc, const QByteArray& data, bool isKeyframe,
+                 bool isAudio, uint32_t frameId, uint32_t backendTs, uint32_t frameNumber = 0,
+                 FrameSentSink* sink = nullptr, std::vector<uint32_t>* evicted = nullptr);
+
+    // Same contract, for fragments the producer already built (buildFragments).
+    // Nothing is copied here or on the worker: the chunks move into the queue
+    // and from the queue to the channel.
+    bool enqueueFragments(std::shared_ptr<rtc::DataChannel> dc, std::vector<Fragment>&& fragments,
+                          bool isKeyframe, uint32_t frameNumber = 0, FrameSentSink* sink = nullptr,
+                          std::vector<uint32_t>* evicted = nullptr);
+
+    // Cut one frame into wire chunks, header included, reading `data` once.
+    // `data` is borrowed: it only has to stay valid until this returns, which
+    // is what lets the native relay call it on the encoder's own buffer before
+    // the encoder unlocks it. Same bytes, chunk for chunk, as the worker
+    // produces for a queued QByteArray.
+    //
+    // `maxPayload` caps each chunk's payload (16,000 bytes, the most SCTP takes
+    // in one message, unless pacing wants smaller runs: the receiver joins the
+    // chunks whatever their size).
+    static std::vector<Fragment> buildFragments(const uint8_t* data, size_t size, bool isKeyframe,
+                                                uint32_t frameId, uint32_t backendTs,
+                                                size_t maxPayload = kMaxPayloadSize);
+
+    // Stop the worker thread and discard pending jobs. Idempotent; safe to call
+    // from the relay's stop()/destructor.
+    void stop();
+
+    // Diagnostic: number of delta frames dropped because the queue was full.
+    uint64_t queueDropCount() const { return m_QueueDrops.load(std::memory_order_relaxed); }
+
+    /// The bench's pacing (`pace=`, SendPacer.h): chunks handed to the
+    /// DataChannel at @p bytesPerSecond at most, @p burstBytes back to back.
+    /// 0 switches it off. Taken up by the worker at its next frame.
+    void setPacing(int64_t bytesPerSecond, size_t burstBytes);
+
+    /// Options::maxQueuedDeltas, changed once the producer is known: a guest
+    /// of the shared feed takes its pictures from a pipe that can hand over
+    /// two or three at once, and those are not a link falling behind.
+    void setMaxQueuedDeltas(size_t deltas);
+
+    /// What pacing cost: frames sent, frames that waited at least once, the
+    /// time spent waiting in all, and the longest wait inside one frame.
+    struct PacingStats
+    {
+        uint64_t frames = 0;
+        uint64_t pacedFrames = 0;
+        int64_t waitedUs = 0;
+        int64_t maxFrameWaitUs = 0;
+    };
+    PacingStats pacingStats() const;
+
+private:
+    struct Job
+    {
+        std::shared_ptr<rtc::DataChannel> dc;
+        // Exactly one of the two is filled: a whole frame to fragment on the
+        // worker, or chunks ready to go.
+        QByteArray data;
+        std::vector<Fragment> fragments;
+        bool isKeyframe = false;
+        bool isAudio = false;
+        uint32_t frameId = 0;
+        uint32_t backendTs = 0;
+        uint32_t frameNumber = 0;
+        FrameSentSink* sink = nullptr;
+    };
+
+    // Must match DataChannelRelay's fragmentation format exactly.
+    static constexpr int kFragHeaderSize = 17;
+    static constexpr int kMaxPayloadSize = 16000;
+
+    // Cap pending jobs: if the worker cannot keep up (e.g. dc->send() blocking
+    // on a full SCTP buffer), drop the oldest delta frames rather than letting
+    // the queue grow unbounded and add latency. Keyframes are always preserved.
+    static constexpr size_t kMaxQueued = kDefaultMaxQueued;
+
+    const Options m_Options;
+
+    /// Write the 17-byte chunk header at `dst`.
+    static void writeHeader(std::byte* dst, uint32_t frameId, uint16_t chunkIdx,
+                            uint16_t totalChunks, bool isKeyframe, uint32_t payloadSize,
+                            uint32_t backendTs);
+
+    /// Queue a job under the cap. Returns true when a delta was evicted; the
+    /// evicted frames' numbers are appended to `evicted` when it is given.
+    bool push(Job&& job, std::vector<uint32_t>* evicted);
+
+    void run();
+    void sendJob(const Job& job);
+    /// Wait, on the worker, until pacing lets @p bytes go; returns the wait.
+    int64_t paceBefore(size_t bytes);
+    void waitUs(int64_t us);
+
+    std::thread m_Thread;
+    std::mutex m_Mutex;
+    std::condition_variable m_Cv;
+    std::deque<Job> m_Queue;
+    size_t m_MaxQueuedDeltas; // under m_Mutex
+    std::atomic<bool> m_Stop{false};
+    std::atomic<uint64_t> m_QueueDrops{0};
+
+    // Pacing: asked for from any thread, applied and used on the worker only.
+    std::atomic<int64_t> m_PaceRate{0};
+    std::atomic<size_t> m_PaceBurst{16 * 1024};
+    SendPacer m_Pacer;
+    int64_t m_PacerRate = 0;
+    size_t m_PacerBurst = 0;
+    void* m_PaceTimer = nullptr; // a high-resolution waitable timer, on Windows
+    std::atomic<uint64_t> m_PacedFrames{0};
+    std::atomic<uint64_t> m_SentFrames{0};
+    std::atomic<int64_t> m_WaitedUs{0};
+    std::atomic<int64_t> m_MaxFrameWaitUs{0};
+};

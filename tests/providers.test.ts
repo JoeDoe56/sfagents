@@ -391,7 +391,7 @@ describe('app settings', () => {
     assert.equal(s.get('cli.showReasoning'), true);
     assert.throws(() => s.set({ 'web.port': 70000 }), /1 to 65535/);
     assert.throws(() => parseSetting('nope', 1), /Unknown setting/);
-    assert.throws(() => parseSetting('sensors.lhm', 'ftp://x'), /"auto", "off"/);
+    assert.throws(() => parseSetting('sensors.lhm', 'auto'), /Unknown setting/);
     s.set({ 'web.port': null });
     assert.equal(s.get('web.port'), 8093);
     assert.ok(s.all().find((x) => x.key === 'web.port')!.restart);

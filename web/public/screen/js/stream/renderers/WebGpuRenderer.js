@@ -1,0 +1,2714 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * WebGpuRenderer — WebGPU output path (feature On). SGSRv1 (C4), FSR1 (C6), NIS
+ * and mwsr.
+ *
+ * Common Pass 0 (blit): importExternalTexture(frame) → inputTex (rgba8unorm,
+ * frame res). A texture_external can only be read with textureSampleBaseClampToEdge,
+ * but the enhancers need textureGather → materialize the frame first. (mwsr
+ * needs no gather; it keeps the pass 0 because the external texture costs two
+ * fetches a sample, which lost to pass 0 + kernel on every GPU measured,
+ * upscaler-mwsr-p2.md §3.) A browser that refuses the import (Chrome on a
+ * machine whose decoded frames cannot be shared with WebGPU) gets the frame
+ * copied through an ImageBitmap into inputTex instead, or, where that copy
+ * is refused too, read back as RGBA and written into a texture pass 0 copies
+ * from, and the picture stays on screen (see _importFrame, _copyFrame). A
+ * renderer that gets no frame onto its canvas for a while gives up (`failed`)
+ * and the page moves the picture to another one.
+ *
+ * mwsr (algo 'mwsr'): 2 passes — Pass 0 blit, Pass 1 mwsr inputTex → canvas.
+ *   MoonlightWeb's own upscaler (MwsrShader.js, docs/design/upscaler-mwsr.md).
+ *   One pipeline per regime, all built at creation and specialised by
+ *   override: the `up` kernel (CHROMA444 on a 4:4:4 stream) and the reduction
+ *   grids; mwsrRegime() picks one per frame from the frame and canvas sizes,
+ *   the uniforms are rewritten when those change. In SDR the reduction reads
+ *   inputTex through its `-srgb` view and draws into the canvas' `-srgb` view:
+ *   the sampler decodes before it filters and the target encodes on write, so
+ *   the average is taken in linear light for free (P3, journal J15) — both
+ *   textures are created with those view formats, and the reduction falls back
+ *   to the software light (LINEAR_LIGHT 1, the 2×2 grid) where the browser
+ *   refuses them or the canvas is float (HDR). The f16 module (`half`) runs
+ *   where the adapter has shader-f16 and is not NVIDIA's: 9-10 % off the
+ *   kernel on the 780M for the same pixels, nothing on the RTX (P2.3).
+ *
+ * SGSRv1 (algo 'sgsr'): 2 passes — Pass 0 blit, Pass 1 SGSR inputTex → canvas.
+ *   Port (Qualcomm, BSD-3-Clause) from sgsr1.h, mode 1, luma = GREEN, EdgeThreshold
+ *   6/255, EdgeSharpness 1.5.
+ *
+ * NIS (algo 'nis'): 2 passes — Pass 0 blit, Pass 1 NVScaler inputTex → canvas.
+ *   NVIDIA Image Scaling SDK 1.0.3 (MIT), the same per-fragment port as
+ *   WebGlRenderer's 'gl-nis' (6×6 luma support, four 3×3 edge maps, 64-phase
+ *   filter banks in a 4×64 rgba32float texture, SDR config from NisTables).
+ *   Sharpness knob: localStorage.mw_nis_sharpness (main thread only).
+ *
+ * FSR1 (algo 'fsr1'): 3 passes — Pass 0 blit, Pass 1 EASU inputTex → intermTex
+ *   (rgba8unorm, output res), Pass 2 RCAS intermTex → canvas. WGSL port from
+ *   firdawolf/AMD-FSR1-wgpu-shader (MIT; AMD FidelityFX FSR1). Adapted: fullscreen
+ *   triangle VS (no vertex buffer), bindings consolidated, demo camera binding
+ *   removed from RCAS, RCAS sharpness = 0.595 = exp2(-0.75) to match DX12 RCAS(0.75)
+ *   under firdawolf's reparameterization (it multiplies by sharpness directly).
+ *   EASU uniform = (inW, inH, outW, outH); RCAS uniform offsets are TEXEL sizes
+ *   → (outW, outH, 1/outW, 1/outH).
+ *
+ * At 1:1 — frame and canvas the same size on both axes (scaleRegime.js) —
+ * none of the three runs: the frame goes straight to the canvas through the
+ * 'off' copy, one pass and no inputTex, whatever pass is selected, and the
+ * pass resumes on the next frame whose size differs (upscaler-mwsr.md §5).
+ * `passthrough` says when that happened, for the overlay and the ladder.
+ *
+ * Dev/setting-gated (video_enhancement). Lifecycle constraints (see plan):
+ *   - A canvas in 'webgpu' context can NEVER go back to '2d' → requestAdapter/
+ *     requestDevice run BEFORE getContext('webgpu') so a failure falls back to
+ *     Canvas2D.
+ *   - External texture expires each task → its blit bind group is per-frame.
+ *   - Perceptual space: the textures stay non-srgb; only mwsr's reduction
+ *     binds the `-srgb` views of inputTex and of the canvas (above).
+ */
+import { VideoRenderer } from './VideoRenderer.js';
+import { nisConfig, nisCoefTexture, readNisSharpness, nisScaleInRange } from './NisTables.js';
+import { fitOutputSize, isIdentityScale } from './scaleRegime.js';
+import {
+    MWSR_UNIFORM_FLOATS,
+    mwsrRegime,
+    mwsrRegimeKey,
+    mwsrRegimes,
+    mwsrUniforms,
+    mwsrWgsl,
+} from './MwsrShader.js';
+
+// Full-screen triangle (uv 0..1, v down — matches texture sampling).
+const FULLSCREEN_VS = /* wgsl */ `
+struct VSOut {
+    @builtin(position) pos : vec4f,
+    @location(0) uv : vec2f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vid : u32) -> VSOut {
+    var out : VSOut;
+    let uv = vec2f(f32((vid << 1u) & 2u), f32(vid & 2u));
+    out.uv = uv;
+    out.pos = vec4f(uv * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
+    return out;
+}
+`;
+
+// Pass 0: sample the external (video) texture into inputTex (materialization).
+const BLIT_WGSL =
+    FULLSCREEN_VS +
+    /* wgsl */ `
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var tex : texture_external;
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+    return textureSampleBaseClampToEdge(tex, samp, in.uv);
+}
+`;
+
+// The same copy from a texture: the plain copy to the canvas when the frame
+// came in another way than the import (an ImageBitmap into inputTex, or the
+// readback into readbackTex, see _copyFrame), and the readback's pass 0.
+const BLIT_TEX_WGSL =
+    FULLSCREEN_VS +
+    /* wgsl */ `
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var tex : texture_2d<f32>;
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+    return textureSampleLevel(tex, samp, in.uv, 0.0);
+}
+`;
+
+// After a refused import, the import is tried again this many draws later:
+// a refusal that was transient ends the slower copies by itself.
+const IMPORT_RETRY_FRAMES = 300;
+
+// Frames in a row that never reached the canvas (no way in took them, the
+// draw threw, or their work did not complete) before the renderer gives up
+// and the page moves the picture to another renderer: half a second at 60 fps.
+const LOST_FRAMES_LIMIT = 30;
+
+// HDR tone-map (Pass 0 replacement). Reads the decoded 10/12-bit YUV planes
+// (frame.copyTo readback) instead of importExternalTexture — the only way to get
+// the *raw* PQ pixels, since importExternalTexture tone-maps HDR away on import.
+// Pipeline (range/matrix/transfer driven by frame.colorSpace): Y'CbCr → R'G'B'
+// → PQ EOTF (linear, 1.0 = 10000 nits) → normalize to SDR diffuse white →
+// BT.2020→Rec.709 gamut → tone curve → sRGB. Default curve is an SDR-preserving
+// soft-clip (identity below the SDR white knee, tanh shoulder above), ACES
+// filmic optional. Output is ordinary SDR perceptual RGB (rgba8unorm), so the
+// downstream FSR1/SGSR passes run unchanged on a normal SDR canvas.
+// Shared HDR math, used by both Pass 0 tone-maps (the YUV readback below and
+// the external-texture one that follows it): the PQ EOTF, the two tone curves,
+// the sRGB encode, and tonemapPq() — the tail that takes transfer-encoded
+// R'G'B' (PQ, BT.2020 primaries) to whichever surface is being rendered to.
+const HDR_COMMON_WGSL = /* wgsl */ `
+// SMPTE ST 2084 (PQ) constants.
+const M1 : f32 = 0.1593017578125;
+const M2 : f32 = 78.84375;
+const C1 : f32 = 0.8359375;
+const C2 : f32 = 18.8515625;
+const C3 : f32 = 18.6875;
+
+fn pqEotf(e : vec3f) -> vec3f {
+    let ep = pow(max(e, vec3f(0.0)), vec3f(1.0 / M2));
+    let num = max(ep - vec3f(C1), vec3f(0.0));
+    let den = vec3f(C2) - C3 * ep;
+    return pow(num / den, vec3f(1.0 / M1)); // [0,1], 1.0 = 10000 nits
+}
+
+// ACES filmic tone curve (Narkowicz approximation). Linear in, linear out.
+fn aces(x : vec3f) -> vec3f {
+    let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
+}
+
+fn linToSrgb(c : vec3f) -> vec3f {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3f(0.0)), vec3f(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3f(0.0031308));
+}
+
+// Transfer-encoded R'G'B' (PQ, BT.2020) → the render target's own space.
+// params: (refWhite nits, _, exposure, curve 0=soft-clip 1=ACES 2=linear HDR out)
+fn tonemapPq(rgbE : vec3f, params : vec4f) -> vec4f {
+    let linear2020 = pqEotf(rgbE);
+    // SDR diffuse white (refWhite nits) maps to 1.0 before tone mapping.
+    let scaled = linear2020 * (10000.0 / params.x) * params.z;
+    if (params.w > 1.5) {
+        // HDR output: no tone curve. Scene light in the canvas' own Display-P3
+        // gamut (BT.2020 → P3, linear, column-major), 1.0 = reference white,
+        // highlights above it, encoded with the sRGB transfer the float16
+        // canvas extends past 1.0 (toneMapping 'extended').
+        let P = mat3x3f(
+            1.343578, -0.065298,  0.002822,
+           -0.282180,  1.075788, -0.019599,
+           -0.061399, -0.010491,  1.016777);
+        return vec4f(linToSrgb(max(P * scaled, vec3f(0.0))), 1.0);
+    }
+    // BT.2020 → Rec.709 gamut (linear), column-major.
+    let M = mat3x3f(
+        1.6605, -0.1246, -0.0182,
+       -0.5876,  1.1329, -0.1006,
+       -0.0728, -0.0083,  1.1187);
+    let rgb709 = max(M * scaled, vec3f(0.0));
+    var tm : vec3f;
+    if (params.w > 0.5) {
+        // White-point normalized: the raw Narkowicz fit maps 1.0 to ~0.804, so
+        // every white renders grayish ("washed" look) — rescale so SDR white
+        // reaches full white; HDR highlights above it clip after the shoulder.
+        const ACES_WHITE : f32 = 0.80379; // aces(1.0)
+        tm = clamp(aces(rgb709) / ACES_WHITE, vec3f(0.0), vec3f(1.0));
+    } else {
+        // SDR-preserving soft-clip: identity below the knee (SDR content renders
+        // exactly like an SDR stream), tanh shoulder compressing HDR highlights
+        // into the remaining headroom (luminance-scaled to limit hue shifts).
+        const KNEE : f32 = 0.9;
+        let y = dot(rgb709, vec3f(0.2126, 0.7152, 0.0722));
+        tm = rgb709;
+        if (y > KNEE) {
+            let yc2 = KNEE + (1.0 - KNEE) * tanh((y - KNEE) / (1.0 - KNEE));
+            tm = rgb709 * (yc2 / max(y, 1e-5));
+        }
+        tm = clamp(tm, vec3f(0.0), vec3f(1.0));
+    }
+    return vec4f(linToSrgb(tm), 1.0);
+}
+`;
+
+const HDR_TONEMAP_WGSL =
+    FULLSCREEN_VS +
+    HDR_COMMON_WGSL +
+    /* wgsl */ `
+@group(0) @binding(0) var texY : texture_2d<u32>;
+@group(0) @binding(1) var texU : texture_2d<u32>;
+@group(0) @binding(2) var texV : texture_2d<u32>;
+@group(0) @binding(3) var<uniform> dims : vec4f;   // (yW, yH, cW, cH)
+@group(0) @binding(4) var<uniform> params : vec4f; // (refWhite nits, codeScale, exposure, curve 0=soft-clip 1=ACES 2=linear HDR out)
+@group(0) @binding(5) var<uniform> csp : vec4f;    // frame.colorSpace: (fullRange, bt709 matrix, isPq, _)
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+    let yDim = vec2<i32>(i32(dims.x), i32(dims.y));
+    let cDim = vec2<i32>(i32(dims.z), i32(dims.w));
+    let yc = clamp(vec2<i32>(floor(in.uv * dims.xy)), vec2<i32>(0), yDim - vec2<i32>(1));
+    let cc = clamp(vec2<i32>(floor(in.uv * dims.zw)), vec2<i32>(0), cDim - vec2<i32>(1));
+    let s = params.y;
+    let cy = f32(textureLoad(texY, yc, 0).r) * s;
+    let cu = f32(textureLoad(texU, cc, 0).r) * s;
+    let cv = f32(textureLoad(texV, cc, 0).r) * s;
+    // 10-bit Y'CbCr → R'G'B', range and matrix from frame.colorSpace.
+    var yL : f32;
+    var cb : f32;
+    var cr : f32;
+    if (csp.x > 0.5) { // full range
+        yL = cy / 1023.0;
+        cb = (cu - 512.0) / 1023.0;
+        cr = (cv - 512.0) / 1023.0;
+    } else { // limited range
+        yL = (cy - 64.0) / 876.0;
+        cb = (cu - 512.0) / 896.0;
+        cr = (cv - 512.0) / 896.0;
+    }
+    var rgbE : vec3f; // transfer-encoded R'G'B' in [0,1]
+    if (csp.y > 0.5) { // BT.709 matrix
+        rgbE.r = yL + 1.5748 * cr;
+        rgbE.g = yL - 0.18732 * cb - 0.46812 * cr;
+        rgbE.b = yL + 1.8556 * cb;
+    } else { // BT.2020 NCL
+        rgbE.r = yL + 1.4746 * cr;
+        rgbE.g = yL - 0.16455 * cb - 0.57135 * cr;
+        rgbE.b = yL + 1.8814 * cb;
+    }
+    rgbE = clamp(rgbE, vec3f(0.0), vec3f(1.0));
+    // Non-PQ content (10-bit SDR stream): already gamma-encoded, present as-is.
+    if (csp.z < 0.5) {
+        return vec4f(rgbE, 1.0);
+    }
+    return tonemapPq(rgbE, params);
+}
+`;
+
+// HDR tone-map from the EXTERNAL texture (Pass 0 replacement, no readback).
+// For browsers whose importExternalTexture does NOT tone-map on import and
+// hands back the raw PQ code values: WebKit paints them as if they were sRGB,
+// which lifts the blacks and desaturates everything (the "washed grey" HDR
+// picture on iOS). The YUV→RGB matrix has already been applied by the browser,
+// so all that is left is the tail: PQ EOTF → gamut → tone curve → sRGB. Unlike
+// the readback path this needs no software decoder, so it is the only tone-map
+// available for HEVC — and it runs before the enhancer like the other one.
+const HDR_EXT_TONEMAP_WGSL =
+    FULLSCREEN_VS +
+    HDR_COMMON_WGSL +
+    /* wgsl */ `
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var tex : texture_external;
+@group(0) @binding(2) var<uniform> params : vec4f; // (refWhite nits, _, exposure, curve)
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+    let rgbE = clamp(
+        textureSampleBaseClampToEdge(tex, samp, in.uv).rgb, vec3f(0.0), vec3f(1.0));
+    return tonemapPq(rgbE, params);
+}
+`;
+
+// SGSRv1 (mode 1, green luma). Ported from sgsr1.h, SGSR_MOBILE variant.
+const SGSR_WGSL =
+    FULLSCREEN_VS +
+    /* wgsl */ `
+struct Uniforms { viewport : vec4f }; // (1/inW, 1/inH, inW, inH)
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var inputTex : texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u : Uniforms;
+
+const EDGE_THRESHOLD : f32 = 6.0 / 255.0;
+const EDGE_SHARPNESS : f32 = 1.5;
+
+fn fastLanczos2(x : f32) -> f32 {
+    var wA = x - 4.0;
+    let wB = x * wA - wA;
+    wA = wA * wA;
+    return wB * wA;
+}
+
+fn weightY(dx : f32, dy : f32, c : f32, data : vec3f) -> vec2f {
+    let stdev = data.x;
+    let dir = data.yz;
+    let edgeDis = (dx * dir.y) + (dy * dir.x);
+    let x = ((dx * dx) + (dy * dy)) +
+            ((edgeDis * edgeDis) * ((clamp((c * c) * stdev, 0.0, 1.0) * 0.7) - 1.0));
+    let w = fastLanczos2(x);
+    return vec2f(w, w * c);
+}
+
+fn edgeDirection(left : vec4f, right : vec4f) -> vec2f {
+    let RxLz = right.x - left.z;
+    let RwLy = right.w - left.y;
+    var delta : vec2f;
+    delta.x = RxLz + RwLy;
+    delta.y = RxLz - RwLy;
+    let lengthInv = inverseSqrt((delta.x * delta.x + 3.075740e-05) + (delta.y * delta.y));
+    return vec2f(delta.x * lengthInv, delta.y * lengthInv);
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+    let uv = in.uv;
+    let con1 = u.viewport;
+
+    var pix = vec4f(textureSampleLevel(inputTex, samp, uv, 0.0).xyz, 1.0);
+
+    let imgCoord = (uv * con1.zw) + vec2f(-0.5, 0.5);
+    let imgCoordPixel = floor(imgCoord);
+    var coord = imgCoordPixel * con1.xy;
+    let pl = imgCoord - imgCoordPixel;
+    var left = textureGather(1, inputTex, samp, coord);
+
+    let pixL = pix.y;
+    let edgeVote = abs(left.z - left.y) + abs(pixL - left.y) + abs(pixL - left.z);
+    if (edgeVote > EDGE_THRESHOLD) {
+        coord.x += con1.x;
+        var right = textureGather(1, inputTex, samp, coord + vec2f(con1.x, 0.0));
+        let udUp = textureGather(1, inputTex, samp, coord + vec2f(0.0, -con1.y));
+        let udDn = textureGather(1, inputTex, samp, coord + vec2f(0.0,  con1.y));
+        var upDown = vec4f(udUp.w, udUp.z, udDn.y, udDn.x);
+
+        let mean = (left.y + left.z + right.x + right.w) * 0.25;
+        left = left - vec4f(mean);
+        right = right - vec4f(mean);
+        upDown = upDown - vec4f(mean);
+        let pixW = pixL - mean;
+
+        let sum = (abs(left.x) + abs(left.y) + abs(left.z) + abs(left.w)) +
+                  (abs(right.x) + abs(right.y) + abs(right.z) + abs(right.w)) +
+                  (abs(upDown.x) + abs(upDown.y) + abs(upDown.z) + abs(upDown.w));
+        let sumMean = 1.014185e+01 / sum;
+        let stdev = sumMean * sumMean;
+
+        let data = vec3f(stdev, edgeDirection(left, right));
+
+        var aWY = weightY(pl.x,       pl.y + 1.0, upDown.x, data);
+        aWY += weightY(pl.x - 1.0, pl.y + 1.0, upDown.y, data);
+        aWY += weightY(pl.x - 1.0, pl.y - 2.0, upDown.z, data);
+        aWY += weightY(pl.x,       pl.y - 2.0, upDown.w, data);
+        aWY += weightY(pl.x + 1.0, pl.y - 1.0, left.x,   data);
+        aWY += weightY(pl.x,       pl.y - 1.0, left.y,   data);
+        aWY += weightY(pl.x,       pl.y,       left.z,   data);
+        aWY += weightY(pl.x + 1.0, pl.y,       left.w,   data);
+        aWY += weightY(pl.x - 1.0, pl.y - 1.0, right.x,  data);
+        aWY += weightY(pl.x - 2.0, pl.y - 1.0, right.y,  data);
+        aWY += weightY(pl.x - 2.0, pl.y,       right.z,  data);
+        aWY += weightY(pl.x - 1.0, pl.y,       right.w,  data);
+
+        var finalY = aWY.y / aWY.x;
+        let max4 = max(max(left.y, left.z), max(right.x, right.w));
+        let min4 = min(min(left.y, left.z), min(right.x, right.w));
+        finalY = clamp(EDGE_SHARPNESS * finalY, min4, max4);
+
+        let deltaY = finalY - pixW;
+        pix.x = saturate(pix.x + deltaY);
+        pix.y = saturate(pix.y + deltaY);
+        pix.z = saturate(pix.z + deltaY);
+    }
+    pix.w = 1.0;
+    return pix;
+}
+`;
+
+// NIS — NVIDIA Image Scaling (NVScaler, SDK 1.0.3, MIT). WGSL transcription of
+// the GLSL port in WebGlRenderer.js, itself the per-fragment form of the SDK's
+// compute shader. Arrays travel by pointer (function address space) so the 36
+// luma samples are gathered once per fragment and read in place.
+const NIS_WGSL =
+    FULLSCREEN_VS +
+    /* wgsl */ `
+struct NisUniforms {
+    scale : vec4f,   // kScaleX, kScaleY, 1/inW, 1/inH
+    detect : vec4f,  // kDetectRatio, kDetectThres, kMinContrastRatio, kRatioNorm
+    sharpA : vec4f,  // kContrastBoost, kEps, kSharpStartY, kSharpScaleY
+    sharpB : vec4f,  // kSharpStrengthMin, kSharpStrengthScale, kSharpLimitMin, kSharpLimitScale
+    outSize : vec4f, // outW, outH, 0, 0
+};
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var inputTex : texture_2d<f32>;
+@group(0) @binding(2) var coefTex : texture_2d<f32>;
+@group(0) @binding(3) var<uniform> u : NisUniforms;
+
+const kPhaseCount : i32 = 64;
+alias Luma36 = array<f32, 36>;
+alias Taps6 = array<f32, 6>;
+
+fn getY(c : vec3f) -> f32 { return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b; }
+fn coefScaler(phase : i32, i : i32) -> f32 {
+    let v = textureLoad(coefTex, vec2<i32>(i >> 2u, phase), 0);
+    return v[i & 3];
+}
+fn coefUSM(phase : i32, i : i32) -> f32 {
+    let v = textureLoad(coefTex, vec2<i32>(2 + (i >> 2u), phase), 0);
+    return v[i & 3];
+}
+fn lumaAt(c : vec2<i32>) -> f32 {
+    let mx = vec2<i32>(textureDimensions(inputTex)) - vec2<i32>(1);
+    return getY(textureLoad(inputTex, clamp(c, vec2<i32>(0), mx), 0).rgb);
+}
+fn P(p : ptr<function, Luma36>, i : i32, j : i32) -> f32 { return (*p)[i * 6 + j]; }
+
+fn getEdgeMap(p : ptr<function, Luma36>, i : i32, j : i32) -> vec4f {
+    let g_0 = abs(P(p, 0 + i, 0 + j) + P(p, 0 + i, 1 + j) + P(p, 0 + i, 2 + j) - P(p, 2 + i, 0 + j) - P(p, 2 + i, 1 + j) - P(p, 2 + i, 2 + j));
+    let g_45 = abs(P(p, 1 + i, 0 + j) + P(p, 0 + i, 0 + j) + P(p, 0 + i, 1 + j) - P(p, 2 + i, 1 + j) - P(p, 2 + i, 2 + j) - P(p, 1 + i, 2 + j));
+    let g_90 = abs(P(p, 0 + i, 0 + j) + P(p, 1 + i, 0 + j) + P(p, 2 + i, 0 + j) - P(p, 0 + i, 2 + j) - P(p, 1 + i, 2 + j) - P(p, 2 + i, 2 + j));
+    let g_135 = abs(P(p, 1 + i, 0 + j) + P(p, 2 + i, 0 + j) + P(p, 2 + i, 1 + j) - P(p, 0 + i, 1 + j) - P(p, 0 + i, 2 + j) - P(p, 1 + i, 2 + j));
+    let g_0_90_max = max(g_0, g_90);
+    let g_0_90_min = min(g_0, g_90);
+    let g_45_135_max = max(g_45, g_135);
+    let g_45_135_min = min(g_45, g_135);
+    if (g_0_90_max + g_45_135_max == 0.0) { return vec4f(0.0); }
+    let e_0_90 = min(g_0_90_max / (g_0_90_max + g_45_135_max), 1.0);
+    let e_45_135 = 1.0 - e_0_90;
+    let c_0_90 = (g_0_90_max > (g_0_90_min * u.detect.x)) && (g_0_90_max > u.detect.y) && (g_0_90_max > g_45_135_min);
+    let c_45_135 = (g_45_135_max > (g_45_135_min * u.detect.x)) && (g_45_135_max > u.detect.y) && (g_45_135_max > g_0_90_min);
+    let c_g_0_90 = g_0_90_max == g_0;
+    let c_g_45_135 = g_45_135_max == g_45;
+    let both = c_0_90 && c_45_135;
+    let f_e_0_90 = select(1.0, e_0_90, both);
+    let f_e_45_135 = select(1.0, e_45_135, both);
+    let weight_0 = select(0.0, f_e_0_90, c_0_90 && c_g_0_90);
+    let weight_90 = select(0.0, f_e_0_90, c_0_90 && !c_g_0_90);
+    let weight_45 = select(0.0, f_e_45_135, c_45_135 && c_g_45_135);
+    let weight_135 = select(0.0, f_e_45_135, c_45_135 && !c_g_45_135);
+    return vec4f(weight_0, weight_90, weight_45, weight_135);
+}
+
+fn calcLTI(p0 : f32, p1 : f32, p2 : f32, p3 : f32, p4 : f32, p5 : f32, phase_index : i32) -> f32 {
+    let selector = phase_index <= kPhaseCount / 2;
+    var sel = select(p3, p0, selector);
+    let a_min = min(min(p1, p2), sel);
+    let a_max = max(max(p1, p2), sel);
+    sel = select(p5, p2, selector);
+    let b_min = min(min(p3, p4), sel);
+    let b_max = max(max(p3, p4), sel);
+    let a_cont = a_max - a_min;
+    let b_cont = b_max - b_min;
+    let cont_ratio = max(a_cont, b_cont) / (min(a_cont, b_cont) + u.sharpA.y);
+    return (1.0 - saturate((cont_ratio - u.detect.z) * u.detect.w)) * u.sharpA.x;
+}
+
+fn evalPoly6(pxl : ptr<function, Taps6>, phase_int : i32) -> f32 {
+    var y = 0.0;
+    for (var i = 0; i < 6; i++) { y += coefScaler(phase_int, i) * (*pxl)[i]; }
+    var y_usm = 0.0;
+    for (var i = 0; i < 6; i++) { y_usm += coefUSM(phase_int, i) * (*pxl)[i]; }
+    let y_scale = 1.0 - saturate((y - u.sharpA.z) * u.sharpA.w);
+    let y_sharpness = y_scale * u.sharpB.y + u.sharpB.x;
+    y_usm *= y_sharpness;
+    let y_sharpness_limit = (y_scale * u.sharpB.w + u.sharpB.z) * y;
+    y_usm = min(y_sharpness_limit, max(-y_sharpness_limit, y_usm));
+    y_usm *= calcLTI((*pxl)[0], (*pxl)[1], (*pxl)[2], (*pxl)[3], (*pxl)[4], (*pxl)[5], phase_int);
+    return y + y_usm;
+}
+
+fn filterNormal(p : ptr<function, Luma36>, phase_x_frac_int : i32, phase_y_frac_int : i32) -> f32 {
+    var h_acc = 0.0;
+    for (var j = 0; j < 6; j++) {
+        var v_acc = 0.0;
+        for (var i = 0; i < 6; i++) { v_acc += P(p, i, j) * coefScaler(phase_y_frac_int, i); }
+        h_acc += v_acc * coefScaler(phase_x_frac_int, j);
+    }
+    return h_acc;
+}
+
+fn addDirFilters(p : ptr<function, Luma36>, phase_x_frac : f32, phase_y_frac : f32,
+                 phase_x_frac_int : i32, phase_y_frac_int : i32, w : vec4f) -> f32 {
+    var f = 0.0;
+    if (w.x > 0.0) {
+        var interp0Deg : Taps6;
+        for (var i = 0; i < 6; i++) { interp0Deg[i] = mix(P(p, i, 2), P(p, i, 3), phase_x_frac); }
+        f += evalPoly6(&interp0Deg, phase_y_frac_int) * w.x;
+    }
+    if (w.y > 0.0) {
+        var interp90Deg : Taps6;
+        for (var i = 0; i < 6; i++) { interp90Deg[i] = mix(P(p, 2, i), P(p, 3, i), phase_y_frac); }
+        f += evalPoly6(&interp90Deg, phase_x_frac_int) * w.y;
+    }
+    if (w.z > 0.0) {
+        var pphase_b45 = 0.5 + 0.5 * (phase_x_frac - phase_y_frac);
+        var temp : array<f32, 7>;
+        temp[1] = mix(P(p, 2, 1), P(p, 1, 2), pphase_b45);
+        temp[3] = mix(P(p, 3, 2), P(p, 2, 3), pphase_b45);
+        temp[5] = mix(P(p, 4, 3), P(p, 3, 4), pphase_b45);
+        pphase_b45 = pphase_b45 - 0.5;
+        let pos = pphase_b45 >= 0.0;
+        let a = select(P(p, 2, 0), P(p, 0, 2), pos);
+        let b = select(P(p, 3, 1), P(p, 1, 3), pos);
+        let c = select(P(p, 4, 2), P(p, 2, 4), pos);
+        let d = select(P(p, 5, 3), P(p, 3, 5), pos);
+        temp[0] = mix(P(p, 1, 1), a, abs(pphase_b45));
+        temp[2] = mix(P(p, 2, 2), b, abs(pphase_b45));
+        temp[4] = mix(P(p, 3, 3), c, abs(pphase_b45));
+        temp[6] = mix(P(p, 4, 4), d, abs(pphase_b45));
+        var interp45Deg : Taps6;
+        var pphase_p45 = phase_x_frac + phase_y_frac;
+        if (pphase_p45 >= 1.0) {
+            for (var i = 0; i < 6; i++) { interp45Deg[i] = temp[i + 1]; }
+            pphase_p45 = pphase_p45 - 1.0;
+        } else {
+            for (var i = 0; i < 6; i++) { interp45Deg[i] = temp[i]; }
+        }
+        f += evalPoly6(&interp45Deg, min(i32(pphase_p45 * 64.0), 63)) * w.z;
+    }
+    if (w.w > 0.0) {
+        var pphase_b135 = 0.5 * (phase_x_frac + phase_y_frac);
+        var temp : array<f32, 7>;
+        temp[1] = mix(P(p, 3, 1), P(p, 4, 2), pphase_b135);
+        temp[3] = mix(P(p, 2, 2), P(p, 3, 3), pphase_b135);
+        temp[5] = mix(P(p, 1, 3), P(p, 2, 4), pphase_b135);
+        pphase_b135 = pphase_b135 - 0.5;
+        let pos = pphase_b135 >= 0.0;
+        let a = select(P(p, 3, 0), P(p, 5, 2), pos);
+        let b = select(P(p, 2, 1), P(p, 4, 3), pos);
+        let c = select(P(p, 1, 2), P(p, 3, 4), pos);
+        let d = select(P(p, 0, 3), P(p, 2, 5), pos);
+        temp[0] = mix(P(p, 4, 1), a, abs(pphase_b135));
+        temp[2] = mix(P(p, 3, 2), b, abs(pphase_b135));
+        temp[4] = mix(P(p, 2, 3), c, abs(pphase_b135));
+        temp[6] = mix(P(p, 1, 4), d, abs(pphase_b135));
+        var interp135Deg : Taps6;
+        var pphase_p135 = 1.0 + (phase_x_frac - phase_y_frac);
+        if (pphase_p135 >= 1.0) {
+            for (var i = 0; i < 6; i++) { interp135Deg[i] = temp[i + 1]; }
+            pphase_p135 = pphase_p135 - 1.0;
+        } else {
+            for (var i = 0; i < 6; i++) { interp135Deg[i] = temp[i]; }
+        }
+        f += evalPoly6(&interp135Deg, min(i32(pphase_p135 * 64.0), 63)) * w.w;
+    }
+    return f;
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+    let dst = floor(in.uv * u.outSize.xy);
+    let src = (dst + 0.5) * u.scale.xy - 0.5;
+    let fsrc = floor(src);
+    let fr = src - fsrc;
+    let fi = min(vec2<i32>(fr * f32(kPhaseCount)), vec2<i32>(kPhaseCount - 1));
+    let s = vec2<i32>(fsrc);
+
+    var p : Luma36;
+    for (var i = 0; i < 6; i++) {
+        for (var j = 0; j < 6; j++) { p[i * 6 + j] = lumaAt(s + vec2<i32>(j - 2, i - 2)); }
+    }
+
+    let e00 = getEdgeMap(&p, 1, 1);
+    let e01 = getEdgeMap(&p, 1, 2);
+    let e10 = getEdgeMap(&p, 2, 1);
+    let e11 = getEdgeMap(&p, 2, 2);
+    let w = mix(mix(e00, e01, fr.x), mix(e10, e11, fr.x), fr.y);
+
+    let baseWeight = 1.0 - w.x - w.y - w.z - w.w;
+    var opY = filterNormal(&p, fi.x, fi.y) * baseWeight;
+    opY += addDirFilters(&p, fr.x, fr.y, fi.x, fi.y, w);
+
+    let coord = (src + 0.5) * u.scale.zw;
+    let op = textureSampleLevel(inputTex, samp, coord, 0.0);
+    let y = getY(op.rgb);
+    return vec4f(clamp(op.rgb + vec3f(opY - y), vec3f(0.0), vec3f(1.0)), 1.0);
+}
+`;
+
+// FSR1 EASU — AMD FidelityFX (firdawolf WGSL port, MIT). Verbatim fragment math;
+// VS replaced with a fullscreen triangle, bindings consolidated, custom saturate()
+// dropped in favor of the WGSL builtin.
+const EASU_WGSL = /* wgsl */ `
+struct Resolution { inputwidth : f32, inputheight : f32, outputwidth : f32, outputheight : f32, }
+@group(0) @binding(0) var input : texture_2d<f32>;
+@group(0) @binding(1) var sam : sampler;
+@group(0) @binding(2) var<uniform> resolution : Resolution;
+
+struct VertexOutput {
+    @builtin(position) clip_position : vec4<f32>,
+    @location(0) tex_coords : vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid : u32) -> VertexOutput {
+    var out : VertexOutput;
+    let uv = vec2<f32>(f32((vid << 1u) & 2u), f32(vid & 2u));
+    out.tex_coords = uv;
+    out.clip_position = vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+    return out;
+}
+
+fn min3(a:vec3<f32>,b:vec3<f32>,c:vec3<f32>)->vec3<f32>{
+    return min(a, min(b,c));
+}
+fn max3(a:vec3<f32>,b:vec3<f32>,c:vec3<f32>)->vec3<f32>{
+    return max(a, max(b,c));
+}
+
+struct FsrTap{
+    aC:vec3<f32>,
+    aW:f32,
+}
+struct FsrSet{
+    dir:vec2<f32>,
+    len:f32,
+}
+fn matchSet(pp:vec2<f32>,biS:bool, biT:bool, biU:bool, biV:bool) -> f32{
+	if(biS){
+		return (1.0 - pp.x) * (1.0 - pp.y);
+	}
+	else if(biT){
+        return pp.x * (1.0 - pp.y);
+	}
+	else if(biU){
+       return (1.0 - pp.x) * pp.y;
+	}
+	else if(biV){
+       return pp.x * pp.y;
+	}
+	else{
+	   return 0.0;
+	}
+}
+
+fn FsrEasuTap(
+	fsr:FsrTap,
+	off:vec2<f32>,
+	dir:vec2<f32>,
+	len:vec2<f32>,
+	lob:f32,
+	clp:f32,
+	c:vec3<f32>
+)-> FsrTap {
+	var fsr1 : FsrTap = fsr;
+    var aC : vec3<f32> = fsr1.aC;
+    var aW : f32 = fsr1.aW;
+	var v : vec2<f32> = vec2<f32>(0.0);
+	v.x = (off.x * (dir.x)) + (off.y * dir.y);
+	v.y = (off.x * (-dir.y)) + (off.y * dir.x);
+	v = v * len;
+	var d2 : f32 = v.x * v.x + v.y * v.y;
+	d2 = min(d2, clp);
+	var wB : f32 = 2.0 / 5.0 * d2 - 1.0;
+	var wA : f32 = lob * d2 - 1.0;
+	wB = wB * wB;
+	wA = wA * wA;
+	wB = 25.0 / 16.0 * wB - (25.0 / 16.0 - 1.0);
+	var w : f32 = wB * wA;
+	aC = aC + c * w;
+    aW = aW + w;
+    fsr1.aC = aC;
+    fsr1.aW = aW;
+    return fsr1;
+}
+
+fn FsrEasuSet(
+	fsr : FsrSet,
+	pp:vec2<f32>,
+	biS:bool, biT:bool, biU:bool, biV:bool,
+	lA:f32, lB:f32, lC:f32, lD:f32, lE:f32) -> FsrSet{
+	var fsr1 : FsrSet = fsr;
+    var dir : vec2<f32> = fsr1.dir;
+    var len : f32 = fsr1.len;
+	var w : f32 = 0.0;
+	w = matchSet(pp,biS,biT,biU,biV);
+	var dc:f32 = lD - lC;
+	var cb:f32 = lC - lB;
+	var lenX:f32 = max(abs(dc), abs(cb));
+	lenX = 1.0 / lenX;
+	var dirX :f32 = lD - lB;
+	dir.x = dir.x + (dirX * w);
+	lenX = saturate(abs(dirX) * lenX);
+	lenX = lenX * lenX;
+	len = len + (lenX * w);
+	var ec :f32 = lE - lC;
+	var ca : f32 = lC - lA;
+	var lenY :f32 = max(abs(ec), abs(ca));
+	lenY = 1.0 / lenY;
+	var dirY:f32 = lE - lA;
+	dir.y = dir.y + (dirY * w);
+	lenY = saturate(abs(dirY) * lenY);
+	lenY = lenY * lenY;
+	len = len + (lenY * w);
+    fsr1.dir = dir;
+    fsr1.len = len;
+    return fsr1;
+}
+
+fn gather_red_components(c: vec2<f32>) -> vec4<f32> {
+   return textureGather(0,input,sam,c);
+}
+fn gather_green_components(c: vec2<f32>) -> vec4<f32> {
+   return textureGather(1,input,sam,c);
+}
+fn gather_blue_components(c: vec2<f32>) -> vec4<f32> {
+   return textureGather(2,input,sam,c);
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32>{
+	var inputSize : vec2<f32>;
+    inputSize.x = resolution.inputwidth;
+    inputSize.y = resolution.inputheight;
+	var outputSize : vec2<f32>;
+    outputSize.x = resolution.outputwidth;
+    outputSize.y = resolution.outputheight;
+
+	var pp:vec2<f32> = (floor(in.tex_coords * outputSize) + 0.5) / outputSize * inputSize - 0.5;
+	var fp : vec2<f32> = floor(pp);
+	pp = pp - fp;
+	var p0 :vec2<f32> = fp + vec2<f32>(1.0, -1.0);
+	var p1 : vec2<f32> = p0 + vec2<f32>(-1.0, 2.0);
+	var p2: vec2<f32> = p0 + vec2<f32>(1.0, 2.0);
+	var p3: vec2<f32> = p0 + vec2<f32>(0.0, 4.0);
+
+	p0 = p0 / inputSize;
+	p1 = p1 / inputSize;
+	p2 = p2 / inputSize;
+	p3 = p3 / inputSize;
+
+	var bczzR : vec4<f32> = gather_red_components(p0);
+	var bczzG : vec4<f32> = gather_green_components(p0);
+	var bczzB : vec4<f32> = gather_blue_components(p0);
+	var ijfeR : vec4<f32> = gather_red_components(p1);
+	var ijfeG : vec4<f32> = gather_green_components(p1);
+	var ijfeB : vec4<f32> = gather_blue_components(p1);
+	var klhgR : vec4<f32> = gather_red_components(p2);
+	var klhgG : vec4<f32> = gather_green_components(p2);
+	var klhgB : vec4<f32> = gather_blue_components(p2);
+	var zzonR : vec4<f32> = gather_red_components(p3);
+	var zzonG : vec4<f32> = gather_green_components(p3);
+	var zzonB : vec4<f32> = gather_blue_components(p3);
+	var bczzL : vec4<f32> = bczzB * 0.5 + (bczzR * 0.5 + bczzG);
+	var ijfeL : vec4<f32> = ijfeB * 0.5 + (ijfeR * 0.5 + ijfeG);
+	var klhgL : vec4<f32> = klhgB * 0.5 + (klhgR * 0.5 + klhgG);
+	var zzonL : vec4<f32> = zzonB * 0.5 + (zzonR * 0.5 + zzonG);
+	var bL :f32 = bczzL.x;
+	var cL :f32 = bczzL.y;
+	var iL :f32 = ijfeL.x;
+	var jL :f32 = ijfeL.y;
+	var fL :f32 = ijfeL.z;
+	var eL :f32 = ijfeL.w;
+	var kL :f32 = klhgL.x;
+	var lL :f32 = klhgL.y;
+	var hL :f32 = klhgL.z;
+	var gL :f32 = klhgL.w;
+	var oL :f32 = zzonL.z;
+	var nL :f32 = zzonL.w;
+    var fsr:FsrSet;
+	fsr.dir = vec2<f32>(0.0,0.0);
+	fsr.len = 0.0;
+	fsr = FsrEasuSet(fsr, pp, true, false, false, false, bL, eL, fL, gL, jL);
+	fsr = FsrEasuSet(fsr, pp, false, true, false, false, cL, fL, gL, hL, kL);
+	fsr = FsrEasuSet(fsr, pp, false, false, true, false, fL, iL, jL, kL, nL);
+    fsr = FsrEasuSet(fsr, pp, false, false, false, true, gL, jL, kL, lL, oL);
+	var dir2 :vec2<f32> = fsr.dir * fsr.dir;
+	var dirR :f32 = dir2.x + dir2.y;
+	var zro : bool = dirR < 1.0 / 32768.0;
+	dirR = 1.0/(sqrt(dirR));
+	if (zro) {dirR = 1.0;};
+	if (zro) {fsr.dir.x = 1.0;};
+	fsr.dir = fsr.dir * dirR;
+	fsr.len = fsr.len * 0.5;
+	fsr.len = fsr.len * fsr.len;
+	var stretch :f32 = (fsr.dir.x * fsr.dir.x + fsr.dir.y * fsr.dir.y) * 1.0/(max(abs(fsr.dir.x), abs(fsr.dir.y)));
+	var len2:vec2<f32> = vec2<f32>(1.0 + (stretch - 1.0) * fsr.len, 1.0 - 0.5 * fsr.len );
+	var lob : f32 = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * fsr.len;
+	var clp : f32 = 1.0/lob;
+	var min4 = min(min3(vec3<f32>(ijfeR.z, ijfeG.z, ijfeB.z), vec3<f32>(klhgR.w, klhgG.w, klhgB.w), vec3<f32>(ijfeR.y, ijfeG.y, ijfeB.y)),
+		vec3<f32>(klhgR.x, klhgG.x, klhgB.x));
+
+	var max4:vec3<f32> = max(max3(vec3<f32>(ijfeR.z, ijfeG.z, ijfeB.z), vec3<f32>(klhgR.w, klhgG.w, klhgB.w), vec3<f32>(ijfeR.y, ijfeG.y, ijfeB.y)),
+		vec3<f32>(klhgR.x, klhgG.x, klhgB.x));
+	var fsr2:FsrTap;
+	fsr2.aC = vec3<f32>(0.0,0.0,0.0);
+	fsr2.aW =0.0;
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(0.0, -1.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(bczzR.x, bczzG.x, bczzB.x));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(1.0, -1.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(bczzR.y, bczzG.y, bczzB.y));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(-1.0, 1.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(ijfeR.x, ijfeG.x, ijfeB.x));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(0.0, 1.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(ijfeR.y, ijfeG.y, ijfeB.y));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(0.0, 0.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(ijfeR.z, ijfeG.z, ijfeB.z));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(-1.0, 0.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(ijfeR.w, ijfeG.w, ijfeB.w));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(1.0, 1.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(klhgR.x, klhgG.x, klhgB.x));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(2.0, 1.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(klhgR.y, klhgG.y, klhgB.y));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(2.0, 0.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(klhgR.z, klhgG.z, klhgB.z));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(1.0, 0.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(klhgR.w, klhgG.w, klhgB.w));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(1.0, 2.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(zzonR.z, zzonG.z, zzonB.z));
+	fsr2=FsrEasuTap(fsr2, vec2<f32>(0.0, 2.0) - pp, fsr.dir, len2, lob, clp, vec3<f32>(zzonR.w, zzonG.w, zzonB.w));
+	var c : vec3<f32> = min(max4, max(min4, fsr2.aC * (1.0/fsr2.aW)));
+	return vec4<f32>(c, 1.0);
+}
+`;
+
+// FSR1 RCAS — AMD FidelityFX (firdawolf WGSL port, MIT). Verbatim fragment math;
+// VS replaced with a fullscreen triangle, demo camera binding removed, module-scope
+// 'let' → 'const', sharpness 0.595 (= exp2(-0.75) → DX12 RCAS(0.75) equivalent),
+// custom saturate() dropped (WGSL builtin). resolution.output{width,height} are
+// TEXEL sizes here (set by the renderer to 1/outW, 1/outH).
+const RCAS_WGSL = /* wgsl */ `
+const sharpness : f32 = 0.595;
+
+struct Resolution { inputwidth : f32, inputheight : f32, outputwidth : f32, outputheight : f32, }
+@group(0) @binding(0) var input : texture_2d<f32>;
+@group(0) @binding(1) var sam : sampler;
+@group(0) @binding(2) var<uniform> resolution : Resolution;
+
+struct VertexOutput {
+    @builtin(position) clip_position : vec4<f32>,
+    @location(0) tex_coords : vec2<f32>,
+}
+
+fn min3f(a:f32,b:f32,c:f32)->f32{
+    return min(a, min(b,c));
+}
+fn max3f(a:f32,b:f32,c:f32)->f32{
+    return max(a, max(b,c));
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid : u32) -> VertexOutput {
+    var out : VertexOutput;
+    let uv = vec2<f32>(f32((vid << 1u) & 2u), f32(vid & 2u));
+    out.tex_coords = uv;
+    out.clip_position = vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32>{
+    let FSR_RCAS_LIMIT :f32 = 0.25-(1.0/16.0);
+	let b : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(0.0, -resolution.outputheight)).rgb;
+	let d : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(-resolution.outputwidth, 0.0)).rgb;
+	var e : vec3<f32> = textureSample(input,sam,in.tex_coords).rgb;
+	let f : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(resolution.outputwidth, 0.0)).rgb;
+	let h : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(0.0, resolution.outputheight)).rgb;
+	var bR :f32 = b.r;
+	var bG :f32  = b.g;
+	var bB :f32  = b.b;
+	var dR :f32  = d.r;
+	var dG :f32  = d.g;
+	var dB :f32  = d.b;
+	var eR :f32  = e.r;
+	var eG :f32  = e.g;
+	var eB :f32  = e.b;
+	var fR :f32 = f.r;
+	var fG :f32  = f.g;
+	var fB :f32  = f.b;
+	var hR :f32 = h.r;
+	var hG :f32  = h.g;
+	var hB:f32  = h.b;
+
+	var nz:f32 = 0.0;
+
+	var bL :f32  = bB * 0.5 + (bR * 0.5 + bG);
+	var dL:f32  = dB * 0.5 + (dR * 0.5 + dG);
+	var eL:f32  = eB * 0.5 + (eR * 0.5 + eG);
+	var fL:f32  = fB * 0.5 + (fR * 0.5 + fG);
+	var hL:f32  = hB * 0.5 + (hR * 0.5 + hG);
+
+	nz = 0.25 * bL + 0.25 * dL + 0.25 * fL + 0.25 * hL - eL;
+	nz = saturate(abs(nz) * 1.0/(max3f(max3f(bL, dL, eL), fL, hL) - min3f(min3f(bL, dL, eL), fL, hL)));
+	nz = -0.5 * nz + 1.0;
+
+	var mn4R :f32 =  min(min3f(bR, dR, fR), hR);
+	var mn4G :f32  = min(min3f(bG, dG, fG), hG);
+	var mn4B :f32  = min(min3f(bB, dB, fB), hB);
+	var mx4R :f32  = max(max3f(bR, dR, fR), hR);
+	var mx4G :f32  = max(max3f(bG, dG, fG), hG);
+	var mx4B :f32  = max(max3f(bB, dB, fB), hB);
+	var peakC :vec2<f32> = vec2<f32>( 1.0, -1.0 * 4.0 );
+	var hitMinR :f32  = min(mn4R, eR) * 1.0/(4.0 * mx4R);
+	var hitMinG :f32 = min(mn4G, eG) * 1.0/(4.0 * mx4G);
+	var hitMinB :f32  = min(mn4B, eB) * 1.0/(4.0 * mx4B);
+	var hitMaxR :f32 = (peakC.x - max(mx4R, eR)) * 1.0/(4.0 * mn4R + peakC.y);
+	var hitMaxG :f32  = (peakC.x - max(mx4G, eG)) * 1.0/(4.0 * mn4G + peakC.y);
+	var hitMaxB :f32 = (peakC.x - max(mx4B, eB)) * 1.0/(4.0 * mn4B + peakC.y);
+	var lobeR:f32  = max(-hitMinR, hitMaxR);
+	var lobeG:f32  = max(-hitMinG, hitMaxG);
+	var lobeB :f32  = max(-hitMinB, hitMaxB);
+	var lobe :f32  = max(-FSR_RCAS_LIMIT, min(max3f(lobeR, lobeG, lobeB), 0.0)) * sharpness;
+
+	lobe = lobe * nz;
+
+	var rcpL :f32  = 1.0/(4.0 * lobe + 1.0);
+	var c:vec3<f32>  = vec3<f32>(
+		(lobe * bR + lobe * dR + lobe * hR + lobe * fR + eR) * rcpL,
+		(lobe * bG + lobe * dG + lobe * hG + lobe * fG + eG) * rcpL,
+		(lobe * bB + lobe * dB + lobe * hB + lobe * fB + eB) * rcpL
+	);
+	return vec4<f32>(c, 1.0);
+}
+`;
+
+export class WebGpuRenderer extends VideoRenderer {
+    constructor() {
+        super();
+        // Declared here so the instance shape is explicit; `create()` is the
+        // only construction path and overwrites all of them before returning.
+        /** @type {string} 'h264' | 'hevc' | 'av1'. */
+        this.videoCodec = '';
+        /** @type {'sgsr'|'nis'|'fsr1'|'mwsr'|'off'} Upscaler pass; 'off' blits through. */
+        this._algo = 'sgsr';
+        /** The last draw copied the frame 1:1 instead of running the pass. */
+        this._passthrough = false;
+        /** 4:4:4 stream: mwsr votes and sharpens per channel (CHROMA444). */
+        this._yuv444 = false;
+        /** mwsr's f16 module: shader-f16 granted (asked for off NVIDIA). */
+        this._mwsrHalf = false;
+        /** SDR: inputTex and the canvas carry `-srgb` view formats (mwsr's reduction). */
+        this._srgbViews = false;
+        /** NIS sharpness (0..1, 0.5 neutral) and its re-read throttle. */
+        this._nisSharpness = 0.5;
+        this._nisKnobsMs = 0;
+        this._nisScaleWarned = false;
+        /** Click-to-photon probe: three canvas texels copied out per frame. */
+        this._probeActive = false;
+        this._probePixels = null;
+        this._probeDrawnAt = null;
+        this._probeQueuedAt = 0;
+        this._probeBuf = null;
+        this._probeBusy = false;
+        /** @type {boolean} HDR→SDR tone-map path (exclusive with _hdr). */
+        this._hdrTonemap = false;
+        /** @type {boolean} Same tone-map, fed by importExternalTexture (no readback). */
+        this._hdrExtTonemap = false;
+        /** @type {number} 10-bit sample alignment (1.0 = low-aligned 0..1023). */
+        this._codeScale = 1.0;
+    }
+
+    static async create(canvas, opts) {
+        if (!navigator.gpu) throw new Error('WebGPU unavailable (no navigator.gpu)');
+
+        // ── Steps that may fail on unsupported platforms — BEFORE getContext ──
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('WebGPU requestAdapter returned null');
+        const device = await WebGpuRenderer._requestDevice(adapter);
+
+        const r = new WebGpuRenderer();
+        r.canvas = canvas;
+        r.videoCodec = opts.videoCodec;
+        // 'off' = WebGPU pass-through (blit only, no upscaler); sgsr is the safe default.
+        r._algo =
+            opts.algo === 'fsr1' ||
+            opts.algo === 'nis' ||
+            opts.algo === 'mwsr' ||
+            opts.algo === 'off'
+                ? opts.algo
+                : 'sgsr';
+        r._yuv444 = opts.yuv444 === true;
+        r._mwsrHalf = device.features.has('shader-f16');
+        // HDR: rgba16float canvas in extended tone-mapping mode (values > 1.0
+        // map to the display's HDR headroom). Gated on opts.hdr; _configure()
+        // self-downgrades to SDR if the browser rejects the HDR canvas config.
+        r._hdr = !!opts.hdr;
+        // HDR→SDR tone-map path: decode HDR (PQ/BT.2020), tone-map to SDR with ACES
+        // via manual P010 readback, then run the enhancer on a normal SDR canvas.
+        // Mutually exclusive with _hdr (the rgba16float extended canvas).
+        r._hdrTonemap = !!opts.hdrTonemap;
+        // Linear HDR path: the same P010 readback, but no tone curve — PQ decoded
+        // to scene light, 1.0 = reference white, written to the rgba16float
+        // extended canvas so highlights reach the display's HDR headroom. The
+        // enhancer then runs on float intermediates, in HDR. Needs _hdr; if the
+        // HDR canvas is refused, _configure() turns this into the tone-map.
+        r._hdrLinear = !!opts.hdrLinear && r._hdr;
+        // Either readback path: the YUV Pass 0 replaces the external-texture blit.
+        r._hdrYuv = r._hdrTonemap || r._hdrLinear;
+        // External-texture tone-map: same ACES tail, fed by importExternalTexture
+        // instead of the readback, for browsers that hand back raw PQ (see
+        // HDR_EXT_TONEMAP_WGSL). The readback is better when available, so this
+        // only applies when neither readback path is running.
+        r._hdrExtTonemap = !!opts.hdrExtTonemap && !r._hdrYuv;
+        // Reference white (nits) → 1.0. 433 nits gives the SDR tone-map an
+        // SDR-looking picture on an SDR screen; on an HDR canvas 1.0 must be
+        // the display's SDR white, 203 nits (BT.2408), or the desktop reads dim.
+        r._refWhite = r._hdrLinear ? 203 : 433;
+        r._codeScale = 1.0; // 10-bit sample alignment (1.0 = low-aligned 0..1023)
+        r._exposure = 1.0; // linear multiplier before the tone curve
+        r._curve = r._hdrLinear ? 2 : 1; // 2 = linear (HDR out), 1 = ACES, 0 = soft-clip
+        r._knobsReadMs = 0; // live-tuning knobs re-read throttle (see _readHdrKnobs)
+        r._copyBuf = null;
+        r._texY = null;
+        r._texU = null;
+        r._texV = null;
+        r._yuvW = 0;
+        r._yuvH = 0;
+        r._yuvCW = 0;
+        r._yuvCH = 0;
+        r._yuvFormatLogged = false;
+        r._copyWarned = false;
+        // The import fallback (see _importFrame) and the once-per-message log.
+        r._importRefused = false;
+        r._importRefusedAt = 0;
+        r._importWarned = false;
+        // Its two copies (see _copyFrame): the bitmap's refusal, asked again
+        // with the import, and the readback's buffer.
+        r._bitmapRefused = false;
+        r._bitmapWarned = false;
+        r._readbackBuf = null;
+        r._readbackWarned = false;
+        // Frames that never reached the canvas, in a row; frames drawn on
+        // this device; whether the renderer gave up (see _noteFrame).
+        r._lostFrames = 0;
+        r._framesOnDevice = 0;
+        r._failed = false;
+        r._drawCount = 0;
+        r._drawErrors = new Set();
+        r._adapter = adapter;
+        r._device = device;
+        r._ready = false;
+        r._disposed = false;
+        r._outW = 0;
+        r._outH = 0;
+        r._hasOutputSize = false;
+        r._armDeviceLost();
+
+        // ── Canvas is now committed to WebGPU (no going back to '2d') ─────────
+        r.ctx = canvas.getContext('webgpu');
+        r._configure(); // sets _format / _interFormat (HDR-aware)
+        r._buildResources();
+        canvas.width = 1920;
+        canvas.height = 1080;
+        r._ready = true;
+        console.log(
+            '[WebGpuRenderer] created algo=' +
+                r._algo +
+                ' hdr=' +
+                r._hdr +
+                ' hdrTonemap=' +
+                r._hdrTonemap +
+                ' hdrLinear=' +
+                r._hdrLinear +
+                ' hdrExtTonemap=' +
+                r._hdrExtTonemap +
+                ' half=' +
+                r._mwsrHalf +
+                ' srgbViews=' +
+                r._srgbViews +
+                ' yuv444=' +
+                r._yuv444,
+        );
+        return r;
+    }
+
+    /**
+     * The device, with shader-f16 where the adapter has it and is not
+     * NVIDIA's: mwsr's f16 module took 9-10 % off the kernel on the 780M for
+     * the same pixels and nothing on the RTX (upscaler-mwsr-p2.md §3), and a
+     * feature granted costs nothing to the other passes. A device refused with
+     * it is asked for bare; the kernel then runs in f32.
+     * @param {GPUAdapter} adapter
+     * @returns {Promise<GPUDevice>}
+     */
+    static async _requestDevice(adapter) {
+        const vendor = String((adapter.info && adapter.info.vendor) || '').toLowerCase();
+        if (adapter.features.has('shader-f16') && vendor !== 'nvidia') {
+            try {
+                return await adapter.requestDevice({ requiredFeatures: ['shader-f16'] });
+            } catch (e) {
+                console.warn('[WebGpuRenderer] shader-f16 refused, f32 kernel: ' + e.message);
+            }
+        }
+        return await adapter.requestDevice();
+    }
+
+    get ready() {
+        return this._ready;
+    }
+
+    get kind() {
+        return 'webgpu';
+    }
+
+    /** See VideoRenderer.passthrough: the last frame was copied 1:1, no pass run. */
+    get passthrough() {
+        return this._passthrough;
+    }
+
+    /** Effective algorithm name for the overlay: 'SGSR' | 'NIS' | 'FSR1' | 'MWSR' | 'Off'. */
+    get algoName() {
+        if (this._algo === 'fsr1') return 'FSR1';
+        if (this._algo === 'nis') return 'NIS';
+        if (this._algo === 'mwsr') return 'MWSR';
+        if (this._algo === 'off') return 'Off';
+        return 'SGSR';
+    }
+
+    /** True HDR is active (rgba16float canvas accepted). Read by the overlay. */
+    get hdrActive() {
+        return !!this._hdr;
+    }
+
+    /** See VideoRenderer.failed: given up, for the page to move the picture (_noteFrame). */
+    get failed() {
+        return this._failed;
+    }
+
+    /**
+     * See VideoRenderer.serialDrawsOnly. The import path may be pipelined: its
+     * commands run in submission order. A frame copied in instead (see
+     * _copyFrame) awaits before it is drawn: two such draws could resolve out
+     * of order and present the older frame last, and the readback reuses one
+     * buffer.
+     */
+    get serialDrawsOnly() {
+        return this._importRefused;
+    }
+
+    /**
+     * See VideoRenderer.probeActive. A presented WebGPU canvas cannot be read
+     * back with drawImage, so while a measurement is on, each frame copies the
+     * probe's three texels from the canvas texture into a mappable buffer
+     * (before submit) and maps it afterwards; the probe polls `probePixels`.
+     * The HDR float canvas is read too: its half floats are clamped to 0..1 and
+     * scaled to 8 bits, which is all the flag test needs. The pixels come
+     * back after the map, a few ms later; `probeDrawnAt` is the submit of the
+     * frame they were copied from.
+     */
+    set probeActive(on) {
+        this._probeActive = !!on;
+        this._probePixels = null;
+        this._probeDrawnAt = null;
+    }
+    get probePixels() {
+        return this._probePixels;
+    }
+    get probeDrawnAt() {
+        return this._probeDrawnAt;
+    }
+
+    _queueProbeRead(encoder, texture, cw, ch) {
+        if (this._probeBusy) return false;
+        if (!this._probeBuf) {
+            // One texel per 256-byte row: copyTextureToBuffer wants both the
+            // buffer offset and bytesPerRow aligned to 256.
+            this._probeBuf = this._device.createBuffer({
+                size: 768,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+        }
+        // Same spots as LatencyProbe: 46.5 %, 50.5 %, 54.5 % of the width,
+        // 2.5 % from the top.
+        const y = Math.min(ch - 1, Math.floor(ch * 0.025));
+        const xs = [0.465, 0.505, 0.545];
+        for (let i = 0; i < 3; i++) {
+            const x = Math.min(cw - 1, Math.floor(cw * xs[i]));
+            encoder.copyTextureToBuffer(
+                { texture, origin: { x, y } },
+                { buffer: this._probeBuf, offset: i * 256, bytesPerRow: 256 },
+                { width: 1, height: 1 },
+            );
+        }
+        this._probeBusy = true;
+        this._probeQueuedAt = performance.now();
+        return true;
+    }
+
+    _mapProbeRead() {
+        const buf = this._probeBuf;
+        const drawnAt = this._probeQueuedAt;
+        const bgra = this._format === 'bgra8unorm';
+        const half = this._format === 'rgba16float';
+        // IEEE half → float, enough for a clamped 0..1 read (no NaN/Inf care).
+        const h2f = (h) => {
+            const s = h & 0x8000 ? -1 : 1;
+            const e = (h >> 10) & 0x1f;
+            const m = h & 0x3ff;
+            if (e === 0) return s * m * 2 ** -24;
+            if (e === 31) return s * Infinity;
+            return s * (1 + m / 1024) * 2 ** (e - 15);
+        };
+        buf.mapAsync(GPUMapMode.READ)
+            .then(() => {
+                const range = buf.getMappedRange();
+                const a = new Uint8Array(range);
+                const px = new Uint8ClampedArray(12);
+                for (let i = 0; i < 3; i++) {
+                    const o = i * 256;
+                    if (half) {
+                        const w = new Uint16Array(range, o, 4);
+                        for (let c = 0; c < 3; c++)
+                            px[i * 4 + c] = Math.round(Math.min(1, Math.max(0, h2f(w[c]))) * 255);
+                    } else {
+                        px[i * 4 + 0] = bgra ? a[o + 2] : a[o + 0];
+                        px[i * 4 + 1] = a[o + 1];
+                        px[i * 4 + 2] = bgra ? a[o + 0] : a[o + 2];
+                    }
+                    px[i * 4 + 3] = 255;
+                }
+                buf.unmap();
+                if (this._probeActive) {
+                    this._probePixels = px;
+                    this._probeDrawnAt = drawnAt;
+                }
+            })
+            .catch(() => {})
+            .finally(() => {
+                this._probeBusy = false;
+            });
+    }
+
+    _configure() {
+        if (this._hdr) {
+            // HDR canvas: float16 backbuffer + 'extended' tone mapping so values
+            // above 1.0 reach the display's HDR headroom; wide-gamut display-p3.
+            // Intermediate textures must also be float16 to keep 10-bit precision.
+            this._format = 'rgba16float';
+            this._interFormat = 'rgba16float';
+            this._importColorSpace = 'display-p3';
+            try {
+                this.ctx.configure({
+                    device: this._device,
+                    format: this._format,
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+                    alphaMode: 'opaque',
+                    colorSpace: 'display-p3',
+                    toneMapping: { mode: 'extended' },
+                });
+                // No sRGB view of a float canvas: the reduction averages in
+                // software light there.
+                this._srgbViews = false;
+                return;
+            } catch (e) {
+                console.warn(
+                    '[WebGpuRenderer] HDR canvas config rejected, falling back to SDR: ' +
+                        e.message,
+                );
+                this._hdr = false;
+                if (this._hdrLinear) {
+                    // Scene light on an 8-bit SDR canvas would clip every
+                    // highlight: keep the readback, put the tone curve back.
+                    this._hdrLinear = false;
+                    this._hdrTonemap = true;
+                    this._refWhite = 433;
+                    this._curve = 1;
+                    console.warn('[WebGpuRenderer] HDR linear path → ACES tone-map instead');
+                }
+            }
+        }
+        // Standard 8-bit sRGB canvas (SDR). Its `-srgb` view format is declared
+        // for mwsr's reduction, which draws its linear-light average through
+        // that view (the texels stored are the same sRGB bytes as ever, so the
+        // probe and the other passes see no difference). A browser that
+        // refuses the view formats gets the plain configuration, and the
+        // reduction its software light.
+        this._format = navigator.gpu.getPreferredCanvasFormat();
+        this._interFormat = 'rgba8unorm';
+        this._importColorSpace = 'srgb';
+        const config = {
+            device: this._device,
+            format: this._format,
+            // COPY_SRC: the click-to-photon probe copies three texels out.
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+            alphaMode: 'opaque',
+            colorSpace: 'srgb',
+        };
+        try {
+            this.ctx.configure({ ...config, viewFormats: [this._format + '-srgb'] });
+            this._srgbViews = true;
+        } catch (e) {
+            console.warn(
+                '[WebGpuRenderer] sRGB view formats refused, reduction in software light: ' +
+                    e.message,
+            );
+            this._srgbViews = false;
+            this.ctx.configure(config);
+        }
+    }
+
+    _buildResources() {
+        const device = this._device;
+        this._sampler = device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'clamp-to-edge',
+            addressModeV: 'clamp-to-edge',
+        });
+
+        // Pass 0 — blit external → inputTex (both algos).
+        this._blitLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} },
+            ],
+        });
+        const blitModule = device.createShaderModule({ code: BLIT_WGSL });
+        this._blitPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [this._blitLayout] }),
+            vertex: { module: blitModule, entryPoint: 'vs' },
+            fragment: {
+                module: blitModule,
+                entryPoint: 'fs',
+                targets: [{ format: this._interFormat }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        if (this._hdrYuv) this._buildHdrTonemapResources();
+        if (this._hdrExtTonemap) this._buildHdrExtTonemapResources();
+
+        // The copy to the canvas: the 'off' pass, and every pass's 1:1 frame.
+        this._buildPassthroughResources();
+        // mwsr's pipelines belong to this device: a recovered one builds anew.
+        this._mwsrLayout = null;
+        this._mwsrPipelines = null;
+        if (this._algo === 'fsr1') {
+            this._buildFsr1Resources();
+        } else if (this._algo === 'nis') {
+            this._buildNisResources();
+        } else if (this._algo === 'mwsr') {
+            this._buildMwsrResources();
+        } else if (this._algo !== 'off') {
+            this._buildSgsrResources();
+        }
+
+        // Size-dependent resources (lazily (re)created in draw()).
+        this._inputTex = null;
+        this._inputTexView = null;
+        this._inW = 0;
+        this._inH = 0;
+        this._intermTex = null;
+        this._intermTexView = null;
+        this._intermW = 0;
+        this._intermH = 0;
+        this._enhanceBindGroup = null; // SGSR / EASU bind group (samples inputTex)
+        this._rcasBindGroup = null; // FSR1 RCAS bind group (samples intermTex)
+        this._inputTexViewSrgb = null; // inputTex through its `-srgb` view (mwsr's reduction)
+        this._mwsrBindGroup = null; // mwsr: the plain view (the kernel)
+        this._mwsrBindGroupSrgb = null; // mwsr: the sRGB view (the reduction)
+    }
+
+    // mwsr (MwsrShader.js): the uniform block, the layout both modes share
+    // (sampler, inputTex, uniforms) and one pipeline per regime, all built
+    // here so that nothing compiles while the stream runs (plan §4.3).
+    _buildMwsrResources() {
+        const device = this._device;
+        this._mwsrUniform = device.createBuffer({
+            size: MWSR_UNIFORM_FLOATS * 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._mwsrUniKey = '';
+        this._mwsrLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' },
+                },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+            ],
+        });
+        this._mwsrPipelineLayout = device.createPipelineLayout({
+            bindGroupLayouts: [this._mwsrLayout],
+        });
+        this._mwsrPipelines = new Map();
+        for (const reg of mwsrRegimes({ srgb: this._srgbViews })) this._mwsrPipeline(reg);
+    }
+
+    /**
+     * The pipeline of one mwsr regime (mwsrRegime), specialised by override:
+     * the kernel with CHROMA444 on a 4:4:4 stream; a reduction grid with its
+     * span and its light, drawing into the canvas' `-srgb` view where there
+     * is one. Built once per device, kept in a map by regime.
+     * @param {{mode: 'up'|'down', taps: number, rDown: number, linearLight: number}} reg
+     * @returns {GPURenderPipeline}
+     */
+    _mwsrPipeline(reg) {
+        const key = mwsrRegimeKey(reg);
+        let pipeline = this._mwsrPipelines.get(key);
+        if (pipeline) return pipeline;
+        const srgb = reg.mode === 'down' && this._srgbViews;
+        const module = this._device.createShaderModule({
+            code: mwsrWgsl({ feed: 'tex', half: this._mwsrHalf, mode: reg.mode, taps: reg.taps }),
+        });
+        pipeline = this._device.createRenderPipeline({
+            layout: this._mwsrPipelineLayout,
+            vertex: { module, entryPoint: 'vs' },
+            fragment: {
+                module,
+                entryPoint: 'fs',
+                constants:
+                    reg.mode === 'up'
+                        ? { CHROMA444: this._yuv444 ? 1 : 0 }
+                        : { R_DOWN: reg.rDown, LINEAR_LIGHT: reg.linearLight },
+                targets: [{ format: srgb ? this._format + '-srgb' : this._format }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+        this._mwsrPipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    // The plain copy to the canvas (external → canvas, no upscaler): the 'off'
+    // pass, and the frame of every other pass when it is already at 1:1.
+    _buildPassthroughResources() {
+        const device = this._device;
+        const blitModule = device.createShaderModule({ code: BLIT_WGSL });
+        this._passthroughPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [this._blitLayout] }),
+            vertex: { module: blitModule, entryPoint: 'vs' },
+            fragment: { module: blitModule, entryPoint: 'fs', targets: [{ format: this._format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        // The same copy from inputTex, for a frame that came in through an
+        // ImageBitmap (the import fallback); its bind group follows inputTex.
+        this._texBlitLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+            ],
+        });
+        const texModule = device.createShaderModule({ code: BLIT_TEX_WGSL });
+        this._texBlitPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [this._texBlitLayout] }),
+            vertex: { module: texModule, entryPoint: 'vs' },
+            fragment: { module: texModule, entryPoint: 'fs', targets: [{ format: this._format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        this._texBlitBindGroup = null;
+        // The readback's texture and pass 0, made at its first frame.
+        this._readbackTex = null;
+        this._readbackW = 0;
+        this._readbackH = 0;
+        this._readbackBindGroup = null;
+        this._texPass0Pipeline = null;
+    }
+
+    _buildSgsrResources() {
+        const device = this._device;
+        this._uniformBuf = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._enhanceLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' },
+                },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+            ],
+        });
+        const sgsrModule = device.createShaderModule({ code: SGSR_WGSL });
+        this._enhancePipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [this._enhanceLayout] }),
+            vertex: { module: sgsrModule, entryPoint: 'vs' },
+            fragment: { module: sgsrModule, entryPoint: 'fs', targets: [{ format: this._format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+    }
+
+    _buildNisResources() {
+        const device = this._device;
+        // Five vec4f: scale, detect, sharpA, sharpB, outSize (see NIS_WGSL).
+        this._nisUniform = device.createBuffer({
+            size: 80,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        // Filter banks: 64 phases × (6 scale taps, 6 USM taps) in a 4×64
+        // rgba32float texture, read with textureLoad (no filtering needed).
+        this._nisCoefTex = device.createTexture({
+            size: { width: 4, height: 64 },
+            format: 'rgba32float',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        device.queue.writeTexture(
+            { texture: this._nisCoefTex },
+            nisCoefTexture(),
+            { bytesPerRow: 4 * 16, rowsPerImage: 64 },
+            { width: 4, height: 64 },
+        );
+        this._nisCoefView = this._nisCoefTex.createView();
+        this._nisLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' },
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'unfilterable-float' },
+                },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+            ],
+        });
+        const nisModule = device.createShaderModule({ code: NIS_WGSL });
+        this._nisPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [this._nisLayout] }),
+            vertex: { module: nisModule, entryPoint: 'vs' },
+            fragment: { module: nisModule, entryPoint: 'fs', targets: [{ format: this._format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+    }
+
+    _buildFsr1Resources() {
+        const device = this._device;
+        this._easuUniform = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._rcasUniform = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        // EASU and RCAS share the same layout shape: texture(0) + sampler(1) + uniform(2).
+        this._fsrLayout = device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' },
+                },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+            ],
+        });
+        const fsrPipelineLayout = device.createPipelineLayout({
+            bindGroupLayouts: [this._fsrLayout],
+        });
+        const easuModule = device.createShaderModule({ code: EASU_WGSL });
+        this._easuPipeline = device.createRenderPipeline({
+            layout: fsrPipelineLayout,
+            vertex: { module: easuModule, entryPoint: 'vs_main' },
+            fragment: {
+                module: easuModule,
+                entryPoint: 'fs_main',
+                targets: [{ format: this._interFormat }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+        const rcasModule = device.createShaderModule({ code: RCAS_WGSL });
+        this._rcasPipeline = device.createRenderPipeline({
+            layout: fsrPipelineLayout,
+            vertex: { module: rcasModule, entryPoint: 'vs_main' },
+            fragment: {
+                module: rcasModule,
+                entryPoint: 'fs_main',
+                targets: [{ format: this._format }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+    }
+
+    // HDR tone-map Pass 0 without readback: external texture + params → SDR.
+    // Same bindings as the blit (sampler + external texture) plus the knobs, so
+    // the per-frame bind group is built next to the blit's in draw().
+    _buildHdrExtTonemapResources() {
+        const device = this._device;
+        this._extParams = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._extLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+            ],
+        });
+        const mod = device.createShaderModule({ code: HDR_EXT_TONEMAP_WGSL });
+        // Two targets, like the YUV pass: inputTex ahead of an enhancer pass,
+        // the canvas itself when the frame goes straight there ('off', or any
+        // pass at 1:1). One pipeline serves both when the formats agree.
+        const layout = device.createPipelineLayout({ bindGroupLayouts: [this._extLayout] });
+        const build = (format) =>
+            device.createRenderPipeline({
+                layout,
+                vertex: { module: mod, entryPoint: 'vs' },
+                fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
+                primitive: { topology: 'triangle-list' },
+            });
+        this._extPipeline = build(this._interFormat);
+        this._extCanvasPipeline =
+            this._format === this._interFormat ? this._extPipeline : build(this._format);
+    }
+
+    // HDR tone-map Pass 0: 3 uint planes (Y/U/V) + dims/params uniforms → SDR.
+    _buildHdrTonemapResources() {
+        const device = this._device;
+        this._yuvDims = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._yuvParams = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._yuvCsp = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._yuvLayout = device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'uint' },
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'uint' },
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'uint' },
+                },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+                { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+            ],
+        });
+        const mod = device.createShaderModule({ code: HDR_TONEMAP_WGSL });
+        // Two targets: inputTex ahead of an enhancer pass, the canvas itself
+        // when the frame goes straight there ('off', or any pass at 1:1), whose
+        // format differs on the SDR tone-map path. One pipeline when they agree.
+        const layout = device.createPipelineLayout({ bindGroupLayouts: [this._yuvLayout] });
+        const build = (format) =>
+            device.createRenderPipeline({
+                layout,
+                vertex: { module: mod, entryPoint: 'vs' },
+                fragment: { module: mod, entryPoint: 'fs', targets: [{ format }] },
+                primitive: { topology: 'triangle-list' },
+            });
+        this._yuvPipeline = build(this._interFormat);
+        this._yuvCanvasPipeline =
+            this._format === this._interFormat ? this._yuvPipeline : build(this._format);
+        // Force texture (re)creation on the next upload (device recovery rebuilds this).
+        this._texY = null;
+        this._yuvW = 0;
+    }
+
+    // (Re)create the r16uint Y/U/V plane textures + bind group when sizes change.
+    _ensureYuvTextures(yW, yH, cW, cH) {
+        if (
+            this._texY &&
+            this._yuvW === yW &&
+            this._yuvH === yH &&
+            this._yuvCW === cW &&
+            this._yuvCH === cH
+        )
+            return;
+        for (const t of [this._texY, this._texU, this._texV]) {
+            try {
+                if (t) t.destroy();
+            } catch (e) {}
+        }
+        const mk = (w, h) =>
+            this._device.createTexture({
+                size: { width: w, height: h },
+                format: 'r16uint',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+            });
+        this._texY = mk(yW, yH);
+        this._texU = mk(cW, cH);
+        this._texV = mk(cW, cH);
+        this._yuvW = yW;
+        this._yuvH = yH;
+        this._yuvCW = cW;
+        this._yuvCH = cH;
+        this._yuvBindGroup = this._device.createBindGroup({
+            layout: this._yuvLayout,
+            entries: [
+                { binding: 0, resource: this._texY.createView() },
+                { binding: 1, resource: this._texU.createView() },
+                { binding: 2, resource: this._texV.createView() },
+                { binding: 3, resource: { buffer: this._yuvDims } },
+                { binding: 4, resource: { buffer: this._yuvParams } },
+                { binding: 5, resource: { buffer: this._yuvCsp } },
+            ],
+        });
+        this._device.queue.writeBuffer(this._yuvDims, 0, new Float32Array([yW, yH, cW, cH]));
+    }
+
+    // GPU→CPU readback of the decoded 10/12-bit YUV planes, uploaded to GPU uint
+    // textures for the tone-map pass. Returns true on success; false (with a
+    // one-time warning) when copyTo is unsupported → caller blits via importExternalTexture.
+    async _uploadP010(frame, inW, inH) {
+        // Chrome's copyTo({format}) only supports *conversion* to RGB formats;
+        // YUV planes must be copied in the frame's own format. Hardware HDR
+        // frames are opaque (format=null) — the decoder is forced to software
+        // when tone-mapping, which yields planar I4xxP10/P12.
+        const fmt = frame.format ? String(frame.format) : '';
+        const m = /^I4(20|22|44)P1([02])$/.exec(fmt);
+        if (!m) {
+            if (!this._copyWarned) {
+                this._copyWarned = true;
+                console.warn(
+                    '[WebGpuRenderer] HDR ingest: unsupported frame.format=' +
+                        (fmt || 'null') +
+                        ' (need software-decoded 10/12-bit planar) → importExternalTexture fallback',
+                );
+            }
+            return false;
+        }
+        const cwDen = m[1] === '44' ? 1 : 2;
+        const chDen = m[1] === '20' ? 2 : 1;
+        const codeScale = m[2] === '2' ? 1023.0 / 4095.0 : 1.0; // 12-bit → 10-bit math
+        const yW = inW,
+            yH = inH;
+        const cW = Math.ceil(inW / cwDen),
+            cH = Math.ceil(inH / chDen);
+        let layouts;
+        try {
+            const size = frame.allocationSize();
+            if (!this._copyBuf || this._copyBuf.byteLength < size) {
+                this._copyBuf = new ArrayBuffer(size);
+            }
+            layouts = await frame.copyTo(this._copyBuf);
+        } catch (e) {
+            if (!this._copyWarned) {
+                this._copyWarned = true;
+                console.warn(
+                    '[WebGpuRenderer] HDR copyTo failed (frame.format=' +
+                        fmt +
+                        '): ' +
+                        e.message +
+                        ' → importExternalTexture fallback',
+                );
+            }
+            return false;
+        }
+        if (!layouts || layouts.length < 3) return false;
+        this._ensureYuvTextures(yW, yH, cW, cH);
+        this._readHdrKnobs();
+        // params + colorSpace uniforms, written each frame (cheap) so the
+        // localStorage knobs apply live and colorSpace changes are tracked.
+        this._device.queue.writeBuffer(
+            this._yuvParams,
+            0,
+            new Float32Array([
+                this._refWhite,
+                codeScale * this._codeScale,
+                this._exposure,
+                this._curve,
+            ]),
+        );
+        const cs = frame.colorSpace || {};
+        this._device.queue.writeBuffer(
+            this._yuvCsp,
+            0,
+            new Float32Array([
+                cs.fullRange ? 1 : 0,
+                cs.matrix === 'bt709' || cs.matrix === 'smpte170m' ? 1 : 0,
+                // Unknown transfer on a negotiated-HDR stream → assume PQ.
+                !cs.transfer || cs.transfer === 'pq' ? 1 : 0,
+                0,
+            ]),
+        );
+        const buf = new Uint8Array(this._copyBuf);
+        const writePlane = (tex, lo, w, h) => {
+            this._device.queue.writeTexture(
+                { texture: tex },
+                buf,
+                { offset: lo.offset, bytesPerRow: lo.stride, rowsPerImage: h },
+                { width: w, height: h },
+            );
+        };
+        writePlane(this._texY, layouts[0], yW, yH);
+        writePlane(this._texU, layouts[1], cW, cH);
+        writePlane(this._texV, layouts[2], cW, cH);
+        if (!this._yuvFormatLogged) {
+            this._yuvFormatLogged = true;
+            console.log(
+                '[WebGpuRenderer] HDR P010 ingest: frame.format=' +
+                    fmt +
+                    ' y=' +
+                    yW +
+                    'x' +
+                    yH +
+                    ' c=' +
+                    cW +
+                    'x' +
+                    cH +
+                    ' planes=' +
+                    layouts.length +
+                    ' colorSpace=' +
+                    JSON.stringify({
+                        primaries: cs.primaries,
+                        transfer: cs.transfer,
+                        matrix: cs.matrix,
+                        fullRange: cs.fullRange,
+                    }),
+            );
+        }
+        return true;
+    }
+
+    // Live-tunable tone-map knobs, re-read from localStorage at most every 500ms
+    // so values can be tweaked from the console without restarting the stream.
+    // (HDR tone-map never runs in the worker, so localStorage is available.)
+    _readHdrKnobs() {
+        const now = performance.now();
+        if (now - this._knobsReadMs < 500) return;
+        this._knobsReadMs = now;
+        try {
+            const rw = parseFloat(localStorage.getItem('mw_hdr_refwhite'));
+            this._refWhite = rw > 0 ? rw : this._hdrLinear ? 203 : 433;
+            const ex = parseFloat(localStorage.getItem('mw_hdr_exposure'));
+            this._exposure = ex > 0 ? ex : 1.0;
+            // The linear HDR path has no curve to choose: it is the HDR output.
+            if (this._hdrLinear) this._curve = 2;
+            else this._curve = localStorage.getItem('mw_hdr_curve') === 'soft' ? 0 : 1;
+        } catch (e) {}
+    }
+
+    // inputTex = frame resolution (Pass 0 target / enhancer source).
+    _ensureInputTex(inW, inH) {
+        if (this._inputTex && this._inW === inW && this._inH === inH) return;
+        if (this._inputTex) {
+            try {
+                this._inputTex.destroy();
+            } catch (e) {}
+        }
+        this._inputTex = this._device.createTexture({
+            size: { width: inW, height: inH },
+            format: this._interFormat,
+            // COPY_DST: the import fallback copies the frame in (see _importFrame).
+            usage:
+                GPUTextureUsage.RENDER_ATTACHMENT |
+                GPUTextureUsage.TEXTURE_BINDING |
+                GPUTextureUsage.COPY_DST,
+            // The `-srgb` view mwsr's reduction reads through (SDR).
+            viewFormats: this._srgbViews ? [this._interFormat + '-srgb'] : [],
+        });
+        this._inputTexView = this._inputTex.createView();
+        this._inputTexViewSrgb = this._srgbViews
+            ? this._inputTex.createView({ format: this._interFormat + '-srgb' })
+            : null;
+        this._inW = inW;
+        this._inH = inH;
+        this._texBlitBindGroup = this._device.createBindGroup({
+            layout: this._texBlitLayout,
+            entries: [
+                { binding: 0, resource: this._sampler },
+                { binding: 1, resource: this._inputTexView },
+            ],
+        });
+
+        if (this._algo === 'fsr1') {
+            this._enhanceBindGroup = this._device.createBindGroup({
+                layout: this._fsrLayout,
+                entries: [
+                    { binding: 0, resource: this._inputTexView },
+                    { binding: 1, resource: this._sampler },
+                    { binding: 2, resource: { buffer: this._easuUniform } },
+                ],
+            });
+        } else if (this._algo === 'nis') {
+            this._enhanceBindGroup = this._device.createBindGroup({
+                layout: this._nisLayout,
+                entries: [
+                    { binding: 0, resource: this._sampler },
+                    { binding: 1, resource: this._inputTexView },
+                    { binding: 2, resource: this._nisCoefView },
+                    { binding: 3, resource: { buffer: this._nisUniform } },
+                ],
+            });
+        } else if (this._algo === 'mwsr') {
+            // Two bind groups, kept with the texture: the plain view for the
+            // kernel, the sRGB view for the reduction (one and the same without
+            // the views).
+            const mk = (view) =>
+                this._device.createBindGroup({
+                    layout: this._mwsrLayout,
+                    entries: [
+                        { binding: 0, resource: this._sampler },
+                        { binding: 1, resource: view },
+                        { binding: 2, resource: { buffer: this._mwsrUniform } },
+                    ],
+                });
+            this._mwsrBindGroup = mk(this._inputTexView);
+            this._mwsrBindGroupSrgb = this._inputTexViewSrgb
+                ? mk(this._inputTexViewSrgb)
+                : this._mwsrBindGroup;
+        } else {
+            this._enhanceBindGroup = this._device.createBindGroup({
+                layout: this._enhanceLayout,
+                entries: [
+                    { binding: 0, resource: this._sampler },
+                    { binding: 1, resource: this._inputTexView },
+                    { binding: 2, resource: { buffer: this._uniformBuf } },
+                ],
+            });
+        }
+    }
+
+    // intermTex = output resolution (FSR1 only: EASU target / RCAS source).
+    _ensureIntermTex(w, h) {
+        if (this._intermTex && this._intermW === w && this._intermH === h) return;
+        if (this._intermTex) {
+            try {
+                this._intermTex.destroy();
+            } catch (e) {}
+        }
+        this._intermTex = this._device.createTexture({
+            size: { width: w, height: h },
+            format: this._interFormat,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        this._intermTexView = this._intermTex.createView();
+        this._intermW = w;
+        this._intermH = h;
+        this._rcasBindGroup = this._device.createBindGroup({
+            layout: this._fsrLayout,
+            entries: [
+                { binding: 0, resource: this._intermTexView },
+                { binding: 1, resource: this._sampler },
+                { binding: 2, resource: { buffer: this._rcasUniform } },
+            ],
+        });
+    }
+
+    // readbackTex = the frame read back as RGBA (see _copyFrame), what pass 0
+    // or the plain copy to the canvas reads in place of the external texture;
+    // its pass 0 targets inputTex's format (float in HDR).
+    _ensureReadbackTex(w, h) {
+        if (this._readbackTex && this._readbackW === w && this._readbackH === h) return;
+        if (this._readbackTex) {
+            try {
+                this._readbackTex.destroy();
+            } catch (e) {}
+        }
+        const device = this._device;
+        this._readbackTex = device.createTexture({
+            size: { width: w, height: h },
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        this._readbackW = w;
+        this._readbackH = h;
+        this._readbackBindGroup = device.createBindGroup({
+            layout: this._texBlitLayout,
+            entries: [
+                { binding: 0, resource: this._sampler },
+                { binding: 1, resource: this._readbackTex.createView() },
+            ],
+        });
+        if (!this._texPass0Pipeline) {
+            const module = device.createShaderModule({ code: BLIT_TEX_WGSL });
+            this._texPass0Pipeline = device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [this._texBlitLayout] }),
+                vertex: { module, entryPoint: 'vs' },
+                fragment: { module, entryPoint: 'fs', targets: [{ format: this._interFormat }] },
+                primitive: { topology: 'triangle-list' },
+            });
+        }
+    }
+
+    _armDeviceLost() {
+        this._device.lost.then((info) => {
+            if (this._disposed) return;
+            console.warn('[WebGpuRenderer] device lost (' + info.reason + '): ' + info.message);
+            this._ready = false;
+            // A device that never finished a frame would not do better a
+            // second time. Chrome destroys the device of a canvas it cannot
+            // give a texture to present, and every new one the same way: Linux
+            // on the software adapter, where the swap chain finds no shared
+            // image to allocate and the page's whole WebGPU instance goes with
+            // the device (22/10/2026, CI 39737555924). The loss is then the
+            // browser's: 'destroyed' is only this renderer's own once disposed.
+            if (this._framesOnDevice === 0) {
+                this._giveUp('its device was lost before it finished a frame');
+                return;
+            }
+            this._recover();
+        });
+    }
+
+    async _recover() {
+        try {
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) throw new Error('no adapter on recovery');
+            this._adapter = adapter;
+            this._device = await WebGpuRenderer._requestDevice(adapter);
+            this._mwsrHalf = this._device.features.has('shader-f16');
+            this._framesOnDevice = 0;
+            this._armDeviceLost();
+            this._configure();
+            this._buildResources(); // resets size-dependent textures (recreated on next draw)
+            this._ready = true;
+            console.log('[WebGpuRenderer] device recovered');
+        } catch (e) {
+            console.error('[WebGpuRenderer] device recovery failed:', e.message);
+            this._giveUp('its device could not be recovered');
+        }
+    }
+
+    setOutputSize(width, height) {
+        if (width <= 0 || height <= 0) return;
+        this._outW = width;
+        this._outH = height;
+        this._hasOutputSize = true;
+    }
+
+    /**
+     * Switch the upscaler pass at runtime (EnhancerGovernor's ladder). Only the
+     * chosen algo's resources are built at create(), so the target's are built
+     * on first use and kept — a switch back is then free.
+     *
+     * Besides the algo field, the enhancer bind group must be invalidated: its
+     * LAYOUT differs between FSR1 and SGSR, and zeroing the cached input size
+     * forces _ensureInputTex to rebuild it. (The copy to the canvas and the HDR
+     * pass 0 exist in both of their targets from the start, so 'off' needs
+     * nothing built or rebuilt.)
+     *
+     * @param {string} algo 'sgsr' | 'nis' | 'fsr1' | 'mwsr' | 'off'; anything else is refused.
+     * @returns {boolean} true when the renderer switched.
+     */
+    setAlgo(algo) {
+        if (algo === this._algo) return false;
+        if (!this._ready || !this._device) return false;
+        if (
+            algo !== 'sgsr' &&
+            algo !== 'nis' &&
+            algo !== 'fsr1' &&
+            algo !== 'mwsr' &&
+            algo !== 'off'
+        )
+            return false;
+
+        try {
+            if (algo === 'sgsr' && !this._enhancePipeline) this._buildSgsrResources();
+            else if (algo === 'nis' && !this._nisPipeline) this._buildNisResources();
+            else if (algo === 'fsr1' && !this._easuPipeline) this._buildFsr1Resources();
+            else if (algo === 'mwsr' && !this._mwsrLayout) this._buildMwsrResources();
+        } catch (e) {
+            console.error('[WebGpuRenderer] setAlgo(' + algo + ') failed: ' + e.message);
+            return false;
+        }
+
+        this._algo = algo;
+        this._inW = 0;
+        this._inH = 0;
+        this._intermW = 0;
+        this._intermH = 0;
+        console.log('[WebGpuRenderer] algo → ' + algo);
+        return true;
+    }
+
+    /**
+     * The frame as an external texture, or null when the browser refuses the
+     * import. Chrome on a machine whose decoded frames cannot be shared with
+     * WebGPU (a Linux runner on the software adapter, 21/10/2026) threw
+     * "Failed to import texture from video" on every frame, and the canvas
+     * stayed black while the console filled up. From the first refusal on,
+     * draw() copies the frames in instead (_copyFrame) and tries the import
+     * again every IMPORT_RETRY_FRAMES draws, in case the refusal was
+     * transient — at once after a frame that got in by no way at all, there
+     * being nothing to lose. One console line in all.
+     * @param {VideoFrame} frame
+     * @returns {GPUExternalTexture|null}
+     */
+    _importFrame(frame) {
+        if (
+            this._importRefused &&
+            this._lostFrames === 0 &&
+            this._drawCount - this._importRefusedAt < IMPORT_RETRY_FRAMES
+        )
+            return null;
+        try {
+            const tex = this._device.importExternalTexture({
+                source: frame,
+                colorSpace: this._importColorSpace || 'srgb',
+            });
+            this._importRefused = false;
+            return tex;
+        } catch (e) {
+            if (!this._importWarned) {
+                this._importWarned = true;
+                console.warn(
+                    '[WebGpuRenderer] importExternalTexture refused the frame (' +
+                        e.message +
+                        '): the frames are copied in from now on',
+                );
+            }
+            this._importRefused = true;
+            this._importRefusedAt = this._drawCount;
+            // Asked again with the import: the bitmap may work now too.
+            this._bitmapRefused = false;
+            return null;
+        }
+    }
+
+    /**
+     * A frame the import refused, copied in another way: through an
+     * ImageBitmap into inputTex (one GPU copy, the WebGL renderer's own
+     * fallback for a refused VideoFrame), else read back by the browser as
+     * RGBA and written into readbackTex (a round trip through memory, the
+     * slowest), which pass 0 copies as it would the external texture (Bruno's
+     * third fallback, 22/10/2026). A refused bitmap is asked again with the
+     * import. In HDR either copy is the browser's SDR rendering of the frame:
+     * a picture, not the HDR one.
+     * @param {VideoFrame} frame
+     * @returns {Promise<''|'bitmap'|'readback'>} the way that took the frame,
+     *   '' when neither did: the frame is lost (_noteFrame).
+     */
+    async _copyFrame(frame, inW, inH) {
+        if (!this._bitmapRefused) {
+            try {
+                this._ensureInputTex(inW, inH);
+                await this._copyFrameThroughBitmap(frame, inW, inH);
+                return 'bitmap';
+            } catch (e) {
+                this._bitmapRefused = true;
+                if (!this._bitmapWarned) {
+                    this._bitmapWarned = true;
+                    console.warn(
+                        '[WebGpuRenderer] the ImageBitmap copy failed too (' +
+                            e.message +
+                            '): the frames are read back (VideoFrame.copyTo) instead',
+                    );
+                }
+            }
+        }
+        try {
+            await this._copyFrameThroughReadback(frame);
+            return 'readback';
+        } catch (e) {
+            if (!this._readbackWarned) {
+                this._readbackWarned = true;
+                console.warn(
+                    '[WebGpuRenderer] the readback failed too (' +
+                        e.message +
+                        '): no way in for the frame',
+                );
+            }
+            return '';
+        }
+    }
+
+    /** The bitmap copy's pass 0: the frame, as an ImageBitmap, copied into inputTex. */
+    async _copyFrameThroughBitmap(frame, inW, inH) {
+        const bmp = await createImageBitmap(frame);
+        try {
+            this._device.queue.copyExternalImageToTexture(
+                { source: bmp },
+                { texture: this._inputTex, colorSpace: 'srgb', premultipliedAlpha: false },
+                { width: Math.min(bmp.width, inW), height: Math.min(bmp.height, inH) },
+            );
+        } finally {
+            bmp.close();
+        }
+    }
+
+    /**
+     * The readback: the frame as RGBA in memory (VideoFrame.copyTo, the
+     * browser's own conversion of the decoded picture, in sRGB), written into
+     * readbackTex. copyTo converts only where the browser knows the `format`
+     * member — WebIDL reads every member it knows, so the getter tells — and
+     * would otherwise hand back the frame's own planes, NV12 or I420, for the
+     * texture to show as colours.
+     * @param {VideoFrame} frame
+     */
+    async _copyFrameThroughReadback(frame) {
+        let converts = false;
+        const asked = {
+            get format() {
+                converts = true;
+                return 'RGBA';
+            },
+        };
+        const size = frame.allocationSize(asked);
+        if (!converts) throw new Error('VideoFrame.copyTo has no RGBA conversion here');
+        if (!this._readbackBuf || this._readbackBuf.byteLength < size)
+            this._readbackBuf = new ArrayBuffer(size);
+        const [plane] = await frame.copyTo(this._readbackBuf, { format: 'RGBA' });
+        const rect = frame.visibleRect;
+        const w = rect ? rect.width : frame.codedWidth;
+        const h = rect ? rect.height : frame.codedHeight;
+        this._ensureReadbackTex(w, h);
+        this._device.queue.writeTexture(
+            { texture: this._readbackTex },
+            this._readbackBuf,
+            { offset: plane.offset, bytesPerRow: plane.stride, rowsPerImage: h },
+            { width: w, height: h },
+        );
+    }
+
+    /**
+     * Count the frames that never reached the canvas: no way in took them,
+     * the draw threw, or their work did not complete on a device that stayed
+     * up. LOST_FRAMES_LIMIT of them in a row and the renderer gives up (Bruno,
+     * 22/10/2026: the picture moves to the same pass on WebGL2, else to
+     * Canvas2D, rather than stay black); a frame drawn starts the count again.
+     * @param {boolean} drawn
+     * @param {string} [why] what kept the frame off the canvas
+     */
+    _noteFrame(drawn, why) {
+        if (drawn) {
+            this._lostFrames = 0;
+            this._framesOnDevice++;
+            return;
+        }
+        this._lostFrames++;
+        if (this._lostFrames >= LOST_FRAMES_LIMIT)
+            this._giveUp(
+                this._lostFrames + ' frames in a row did not reach the canvas (' + why + ')',
+            );
+    }
+
+    /** See VideoRenderer.failed: once, and said in the console. */
+    _giveUp(why) {
+        if (this._failed) return;
+        this._failed = true;
+        console.warn('[WebGpuRenderer] giving up: ' + why);
+    }
+
+    async draw(frame) {
+        if (!this._ready || !this.ctx) {
+            try {
+                frame.close();
+            } catch (e) {}
+            return;
+        }
+
+        // Diagnostics: split the encode/submit work from the GPU wait below.
+        // onSubmittedWorkDone() also absorbs the compositor's swap-chain
+        // back-pressure, so a large waitMs with a small submitMs means the
+        // pipeline is presentation-bound, not shader-bound (which is exactly
+        // what a rising framerate turns into). See VideoRenderer.lastDraw.
+        const drawStart = performance.now();
+        let uploadMs = 0;
+        // Set when the frame came in another way than the import (see
+        // _copyFrame): 'bitmap' into inputTex, 'readback' into readbackTex.
+        let copied = '';
+        // The frame's device, and whether its work went in (see _noteFrame).
+        const device = this._device;
+        let submitted = false;
+        let lostWhy = 'their work did not complete';
+
+        const inW = frame.displayWidth || frame.codedWidth || 0;
+        const inH = frame.displayHeight || frame.codedHeight || 0;
+        if (inW <= 0 || inH <= 0) {
+            try {
+                frame.close();
+            } catch (e) {}
+            return;
+        }
+        this._drawCount++;
+
+        // Canvas backing = frame-aspect rect fitting the output box (else frame
+        // res), capped (scaleRegime.js). At exactly the frame size the pass has
+        // nothing to do: the frame is copied straight to the canvas, as in
+        // 'off', and the pass resumes on the next frame whose size differs.
+        const { cw, ch } = fitOutputSize(
+            inW,
+            inH,
+            this._hasOutputSize ? this._outW : 0,
+            this._hasOutputSize ? this._outH : 0,
+        );
+        const identity = isIdentityScale(inW, inH, cw, ch);
+        const direct = this._algo === 'off' || identity;
+        this._passthrough = identity && this._algo !== 'off';
+        if (cw > 0 && ch > 0 && (this.canvas.width !== cw || this.canvas.height !== ch)) {
+            this.canvas.width = cw;
+            this.canvas.height = ch;
+        }
+
+        // HDR readback paths (tone-map or linear): read back the raw 10-bit YUV
+        // (importExternalTexture would tone-map the HDR away). On failure, fall
+        // back to the blit below.
+        let useYuv = false;
+        if (this._hdrYuv) {
+            const uploadStart = performance.now();
+            try {
+                useYuv = await this._uploadP010(frame, inW, inH);
+                uploadMs = performance.now() - uploadStart;
+            } catch (e) {
+                uploadMs = performance.now() - uploadStart;
+                useYuv = false;
+                if (!this._uploadWarned) {
+                    this._uploadWarned = true;
+                    console.warn('[WebGpuRenderer] HDR upload threw: ' + e.message);
+                }
+            }
+        }
+
+        try {
+            // External texture + its blit bind group are per-frame (texture expires).
+            // Skipped when the YUV tone-map pass supplies Pass 0 instead.
+            let blitBindGroup = null;
+            // The external texture feeds either the plain blit or, on a browser
+            // that did not tone-map it on import, the ext tone-map pass.
+            const useExt = !useYuv && this._hdrExtTonemap && !!this._extPipeline;
+            // A refused import: the frame is copied in here (_copyFrame), into
+            // inputTex (pass 0 done) or readbackTex (pass 0 reads it), and the
+            // plain copy to the canvas reads that texture. A frame no way took
+            // in is lost.
+            if (!useYuv) {
+                const externalTex = this._importFrame(frame);
+                if (!externalTex) {
+                    const uploadStart = performance.now();
+                    copied = await this._copyFrame(frame, inW, inH);
+                    uploadMs += performance.now() - uploadStart;
+                    if (!copied) {
+                        frame.close();
+                        this._noteFrame(false, 'no way in');
+                        this._noteDraw(drawStart, uploadMs, this._algo + '+lost');
+                        return;
+                    }
+                } else {
+                    if (useExt) {
+                        this._readHdrKnobs();
+                        // Written each frame (cheap) so the localStorage knobs apply live.
+                        this._device.queue.writeBuffer(
+                            this._extParams,
+                            0,
+                            new Float32Array([this._refWhite, 1.0, this._exposure, this._curve]),
+                        );
+                    }
+                    blitBindGroup = this._device.createBindGroup({
+                        layout: useExt ? this._extLayout : this._blitLayout,
+                        entries: useExt
+                            ? [
+                                  { binding: 0, resource: this._sampler },
+                                  { binding: 1, resource: externalTex },
+                                  { binding: 2, resource: { buffer: this._extParams } },
+                              ]
+                            : [
+                                  { binding: 0, resource: this._sampler },
+                                  { binding: 1, resource: externalTex },
+                              ],
+                    });
+                }
+            }
+
+            const encoder = this._device.createCommandEncoder();
+            const canvasTex = this.ctx.getCurrentTexture();
+
+            // Straight to the canvas, one pass: 'off' (linear scale, no
+            // upscaler), and every pass at 1:1 — the plain external copy, or
+            // the HDR pass 0 in its canvas-format flavour.
+            if (direct) {
+                const pass = encoder.beginRenderPass({
+                    colorAttachments: [
+                        {
+                            view: canvasTex.createView(),
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        },
+                    ],
+                });
+                if (useYuv) {
+                    pass.setPipeline(this._yuvCanvasPipeline);
+                    pass.setBindGroup(0, this._yuvBindGroup);
+                } else if (copied) {
+                    pass.setPipeline(this._texBlitPipeline);
+                    pass.setBindGroup(
+                        0,
+                        copied === 'bitmap' ? this._texBlitBindGroup : this._readbackBindGroup,
+                    );
+                } else {
+                    pass.setPipeline(useExt ? this._extCanvasPipeline : this._passthroughPipeline);
+                    pass.setBindGroup(0, blitBindGroup);
+                }
+                pass.draw(3);
+                pass.end();
+                const probing =
+                    this._probeActive && this._queueProbeRead(encoder, canvasTex, cw, ch);
+                this._device.queue.submit([encoder.finish()]);
+                submitted = true;
+                if (probing) this._mapProbeRead();
+                frame.close();
+                // Backpressure: resolve only when the GPU finished, so the caller's
+                // render guard reflects real GPU throughput (drop-to-latest then
+                // discards the backlog instead of letting it grow → no lag creep).
+                const gpuStart = performance.now();
+                let done = false;
+                try {
+                    await device.queue.onSubmittedWorkDone();
+                    done = true;
+                } catch (e) {}
+                this._noteFrame(done && device === this._device && this._ready, lostWhy);
+                this._noteDraw(
+                    drawStart,
+                    uploadMs + (performance.now() - gpuStart),
+                    (this._passthrough ? '1:1' : 'off') +
+                        (useYuv ? '+yuv' : '') +
+                        (copied ? '+' + copied : ''),
+                );
+                return;
+            }
+
+            this._ensureInputTex(inW, inH);
+
+            // Pass 0: external → inputTex (frame res). Already done by the copy
+            // when the frame came in through an ImageBitmap; from readbackTex
+            // when it was read back.
+            if (copied !== 'bitmap') {
+                const p0 = encoder.beginRenderPass({
+                    colorAttachments: [
+                        {
+                            view: this._inputTexView,
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        },
+                    ],
+                });
+                if (useYuv) {
+                    // HDR YUV → SDR (ACES) tone-map into inputTex.
+                    p0.setPipeline(this._yuvPipeline);
+                    p0.setBindGroup(0, this._yuvBindGroup);
+                } else if (copied === 'readback') {
+                    p0.setPipeline(this._texPass0Pipeline);
+                    p0.setBindGroup(0, this._readbackBindGroup);
+                } else {
+                    // Plain blit, or the same ACES tone-map fed by the external texture.
+                    p0.setPipeline(useExt ? this._extPipeline : this._blitPipeline);
+                    p0.setBindGroup(0, blitBindGroup);
+                }
+                p0.draw(3);
+                p0.end();
+            }
+
+            if (this._algo === 'fsr1') {
+                this._ensureIntermTex(cw, ch);
+                // EASU uniform = (inW, inH, outW, outH) in pixels.
+                this._device.queue.writeBuffer(
+                    this._easuUniform,
+                    0,
+                    new Float32Array([inW, inH, cw, ch]),
+                );
+                // RCAS samples intermTex (cw×ch) at TEXEL offsets → output* = 1/cw, 1/ch.
+                this._device.queue.writeBuffer(
+                    this._rcasUniform,
+                    0,
+                    new Float32Array([cw, ch, 1 / cw, 1 / ch]),
+                );
+
+                // Pass 1: EASU inputTex → intermTex (output res).
+                const p1 = encoder.beginRenderPass({
+                    colorAttachments: [
+                        {
+                            view: this._intermTexView,
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        },
+                    ],
+                });
+                p1.setPipeline(this._easuPipeline);
+                p1.setBindGroup(0, this._enhanceBindGroup);
+                p1.draw(3);
+                p1.end();
+
+                // Pass 2: RCAS intermTex → canvas.
+                const p2 = encoder.beginRenderPass({
+                    colorAttachments: [
+                        {
+                            view: canvasTex.createView(),
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        },
+                    ],
+                });
+                p2.setPipeline(this._rcasPipeline);
+                p2.setBindGroup(0, this._rcasBindGroup);
+                p2.draw(3);
+                p2.end();
+            } else if (this._algo === 'nis') {
+                // NIS is specified for scale factors in [0.5, 1] (up to 2× up).
+                // Outside that it still runs — just not what NVIDIA validated —
+                // so say so once rather than refuse the frame.
+                const kScaleX = inW / cw,
+                    kScaleY = inH / ch;
+                if (!this._nisScaleWarned && !nisScaleInRange(kScaleX, kScaleY)) {
+                    this._nisScaleWarned = true;
+                    console.warn(
+                        '[WebGpuRenderer] NIS scale ' +
+                            kScaleX.toFixed(3) +
+                            '×' +
+                            kScaleY.toFixed(3) +
+                            ' is outside the SDK range [0.5, 1] (2× upscale max, no downscale)',
+                    );
+                }
+                if (performance.now() - this._nisKnobsMs >= 500) {
+                    this._nisKnobsMs = performance.now();
+                    this._nisSharpness = readNisSharpness();
+                }
+                const cfg = nisConfig(this._nisSharpness);
+                this._device.queue.writeBuffer(
+                    this._nisUniform,
+                    0,
+                    new Float32Array([
+                        kScaleX,
+                        kScaleY,
+                        1 / inW,
+                        1 / inH,
+                        ...cfg.detect,
+                        ...cfg.sharpA,
+                        ...cfg.sharpB,
+                        cw,
+                        ch,
+                        0,
+                        0,
+                    ]),
+                );
+                // Pass 1: NIS inputTex → canvas.
+                const p1 = encoder.beginRenderPass({
+                    colorAttachments: [
+                        {
+                            view: canvasTex.createView(),
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        },
+                    ],
+                });
+                p1.setPipeline(this._nisPipeline);
+                p1.setBindGroup(0, this._enhanceBindGroup);
+                p1.draw(3);
+                p1.end();
+            } else if (this._algo === 'mwsr') {
+                // The regime by the frame and canvas sizes — never 'copy', the
+                // 1:1 frame went straight to the canvas above. The reduction
+                // reads and draws through the sRGB views when the canvas has
+                // them; the kernel works in gamma, on the plain views.
+                const reg = mwsrRegime(inW, inH, cw, ch, { srgb: this._srgbViews });
+                const srgb = reg.mode === 'down' && this._srgbViews;
+                const uniKey = inW + 'x' + inH + '>' + cw + 'x' + ch;
+                if (this._mwsrUniKey !== uniKey) {
+                    this._mwsrUniKey = uniKey;
+                    this._device.queue.writeBuffer(
+                        this._mwsrUniform,
+                        0,
+                        mwsrUniforms(inW, inH, cw, ch),
+                    );
+                }
+                // Pass 1: mwsr inputTex → canvas.
+                const p1 = encoder.beginRenderPass({
+                    colorAttachments: [
+                        {
+                            view: srgb
+                                ? canvasTex.createView({ format: this._format + '-srgb' })
+                                : canvasTex.createView(),
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        },
+                    ],
+                });
+                p1.setPipeline(this._mwsrPipeline(reg));
+                p1.setBindGroup(0, srgb ? this._mwsrBindGroupSrgb : this._mwsrBindGroup);
+                p1.draw(3);
+                p1.end();
+            } else {
+                // SGSR: viewport = (1/inW, 1/inH, inW, inH).
+                this._device.queue.writeBuffer(
+                    this._uniformBuf,
+                    0,
+                    new Float32Array([1 / inW, 1 / inH, inW, inH]),
+                );
+                // Pass 1: SGSR inputTex → canvas.
+                const p1 = encoder.beginRenderPass({
+                    colorAttachments: [
+                        {
+                            view: canvasTex.createView(),
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        },
+                    ],
+                });
+                p1.setPipeline(this._enhancePipeline);
+                p1.setBindGroup(0, this._enhanceBindGroup);
+                p1.draw(3);
+                p1.end();
+            }
+
+            const probing = this._probeActive && this._queueProbeRead(encoder, canvasTex, cw, ch);
+            this._device.queue.submit([encoder.finish()]);
+            submitted = true;
+            if (probing) this._mapProbeRead();
+        } catch (e) {
+            // Once per distinct message: a frame that fails is every frame.
+            const msg = String(e && e.message);
+            lostWhy = 'the draw threw: ' + msg;
+            if (!this._drawErrors.has(msg)) {
+                this._drawErrors.add(msg);
+                console.error(
+                    '[WebGpuRenderer] draw failed: ' +
+                        msg +
+                        ' (further frames failing the same way are not logged)',
+                );
+            }
+        }
+
+        frame.close();
+        // Backpressure: resolve only when the GPU finished this frame's work, so
+        // the caller's render guard self-paces to GPU capacity. Without it the
+        // VSync-off / worker path submits faster than the GPU presents and the
+        // backlog grows unbounded → progressive latency (4K + FSR1 + zoom).
+        const gpuStart = performance.now();
+        let done = false;
+        try {
+            await device.queue.onSubmittedWorkDone();
+            done = true;
+        } catch (e) {}
+        // Drawn: its work went in and completed on a device that stayed up.
+        this._noteFrame(submitted && done && device === this._device && this._ready, lostWhy);
+        this._noteDraw(
+            drawStart,
+            uploadMs + (performance.now() - gpuStart),
+            this._algo + (useYuv ? '+yuv' : '') + (copied ? '+' + copied : ''),
+        );
+    }
+
+    /** Record the draw split for PipelineDiag (see VideoRenderer.lastDraw). */
+    _noteDraw(startMs, waitMs, path) {
+        const total = performance.now() - startMs;
+        this.lastDraw.submitMs = Math.max(0, total - waitMs);
+        this.lastDraw.waitMs = waitMs;
+        this.lastDraw.path = path;
+    }
+
+    dispose() {
+        this._disposed = true;
+        this._ready = false;
+        try {
+            if (this._inputTex) this._inputTex.destroy();
+        } catch (e) {}
+        try {
+            if (this._intermTex) this._intermTex.destroy();
+        } catch (e) {}
+        try {
+            if (this._readbackTex) this._readbackTex.destroy();
+        } catch (e) {}
+        this._readbackTex = null;
+        this._readbackBuf = null;
+        try {
+            if (this._nisCoefTex) this._nisCoefTex.destroy();
+        } catch (e) {}
+        this._nisCoefTex = null;
+        try {
+            if (this._probeBuf) this._probeBuf.destroy();
+        } catch (e) {}
+        this._probeBuf = null;
+        for (const t of [this._texY, this._texU, this._texV]) {
+            try {
+                if (t) t.destroy();
+            } catch (e) {}
+        }
+        try {
+            if (this._device) this._device.destroy();
+        } catch (e) {}
+        this._inputTex = null;
+        this._intermTex = null;
+        this._texY = null;
+        this._texU = null;
+        this._texV = null;
+        this._copyBuf = null;
+        this._device = null;
+        this.ctx = null;
+        this.canvas = null;
+    }
+}

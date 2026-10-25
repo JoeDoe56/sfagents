@@ -42,13 +42,18 @@ License, with a private CPython runtime. See web/native/linux/vendor/LICENSE,
 web/native/linux/vendor/UPSTREAM.json and web/native/NOTICE.md for source,
 versions and runtime notices. macOS uses native OS readers.
 
-Remote Desktop works with MoonlightWeb (https://github.com/linckosz/moonlight-web),
-Copyright 2026 Bruno Martin, licensed under the GNU General Public License,
-version 3 or later. SF Agents does not include MoonlightWeb's binaries: it uses
-an installed copy or downloads an official release. web/public/remote/
-moonlight-embed.js and the edits in web/src/remote-embed.ts change MoonlightWeb's
-web page as SF Agents serves it; the same change is in
-third_party/moonlight-web/sfagents-embed.patch.
+Remote Desktop (screen mirroring) is built from MoonlightWeb
+(https://github.com/linckosz/moonlight-web), Copyright 2026 Bruno Martin,
+licensed under the GNU General Public License, version 3 or later: its capture,
+encoding and streaming engine in web/native/screen (built into the
+sfagents-screen helper, which SF Agents downloads from this repository's
+releases) and its stream page in web/public/screen. Both are changed for
+SF Agents; web/native/screen/UPSTREAM.json and web/public/screen/UPSTREAM.json
+name the commit and every change. The helper's archive includes Qt
+(LGPL-3.0), libdatachannel (MPL-2.0), OpenSSL (Apache-2.0), Opus and OpenH264
+(BSD) and the virtual display driver (MIT) MoonlightWeb uses. On Windows, the
+startup approval also installs ViGEmBus (BSD-3-Clause), downloaded from its
+official release, for gamepads.
 
 Dictation downloads, on first use, a llama.cpp release
 (https://github.com/ggml-org/llama.cpp, MIT License) and Qwen3-ASR-1.7B in

@@ -1,0 +1,400 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "NvHTTP.h"
+
+#include <QDebug>
+#include <QSslConfiguration>
+#include <QSslCertificate>
+#include <QSslError>
+#include <QSslKey>
+#include <QSslSocket>
+#include <QNetworkProxy>
+#include <QRegularExpression>
+
+#include "IdentityManager.h"
+#include <QUuid>
+
+NvHTTP::NvHTTP(QNetworkAccessManager* nam, QObject* parent)
+    : QObject(parent)
+    , m_Nam(nam)
+{
+    // Disable system proxy for LAN connections (Sunshine is always local)
+    m_Nam->setProxy(QNetworkProxy::NoProxy);
+}
+
+QUrl NvHTTP::buildUrl(const NvAddress& address, const QString& command, const QString& uniqueId,
+                      const QString& arguments) const
+{
+    QUrl url;
+    url.setScheme("http");
+    url.setHost(address.address());
+    // Fallback to MW_HTTP_PORT if port is 0 or invalid
+    url.setPort(address.port() > 0 ? address.port() : MW_HTTP_PORT);
+    url.setPath("/" + command);
+
+    QString query =
+        "uniqueid=" + uniqueId + "&uuid=" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!arguments.isEmpty()) query += "&" + arguments;
+    url.setQuery(query);
+
+    return url;
+}
+
+QNetworkReply* NvHTTP::getServerInfoAsync(const NvAddress& address, const QString& uniqueId)
+{
+    QUrl url = buildUrl(address, "serverinfo", uniqueId);
+
+    QNetworkRequest req(url);
+    req.setTransferTimeout(FAST_FAIL_TIMEOUT_MS);
+    req.setRawHeader("User-Agent", "MoonlightWeb/0.1");
+    closeWhenDone(req);
+    // Force a fresh connection each poll: Sunshine closes idle keep-alive
+    // sockets, and reusing a dead one yields spurious RemoteHostClosedError.
+    req.setRawHeader("Connection", "close");
+
+    return m_Nam->get(req);
+}
+
+QNetworkReply* NvHTTP::getServerInfoAsyncHttps(const NvAddress& address, const QString& uniqueId,
+                                               const QByteArray& clientCertPem,
+                                               const QByteArray& clientKeyPem, quint16 httpsPort)
+{
+    // Build URL as string to avoid any QUrl encoding quirks
+    QString urlStr = QString("https://%1:%2/serverinfo?uniqueid=%3&uuid=%4")
+                         .arg(address.address())
+                         .arg(httpsPort ? httpsPort : MW_HTTPS_PORT)
+                         .arg(uniqueId, QUuid::createUuid().toString(QUuid::WithoutBraces));
+    QUrl url(urlStr);
+
+    QNetworkRequest req(url);
+    req.setTransferTimeout(REQUEST_TIMEOUT_MS);
+    req.setRawHeader("User-Agent", "MoonlightWeb/0.1");
+    closeWhenDone(req);
+    // Close immediately: Qt would otherwise keep the TLS socket alive ~120s for
+    // reuse, holding Sunshine's single-threaded HTTPS server and making the host
+    // appear offline to co-located native clients during that window.
+    req.setRawHeader("Connection", "close");
+
+    QSslConfiguration sslConfig = req.sslConfiguration();
+    sslConfig.setLocalCertificate(QSslCertificate(clientCertPem, QSsl::Pem));
+    sslConfig.setPrivateKey(QSslKey(clientKeyPem, QSsl::Rsa, QSsl::Pem));
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    req.setSslConfiguration(sslConfig);
+
+    return m_Nam->get(req);
+}
+
+// --- Static XML helpers ----------------------------------------------------
+
+void NvHTTP::verifyResponseStatus(const QString& xml)
+{
+    QXmlStreamReader reader(xml);
+
+    if (reader.readNextStartElement()) {
+        int statusCode = reader.attributes().value("status_code").toInt();
+
+        if (statusCode == 200) return;
+
+        if (reader.attributes().value("status_message").toString() == "Invalid" && statusCode == -1)
+            statusCode = 418;
+
+        throw std::runtime_error(QString("HTTP %1: %2")
+                                     .arg(statusCode)
+                                     .arg(reader.attributes().value("status_message").toString())
+                                     .toStdString());
+    }
+}
+
+int NvHTTP::responseStatusCode(const QString& xml)
+{
+    QXmlStreamReader reader(xml);
+
+    if (!reader.readNextStartElement()) return 0;
+    return reader.attributes().value("status_code").toInt();
+}
+
+QString NvHTTP::getXmlString(const QString& xml, const QString& tagName)
+{
+    QXmlStreamReader reader(xml);
+
+    while (!reader.atEnd()) {
+        if (reader.readNextStartElement()) {
+            if (reader.name().toString() == tagName) return reader.readElementText();
+        }
+    }
+
+    return QString();
+}
+
+QByteArray NvHTTP::getXmlStringFromHex(const QString& xml, const QString& tagName)
+{
+    QString hex = getXmlString(xml, tagName);
+    if (hex.isEmpty()) return QByteArray();
+    return QByteArray::fromHex(hex.toUtf8());
+}
+
+QVector<NvDisplayMode> NvHTTP::getDisplayModeList(const QString& serverInfo)
+{
+    QVector<NvDisplayMode> modes;
+    QXmlStreamReader reader(serverInfo);
+
+    while (!reader.atEnd()) {
+        if (reader.readNextStartElement()) {
+            if (reader.name().toString() == "DisplayMode") {
+                NvDisplayMode mode;
+                while (!(reader.isEndElement() && reader.name().toString() == "DisplayMode")) {
+                    reader.readNext();
+                    if (reader.isStartElement()) {
+                        if (reader.name().toString() == "Width")
+                            mode.width = reader.readElementText().toInt();
+                        else if (reader.name().toString() == "Height")
+                            mode.height = reader.readElementText().toInt();
+                        else if (reader.name().toString() == "RefreshRate")
+                            mode.refreshRate = reader.readElementText().toInt();
+                    }
+                }
+                if (mode.width > 0) modes.append(mode);
+            }
+        }
+    }
+
+    // Sort by resolution * refresh rate (descending)
+    std::sort(modes.begin(), modes.end(), [](const NvDisplayMode& a, const NvDisplayMode& b) {
+        int pixelsA = a.width * a.height * a.refreshRate;
+        int pixelsB = b.width * b.height * b.refreshRate;
+        return pixelsA > pixelsB;
+    });
+
+    return modes;
+}
+
+int NvHTTP::getCurrentGame(const QString& serverInfo)
+{
+    QString state = getXmlString(serverInfo, "state");
+    if (!state.isEmpty() && state.endsWith("_SERVER_BUSY"))
+        return getXmlString(serverInfo, "currentgame").toInt();
+    return 0;
+}
+
+QNetworkReply* NvHTTP::getAppListAsync(const NvAddress& address, quint16 httpsPort,
+                                       const QByteArray& clientCertPem,
+                                       const QByteArray& clientKeyPem)
+{
+    QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QUrl url(QString("https://%1:%2/applist?uniqueid=%3&uuid=%4")
+                 .arg(address.address())
+                 .arg(httpsPort)
+                 .arg(IdentityManager::get()->getUniqueId())
+                 .arg(uuid));
+
+    QNetworkRequest req(url);
+    req.setTransferTimeout(REQUEST_TIMEOUT_MS);
+    req.setRawHeader("User-Agent", "MoonlightWeb/0.1");
+    closeWhenDone(req);
+    // Close immediately — see getServerInfoAsyncHttps. This periodic pair-check
+    // (every 5 min) was the connection that lingered ~120s and wedged Sunshine's
+    // HTTPS server, cycling the host offline for native iOS/Qt clients.
+    req.setRawHeader("Connection", "close");
+
+    QSslConfiguration sslConfig = req.sslConfiguration();
+    sslConfig.setLocalCertificate(QSslCertificate(clientCertPem, QSsl::Pem));
+    sslConfig.setPrivateKey(QSslKey(clientKeyPem, QSsl::Rsa, QSsl::Pem));
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    req.setSslConfiguration(sslConfig);
+
+    return m_Nam->get(req);
+}
+
+QVector<NvApp> NvHTTP::parseAppList(const QString& xml)
+{
+    QVector<NvApp> apps;
+    QXmlStreamReader reader(xml);
+
+    while (!reader.atEnd()) {
+        if (reader.readNextStartElement()) {
+            if (reader.name().toString() == "App") {
+                int id = 0;
+                QString name;
+                bool hdrSupported = false;
+
+                while (!(reader.isEndElement() && reader.name().toString() == "App")) {
+                    reader.readNext();
+                    if (reader.isStartElement()) {
+                        if (reader.name().toString() == "ID")
+                            id = reader.readElementText().toInt();
+                        else if (reader.name().toString() == "AppTitle")
+                            name = reader.readElementText();
+                        else if (reader.name().toString() == "IsHdrSupported")
+                            hdrSupported = reader.readElementText() == "1";
+                    }
+                }
+
+                if (id != 0 && !name.isEmpty()) apps.append(NvApp(id, name, hdrSupported));
+            }
+        }
+    }
+
+    return apps;
+}
+
+// A launch or resume URL fit for the log: rikey is the key every keystroke and
+// click of the session is encrypted with, and a log ends up attached to issues.
+static QString loggableUrl(const QUrl& url)
+{
+    static const QRegularExpression rikey(QStringLiteral("rikey=[0-9A-Fa-f]*"));
+    return url.toString().replace(rikey, QStringLiteral("rikey=(hidden)"));
+}
+
+QNetworkReply* NvHTTP::launchAppAsync(const NvAddress& address, quint16 httpsPort, int appId,
+                                      const QString& uniqueId, const QByteArray& rikey, int rikeyid,
+                                      int width, int height, int fps, int bitrate,
+                                      const QByteArray& clientCertPem,
+                                      const QByteArray& clientKeyPem, int hdrMode,
+                                      int localAudioPlayMode, int timeoutMs)
+{
+    Q_UNUSED(bitrate) // sent via RTSP ANNOUNCE, not /launch
+    QString mode = QString("%1x%2x%3").arg(width).arg(height).arg(fps);
+    QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    // localAudioPlayMode: 0 = mute host speakers (audio only streamed), 1 = play on host too.
+    QString query = QString("appid=%1&uniqueid=%2&uuid=%3&mode=%4&rikey=%5&rikeyid=%6"
+                            "&localAudioPlayMode=%7&sops=1&surroundAudioInfo=196610"
+                            "&gcmap=0&hdrMode=%8&corever=1")
+                        .arg(appId)
+                        .arg(uniqueId)
+                        .arg(uuid)
+                        .arg(mode)
+                        .arg(QString::fromLatin1(rikey.toHex()))
+                        .arg(rikeyid)
+                        .arg(localAudioPlayMode)
+                        .arg(hdrMode);
+
+    QUrl url(QString("https://%1:%2/launch?%3").arg(address.address()).arg(httpsPort).arg(query));
+
+    qDebug() << "[NvHTTP] launchApp URL:" << loggableUrl(url);
+
+    QNetworkRequest req(url);
+    req.setTransferTimeout(timeoutMs > 0 ? timeoutMs : LAUNCH_TIMEOUT_MS);
+    req.setRawHeader("User-Agent", "MoonlightWeb/0.1");
+    closeWhenDone(req);
+
+    QSslConfiguration sslConfig = req.sslConfiguration();
+    QSslCertificate clientCert(clientCertPem, QSsl::Pem);
+    QSslKey clientKey(clientKeyPem, QSsl::Rsa, QSsl::Pem);
+    sslConfig.setLocalCertificate(clientCert);
+    sslConfig.setPrivateKey(clientKey);
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    req.setSslConfiguration(sslConfig);
+
+    // SSL errors are expected (Sunshine self-signed cert) and ignored via
+    // VerifyNone above; no handler needed.
+    return m_Nam->get(req);
+}
+
+QNetworkReply* NvHTTP::resumeAppAsync(const NvAddress& address, quint16 httpsPort,
+                                      const QString& uniqueId, const QByteArray& rikey, int rikeyid,
+                                      const QByteArray& clientCertPem,
+                                      const QByteArray& clientKeyPem, int localAudioPlayMode,
+                                      int timeoutMs)
+{
+    QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QString uid = uniqueId.isEmpty() ? IdentityManager::get()->getUniqueId() : uniqueId;
+    // No appid/mode: resume reconnects to the app already running for this client.
+    // localAudioPlayMode: 0 = mute host speakers, 1 = play on host too.
+    QString query = QString("uniqueid=%1&uuid=%2&rikey=%3&rikeyid=%4"
+                            "&surroundAudioInfo=196610&localAudioPlayMode=%5&corever=1")
+                        .arg(uid)
+                        .arg(uuid)
+                        .arg(QString::fromLatin1(rikey.toHex()))
+                        .arg(rikeyid)
+                        .arg(localAudioPlayMode);
+
+    QUrl url(QString("https://%1:%2/resume?%3").arg(address.address()).arg(httpsPort).arg(query));
+
+    qDebug() << "[NvHTTP] resumeApp URL:" << loggableUrl(url);
+
+    QNetworkRequest req(url);
+    req.setTransferTimeout(timeoutMs > 0 ? timeoutMs
+                                         : LAUNCH_TIMEOUT_MS); // resume blocks like launch
+    req.setRawHeader("User-Agent", "MoonlightWeb/0.1");
+    closeWhenDone(req);
+
+    QSslConfiguration sslConfig = req.sslConfiguration();
+    sslConfig.setLocalCertificate(QSslCertificate(clientCertPem, QSsl::Pem));
+    sslConfig.setPrivateKey(QSslKey(clientKeyPem, QSsl::Rsa, QSsl::Pem));
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    req.setSslConfiguration(sslConfig);
+
+    return m_Nam->get(req);
+}
+
+QNetworkReply* NvHTTP::quitAppAsync(const NvAddress& address, quint16 httpsPort,
+                                    const QByteArray& clientCertPem, const QByteArray& clientKeyPem,
+                                    const QString& uniqueId)
+{
+    QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QString uid = uniqueId.isEmpty() ? IdentityManager::get()->getUniqueId() : uniqueId;
+    QUrl url(QString("https://%1:%2/cancel?uniqueid=%3&uuid=%4")
+                 .arg(address.address())
+                 .arg(httpsPort)
+                 .arg(uid)
+                 .arg(uuid));
+
+    QNetworkRequest req(url);
+    req.setTransferTimeout(QUIT_TIMEOUT_MS);
+    req.setRawHeader("User-Agent", "MoonlightWeb/0.1");
+    closeWhenDone(req);
+    // Close immediately — see getServerInfoAsyncHttps. This one is the parent
+    // process's, and the parent outlives every stream: a pooled /cancel socket
+    // sits on Sunshine's single-threaded HTTPS server for the whole ~120s Qt
+    // keep-alive window. That is what wedged the host in the 2026-08-07 logs —
+    // the /cancel that ends a failed attempt silenced Sunshine, so every
+    // /launch of the transport chain that followed went unanswered and the
+    // browser burned the whole chain on launch timeouts without ever reaching
+    // ICE. The workers drop their own launch socket (Session::onLaunchReplyFinished).
+    req.setRawHeader("Connection", "close");
+
+    QSslConfiguration sslConfig = req.sslConfiguration();
+    sslConfig.setLocalCertificate(QSslCertificate(clientCertPem, QSsl::Pem));
+    sslConfig.setPrivateKey(QSslKey(clientKeyPem, QSsl::Rsa, QSsl::Pem));
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    req.setSslConfiguration(sslConfig);
+
+    return m_Nam->get(req);
+}
+
+void NvHTTP::closeWhenDone(QNetworkRequest& req)
+{
+    req.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, 0);
+}
+
+QString NvHTTP::parseSessionUrl(const QString& launchXml)
+{
+    return getXmlString(launchXml, "sessionUrl0");
+}
+
+QVector<int> NvHTTP::parseQuad(const QString& quad)
+{
+    QVector<int> ret;
+    if (quad.isEmpty()) return ret;
+
+    QStringList parts = quad.split('.');
+    ret.reserve(parts.size());
+    for (const auto& part : parts)
+        ret.append(part.toInt());
+    return ret;
+}

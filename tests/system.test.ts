@@ -1,16 +1,12 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import http from 'node:http';
 import path from 'node:path';
 import type os from 'node:os';
 import {
-  LhmClient,
   SystemMonitor,
   lhmReadings,
   parseCpuinfo,
-  parseLhmTree,
-  parseLhmValue,
   parseDiskstats,
   parseIoregDisk,
   parseIoregGpu,
@@ -20,11 +16,13 @@ import {
   parseNetstatIb,
   parseNvidiaSmi,
   parseVmStat,
+  type LhmSensor,
   type SystemSource,
 } from '@sfagents/web';
 import { REPO_ROOT } from './helpers.js';
 
-const LHM_FIXTURE = fs.readFileSync(path.join(REPO_ROOT, 'tests', 'fixtures', 'lhm-data.json'), 'utf8');
+// What the bundled Windows sensor program reports for a desktop with an Intel CPU, an RTX 3070, Ethernet and Wi-Fi.
+const LHM_SENSORS = (JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'tests', 'fixtures', 'lhm-sensors.json'), 'utf8')) as { sensors: LhmSensor[] }).sensors;
 
 const MEMINFO = `MemTotal:       16384000 kB
 MemFree:         1024000 kB
@@ -275,17 +273,8 @@ describe('system: monitor', () => {
 });
 
 describe('system: Libre Hardware Monitor', () => {
-  test('the sensor tree: hardware ids, raw values in base units, NaN as no reading', () => {
-    const sensors = parseLhmTree(JSON.parse(LHM_FIXTURE.replace(/:\s*NaN\b/g, ':null')))!;
-    assert.ok(sensors.length > 40);
-    const pkg = sensors.find((x) => x.id === '/intelcpu/0/temperature/8')!;
-    assert.deepEqual(pkg, { hardwareId: '/intelcpu/0', hardware: 'Intel Core i7-11700K', id: '/intelcpu/0/temperature/8', name: 'CPU Package', type: 'Temperature', value: 61.25 });
-    assert.equal(sensors.find((x) => x.hardware === 'Wi-Fi' && x.name === 'Upload Speed')!.value, null);
-    assert.equal(parseLhmTree({ hello: 'world' }), null);
-  });
-
   test('readings: CPU package temperature and cores, the separate GPU with VRAM, physical memory, busiest drive, physical adapters', () => {
-    const r = lhmReadings(parseLhmTree(JSON.parse(LHM_FIXTURE.replace(/:\s*NaN\b/g, ':null')))!);
+    const r = lhmReadings(LHM_SENSORS);
     assert.deepEqual(r.cpu, { usage: 0.235, temperature: 61.25, cores: 8, name: 'Intel Core i7-11700K' });
     // The integrated GPU is busier, but the card is the one people mean.
     assert.deepEqual(r.gpu, { usage: 0.37, temperature: 48, name: 'NVIDIA GeForce RTX 3070', memory: { used: 3758096384, total: 8589934592 } });
@@ -296,69 +285,25 @@ describe('system: Libre Hardware Monitor', () => {
     assert.deepEqual(r.network, { down: 2411724.8 + 1024, up: 184320 });
   });
 
-  test('older servers: formatted values only, comma decimals, °F, Data in GB and SmallData in MB', () => {
-    assert.equal(parseLhmValue('45,5 °C', 'Temperature'), 45.5);
-    assert.ok(Math.abs(parseLhmValue('122.0 °F', 'Temperature')! - 50) < 1e-9);
-    assert.equal(parseLhmValue('2,0 MB/s', 'Throughput'), 2 * 1024 ** 2);
-    assert.equal(parseLhmValue('16.0 GB', 'Data'), 16 * 1024 ** 3);
-    assert.equal(parseLhmValue('512 MB', 'SmallData'), 512 * 1024 ** 2);
-    const s = (hw: string, type: string, i: number, name: string, value: string, raw?: number) => ({
-      Text: name, Value: value, SensorId: `${hw}/${type.toLowerCase()}/${i}`, Type: type, ...(raw === undefined ? {} : { RawValue: raw }), Children: [],
-    });
-    const tree = {
-      Text: 'Sensor',
-      Children: [{ Text: 'PC', Children: [
-        { Text: 'AMD Ryzen 7 5800X', Children: [{ Text: 'Load', Children: [s('/amdcpu/0', 'Load', 0, 'CPU Total', '12,5 %'), s('/amdcpu/0', 'Load', 1, 'CPU Core #1', '1 %'), s('/amdcpu/0', 'Load', 2, 'CPU Core #2', '1 %')] },
-          { Text: 'Temperatures', Children: [s('/amdcpu/0', 'Temperature', 0, 'Core (Tctl/Tdie)', '149,0 °F')] }] },
-        { Text: 'Radeon RX 6800', Children: [{ Text: 'Data', Children: [s('/gpu-amd/0', 'SmallData', 0, 'GPU Memory Used', '2048,0 MB', 2048), s('/gpu-amd/0', 'SmallData', 2, 'GPU Memory Total', '16384,0 MB', 16384), s('/gpu-amd/0', 'Load', 0, 'GPU Core', '5,0 %')] }] },
-        { Text: 'Generic Memory', Children: [s('/ram', 'Data', 0, 'Memory Used', '8,0 GB', 8), s('/ram', 'Data', 1, 'Memory Available', '24,0 GB', 24)] },
-      ] }],
-    };
-    const r = lhmReadings(parseLhmTree(tree)!);
-    assert.equal(r.cpu?.usage, 0.125);
-    assert.ok(Math.abs(r.cpu!.temperature! - 65) < 1e-9);
-    assert.equal(r.cpu?.cores, 2);
-    assert.deepEqual(r.gpu?.memory, { used: 2048 * 1024 ** 2, total: 16384 * 1024 ** 2 });
-    assert.equal(r.gpu?.usage, 0.05);
-    assert.deepEqual(r.memory, { used: 8 * 1024 ** 3, total: 32 * 1024 ** 3 });
-    assert.equal(r.disk, null);
-    assert.equal(r.network, null);
-  });
-
-  test('the monitor prefers a running server (with its sign-in), and falls back to the OS when it stops', async () => {
-    let auth: string | undefined;
+  test('the monitor uses the sensor program, and falls back to the OS when it stops answering', async () => {
     let up = true;
-    const server = http.createServer((req, res) => {
-      auth = req.headers.authorization;
-      if (!up || req.url !== '/data.json') {
-        res.writeHead(404).end();
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end(LHM_FIXTURE);
-    });
-    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-    const port = (server.address() as { port: number }).port;
-    try {
-      const source: SystemSource = {
-        platform: 'win32', readFile: () => null, listDir: () => [], readLink: () => null, run: async () => null,
-        statfs: (m) => (m === 'C:\\' ? { blocks: 100, bfree: 25, bavail: 25, bsize: 4096 } : null),
-        cpus: () => Array.from({ length: 16 }, () => cpu(10, 10)), totalmem: () => 8e9, freemem: () => 2e9, uptime: () => 60, hostname: () => 'NEWPC',
-      };
-      const monitor = new SystemMonitor(source, { lhm: new LhmClient(`http://me:s%40cret@127.0.0.1:${port}`, 0) });
-      const s = await monitor.read();
-      assert.equal(auth, 'Basic ' + Buffer.from('me:s@cret').toString('base64'));
-      assert.equal(s.source, 'lhm');
-      assert.equal(s.hint, null);
-      assert.deepEqual(s.cpu, { usage: 0.235, temperature: 61.25, cores: 8, threads: 16, model: 'Intel Core i7-11700K' });
-      assert.equal(s.gpu?.name, 'NVIDIA GeForce RTX 3070');
-      assert.equal(s.drives[0]?.name, 'C:');
-      up = false;
-      await new Promise((r) => setTimeout(r, 1050));
-      const t = await monitor.read();
-      assert.equal(t.source, 'os');
-      assert.match(t.hint ?? '', /Remote Web Server/);
-    } finally {
-      server.close();
-    }
+    const source: SystemSource = {
+      platform: 'win32', readFile: () => null, listDir: () => [], readLink: () => null, run: async () => null,
+      statfs: (m) => (m === 'C:\\' ? { blocks: 100, bfree: 25, bavail: 25, bsize: 4096 } : null),
+      cpus: () => Array.from({ length: 16 }, () => cpu(10, 10)), totalmem: () => 8e9, freemem: () => 2e9, uptime: () => 60, hostname: () => 'NEWPC',
+    };
+    const reader = { hint: null as string | null, read: async () => (up ? LHM_SENSORS : ((reader.hint = 'The Windows sensor helper stopped or did not respond.'), null)) };
+    const monitor = new SystemMonitor(source, { lhm: reader });
+    const s = await monitor.read();
+    assert.equal(s.source, 'lhm');
+    assert.equal(s.hint, null);
+    assert.deepEqual(s.cpu, { usage: 0.235, temperature: 61.25, cores: 8, threads: 16, model: 'Intel Core i7-11700K' });
+    assert.equal(s.gpu?.name, 'NVIDIA GeForce RTX 3070');
+    assert.equal(s.drives[0]?.name, 'C:');
+    up = false;
+    await new Promise((r) => setTimeout(r, 1050));
+    const t = await monitor.read();
+    assert.equal(t.source, 'os');
+    assert.match(t.hint ?? '', /sensor helper/);
   });
 });

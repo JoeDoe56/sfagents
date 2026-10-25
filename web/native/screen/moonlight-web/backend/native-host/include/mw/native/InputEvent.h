@@ -1,0 +1,173 @@
+/*
+ * MoonlightWeb — native capture & encoding engine.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+namespace mw::native {
+
+/// One input event to inject into the OS.
+///
+/// A flat tagged struct rather than JSON on purpose: parsing already happened
+/// once, in the relay, and re-serializing here would put back exactly the cost
+/// this engine exists to remove. The field names mirror what the existing
+/// relays already decode from the browser, so the adapter is a direct
+/// translation with no reinterpretation.
+///
+/// **Threading**: the engine injects on the caller's thread. SendInput,
+/// uinput's write() and CGEventPost are all thread-safe and cost microseconds,
+/// so there is no queue and no thread hop between the DataChannel callback and
+/// the OS (§8). Do not add one.
+struct InputEvent
+{
+    enum class Type
+    {
+        KeyDown,
+        KeyUp,
+        Utf8Text, ///< virtual/soft keyboard — a whole string at once
+        /// One key the client's layout puts a different character on than its
+        /// US position would. Unlike Utf8Text these are a real press and
+        /// release: the platform layer looks the character up in the host's own
+        /// layout and holds THAT key, so the scancode is genuine and games,
+        /// Raw Input and typematic all still see a key.
+        CharDown,
+        CharUp,
+        MouseMoveRelative,
+        MouseMoveAbsolute,
+        MouseButtonDown,
+        MouseButtonUp,
+        MouseScrollVertical,
+        MouseScrollHorizontal,
+        ControllerArrival,
+        ControllerState,
+        ControllerRemoval,
+        LockKeySync, ///< align host NumLock/CapsLock/ScrollLock with the client
+        /// Ctrl+Alt+Suppr, which is not a key combination at all: Windows
+        /// reserves it in the kernel and no injected key can forge it. It goes
+        /// through SendSAS instead, and only a SYSTEM worker may call that —
+        /// every other host ignores it, having nothing honest to do with it.
+        SecureAttention,
+    };
+
+    Type type = Type::KeyDown;
+
+    // ── Keyboard ─────────────────────────────────────────────────────────────
+    /// Windows virtual-key code, as the browser already sends it. The platform
+    /// layer maps it to whatever the local OS wants.
+    int16_t keyCode = 0;
+    /// Modifier bitmask, matching the browser's existing encoding.
+    uint8_t modifiers = 0;
+    /// Whether @ref modifiers is the client's own statement of what it holds,
+    /// and so may be trusted as the whole truth — including "nothing is held".
+    /// False on the events the host makes up for itself (the watchdog letting
+    /// go of a key during a stall), where a zero mask means "not said" rather
+    /// than "no modifier". Read by the macOS backend only: it is the one that
+    /// has to synthesise the modifier flags instead of letting the OS hold
+    /// them, so it is the one whose idea of them can drift.
+    bool modifiersKnown = false;
+    uint8_t keyFlags = 0;
+    /// UTF-8 payload for Type::Utf8Text, and the single character for
+    /// Type::CharDown / Type::CharUp.
+    std::string text;
+    /// CharDown / CharUp: a chord the touch keyboard's bar made (Ctrl latched,
+    /// then z typed): the host key that carries the character, pressed under
+    /// whatever modifiers the viewer holds, none added and none lifted —
+    /// a shortcut is a key, not a character. keyCode is then the character's
+    /// US position, for a layout with no key for it (a Cyrillic one).
+    bool chord = false;
+    /// CharDown / CharUp: the character came from AltGr, or from a Mac's
+    /// Option key, which composes characters as AltGr does ({ [ | ~ on the
+    /// Mac's AZERTY): the Alt the viewer holds, and the Ctrl a Windows AltGr
+    /// comes with, are a level here, let go for the key when the host's
+    /// layout does not need them, never kept as a Ctrl+ or Alt+ shortcut.
+    bool altGraph = false;
+
+    // ── Mouse ────────────────────────────────────────────────────────────────
+    int16_t deltaX = 0;
+    int16_t deltaY = 0;
+    /// For MouseMoveAbsolute: position within a reference surface of
+    /// referenceWidth × referenceHeight, which the platform layer rescales to
+    /// the captured display.
+    int16_t positionX = 0;
+    int16_t positionY = 0;
+    int16_t referenceWidth = 0;
+    int16_t referenceHeight = 0;
+    /// 1 = left, 2 = middle, 3 = right, 4 = X1, 5 = X2 — the browser's numbering.
+    int button = 0;
+    /// Wheel amount in 120-unit notches, already quantized upstream.
+    int16_t scrollAmount = 0;
+
+    // ── Controller ───────────────────────────────────────────────────────────
+    uint8_t controllerNumber = 0;
+    uint16_t activeGamepadMask = 0;
+
+    /// What the client says it is holding, as GameStream's LI_CTYPE_*: 0
+    /// unknown, 1 Xbox, 2 PlayStation, 3 Nintendo. It decides which virtual pad
+    /// the engine presents, and it is a HINT — the browser works it out from a
+    /// device name string that varies by OS, driver and connection, so an
+    /// unrecognised pad arrives as 0 and gets the profile that works everywhere.
+    uint8_t controllerType = 0;
+    static constexpr uint8_t kControllerUnknown = 0;
+    static constexpr uint8_t kControllerXbox = 1;
+    static constexpr uint8_t kControllerPlayStation = 2;
+    static constexpr uint8_t kControllerNintendo = 3;
+
+    bool hasRumble = false;
+    int32_t buttonFlags = 0;
+    uint8_t leftTrigger = 0;
+    uint8_t rightTrigger = 0;
+    int16_t leftStickX = 0;
+    int16_t leftStickY = 0;
+    int16_t rightStickX = 0;
+    int16_t rightStickY = 0;
+
+    // ── Lock keys ────────────────────────────────────────────────────────────
+    bool numLock = false;
+    bool capsLock = false;
+    bool scrollLock = false;
+
+    /// True when the client marked this press as one to keep held through a
+    /// brief link stall (movement keys in gaming mode). The engine itself does
+    /// nothing with it — the shared InputWatchdog above this module does — but
+    /// it rides along so the two paths stay symmetrical.
+    bool hold = false;
+
+    /// True when this press comes from the client's held-state heartbeat rather
+    /// than from the user doing something.
+    ///
+    /// The distinction is not cosmetic. That heartbeat beats every 100 ms while
+    /// anything is held, and its job is to restore what the host's watchdog
+    /// released during a stall. Applied blindly it does the opposite: pressing a
+    /// key that is ALREADY down is an extra character, and pressing a mouse
+    /// button that is already down is a second click — which is how a plain tap
+    /// on a trackpad arrived on the host as a double-click. A resync press is
+    /// therefore applied only when it actually changes something.
+    bool resync = false;
+};
+
+/// Rumble the host asked to send back to the client's gamepad. Travels the
+/// opposite way from InputEvent, over the same DataChannel.
+struct RumbleEvent
+{
+    uint8_t controllerNumber = 0;
+    uint16_t lowFrequencyMotor = 0;
+    uint16_t highFrequencyMotor = 0;
+};
+
+} // namespace mw::native

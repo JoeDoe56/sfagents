@@ -1,0 +1,846 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/** @typedef {import('./StreamView.js').StreamView} StreamViewInstance */
+
+/**
+ * Touch input (mobile trackpad-like) subsystem for StreamView.
+ *
+ * Extracted from StreamView; plain prototype methods (`this` = the StreamView
+ * instance), copied onto StreamView.prototype at the bottom of StreamView.js.
+ */
+export class StreamViewTouch {
+    // =========================================================================
+    // Touch input (mobile) — trackpad-like behaviour
+    // =========================================================================
+
+    /**
+     * Handle touch start anywhere on the streaming overlay.
+     *
+     * Laptop-trackpad model:
+     *   1 finger → start tracking for relative cursor movement / tap.
+     *   2 fingers (simultaneous) → right click (mousedown+mouseup button=3).
+     * @this {StreamViewInstance}
+     */
+    handleTouchStart(e) {
+        // A touch anywhere on screen dismisses the gesture hint, not just a tap
+        // on the slide itself (it takes up real estate on mobile).
+        if (
+            this._shortcutsSlide &&
+            this._shortcutsSlide.style.display !== 'none' &&
+            !this._shortcutsSlide.classList.contains('fading-out')
+        ) {
+            this._hideShortcutsSlide();
+        }
+        // UI buttons (Stop, Fullscreen, Keyboard) and the draggable stats card
+        // are never fed into the game's trackpad tracking. Their taps are
+        // resolved in handleTouchEnd() (manual click dispatch) — remember the
+        // start position so it can apply tap semantics (minimal movement).
+        if (e.target.closest('button') || e.target.closest('#stream-stats-overlay')) {
+            const t0 = e.changedTouches[0];
+            if (t0) {
+                this._uiTouchX = t0.clientX;
+                this._uiTouchY = t0.clientY;
+            }
+            return;
+        }
+        e.preventDefault();
+        const newCount = e.touches.length;
+
+        // Any new touch interrupts an ongoing inertial scroll/pan glide.
+        this._stopScrollMomentum();
+        this._stopPanMomentum();
+
+        // New sequence: first finger of the gesture goes down.
+        if (!this._touchActive) {
+            this._touchActive = true;
+            this._touchMaxFingers = 0;
+            this._touchMoved = false;
+            this._touchDragging = false;
+            this._touchHadTwoFingers = false;
+            this._scrollAccum = 0;
+            this._scrollAccumX = 0;
+            this._moveAccumX = 0;
+            this._moveAccumY = 0;
+            this._touchScrollAnchored = false;
+            this._scrollSamples.length = 0;
+            this._panSamples.length = 0;
+            this._threeFingerDx = 0;
+            this._threeFingerDy = 0;
+            this._threeFingerSwitched = false;
+            const t = e.touches[0];
+            this._touchStartX = t.clientX;
+            this._touchStartY = t.clientY;
+            this._touchLastX = t.clientX;
+            this._touchLastY = t.clientY;
+            this._touchStartTime = performance.now();
+            this._lastMoveFingerCount = newCount;
+        }
+
+        this._touchFingerCount = newCount;
+        this._touchMaxFingers = Math.max(this._touchMaxFingers, newCount);
+        if (newCount >= 2) this._touchHadTwoFingers = true;
+
+        if (newCount === 1) {
+            // Arm long-press → drag: hold still to grab the left button, the
+            // only way to keep it down without a physical button (move a window
+            // by its title bar, drag a file, select text, pull a slider).
+            // Native Windows touch puts the context menu on a long press; we
+            // follow the remote-desktop convention instead — right click is the
+            // two-finger tap, which frees the long press for the drag. A finger
+            // that moves before the delay scrolls instead, so the two never
+            // compete.
+            this._clearLongPress();
+            this._touchLongPressTimer = setTimeout(() => {
+                if (
+                    this._touchActive &&
+                    !this._touchMoved &&
+                    this._touchFingerCount === 1 &&
+                    this._touchMaxFingers === 1 &&
+                    !this._touchDragging &&
+                    !this._tvTapOffPicture(this._touchStartX, this._touchStartY)
+                ) {
+                    this._touchDragging = true;
+                    // Touch-screen mode: grab the button right under the finger.
+                    if (this._touchScreen) this._sendAbsTouch(this._touchStartX, this._touchStartY);
+                    // _sendMouseButton (not webrtc.send): the host releases held
+                    // buttons the heartbeat stops reporting, and a drag that
+                    // pauses mid-gesture sends nothing else.
+                    this._sendMouseButton(1, true);
+                }
+            }, this._touchLongPressMs);
+        } else {
+            // Multi-finger gesture — never a drag candidate.
+            this._clearLongPress();
+            if (newCount >= 2) {
+                // Seed spacing + centroid for zoom/scroll (2 fingers) or pan (3).
+                this._seedMultiTouch(e.touches);
+            }
+        }
+    }
+
+    /** Seed multi-finger trackers from the current touch list: finger spacing
+     *  (first two fingers, for pinch) and the centroid of all touches (for
+     * @this {StreamViewInstance}
+     *  2-finger scroll and 3-finger pan). */
+    _seedMultiTouch(touches) {
+        const n = touches.length;
+        if (n < 2) return;
+        const t0 = touches[0],
+            t1 = touches[1];
+        this._pinchPrevDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        let cx = 0,
+            cy = 0;
+        for (let i = 0; i < n; i++) {
+            cx += touches[i].clientX;
+            cy += touches[i].clientY;
+        }
+        this._pinchPrevCx = cx / n;
+        this._pinchPrevCy = cy / n;
+        // Anchor for "did this multi-finger gesture actually move?" — small
+        // jitter while holding 2/3 fingers must NOT disqualify a tap.
+        this._multiOriginCx = cx / n;
+        this._multiOriginCy = cy / n;
+        this._multiOriginDist = this._pinchPrevDist;
+        // New 2-finger sequence: gesture mode is decided on the first clear frame.
+        this._twoFingerMode = null;
+    }
+
+    /** True once a multi-finger gesture has clearly moved (centroid travel or,
+     *  for 2 fingers, a real pinch) beyond the given tap-jitter tolerance (px).
+     * @this {StreamViewInstance}
+     *  Pass dist=null for 3-finger gestures (spacing irrelevant). */
+    _multiMovedBeyondTol(cx, cy, dist, tol) {
+        const movedC = Math.hypot(
+            cx - (this._multiOriginCx ?? cx),
+            cy - (this._multiOriginCy ?? cy),
+        );
+        const movedD =
+            dist != null && this._multiOriginDist != null
+                ? Math.abs(dist - this._multiOriginDist)
+                : 0;
+        return movedC > tol || movedD > tol;
+    }
+
+    /** Finger px → wheel units for the gesture in progress: trackpad-style
+     *  amplification for a two-finger drag, near 1:1 for a single finger on a
+     * @this {StreamViewInstance}
+     *  touch screen (where the finger is meant to *be* the content). */
+    _curScrollScale() {
+        return this._touchScreen && this._touchMaxFingers === 1
+            ? this._touchScrollScale
+            : this._scrollScale;
+    }
+
+    /** Send one frame of scrolling to the host from a finger/centroid travel,
+     *  on BOTH axes. The content follows the finger (natural direction): the
+     *  vertical wheel is positive when the finger goes down, the horizontal one
+     *  is negative when it goes right (positive hwheel = view scrolls right).
+     *  Deltas are amplified and carried as fractions so slow drags still
+     * @this {StreamViewInstance}
+     *  register, and the centroid is sampled for the release flick. */
+    _emitScroll(dCx, dCy, sampleX, sampleY) {
+        const scale = this._curScrollScale();
+
+        this._scrollAccum += dCy * scale;
+        const whole = Math.trunc(this._scrollAccum);
+        if (whole !== 0) {
+            this.webrtc.send({ type: 'mousewheel', delta: whole });
+            this._scrollAccum -= whole;
+        }
+
+        this._scrollAccumX += -dCx * scale;
+        const wholeX = Math.trunc(this._scrollAccumX);
+        if (wholeX !== 0) {
+            this.webrtc.send({ type: 'mousehwheel', delta: wholeX });
+            this._scrollAccumX -= wholeX;
+        }
+
+        const now = performance.now();
+        this._scrollSamples.push({ t: now, x: sampleX, y: sampleY });
+        // Keep only the last ~120 ms of samples.
+        while (this._scrollSamples.length > 2 && now - this._scrollSamples[0].t > 120) {
+            this._scrollSamples.shift();
+        }
+    }
+
+    /** Touch-screen mode: map a finger's client position to the host's absolute
+     * @this {StreamViewInstance}
+     *  cursor position (over the real picture, letterbox-aware) and send it. */
+    _sendAbsTouch(clientX, clientY) {
+        const rect = this._mediaRect();
+        if (!rect || !rect.width || !rect.height) return;
+        const x = Math.round(Math.max(0, Math.min(clientX - rect.left, rect.width)));
+        const y = Math.round(Math.max(0, Math.min(clientY - rect.top, rect.height)));
+        this.webrtc.send({
+            type: 'mousemove',
+            x,
+            y,
+            referenceWidth: Math.round(rect.width),
+            referenceHeight: Math.round(rect.height),
+        });
+        this._clientCursorPlacedAt(x / rect.width, y / rect.height);
+    }
+
+    /**
+     * A TV browser's cursor over no part of the picture — a letterbox bar, the
+     * stream's header. _sendAbsTouch would pin it to the nearest edge, and the
+     * tap then clicked there: the host's pointer leapt to a border and clicked
+     * something the viewer never aimed at (Freebox, 03/10/2026). A finger on a
+     * phone keeps that pinning: it lands near the edge it means.
+     * @this {StreamViewInstance}
+     */
+    _tvTapOffPicture(clientX, clientY) {
+        if (!this._tvCursor) return false;
+        const rect = this._mediaRect();
+        if (!rect || !rect.width || !rect.height) return true;
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        return x < 0 || y < 0 || x > rect.width || y > rect.height;
+    }
+
+    /**
+     * Apply the current zoom/pan to the streamed display (canvas + video).
+     * Pan is clamped so the scaled image edges never reveal the black area.
+     * Origin is the center; the input layer stays unscaled.
+     * @this {StreamViewInstance}
+     */
+    _applyZoomTransform() {
+        if (this.canvasArea) {
+            const rect = this.canvasArea.getBoundingClientRect();
+            // Displayed image size at zoom 1 (object-fit: contain letterboxes it
+            // inside the area). Clamp the pan so the *scaled image* always covers
+            // the area — its edges can never reveal the black bars.
+            const el = this._displayEl();
+            let iw = 0,
+                ih = 0;
+            if (this._videoIsDisplay()) {
+                iw = /** @type {HTMLVideoElement} */ (el).videoWidth;
+                ih = /** @type {HTMLVideoElement} */ (el).videoHeight;
+            } else if (this.canvas) {
+                iw = this.canvas.width;
+                ih = this.canvas.height;
+            }
+            let imgW = rect.width,
+                imgH = rect.height;
+            if (iw > 0 && ih > 0) {
+                const fit = Math.min(rect.width / iw, rect.height / ih);
+                imgW = iw * fit;
+                imgH = ih * fit;
+            }
+            const maxX = Math.max(0, (imgW * this._zoom - rect.width) / 2);
+            const maxY = Math.max(0, (imgH * this._zoom - rect.height) / 2);
+            // Allow pushing the image up beyond the standard clamp so its bottom
+            // edge can travel up to the middle of the visible area (black bar up
+            // to half the height). Other edges keep the strict no-black clamp.
+            const extraDown = rect.height / 2;
+            this._panX = Math.max(-maxX, Math.min(maxX, this._panX));
+            this._panY = Math.max(-(maxY + extraDown), Math.min(maxY, this._panY));
+        }
+        const transform =
+            this._zoom > 1.001
+                ? `translate(${this._panX}px, ${this._panY}px) scale(${this._zoom})`
+                : '';
+        if (this.canvas) this.canvas.style.transform = transform;
+        if (this.videoEl) this.videoEl.style.transform = transform;
+        // getBoundingClientRect reflects the transform, so zoom/pan moves the
+        // media rect — the cached measurement is now stale.
+        this._invalidateMediaRect();
+        // And the pointer drawn over the picture goes where the picture went.
+        this._placeClientCursor();
+    }
+
+    /**
+     * Cancel a pending long-press → drag timer.
+     *
+     * @this {StreamViewInstance}
+     */
+    _clearLongPress() {
+        if (this._touchLongPressTimer) {
+            clearTimeout(this._touchLongPressTimer);
+            this._touchLongPressTimer = null;
+        }
+    }
+
+    /**
+     * Handle touch move (drag).
+     *
+     * 1 finger  → trackpad mode: RELATIVE cursor movement, like a laptop
+     *             touchpad — the finger moves the host cursor by deltas.
+     *             Touch-screen mode: scroll wheel on both axes instead (the
+     *             content follows the finger, as on a real touchscreen); the
+     *             cursor only follows the finger once a long-press drag holds
+     *             the left button down.
+     * 2 fingers → pinch = zoom the local display (focal recenter), otherwise
+     *             scroll wheel on both axes to the host (works zoomed in too).
+     * 3 fingers → pan the zoomed display (no scroll/zoom side effects).
+     * @this {StreamViewInstance}
+     */
+    handleTouchMove(e) {
+        if (e.target.closest('button') || e.target.closest('#stream-stats-overlay')) return;
+        e.preventDefault();
+        if (!this._touchActive) return;
+
+        const count = e.touches.length;
+        this._touchFingerCount = count;
+
+        // Finger count changed mid-gesture (lifted/added a finger): reseed the
+        // multi-finger trackers and skip this frame's delta to avoid a jump.
+        if (count !== this._lastMoveFingerCount) {
+            this._lastMoveFingerCount = count;
+            if (count === 1) {
+                const t = e.touches[0];
+                this._touchLastX = t.clientX;
+                this._touchLastY = t.clientY;
+                // The skipped delta must not come back as carry on the next
+                // event: this branch exists precisely to drop it.
+                this._moveAccumX = 0;
+                this._moveAccumY = 0;
+            } else {
+                this._seedMultiTouch(e.touches);
+            }
+            return;
+        }
+
+        if (count === 1 && this._tvCursor && !this._touchDragging) {
+            // A TV browser has no finger to drag. TV Bro scrolls a page whose
+            // cursor pushes against an edge by faking a swipe from well inside
+            // it — read as a touch-screen scroll, it pulled the host's pointer
+            // to the swipe's start and scrolled whatever window was there, as
+            // soon as the cursor went past the picture (Freebox, 04/10/2026).
+            // The stream page has nothing to scroll: the swipe sends nothing,
+            // and is no tap either.
+            this._touchMoved = true;
+            this._clearLongPress();
+            return;
+        }
+
+        if (count === 1) {
+            // Single finger: relative trackpad movement (also drags when the
+            // long-press grab is active — the left button stays held down).
+            const touch = e.touches[0];
+
+            // Past the tap threshold → it's a move, cancel long-press arming.
+            const movedDist = Math.hypot(
+                touch.clientX - this._touchStartX,
+                touch.clientY - this._touchStartY,
+            );
+            if (movedDist > this._touchTapThreshold) {
+                this._touchMoved = true;
+                if (!this._touchDragging) this._clearLongPress();
+            }
+
+            if (this._touchScreen) {
+                // Only for a genuine single-finger gesture — a 2/3-finger gesture
+                // (or its leftover finger) must never move the cursor or scroll.
+                if (this._touchMaxFingers === 1) {
+                    if (this._touchDragging) {
+                        // Long-press grab in progress: the cursor follows the
+                        // finger 1:1 over the picture (drag & hold).
+                        this._sendAbsTouch(touch.clientX, touch.clientY);
+                    } else {
+                        // Real touchscreen feel: the finger scrolls the content
+                        // in any direction. Windows routes the wheel to the
+                        // window under the cursor, so anchor it once on the
+                        // spot the finger landed on — the scroll then lands in
+                        // the window being touched, without clicking (and
+                        // without focusing) it. Deliberately NOT done on touch
+                        // start: a tap, a two-finger tap or a pinch begins the
+                        // same way and must never drag the host cursor along.
+                        // Anchored once, not per frame: a scroll that wanders
+                        // over a neighbouring window keeps feeding the first one.
+                        if (!this._touchScrollAnchored) {
+                            this._touchScrollAnchored = true;
+                            this._sendAbsTouch(this._touchStartX, this._touchStartY);
+                        }
+                        this._emitScroll(
+                            touch.clientX - this._touchLastX,
+                            touch.clientY - this._touchLastY,
+                            touch.clientX,
+                            touch.clientY,
+                        );
+                    }
+                }
+            } else {
+                // Slow the cursor proportionally to zoom (linear: -0.1 per step,
+                // x2→0.9, x3→0.8, x4→0.7…) for finer aim when zoomed in.
+                const zoomSlow = Math.max(0.1, 1 - 0.1 * (this._zoom - 1));
+                const sens = this._touchSensitivity * zoomSlow;
+                // Drawing the pointer ourselves, we also PLACE it: the position
+                // is computed here, with our own acceleration, and sent as an
+                // absolute point — so the host's pointer is exactly under the
+                // one drawn, whatever the host's own mouse settings would have
+                // made of a delta. See StreamView._clientCursorSteer.
+                if (this._clientCursorSteers()) {
+                    this._clientCursorSteer(
+                        touch.clientX - this._touchLastX,
+                        touch.clientY - this._touchLastY,
+                        sens,
+                    );
+                    this._touchLastX = touch.clientX;
+                    this._touchLastY = touch.clientY;
+                    return;
+                }
+                // Carried as fractions, exactly like the wheel in _emitScroll,
+                // and for the same reason: a finger moving slowly (or a zoomed
+                // view, which divides the sensitivity by up to 3) produces
+                // sub-pixel deltas per event. Rounding each one on its own sent
+                // an endless run of {dx:0, dy:0} — the host dutifully injected
+                // them and the cursor never moved, however far the finger
+                // travelled. Found 04/09/2026 on an iPhone: 12 events injected
+                // over a whole gesture, against 247 for the same drag done fast.
+                this._moveAccumX += (touch.clientX - this._touchLastX) * sens;
+                this._moveAccumY += (touch.clientY - this._touchLastY) * sens;
+                const dx = Math.trunc(this._moveAccumX);
+                const dy = Math.trunc(this._moveAccumY);
+                if (dx !== 0 || dy !== 0) {
+                    this._moveAccumX -= dx;
+                    this._moveAccumY -= dy;
+                    this.webrtc.send({ type: 'mousemove', dx, dy });
+                    // Our own drawing of the pointer follows the finger now,
+                    // not the host's echo — see MOBILE_CURSOR_CLIENT_DRAWN.
+                    this._clientCursorMoved(dx, dy);
+                }
+            }
+
+            this._touchLastX = touch.clientX;
+            this._touchLastY = touch.clientY;
+        } else if (count === 2) {
+            // Two fingers: pinch → zoom (focal recenter); otherwise → scroll
+            // wheel to the host. Pan is reserved for 3 fingers, so scrolling
+            // works whether or not the display is zoomed in.
+            this._clearLongPress();
+            const t1 = e.touches[0];
+            const t2 = e.touches[1];
+            const cx = (t1.clientX + t2.clientX) / 2;
+            const cy = (t1.clientY + t2.clientY) / 2;
+            const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+            // Only count as "moved" past a tolerance, so a slightly imperfect
+            // 2-finger tap still registers. Tighter than 3-finger (12px) — a
+            // compromise between the old zero-tolerance and the looser pass.
+            if (this._multiMovedBeyondTol(cx, cy, dist, 12)) this._touchMoved = true;
+
+            const dDist = this._pinchPrevDist > 0 ? dist - this._pinchPrevDist : 0;
+            const dCx = this._pinchPrevCx != null ? cx - this._pinchPrevCx : 0;
+            const dCy = this._pinchPrevCy != null ? cy - this._pinchPrevCy : 0;
+            const drag = Math.hypot(dCx, dCy);
+
+            // Lock the gesture to zoom OR scroll for the whole 2-finger sequence,
+            // so a scroll never zooms (and vice versa). The mode is decided on the
+            // first frame with clear intent: a change in finger spacing → zoom,
+            // a parallel drag → scroll. Ambiguous tiny frames wait until it's clear.
+            // Bias toward scroll: zoom only locks when the finger-spacing change
+            // clearly dominates the drag (1.6x), so a slightly uneven two-finger
+            // swipe scrolls instead of zooming by accident.
+            if (this._twoFingerMode == null) {
+                if (Math.abs(dDist) > 3 && Math.abs(dDist) >= drag * 1.6) {
+                    this._twoFingerMode = 'zoom';
+                } else if (drag > 1.5) {
+                    this._twoFingerMode = 'scroll';
+                }
+            }
+
+            if (this._twoFingerMode === 'zoom') {
+                const newZoom = Math.min(8, Math.max(1, this._zoom * (dist / this._pinchPrevDist)));
+                const f = newZoom / this._zoom;
+                if (f !== 1 && this.canvasArea) {
+                    const rect = this.canvasArea.getBoundingClientRect();
+                    const focalX = cx - (rect.left + rect.width / 2);
+                    const focalY = cy - (rect.top + rect.height / 2);
+                    this._panX = focalX * (1 - f) + f * this._panX;
+                    this._panY = focalY * (1 - f) + f * this._panY;
+                }
+                this._zoom = newZoom;
+                if (this._zoom <= 1.001) {
+                    this._panX = 0;
+                    this._panY = 0;
+                }
+                this._applyZoomTransform();
+                // Re-render the enhancer backing at the new zoom step (crisp pinch-zoom).
+                if (this._outputZoomScale() !== this._lastOutputZoomScale) this._applyOutputSize();
+                // Pinching cancels pending inertia (scroll and pan alike).
+                this._scrollSamples.length = 0;
+                this._panSamples.length = 0;
+            } else if (this._twoFingerMode === 'scroll' && drag > 0.1) {
+                // Parallel two-finger drag → scroll wheel on both axes.
+                this._emitScroll(dCx, dCy, cx, cy);
+            }
+
+            this._pinchPrevDist = dist;
+            this._pinchPrevCx = cx;
+            this._pinchPrevCy = cy;
+        } else if (count >= 3) {
+            // Three fingers: pan the zoomed display, or — at base zoom, where
+            // there is nothing to pan — swipe sideways to change desktop on the
+            // host. The gesture a laptop trackpad puts on the same three
+            // fingers, aimed at the machine being streamed instead of this one.
+            this._clearLongPress();
+            let cx = 0,
+                cy = 0;
+            for (let i = 0; i < count; i++) {
+                cx += e.touches[i].clientX;
+                cy += e.touches[i].clientY;
+            }
+            cx /= count;
+            cy /= count;
+            // Tolerate jitter so a slightly imperfect 3-finger tap still fires.
+            if (this._multiMovedBeyondTol(cx, cy, null, 24)) this._touchMoved = true;
+            const dCx = this._pinchPrevCx != null ? cx - this._pinchPrevCx : 0;
+            const dCy = this._pinchPrevCy != null ? cy - this._pinchPrevCy : 0;
+            if (this._zoom > 1.01) {
+                this._panX += dCx;
+                this._panY += dCy;
+                this._applyZoomTransform();
+                // Sample the centroid for the release flick (inertial glide).
+                const now = performance.now();
+                this._panSamples.push({ t: now, x: cx, y: cy });
+                while (this._panSamples.length > 2 && now - this._panSamples[0].t > 120) {
+                    this._panSamples.shift();
+                }
+            } else if (!this._threeFingerSwitched) {
+                // Travel is accumulated because a single touchmove carries only
+                // a few pixels. 60px is well past the 24px tap tolerance above,
+                // so the 3-finger tap that opens the keyboard is untouched; the
+                // 1.5x dominance keeps a diagonal drag from switching desktop.
+                this._threeFingerDx += dCx;
+                this._threeFingerDy += dCy;
+                if (
+                    Math.abs(this._threeFingerDx) > 60 &&
+                    Math.abs(this._threeFingerDx) > Math.abs(this._threeFingerDy) * 1.5
+                ) {
+                    this._threeFingerSwitched = true;
+                    // Not a tap any more: the release must not open the keyboard.
+                    this._touchMoved = true;
+                    // Fingers left → the desktop to the right comes in, as on a
+                    // laptop trackpad.
+                    this.sendDesktopSwitch(this._threeFingerDx < 0 ? 1 : -1);
+                }
+            }
+            this._pinchPrevCx = cx;
+            this._pinchPrevCy = cy;
+        }
+    }
+
+    /**
+     * Handle touch end.
+     *
+     * 1→0 finger transition with minimal movement → left click (tap).
+     * @this {StreamViewInstance}
+     */
+    handleTouchEnd(e) {
+        // UI buttons / stats card: suppress the browser's synthetic click — it
+        // hit-tests at dispatch time, so a tap that tears the stream view down
+        // (Stop) can ghost-fire on whatever the next view puts under the
+        // finger. Dispatch the button's click ourselves instead.
+        const uiBtn = e.target.closest('button');
+        if (uiBtn || e.target.closest('#stream-stats-overlay')) {
+            e.preventDefault();
+            const t0 = e.changedTouches[0];
+            const moved = t0
+                ? Math.hypot(t0.clientX - this._uiTouchX, t0.clientY - this._uiTouchY)
+                : 0;
+            if (uiBtn && e.type !== 'touchcancel' && e.touches.length === 0 && moved < 25) {
+                uiBtn.click();
+            }
+            return;
+        }
+        e.preventDefault();
+        this._touchFingerCount = e.touches.length;
+
+        // Resolve the gesture only once ALL fingers are lifted.
+        if (e.touches.length > 0) return;
+
+        this._clearLongPress();
+
+        const elapsed = performance.now() - this._touchStartTime;
+        const tch = e.changedTouches[0];
+        const dist = tch
+            ? Math.hypot(tch.clientX - this._touchStartX, tch.clientY - this._touchStartY)
+            : 0;
+        // Multi-finger taps (right-click / keyboard) are harder to land cleanly:
+        // fingers touch down staggered and the first one drifts. 3-finger stays
+        // the most forgiving; 2-finger sits midway between that and a precise
+        // 1-finger tap.
+        const distTol =
+            this._touchMaxFingers >= 3
+                ? 45
+                : this._touchMaxFingers === 2
+                  ? 28
+                  : this._touchTapThreshold;
+        const timeTol =
+            this._touchMaxFingers >= 3
+                ? 600
+                : this._touchMaxFingers === 2
+                  ? 450
+                  : this._touchTapTimeThreshold;
+        // A cancelled touch is never a tap: the system took it back. TV Bro's
+        // edge scroll cancels each fake swipe and opens the next with a
+        // touchstart cancelled at once — as taps, a cursor held against an edge
+        // clicked a dozen times a second where the swipes began (Freebox,
+        // 04/10/2026).
+        const isTap =
+            e.type !== 'touchcancel' &&
+            !this._touchMoved &&
+            dist < distTol &&
+            elapsed < timeTol &&
+            this._touchStartTime > 0;
+
+        if (this._touchDragging) {
+            // End the long-press drag — release the held left button.
+            this._sendMouseButton(1, false);
+        } else if (isTap) {
+            if (this._touchMaxFingers >= 3) {
+                this._toggleVirtualKeyboard(); // 3-finger tap → keyboard
+            } else if (this._touchMaxFingers === 2) {
+                this._sendMouseButton(3, true);
+                this._sendMouseButton(3, false); // 2-finger tap → right click
+            } else if (this._tvTapOffPicture(this._touchStartX, this._touchStartY)) {
+                // A TV cursor off the picture: nothing aimed at, nothing sent.
+            } else {
+                // 1-finger tap → left click. Touch-screen mode positions the
+                // cursor first; a fast double-tap at the same spot lands a second
+                // click at the SAME coordinate, so the host registers a true
+                // double-click and selects the word under it.
+                const now = performance.now();
+                const near =
+                    Math.hypot(
+                        this._touchStartX - (this._lastTapX || 0),
+                        this._touchStartY - (this._lastTapY || 0),
+                    ) < 28;
+                const isDouble =
+                    this._touchScreen &&
+                    this._lastTapTime &&
+                    now - this._lastTapTime <= 300 &&
+                    near;
+                if (this._touchScreen) {
+                    const px = isDouble ? this._lastTapX : this._touchStartX;
+                    const py = isDouble ? this._lastTapY : this._touchStartY;
+                    this._sendAbsTouch(px, py);
+                }
+                this._sendMouseButton(1, true);
+                this._sendMouseButton(1, false);
+                if (isDouble) {
+                    this._lastTapTime = 0; // consumed — avoid chaining into a triple
+                } else {
+                    this._lastTapTime = now;
+                    this._lastTapX = this._touchStartX;
+                    this._lastTapY = this._touchStartY;
+                }
+            }
+        }
+
+        // Inertial scroll: if the gesture ended on a flicking scroll drag — two
+        // fingers, or one in touch-screen mode — keep gliding with a decaying
+        // velocity (phone-like momentum). Velocity is derived from the recent
+        // centroid samples (px/frame → wheel units).
+        const wasScrollDrag =
+            this._touchMaxFingers === 2 || (this._touchScreen && this._touchMaxFingers === 1);
+        if (!isTap && !this._touchDragging && wasScrollDrag) {
+            this._startScrollMomentum();
+        }
+        // Same for a 3-finger pan on a zoomed display: the picture keeps
+        // sliding after the fingers leave, like a zoomed photo on a phone.
+        if (!isTap && this._touchMaxFingers >= 3 && this._zoom > 1.01) {
+            this._startPanMomentum();
+        }
+
+        // Reset sequence state.
+        this._touchActive = false;
+        this._touchDragging = false;
+        this._touchMoved = false;
+        this._touchHadTwoFingers = false;
+        this._touchFingerCount = 0;
+        this._touchMaxFingers = 0;
+        this._scrollAccum = 0;
+        this._scrollAccumX = 0;
+        this._touchScrollAnchored = false;
+        this._scrollSamples.length = 0;
+        this._panSamples.length = 0;
+        this._pinchPrevDist = 0;
+        this._pinchPrevCx = null;
+        this._pinchPrevCy = null;
+        this._twoFingerMode = null;
+        this._lastMoveFingerCount = 0;
+    }
+
+    /** Start the inertial scroll glide. Computes the release velocity from the
+     *  recent centroid samples, then sends decaying wheel deltas each frame
+     * @this {StreamViewInstance}
+     *  until the velocity dies out (or a new touch cancels it). */
+    _startScrollMomentum() {
+        this._stopScrollMomentum();
+
+        // Flick velocity from the oldest→newest recent sample (px per frame).
+        const s = this._scrollSamples;
+        if (s.length < 2) return;
+        const a = s[0],
+            b = s[s.length - 1];
+        const dt = b.t - a.t;
+        // Only glide on a fresh flick (last sample very recent, real movement).
+        if (dt <= 0 || performance.now() - b.t > 80) return;
+        const scale = this._curScrollScale();
+        const clamp = (v) => Math.max(-400, Math.min(400, v)); // clamp wild flicks
+        let v = clamp(((b.y - a.y) / dt) * 16.67 * scale); // wheel units/frame
+        let vx = clamp(((a.x - b.x) / dt) * 16.67 * scale); // hwheel: right = negative
+        if (Math.hypot(v, vx) < 1.5) return; // too slow → no glide
+
+        let acc = this._scrollAccum; // carry leftover fractional delta
+        let accX = this._scrollAccumX;
+        const friction = 0.95; // per-frame decay (higher = longer glide)
+        const step = () => {
+            v *= friction;
+            vx *= friction;
+            if (Math.hypot(v, vx) < 0.4) {
+                this._scrollMomentumRaf = null;
+                return;
+            }
+            acc += v;
+            const whole = Math.trunc(acc);
+            if (whole !== 0) {
+                this.webrtc.send({ type: 'mousewheel', delta: whole });
+                acc -= whole;
+            }
+            accX += vx;
+            const wholeX = Math.trunc(accX);
+            if (wholeX !== 0) {
+                this.webrtc.send({ type: 'mousehwheel', delta: wholeX });
+                accX -= wholeX;
+            }
+            this._scrollMomentumRaf = requestAnimationFrame(step);
+        };
+        this._scrollMomentumRaf = requestAnimationFrame(step);
+    }
+
+    /** Start the inertial pan glide (3-finger pan on a zoomed display). The
+     *  picture keeps sliding after the fingers leave, with a decaying velocity
+     *  taken from the recent centroid samples — the way a zoomed photo behaves
+     *  on a phone. Decay and travel are time-based, so the glide lasts the same
+     *  wall-clock time at 60 or 120 Hz.
+     * @this {StreamViewInstance} */
+    _startPanMomentum() {
+        this._stopPanMomentum();
+
+        const s = this._panSamples;
+        if (s.length < 2) return;
+        const a = s[0],
+            b = s[s.length - 1];
+        const dt = b.t - a.t;
+        // Only glide on a fresh flick (last sample very recent, real movement).
+        if (dt <= 0 || performance.now() - b.t > 80) return;
+        const clamp = (v) => Math.max(-90, Math.min(90, v)); // clamp wild flicks
+        let vx = clamp(((b.x - a.x) / dt) * 16.67); // px per 60 Hz frame
+        let vy = clamp(((b.y - a.y) / dt) * 16.67);
+        if (Math.hypot(vx, vy) < 1.2) return; // too slow → no glide
+
+        const friction = 0.955; // decay per 60 Hz frame (higher = longer glide)
+        let prev = performance.now();
+        const step = () => {
+            const now = performance.now();
+            // Frames elapsed since the last step, capped so a stalled tab (or a
+            // background frame) cannot teleport the picture across the screen.
+            const frames = Math.min(4, (now - prev) / 16.67);
+            prev = now;
+            const decay = Math.pow(friction, frames);
+            if (Math.hypot(vx, vy) * decay < 0.15 || this._zoom <= 1.01) {
+                this._panMomentumRaf = null;
+                return;
+            }
+            // Travel over this slice: the integral of the decaying velocity.
+            const travel = (decay - 1) / Math.log(friction);
+            const wantX = this._panX + vx * travel;
+            const wantY = this._panY + vy * travel;
+            this._panX = wantX;
+            this._panY = wantY;
+            this._applyZoomTransform(); // clamps the pan to the image edges
+            // An axis that hit its clamp is done — stop pushing against the edge.
+            if (Math.abs(this._panX - wantX) > 0.01) vx = 0;
+            if (Math.abs(this._panY - wantY) > 0.01) vy = 0;
+            if (vx === 0 && vy === 0) {
+                this._panMomentumRaf = null;
+                return;
+            }
+            vx *= decay;
+            vy *= decay;
+            this._panMomentumRaf = requestAnimationFrame(step);
+        };
+        this._panMomentumRaf = requestAnimationFrame(step);
+    }
+
+    /**
+     * Cancel any running inertial pan glide.
+     *
+     * @this {StreamViewInstance}
+     */
+    _stopPanMomentum() {
+        if (this._panMomentumRaf != null) {
+            cancelAnimationFrame(this._panMomentumRaf);
+            this._panMomentumRaf = null;
+        }
+    }
+
+    /**
+     * Cancel any running inertial scroll glide.
+     *
+     * @this {StreamViewInstance}
+     */
+    _stopScrollMomentum() {
+        if (this._scrollMomentumRaf != null) {
+            cancelAnimationFrame(this._scrollMomentumRaf);
+            this._scrollMomentumRaf = null;
+        }
+    }
+}

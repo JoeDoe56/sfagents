@@ -1,0 +1,603 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <QElapsedTimer>
+#include <QObject>
+#include <QNetworkReply>
+#include <QUrl>
+#include <QStringList>
+#include <QSet>
+
+#include "InputPolicy.h"
+#include "StreamConfig.h"
+#include "../common/Types.h"
+#include "../server/NetClassify.h"
+
+#include "../backend/streambackend/IStreamBackend.h"
+#include "../backend/streambackend/HostOsProbe.h"
+
+#include <memory>
+#include <optional>
+
+class NvHTTP;
+class NvComputer;
+class DataChannelRelay;
+class MediaTrackRelay;
+class SignalingServer;
+class StreamRelay;
+class IMediaEngine;
+
+class StreamSession : public QObject
+{
+    Q_OBJECT
+
+public:
+    StreamSession(NvComputer* host, int appId, NvHTTP* http, ResponseCallback respond,
+                  quint16 wsPort = 48001, const QString& serverHost = "localhost",
+                  VideoCodec videoCodec = VideoCodec::Auto, bool gamingMode = true,
+                  const QString& transport = "webrtc",
+                  const QString& stunServer = "stun:stream.moonlightweb.top:3478",
+                  int streamHeight = 1080,
+                  int streamWidth = 0, // 0 = derive from height (16:9); >0 = explicit (ultrawide)
+                  int streamFps = 60, int streamBitrateKbps = 20000, bool yuv444 = false,
+                  bool hdrEnabled = false, QObject* parent = nullptr);
+    ~StreamSession() override;
+
+    void start();
+    void quit();
+
+    /// Override the signaling WS URL returned to the browser.
+    /// When a public tunnel is active, this is the tunnel's WSS endpoint.
+    /// Set the full transport mode string (e.g. "webrtc-media-udp", "webrtc-dc-tcp").
+    /// Used for reporting back to the browser in the /start response.
+    void setTransportMode(const QString& mode) { m_TransportMode = mode; }
+
+    /// Enable/disable ICE-TCP candidates for WebRTC transport.
+    /// Set before start() to control whether TCP fallback candidates are generated.
+    void setEnableIceTcp(bool enable) { m_EnableIceTcp = enable; }
+
+    /// Request lower-bandwidth audio (10ms Opus frames) for mobile clients.
+    void setLowAudio(bool enable) { m_LowAudio = enable; }
+
+    /// Mute the host PC speakers while streaming (GameStream localAudioPlayMode).
+    /// true (default) → host muted; false → audio also plays on the host.
+    void setMuteHostAudio(bool mute) { m_Config.muteHostAudio = mute; }
+
+    /// Enable auto-mode behavior: WS fallback is disabled so that ICE timeout
+    /// emits sessionEnded() instead of starting the internal WS fallback.
+    /// This allows the auto fallback chain in main.cpp to try the next transport.
+    void setAutoMode(bool autoMode) { m_AutoMode = autoMode; }
+
+    /// Mark the video codec as overridden for transport compatibility.
+    /// Example: MediaTrack forced but user selected HEVC → codec forced to H.264.
+    /// When set, onShimConnectionStarted() includes codecOverridden + originalCodec
+    /// in the JSON response so the frontend can adjust decoder expectations.
+    void setCodecOverridden(bool overridden, VideoCodec originalCodec)
+    {
+        m_CodecOverridden = overridden;
+        m_OriginalCodec = originalCodec;
+    }
+
+    void setExplicitWsUrl(const QString& url) { m_ExplicitWsUrl = url; }
+
+    /// Where the streaming client sits, classified from the browser's own
+    /// address. Forwarded to the SignalingServer, which cannot work it out for
+    /// itself — it only sees the loopback end of the local WebSocket proxy.
+    /// Drives both the ICE-server choice and whether the private LAN candidate
+    /// may be advertised. See SignalingServer::setClientKind.
+    void setClientKind(NetClassify::Kind kind) { m_ClientKind = kind; }
+
+    /// MW-BIND-v1 material, forwarded to the SignalingServer of whichever relay
+    /// this session ends up using. See SignalingServer::setPairingIdentity and
+    /// docs/design/pairing-signature.md.
+    void setPairingIdentity(const QString& hostId, const QByteArray& hostKeyPem,
+                            const QByteArray& browserSpki)
+    {
+        m_MwBindHostId = hostId;
+        m_MwBindHostKey = hostKeyPem;
+        m_MwBindBrowserKey = browserSpki;
+    }
+
+    /// Set the ordered transport fallback chain and the index of the attempt
+    /// this session represents. Echoed back to the browser so the frontend can
+    /// walk the chain (relaunch with the next index) when a transport fails.
+    void setTransportChain(const QStringList& chain, int index)
+    {
+        m_TransportChain = chain;
+        m_TransportIndex = index;
+    }
+
+    /// A transport the user asked for by name that was removed from the chain
+    /// before it could ever run (today: "wss" for a browser on the rendezvous).
+    /// Echoed back so the frontend can say so instead of letting the user
+    /// benchmark a transport that silently became another one.
+    void setTransportDropped(const QString& mode) { m_TransportDropped = mode; }
+
+    /// Per-browser Sunshine unique ID (from the browser's localStorage).
+    /// Isolates session management on Sunshine so one browser doesn't take
+    /// over / cancel another's session. Empty → shared IdentityManager id.
+    void setClientUniqueId(const QString& id) { m_ClientUniqueId = id; }
+
+    /// The browser will decode through a gap instead of asking for a keyframe.
+    ///
+    /// Its half of the intra-refresh bargain: the encoder pays for the moving
+    /// refresh band, and only a receiver that keeps decoding collects the
+    /// benefit. Ignored by every path except the native engine.
+    void setRideOutLoss(bool enabled) { m_RideOutLoss = enabled; }
+
+    /// False when the browser's decoder falls silent under the encoder's
+    /// reference repairs: the native engine then keeps one reference and heals
+    /// a loss by a keyframe (mw::native::refuseReferenceRepairs). Ignored by
+    /// every other path.
+    void setRefInvalidation(bool allowed) { m_RefInvalidation = allowed; }
+
+    /// True when the browser cuts each decoded frame to the size the host
+    /// announces (mw::native::SessionConfig::clientCropsToFrame). Ignored by
+    /// every path except the native engine.
+    void setCropsToFrame(bool crops) { m_CropsToFrame = crops; }
+
+    /// The display a native display card stands for, as the server resolved
+    /// it (LaunchRequest::displayKey). A stream worker's only.
+    void setDisplayKey(const QString& key) { m_DisplayKey = key; }
+
+    /// Whether the owner's app this stream shows is still in the settings, as
+    /// the server found it (LaunchRequest::hostAppKnown). A stream worker's only.
+    void setHostAppKnown(bool known) { m_HostAppKnown = known; }
+
+    /// The display our virtual display took the primary role from, as the
+    /// server recorded it (LaunchRequest::previousPrimary). A stream worker's only.
+    void setPreviousPrimary(const QString& key) { m_PreviousPrimary = key; }
+
+    /// Whether the viewer administers MoonlightWeb here — HttpRequest::isLocal
+    /// at /start. Only the native engine acts on it: anyone else is kept out
+    /// of the host's windows that run as administrator (InputGate).
+    void setViewerAdmin(bool admin) { m_ViewerAdmin = admin; }
+
+    /// keyboard_layout_fidelity as the server read it ("auto", "always",
+    /// "never"), handed over in the worker's config: a SYSTEM worker would read
+    /// another profile's settings.json. Empty: read the file here, which is the
+    /// right one for a session in the server's own process.
+    void setKeyboardLayoutFidelity(const QString& fidelity) { m_KeyboardLayoutFidelity = fidelity; }
+
+    /// The desktop portal consent this installation already holds, replayed so
+    /// the user is not asked again. Only the native engine acts on it, and only
+    /// on the Linux portal route; empty everywhere else, which simply means the
+    /// dialog comes up once. Whatever the portal grants back leaves through
+    /// portalGrantReceived().
+    void setPortalRestoreToken(const QString& token) { m_PortalRestoreToken = token; }
+
+    /// The owner streams the virtual display card: on Linux, where the session
+    /// makes that monitor itself, it becomes the desktop's primary while it
+    /// streams (SessionConfig::virtualPrimary). Only the native engine acts on
+    /// it; a guest's session never sets it.
+    void setVirtualPrimary(bool primary) { m_VirtualPrimary = primary; }
+
+    /// One of the owner's apps in its own gamescope, on a Linux native host
+    /// (SessionConfig::gamescopeApp): its name and command, from the settings.
+    /// Only the native engine acts on it.
+    void setGamescopeApp(const QString& name, const QString& command)
+    {
+        m_GamescopeApp = name;
+        m_GamescopeCommand = command;
+    }
+
+    /// The chain a native Windows session carries its pictures on, as the
+    /// admin chose it (AppSettings::nativeVideoPipeline): "auto", "d3d11" or
+    /// "d3d12". Only the native engine acts on it; empty or unknown is auto.
+    void setNativeVideoPipeline(const QString& pipeline) { m_NativeVideoPipeline = pipeline; }
+
+    /// The bench's engine knobs from the settings file (AppSettings::
+    /// nativeTuning), read by the server, which owns that file: a SYSTEM
+    /// worker's own AppData is systemprofile's. Only the native engine acts on
+    /// it, and only when MW_NATIVE_TUNING is absent; empty is the engine's own
+    /// settings.
+    void setNativeTuning(const QString& spec) { m_NativeTuning = spec; }
+    /// AppSettings::rtpVideo — which codecs ride an RTP video track, per host
+    /// type (POC Ultra U1.4). MW_RTP_VIDEO overrides it.
+    void setRtpVideo(const QString& spec) { m_RtpVideo = spec; }
+
+    /// A guest of a native host on the guests' shared feed (plan « flux commun
+    /// des invités »): the feed's pipe and the token it asks, and the guest's
+    /// slot. The native engine then carries the feed's pictures instead of
+    /// capturing its own. Empty: the session captures, as every other does.
+    void setSharedFeed(const QString& pipe, const QByteArray& token, int slot)
+    {
+        m_FeedPipe = pipe;
+        m_FeedToken = token;
+        m_FeedSlot = slot;
+    }
+
+    /// The client's screen, from the /start request: its refresh in
+    /// millihertz (0 = it did not measure one) and whether it paints on
+    /// vsync (tearing off, or a browser that cannot tear). Only the native
+    /// engine acts on it: a vsync client gets a stream cadence that divides
+    /// its refresh, so frames land on its grid instead of beating against it.
+    /// @p tearingReal: its tearing shows each frame as it is drawn — see
+    /// SessionConfig::clientTearingReal.
+    void setClientPresentation(int refreshMilliHz, bool vsync, bool tearingReal)
+    {
+        m_ClientRefreshMilliHz = refreshMilliHz;
+        m_ClientVsync = vsync;
+        m_ClientTearingReal = tearingReal;
+    }
+
+    /// A rate this session may not exceed, alignment included. "Auto" states
+    /// one because it chose the rate itself, against a pixel budget the whole
+    /// chain has to carry; a rate the viewer named carries none. Only the
+    /// native engine acts on it — see mw::native::SessionConfig::maxFps.
+    void setMaxFps(int fps) { m_MaxFps = fps > 0 ? fps : 0; }
+
+    /// The viewer's aspect setting is "Auto", so a native stream rebuilds at
+    /// the display's new shape when the host changes mode — see
+    /// mw::native::SessionConfig::followDisplayShape. Other engines ignore it.
+    void setFollowDisplayShape(bool follow) { m_FollowDisplayShape = follow; }
+
+    /// The requested size is a box to fit (the display's shape inside it),
+    /// and whether a native stream may then be larger than the display — the
+    /// browser's "Same as your device" / "Custom" resolutions. See
+    /// mw::native::SessionConfig::fitRequestedBox and allowUpscale. Other
+    /// engines ignore both: they get the explicit width and height.
+    void setFrameFit(bool fitBox, bool allowUpscale, bool matchDisplay = false,
+                     int fallbackWidth = 0, int fallbackHeight = 0)
+    {
+        m_FitRequestedBox = fitBox;
+        m_AllowUpscale = fitBox && allowUpscale;
+        m_MatchClientDisplay = fitBox && matchDisplay;
+        m_FallbackWidth = fallbackWidth;
+        m_FallbackHeight = fallbackHeight;
+    }
+
+    /// The provider this session launches through. Required: set it before
+    /// start(). It is what decides which host/seat is dialled and, for a
+    /// multi-seat backend, which identity is presented.
+    void setBackend(std::shared_ptr<IStreamBackend> backend) { m_Backend = std::move(backend); }
+
+    /// Go straight to /resume instead of /launch. Sunshine rejects /launch
+    /// while an app is running ("An app is already running on this host"), so
+    /// a standby stream — which by definition joins the LIVE app session —
+    /// must resume directly (each /resume gets its own session_t with its own
+    /// resolution/bitrate). The launch↔resume self-heal still covers a stale
+    /// hint (e.g. the app just exited).
+    void setPreferResume(bool prefer) { m_PreferResume = prefer; }
+
+    /// Set the actual HTTPS port used by HttpServer (may differ from 443
+    /// due to port fallback). Used to construct the correct wsUrl() for
+    /// the browser when sharing the unified port.
+    void setHttpsPort(quint16 port) { m_HttpsPort = port; }
+
+    /// This browser reached us through the rendezvous tunnel, so it has no HTTP
+    /// route here at all. The signalling URL then has to be a PATH: the host's
+    /// own address and port describe a door that browser cannot open, and
+    /// naming one is how "wss://stream.moonlightweb.top:8443/ws" ended up in a
+    /// launch response — the rendezvous's name with this machine's local port
+    /// bolted on, an address that answers nowhere. The page resolves a path
+    /// against its own origin, which is the only authority that means anything
+    /// on this path.
+    void setTunnelArrival(bool viaTunnel) { m_TunnelArrival = viaTunnel; }
+
+    /// Set the port for the legacy WSS StreamRelay (separate from signaling WS port).
+    void setStreamRelayPort(quint16 port) { m_StreamRelayPort = port; }
+
+    /// Distinct WebRTC/UPnP media UDP port for this stream slot (base + slot).
+    /// Forwarded to the SignalingServer so concurrent workers never collide on
+    /// the media port. Defaults to the base for the single-stream path.
+    void setMediaPort(quint16 port) { m_MediaPort = port; }
+
+    /// The router hole the parent claimed for this slot (RouterPortAllocator):
+    /// the browser is told publicIp:externalPort, the socket binds the media
+    /// port. Absent or 0 = no mapping, STUN only.
+    void setUpnpMapping(const QString& publicIp, quint16 externalPort)
+    {
+        m_UpnpPublicIp = publicIp;
+        m_UpnpExternalPort = externalPort;
+    }
+
+    /// Proxy path prefix for this session's WebSockets ("/ws" by default;
+    /// "/ws1" for the second concurrent stream slot). Forwarded to the
+    /// SignalingServer / StreamRelay so the advertised wsUrl matches the
+    /// HttpServer path→port routing.
+    void setWsPath(const QString& path) { m_WsPath = path; }
+
+    /// What this session's client may send to the host. Unrestricted for the
+    /// owner; an invited player gets whatever the owner ticked on the sharing
+    /// board. Restricting it also shuts clipboard sync off — the host's
+    /// clipboard is not a guest's to read.
+    ///
+    /// Call before start() only: this writes the field directly, and the relays
+    /// read it from their own thread once they exist.
+    void setInputPolicy(const InputMsg::Policy& policy) { m_InputPolicy = policy; }
+
+    /// Change the policy of a session that is already streaming — the owner
+    /// moved this player's permissions while they were playing. Safe to call
+    /// from the main thread: every write lands on the relay thread that owns
+    /// the objects it touches.
+    void applyInputPolicy(const InputMsg::Policy& policy);
+
+    /// Shift this session's controller numbers so gamepads from concurrent
+    /// sessions land on distinct virtual pads instead of all arriving as
+    /// controller 0. Zero (the owner) keeps the browser's own numbering.
+    void setGamepadOffset(int offset) { m_GamepadOffset = offset; }
+
+    /// The per-session key sent to the host as `rikey`. A backend that keys its
+    /// own bookkeeping on the launch — Wolf indexes a session by client
+    /// certificate and reflects this key back as `aes_key` — needs it to tell
+    /// OUR session apart from every other one running on that host.
+    ///
+    /// Valid from sessionStarted(); read it there, not later: this object
+    /// deletes itself immediately afterwards.
+    QByteArray launchKey() const { return m_Config.rikey; }
+
+signals:
+    void relayCreated(DataChannelRelay* relay);
+    void mediaTrackRelayCreated(MediaTrackRelay* relay);
+    void streamRelayCreated(StreamRelay* relay);
+    void sessionStarted();
+    void sessionFailed(const QString& error);
+    // The TTL a host's own packets arrived with, once one has been seen. The
+    // worker forwards it to the parent, which is the only process that keeps a
+    // host list — so the NEXT session on this host starts out knowing its OS
+    // instead of spending its first seconds quantizing scroll it need not.
+    void hostIpTtlObserved(int ttl);
+    // A desktop-portal consent worth keeping, from the native engine. Travels
+    // the same road as the TTL above and for the same reason — only the parent
+    // process owns settings — but unlike the TTL this one IS persisted: it is
+    // what makes the AppImage ask once per installation instead of per session.
+    void portalGrantReceived(const QString& token);
+
+private slots:
+    void onShimConnectionStarted();
+    // Poll the media path for the host's TTL until one shows up or we give up.
+    void sampleHostIpTtl();
+    void onShimConnectionFailed(const QString& error);
+
+private:
+    /// Tell the engine how far this host can honour the client's keyboard
+    /// layout. Called at stream start, and again if the TTL sample names an OS
+    /// the control plane could not — a Windows host identified only there would
+    /// otherwise keep typing by position for the whole session.
+    void applyKeyboardMode(HostOsProbe::HostOs os);
+
+    void doLaunchApp();
+    void doResumeApp();
+    /// Where the app outlives the stream (capabilities().resumableApps), ask
+    /// the host what runs before choosing: the requested app → /resume, none →
+    /// /launch, another one → refuse with `app_running` so the browser can ask
+    /// the viewer what to do. `orElse` runs when the host cannot tell.
+    void chooseByRunningApp(std::function<void()> orElse);
+    void respondAppRunning(int runningAppId);
+
+    /// Single landing point for launch and resume, whichever produced it.
+    void onLaunchResult(bool ok, const BackendError& err, const MediaDescriptor& media);
+
+    /// Everything a launch/resume needs, gathered from this session.
+    LaunchRequest buildLaunchRequest() const;
+
+    /// Deadline for the launch/resume about to be sent, carved out of a budget
+    /// shared by every attempt this session makes. Call once per attempt, after
+    /// the attempt's own flag is set — the reserve it keeps depends on whether
+    /// the cancel-and-retry is still on the table.
+    int launchTimeoutMs();
+
+    /// Effective Sunshine uniqueid (m_ClientUniqueId or the shared id).
+    QString effectiveUniqueId() const;
+
+    /// Registry of uniqueids with a session we launched and haven't quit.
+    /// Main-thread only (start/quit/reply slots all run on the Session thread).
+    /// Lets a reload reconnect to its own session via /resume instead of /launch.
+    static QSet<QString> s_ActiveUniqueIds;
+
+    NvComputer* m_Host;
+    // Ticks left before sampleHostIpTtl() stops looking for a TTL.
+    int m_TtlSamplesLeft = 0;
+    int m_AppId;
+    NvHTTP* m_Http;
+
+    // Owns the launch: kept alive for the whole session because its async
+    // callbacks reference it.
+    std::shared_ptr<IStreamBackend> m_Backend;
+    ResponseCallback m_Respond;
+    quint16 m_WsPort = 48001;
+    QString m_ServerHost;
+
+    StreamConfig m_Config;
+    bool m_GamingMode = true;
+
+    // Streaming resolution, FPS and bitrate (read from AppSettings)
+    int m_StreamWidth = 1920;
+    int m_StreamHeight = 1080;
+    int m_StreamFps = 60;
+    int m_StreamBitrateKbps = 20000;
+
+    QString m_Transport = "webrtc";
+    /// Full transport mode string (e.g. "webrtc-media-udp", "webrtc-dc-tcp", "wss").
+    /// Echoed back to the browser in the /start response for display/debug.
+    QString m_TransportMode;
+    /// Ordered transport fallback chain + this attempt's index (echoed back so
+    /// the frontend can relaunch with the next transport on connection failure).
+    QStringList m_TransportChain;
+    int m_TransportIndex = 0;
+    /// Explicitly requested transport that was stripped from the chain (see
+    /// setTransportDropped). Empty when the chain honoured the request.
+    QString m_TransportDropped;
+    /// The virtual display's GPU and the one its predecessor was drawn by,
+    /// when they differ (NativeHostMedia::virtualDisplayGpu) — for the browser.
+    QString m_VirtualDisplayGpu;
+    QString m_PreviousPrimaryGpu;
+    /// Enable ICE-TCP candidates (true for *-tcp modes, false for *-udp modes).
+    bool m_EnableIceTcp = false;
+    bool m_LowAudio = false;
+    /// True when session is part of the auto fallback chain (main.cpp auto mode).
+    /// Disables internal WS fallback so ICE timeout → sessionEnded → tryNext().
+    bool m_AutoMode = false;
+    /// True when the video codec was overridden for transport compatibility.
+    bool m_CodecOverridden = false;
+    /// The original codec selected by the user, before override.
+    VideoCodec m_OriginalCodec = VideoCodec::Auto;
+    QString m_StunServer = "stun:stream.moonlightweb.top:3478";
+    /// Per-browser uniqueid for Sunshine launch/cancel; empty → shared id.
+    QString m_ClientUniqueId;
+    /// Resume directly instead of launching (see setPreferResume).
+    bool m_PreferResume = false;
+    QNetworkReply* m_LaunchReply = nullptr;
+    /// Track which start paths we've tried, so launch↔resume fallback (used when
+    /// the registry hint is stale) terminates instead of looping.
+    bool m_LaunchAttempted = false;
+    bool m_ResumeAttempted = false;
+    /// The /launch refusal that sent us to /resume. If the resume fails too,
+    /// this is the error the viewer is told about (see onLaunchResult).
+    std::optional<BackendError> m_LaunchRefusal;
+    /// A /launch that TIMES OUT means Sunshine still holds a stale session; we
+    /// /cancel and relaunch exactly once. This guards that single retry.
+    bool m_LaunchTimeoutRetried = false;
+
+    // ── Launch budget ────────────────────────────────────────────────────────
+    //
+    // The browser gives up on /start after 25s (BackendClient.launchApp) and
+    // relaunches, which takes this slot over and kills the worker mid-request.
+    // Two back-to-back 20s attempts overran that by 15s: against a host that
+    // had stopped answering /launch entirely, the browser had already started a
+    // second worker — itself good for another 40s — while the first was still
+    // waiting. Every attempt now draws from one budget that ends first.
+    static constexpr int kLaunchBudgetMs = 21000;
+    /// Held back from the first attempt so the /cancel and the relaunch that a
+    /// timeout triggers still fit inside the budget.
+    static constexpr int kLaunchRetryReserveMs = 11000;
+    /// Floor for a single attempt: below this a healthy but slow host would be
+    /// cut off mid-answer.
+    static constexpr int kLaunchMinTimeoutMs = 4000;
+    /// Starts on the first attempt; measures the whole launch step.
+    QElapsedTimer m_LaunchBudget;
+    QString m_SessionUrl;
+
+    /// If non-empty, overrides SignalingServer::wsUrl() in the /start response.
+    QString m_ExplicitWsUrl;
+
+    /// Where the streaming client sits (see setClientKind).
+    NetClassify::Kind m_ClientKind = NetClassify::Kind::Public;
+    QString m_MwBindHostId;
+    QByteArray m_MwBindHostKey;
+    QByteArray m_MwBindBrowserKey;
+
+    /// The HTTPS port HttpServer is actually listening on (may be != 443).
+    quint16 m_HttpsPort = 443;
+
+    /// Whether the launch request came down the tunnel (see setTunnelArrival).
+    bool m_TunnelArrival = false;
+
+    /// Port for legacy WSS StreamRelay (separate from m_WsPort used for signaling).
+    quint16 m_StreamRelayPort = 48002;
+    /// WebRTC media UDP port for this slot; 48550 (slot 0 base) by default.
+    quint16 m_MediaPort = 48550;
+    /// The router hole for this slot (see setUpnpMapping); none by default.
+    QString m_UpnpPublicIp;
+    quint16 m_UpnpExternalPort = 0;
+
+    /// Proxy path prefix for this session's WebSockets (see setWsPath).
+    QString m_WsPath = QStringLiteral("/ws");
+
+    /// Input restrictions for a shared session (see setInputPolicy).
+    InputMsg::Policy m_InputPolicy;
+    /// Controller-number offset for a shared session (see setGamepadOffset).
+    int m_GamepadOffset = 0;
+
+    /// Negotiated video format from drSetup (0=unknown, 0x0001=H.264, 0x0100=HEVC, 0x0200=AV1).
+    /// Written by drSetup on the worker thread, read on the main thread during
+    /// onShimConnectionStarted(). The atomic in MoonlightShim guarantees up-to-date reads.
+    int m_NegotiatedVideoFormat = 0;
+
+    /// The browser said it will decode through a gap rather than demand a
+    /// keyframe. Set from the /start request; only the native engine acts on
+    /// it, and only if its encoder really honours intra-refresh.
+    bool m_RideOutLoss = false;
+
+    /// See setRefInvalidation. True, the engine's own repairs, unless the
+    /// /start request said otherwise.
+    bool m_RefInvalidation = true;
+
+    /// See setCropsToFrame. False, the frame on the encoder's grid, unless the
+    /// /start request said otherwise.
+    bool m_CropsToFrame = false;
+
+    /// See setDisplayKey. Absent, the backend resolves the app id itself.
+    std::optional<QString> m_DisplayKey;
+
+    /// See setHostAppKnown. Absent, the backend looks the app up itself.
+    std::optional<bool> m_HostAppKnown;
+
+    /// See setPreviousPrimary. Absent, the backend reads the settings itself.
+    std::optional<QString> m_PreviousPrimary;
+
+    /// See setViewerAdmin. Defaults to the trusting value only because every
+    /// caller sets it; a worker whose parent predates the field is the owner
+    /// path, which is the host's own administrator anyway.
+    bool m_ViewerAdmin = true;
+    QString m_KeyboardLayoutFidelity;
+
+    /// See setPortalRestoreToken. Empty is the honest default: a session that
+    /// does not know of a consent asks for one.
+    QString m_PortalRestoreToken;
+
+    /// See setVirtualPrimary. Off unless the owner's /start says so.
+    bool m_VirtualPrimary = false;
+
+    /// See setGamescopeApp. Empty on every other card.
+    QString m_GamescopeApp;
+    QString m_GamescopeCommand;
+
+    /// See setNativeVideoPipeline. Empty — a parent that predates the setting —
+    /// is auto, the engine's own table.
+    QString m_NativeVideoPipeline;
+
+    /// See setNativeTuning. Empty — a parent that predates it, or no knob.
+    QString m_NativeTuning;
+    /// See setRtpVideo. Empty — every codec on the video DataChannel.
+    QString m_RtpVideo;
+
+    /// See setSharedFeed. Empty: this session captures its own pictures.
+    QString m_FeedPipe;
+    QByteArray m_FeedToken;
+    int m_FeedSlot = -1;
+
+    /// The client's screen at /start — see setClientPresentation.
+    int m_ClientRefreshMilliHz = 0;
+    bool m_ClientVsync = false;
+    bool m_ClientTearingReal = false;
+
+    /// See setMaxFps.
+    int m_MaxFps = 0;
+
+    /// See setFollowDisplayShape.
+    bool m_FollowDisplayShape = false;
+
+    /// See setFrameFit.
+    bool m_FitRequestedBox = false;
+    bool m_AllowUpscale = false;
+    bool m_MatchClientDisplay = false;
+    int m_FallbackWidth = 0;
+    int m_FallbackHeight = 0;
+
+    /// The engine producing this session's media: MoonlightShim for a
+    /// GameStream host, NativeMediaEngine for this machine's own screen.
+    /// Chosen once, in the media-engine branch of onLaunchResult().
+    IMediaEngine* m_Engine = nullptr;
+    DataChannelRelay* m_Relay = nullptr;
+    MediaTrackRelay* m_MediaTrackRelay = nullptr;
+    SignalingServer* m_Signaling = nullptr;
+    StreamRelay* m_StreamRelay = nullptr;
+};

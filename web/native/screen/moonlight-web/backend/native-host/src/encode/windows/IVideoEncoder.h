@@ -1,0 +1,116 @@
+/*
+ * MoonlightWeb — native capture & encoding engine.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include "mw/native/Capabilities.h"
+#include "mw/native/EncoderTuning.h"
+#include "../EncoderOutput.h"
+
+#include <d3d11.h>
+
+#include <cstdint>
+#include <string>
+
+namespace mw::native::encode {
+
+/// A hardware encoder taking D3D11 textures.
+///
+/// The interface exists at the vendor boundary and nowhere else: capture and
+/// colour conversion are identical whichever GPU is in the machine, and it is
+/// only the encoder that differs. Every implementation takes the SAME NV12 (or
+/// AYUV) texture the conversion pass wrote, on the same adapter — that is the
+/// zero-copy contract, and an implementation that needs a staging copy has
+/// broken it.
+class IVideoEncoder
+{
+public:
+    virtual ~IVideoEncoder() = default;
+
+    IVideoEncoder(const IVideoEncoder&) = delete;
+    IVideoEncoder& operator=(const IVideoEncoder&) = delete;
+
+    /// @param device the D3D11 device the frames live on. Must be the adapter
+    ///               that captured them.
+    /// @param yuv444 encode 4:4:4 rather than 4:2:0. The caller must have
+    ///               checked GpuInfo::supports444 first.
+    /// @param hdr the surface is **P010** — 10-bit, BT.2020 primaries, the PQ
+    ///            transfer — rather than 8-bit BT.709. The encoder must pick a
+    ///            10-bit profile AND describe the colour in its bitstream: a
+    ///            browser that is not told the transfer curve displays PQ as if
+    ///            it were sRGB, which is a grey, washed-out picture rather than
+    ///            an error. Mutually exclusive with @p yuv444 (no browser
+    ///            decodes 10-bit 4:4:4) and only ever true for HEVC or AV1.
+    /// @param intraRefresh encode with a moving band of intra blocks instead of
+    ///                     relying on keyframes for recovery. Only ask when the
+    ///                     receiver will decode through the damage; an encoder
+    ///                     that cannot do it reports so from
+    ///                     intraRefreshEnabled() rather than failing.
+    /// @param tuning the bench's overrides of this encoder's own settings; a
+    ///               default-constructed one IS the engine's choice, and is what
+    ///               every session a browser starts passes.
+    virtual bool init(ID3D11Device* device, Codec codec, int width, int height, int fps,
+                      int bitrateKbps, bool yuv444, bool hdr, bool intraRefresh,
+                      const EncoderTuning& tuning, std::string& error) = 0;
+
+    /// Encode one texture. Blocking: returns with the bitstream ready.
+    /// @param frameNumber the number this frame goes out under (EncodedFrame::
+    ///                    frameNumber). The encoder stamps its picture with it,
+    ///                    which is what lets a receiver name the frame it lost
+    ///                    to invalidateReference().
+    virtual bool encode(ID3D11Texture2D* surface, bool forceKeyframe, uint32_t frameNumber,
+                        EncoderOutput& out, std::string& error) = 0;
+
+    /// Whether invalidateReference() does anything on this encoder.
+    virtual bool supportsReferenceInvalidation() const { return false; }
+
+    /// The frame numbered @p frameNumber never reached the receiver: encode
+    /// the next pictures against older frames only, so the stream heals with
+    /// an ordinary delta instead of a keyframe (design §9.2). Returns false
+    /// when this encoder cannot — the caller then forces a keyframe.
+    virtual bool invalidateReference(uint32_t frameNumber, std::string& error)
+    {
+        (void)frameNumber;
+        error = "reference invalidation is not available on this encoder";
+        return false;
+    }
+
+    /// Release the buffer handed out by the last encode(). Must be called
+    /// before the next encode().
+    virtual void releaseOutput() = 0;
+
+    virtual void stop() = 0;
+
+    /// Move the target bitrate without restarting the session — the basis for
+    /// following the client's real feedback frame by frame.
+    virtual bool setBitrate(int bitrateKbps, std::string& error) = 0;
+
+    /// Whether the stream refreshes by intra-refresh rather than by periodic
+    /// keyframes. Reported, not requested: not every encoder can do it.
+    virtual bool intraRefreshEnabled() const = 0;
+
+    /// How many frames a loss may take to heal by the refresh: the sweep's
+    /// period, unless the encoder leaves a gap between sweeps — then the gap
+    /// plus one sweep. 0 = the period (encode::intraRefreshPeriodFrames), which
+    /// is every encoder but oneVPL and NVENC.
+    virtual int intraRefreshHorizonFrames() const { return 0; }
+
+protected:
+    IVideoEncoder() = default;
+};
+
+} // namespace mw::native::encode

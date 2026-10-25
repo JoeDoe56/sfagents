@@ -18,4 +18,4 @@ if ($signature.Status -ne 'Valid') { throw ('PawnIO installer signature could no
 Write-Output ('Opening the signed PawnIO installer from ' + $signature.SignerCertificate.Subject + '. Windows will ask for administrator approval.')
 $setupProcess = Start-Process -FilePath $installer -Verb RunAs -WindowStyle Normal -PassThru -Wait
 if ($setupProcess.ExitCode -ne 0) { throw ('PawnIO setup exited with code ' + $setupProcess.ExitCode) }
-Write-Output 'Restart SF Agents with --sensor-admin to grant only its sensor worker access to the hardware.'
+Write-Output 'Restart SF Agents and approve its administrator prompt to give its sensor worker access to the hardware.'

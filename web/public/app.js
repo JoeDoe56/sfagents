@@ -697,7 +697,7 @@ function connect() {
   });
   es.addEventListener('usage', (e) => agentSheet?.setUsage?.(JSON.parse(e.data)));
   es.addEventListener('dictation', (e) => dictationEvent(JSON.parse(e.data)));
-  es.addEventListener('remote', (e) => remoteEvent(JSON.parse(e.data)));
+  es.addEventListener('screen', (e) => remoteEvent(JSON.parse(e.data)));
   es.addEventListener('notice', (e) => {
     const { text, level } = JSON.parse(e.data);
     notice(text, level === 'error' ? 'error' : '');

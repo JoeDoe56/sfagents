@@ -1,0 +1,214 @@
+/*
+ * MoonlightWeb — browser-based Sunshine/GameStream client.
+ * Copyright (C) 2026 Bruno Martin <brunoocto@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <QString>
+#include <QByteArray>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QVector>
+#include <QSettings>
+
+#include "NvAddress.h"
+#include "NvApp.h"
+#include "NvHTTP.h"
+#include "backend/streambackend/HostOsProbe.h"
+
+class NvComputer
+{
+public:
+    enum PairState
+    {
+        PS_UNKNOWN,
+        PS_PAIRED,
+        PS_NOT_PAIRED
+    };
+    enum ComputerState
+    {
+        CS_UNKNOWN,
+        CS_ONLINE,
+        CS_OFFLINE
+    };
+
+    NvComputer() = default;
+
+    // Construct from serverInfo XML + active address (polling response)
+    explicit NvComputer(const QString& serverInfo, const NvAddress& activeAddr);
+
+    // Construct from persisted QSettings
+    explicit NvComputer(QSettings& settings);
+
+    // Merge polling data — returns true if any field changed
+    bool update(const NvComputer& that);
+
+    // Persistence
+    void serialize(QSettings& settings) const;
+    bool isEqualSerialized(const NvComputer& that) const;
+
+    // REST API output
+    QJsonObject toJson() const;
+
+    // Helpers for address iteration during polling
+    QVector<NvAddress> uniqueAddresses() const;
+
+    // True when this host resolves to the machine MoonlightWeb runs on (loopback
+    // or one of our own interface addresses). Surfaced in toJson() so the
+    // frontend can warn about streaming your own PC ("Inception" loop).
+    bool isLocalMachine() const;
+
+    // True for the synthetic host backed by MoonlightWeb's own capture engine.
+    //
+    // It is unlike every other entry in the list: it has no address, nothing to
+    // poll, no pairing, and it is recomputed at each startup from what the
+    // machine can actually do — so it must never be persisted, or a stale one
+    // would offer a display that has since been unplugged.
+    bool isNativeEngine() const { return backendType == QLatin1String("native"); }
+
+    // True when ending a stream on this host means sending it a GameStream
+    // /cancel. The native engine has no server to send one to — its address is
+    // empty — so the /cancel only ever came back "Host not found", and Stop
+    // answered the browser with a 502 for a stream that had ended cleanly.
+    bool takesHostCancel() const { return !isNativeEngine(); }
+
+    // State management
+    static PairState pairStateFromString(const QString& s);
+    static QString pairStateToString(PairState ps);
+    static ComputerState computerStateFromString(const QString& s);
+    static QString computerStateToString(ComputerState cs);
+
+    // — Ephemeral traits (from polling) —
+    ComputerState state = CS_UNKNOWN;
+
+    // Consecutive failed polls — debounce so a single transient network
+    // error (stale keep-alive, 2s abort) does not flip the host offline.
+    int consecutivePollFailures = 0;
+
+    // True when the machine answers at the IP level but the GameStream/Sunshine
+    // server isn't (e.g. the host is powered on but MoonlightWeb/Sunshine isn't
+    // running → the serverinfo poll gets a TCP reset, not a timeout). Lets the
+    // frontend show "Unavailable" (no Wake-on-LAN) instead of a plain "Offline"
+    // + Wake for a host that is demonstrably up. Ephemeral, not persisted.
+    bool reachable = false;
+
+    // — Persisted pairing state —
+    PairState pairState = PS_UNKNOWN;
+    NvAddress activeAddress;
+    int currentGameId = 0;
+    /// Apollo names the running app only on its paired HTTPS port and answers
+    /// 0 on plain HTTP, which is what the host poll reads. Recognised by the
+    /// <Permission> element no Sunshine sends. Its currentGameId is then left
+    /// to ComputerManager::refreshRunningApp (HTTPS), or every poll would wipe
+    /// the Running card 10 s after a Stop (issue #24 bench, 05/10/2026).
+    bool runningAppOverHttpsOnly = false;
+    QString gfeVersion;
+    QString appVersion;
+    QString gpuModel;
+    int serverCodecModeSupport = 0;
+    int maxLumaPixelsHEVC = 0;
+    bool isNvidiaServerSoftware = false;
+    QVector<NvDisplayMode> displayModes;
+
+    // — Persisted traits —
+    NvAddress localAddress;
+    NvAddress remoteAddress;
+    NvAddress manualAddress;
+    QByteArray macAddress;
+    QString name;
+
+    // A name the user gave this host here, which wins over `name` everywhere it
+    // is shown. Kept separate rather than overwriting `name` because `name` is
+    // refreshed from serverinfo on every poll: writing the alias there would
+    // have the next poll erase it. Empty means "show what the host calls
+    // itself", which is also how the alias is cleared.
+    QString customName;
+
+    QString uuid;
+    QVector<NvApp> appList;
+
+    // — Pairing state (persisted) —
+    QByteArray serverCertPem;
+    quint16 activeHttpsPort = 0;
+
+    // — Stream backend (persisted) —
+    //
+    // Empty means a plain GameStream host: Sunshine, Apollo, anything speaking
+    // NvHTTP. That is the default and keeps those hosts on exactly today's code
+    // path. A non-empty type names a registered backend ("wolf") with its own
+    // control API, addressed through backendApiUrl.
+    //
+    // backendApiToken is a secret and must never reach toJson().
+    QString backendType;
+    QString backendApiUrl;
+    QString backendApiToken;
+
+    // Credentials used to push a pairing PIN to whatever the backend puts in
+    // front of each seat. MultiSeat needs them: its own API can read and unpair
+    // clients but never pair one, so a seat is paired through its Apollo web UI
+    // — and MultiSeat does not generate those credentials, it expects an admin
+    // to have set them. All seats share one credentials file, so one pair
+    // covers every seat. Empty for backends that pair without them, like Wolf.
+    //
+    // backendPairPassword is a secret and must never reach toJson().
+    QString backendPairUser;
+    QString backendPairPassword;
+
+    // — What we worked out about this host ourselves (NOT persisted) —
+    //
+    // A MultiSeat control API answered on this host's address. This is the one
+    // thing about a backend that can be established without a credential and
+    // without asking, so it is what lets the UI offer MultiSeat to the people
+    // who have it while staying completely absent for everyone else.
+    //
+    // Deliberately not saved: it describes what is running right now, and a
+    // stale "yes" from months ago would offer a setup that cannot complete.
+    // Re-probed once per process, per host.
+    bool multiSeatApiPresent = false;
+
+    // This host speaks GameStream but carries no Sunshine-family management API,
+    // so whatever runs it has a control API we have no way of finding: its
+    // address is known only to whoever set up the reverse proxy in front of it.
+    // Today the one such server we know of is Wolf — but that is an inference,
+    // not a fact, so this flag says what was actually observed and the UI it
+    // drives never names a product.
+    //
+    // Only a DEFINITE negative sets it. "Could not reach that port" leaves it
+    // false, or a Sunshine host behind a firewall would be offered a setup it
+    // has no use for. Not saved, for the same reason as the flag above.
+    bool mayHaveControlApi = false;
+
+    // IP TTL seen on a packet this host sent us, 0 until a stream has run. The
+    // media path is the only place its packets reach code of ours that can read
+    // one — nothing on the control plane answers over UDP (see HostOsProbe.h).
+    //
+    // Deliberately not saved, and this one really must not be: the bench-mini
+    // dual-boots Ubuntu and Windows, so a TTL kept from last week would name
+    // the wrong OS half the time.
+    int observedIpTtl = 0;
+
+    // The OS a stream worker was TOLD this host runs. A worker rebuilds a bare
+    // NvComputer from a snapshot and has no ComputerManager, so none of the
+    // probe results above reach it; the parent, which has them all, hands its
+    // conclusion down with the rest of the snapshot. Unset in the parent, where
+    // the evidence itself is available.
+    HostOsProbe::HostOs declaredOs = HostOsProbe::HostOs::Unknown;
+
+    // Which OS this host runs, worked out from everything above. Derived on
+    // every call rather than cached so it cannot go stale behind a host that
+    // rebooted into its other system.
+    HostOsProbe::HostOs hostOs() const;
+};

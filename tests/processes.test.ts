@@ -121,7 +121,7 @@ describe('processes: HTTP API', () => {
     writeAgent(dir, baseAgent('main'));
     const agents = loadAgentTree(path.join(dir, 'agent.json'));
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: agents.configDir });
-    const server = new WebServer({ tree: agents, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, lhmUrl: null, auth: false });
+    const server = new WebServer({ tree: agents, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, sensors: null, auth: false });
     const base = (await server.start()).replace(/\/$/, '');
     const get = (p: string, headers: Record<string, string> = {}) =>
       new Promise<{ status: number; json: Record<string, unknown> }>((resolve, reject) => {
