@@ -1,13 +1,14 @@
 # Builds sfagents-screen, SF Agents' screen mirroring helper (web/native/screen),
-# for Windows and Linux. A tag screen-v<version> publishes the archives as a
-# release; SF Agents downloads them by that version and checks them against
-# the SHA-256 pinned in web/src/screen.ts.
+# for Windows and Linux. A build of a version (CMakeLists.txt's project VERSION)
+# that has no release yet publishes the archives as release screen-v<version>;
+# SF Agents downloads them by that version and checks them against the SHA-256
+# pinned in web/src/screen.ts. A published version is never rebuilt: change
+# the helper, bump the version.
 name: Screen helper
 
 on:
   push:
     branches: [main, moonlightweb]
-    tags: ['screen-v*']
     paths:
       - web/native/screen/**
       - scripts/build-screen.mjs
@@ -178,16 +179,33 @@ jobs:
           path: sfagents-screen-linux-x64.tar.gz*
 
   release:
-    if: startsWith(github.ref, 'refs/tags/screen-v')
     needs: [windows, linux]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v6
-        with:
-          merge-multiple: true
-      - env:
+      - uses: actions/checkout@v5
+      - id: version
+        env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Screen helper ${GITHUB_REF_NAME#screen-v}" \
+          v=$(sed -nE 's/^project\(sfagents-screen VERSION ([0-9.]+).*/\1/p' web/native/screen/CMakeLists.txt)
+          test -n "$v"
+          echo "tag=screen-v$v" >> "$GITHUB_OUTPUT"
+          if gh release view "screen-v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "screen-v$v is already published"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.version.outputs.new == 'true'
+        uses: actions/download-artifact@v6
+        with:
+          merge-multiple: true
+      - if: steps.version.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          cat sfagents-screen-*.sha256
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Screen helper ${TAG#screen-v}" \
             --notes "sfagents-screen, SF Agents' screen mirroring helper, built from web/native/screen at $GITHUB_SHA." \
             sfagents-screen-*
