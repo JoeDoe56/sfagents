@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { ConversationService, loadAgentTree } from '@sfagents/core';
+import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
 import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, useAnySandbox, writeJson, type Script, writeAgent } from './helpers.js';
 
@@ -497,6 +497,40 @@ describe('sfagents web (CLI)', () => {
 
 
 describe('agent settings and context', () => {
+  test('a new project starts with no provider and flags broken files; an added provider becomes the account', async () => {
+    const dir = makeTempDir('sfagents-web-');
+    ensureProject(dir);
+    fs.writeFileSync(path.join(dir, 'agents', 'broken.json'), '{');
+    fs.writeFileSync(path.join(dir, 'mcp.json'), 'not json');
+    const tree = loadAgentTree(dir, { fallback: true });
+    const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
+    const registry = new ProviderRegistry({ dir: makeTempDir(), secrets: new MemorySecretStore() });
+    const server = new WebServer({ tree, conversation, port: 0, registry, watchAgents: false, auth: false });
+    const base = (await server.start()).replace(/\/$/, '');
+    try {
+      let info = JSON.parse((await request(base, '/api/agent')).body.toString());
+      assert.equal(info.id, 'main');
+      assert.equal(info.account, '');
+      assert.deepEqual(info.accounts, []);
+      const state = JSON.parse((await request(base, '/api/state')).body.toString()) as { notices: Array<string | { text: string; level: string }> };
+      const texts = state.notices.map((n) => (typeof n === 'string' ? n : n.text));
+      assert.ok(texts.some((t) => /^broken\.json was skipped: invalid JSON/.test(t)), JSON.stringify(texts));
+      assert.ok(texts.some((t) => /mcp\.json could not be used/.test(t)), JSON.stringify(texts));
+      for (const p of ['/api/agent/usage', '/api/agent/context']) assert.equal((await request(base, p, { headers: { 'Sec-Fetch-Site': 'same-origin' } })).status, 200, p);
+      await registry.add({ name: 'Claude', kind: 'anthropic', secret: { token: 't' } });
+      await registry.add({ name: 'OpenRouter', kind: 'openrouter', secret: { apiKey: 'k' } });
+      info = JSON.parse((await request(base, '/api/agent')).body.toString());
+      assert.equal(info.account, 'Claude');
+      assert.deepEqual(info.accounts.map((a: { name: string; model: string }) => [a.name, a.model]), [['Claude', 'claude-sonnet-5-5'], ['OpenRouter', 'anthropic/claude-sonnet-5.5']]);
+      const set = await postJson(base, '/api/agent', { account: 'OpenRouter' });
+      assert.equal(set.status, 200);
+      assert.equal(set.json['account'], 'OpenRouter');
+    } finally {
+      await server.close();
+      conversation.close();
+    }
+  });
+
   test('reasoning effort: read, change, persist, and sent with requests', async () => {
     const seen: Array<string | undefined> = [];
     const s = await startServer((req) => {

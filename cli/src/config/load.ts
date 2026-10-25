@@ -61,7 +61,15 @@ export function loadEnvFile(configDir: string, env: NodeJS.ProcessEnv = process.
   return loaded;
 }
 
-export function loadConfig(location: ConfigLocation): AgentTree {
+/**
+ * Loads the project's agents. With `fallback` (the commands that start the
+ * app, after ensureProject), a project whose agent files are all broken
+ * still starts with the built-in default agent.
+ */
+export function loadConfig(location: ConfigLocation, options: { fallback?: boolean } = {}): AgentTree {
+  if (options.fallback) {
+    return loadAgentTree(location.configDir, { mcpConfigFile: location.mcpFile, fallback: true, ...(location.agent ? { agent: location.agent } : {}) });
+  }
   if (!fs.existsSync(path.join(location.configDir, AGENTS_DIR_NAME)) && !fs.existsSync(path.join(location.configDir, 'agent.json'))) {
     throw new Error(
       `No agents found: ${location.configDir} has no "${AGENTS_DIR_NAME}" folder. Run sfagents from a project directory with ${AGENTS_DIR_NAME}/<name>.json files, or pass --config <dir>.`,

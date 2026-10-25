@@ -628,7 +628,7 @@ function applySnapshot(s) {
   setArtifacts(s.artifacts);
   setSections(s.sections);
   if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
-  for (const text of s.notices || []) notice(text);
+  for (const n of s.notices || []) typeof n === 'string' ? notice(n) : notice(n.text, n.level);
   render();
   updateComposer();
   requestAnimationFrame(scrollToBottom);

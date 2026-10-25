@@ -23,6 +23,7 @@ import {
   watchProject,
   type ProviderFactory,
   describeTree,
+  ensureProject,
   getErrorMessage,
   KeyringUnavailableError,
   mcpGrants,
@@ -128,7 +129,7 @@ function providers(env: NodeJS.ProcessEnv = process.env) {
 /** Fails early, before any model call, when the replying agent has no usable provider. */
 function checkCredentials(tree: AgentTree, env: NodeJS.ProcessEnv): void {
   const problems = checkProviders(tree.root.definition, providers(env).registry, env);
-  if (problems.length) throw new ConfigError(tree.root.file, 'provider', problems[0]!.replace(/^Agent "[^"]+" uses /, 'uses '));
+  if (problems.length) throw new ConfigError(tree.root.file, 'provider', problems[0]!.replace(/^Agent "[^"]+" (uses|has) /, '$1 '));
 }
 
 export async function main(argv: string[], streams: Streams = { stdout: process.stdout, stderr: process.stderr }): Promise<number> {
@@ -194,7 +195,15 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
   try {
     location = locateConfig(values.config, values.mcp, process.cwd(), values.agent);
     loadEnvFile(location.configDir);
-    tree = loadConfig(location);
+    // The app starts even when its folders are missing or its files are broken.
+    const starting = command === 'web' || command === 'start';
+    if (starting) for (const created of ensureProject(location.configDir)) streams.stderr.write(`Created ${created}\n`);
+    tree = loadConfig(location, { fallback: starting });
+    if (starting) {
+      const style = createStyle(streams.stderr as NodeJS.WriteStream);
+      for (const s of tree.skipped) streams.stderr.write(`${style.yellow('skipped')} ${s.file}: ${s.error}\n`);
+      for (const w of tree.warnings) streams.stderr.write(`${style.yellow('note:')} ${w}\n`);
+    }
   } catch (error) {
     return printConfigError(error, streams);
   }
@@ -332,10 +341,11 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       } catch (error) {
         return printConfigError(error, streams);
       }
+      // Providers can be added in Settings once the app runs.
       try {
         checkCredentials(tree, process.env);
       } catch (error) {
-        return printConfigError(error, streams);
+        streams.stderr.write(`${createStyle(streams.stderr as NodeJS.WriteStream).yellow('note:')} ${getErrorMessage(error)}\n`);
       }
       const conversation = openSelected('start', values, tree, streams);
       if (conversation instanceof Error || !conversation) return EXIT_CONFIG;

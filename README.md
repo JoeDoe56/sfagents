@@ -22,7 +22,7 @@ cp examples/mcp.json mcp.json
 npx sfagents --help
 ```
 
-The copy commands above are for a new checkout and also work in PowerShell. Skip them if you already have your own `agents/` folder and `mcp.json`. These local configuration files are ignored by Git; edit them freely without publishing your setup. Generic defaults stay in `examples/`.
+The copy commands above are for a new checkout and also work in PowerShell. Skip them if you already have your own `agents/` folder and `mcp.json`. They are optional: `sfagents web` (and `start`) creates a missing `agents/` folder with a default `main.json` that names no provider, so it replies with the provider you add in Settings. A broken agent file or `mcp.json` never stops the app: it is skipped and flagged, and if no agent file loads at all, the built-in default agent replies until one is fixed. These local configuration files are ignored by Git; edit them freely without publishing your setup. Generic defaults stay in `examples/`.
 
 `npm run build` rebuilds after changes. On any platform, `npm run sfagents -- <args>` also works.
 
@@ -123,8 +123,8 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | Field | Notes |
 | --- | --- |
 | `name` | Optional display name. The file name is the agent's identity (an older `id` field that differs from it is shown as the name). |
-| `provider` | The name of a provider you added ("Claude 1"), or a list of them in failover order (entries may be `{ "provider": "…", "model": "…" }` with their own model). Also `openrouter` (key from `OPENROUTER_API_KEY`) or `openai-compatible` with `"providerOptions": { "baseUrl": "...", "apiKeyEnv": "MY_KEY_VAR" }`. |
-| `model` | Any model ID the provider accepts. Nothing is hardcoded. |
+| `provider` | The name of a provider you added ("Claude 1"), or a list of them in failover order (entries may be `{ "provider": "…", "model": "…" }` with their own model). Also `openrouter` (key from `OPENROUTER_API_KEY`) or `openai-compatible` with `"providerOptions": { "baseUrl": "...", "apiKeyEnv": "MY_KEY_VAR" }`. Optional: without it the agent replies with the provider picked for it in the web interface, else the first one added. |
+| `model` | Any model ID the provider accepts. Optional only when `provider` is left out: then the provider's default is used (Claude Sonnet 5.5 for Claude and OpenRouter, the plan's default for ChatGPT; a custom endpoint needs `model`). |
 | `reasoning` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Sent as OpenRouter's `reasoning.effort` (or `reasoning_effort` for other endpoints). Reasoning blocks are passed back across tool calls. |
 | `workspace.roots` | Directories the agent may read and write, relative to the project directory. Default `["."]`. Shell commands are sandboxed to them. |
 | `workspace.access` | Exceptions to the roots, like folder sharing: `[{ "path": "~/.cargo", "mode": "read" }, { "path": "secrets", "mode": "none" }]`. Modes `read`, `write`, `none`; the longest matching path wins. Paths are relative to the project directory, `~` is your home folder. Applies to shell commands and to artifact files alike. SF Agents' own files stay protected whatever an entry says. |

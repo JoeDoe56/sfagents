@@ -210,6 +210,19 @@ describe('sfagents settings and providers', () => {
     assert.match(bad.stderr, /Usage: sfagents providers add <openrouter\|openai\|anthropic\|custom>/);
   });
 
+  test('start in a folder with no agents creates the default agent, then asks for a provider', async () => {
+    const dir = makeTempDir();
+    const r = await runCli(['start'], { cwd: dir, env: { SFAGENTS_HOME: makeTempDir() }, input: '/exit\n' });
+    assert.match(r.stderr, /Created .*agents/);
+    assert.ok(fs.existsSync(path.join(dir, 'agents', 'main.json')));
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /has no provider yet\. Add one in Settings/);
+    // Other commands still say the folder is missing rather than creating it.
+    const other = makeTempDir();
+    assert.equal((await runCli(['agents', 'validate'], { cwd: other })).code, 2);
+    assert.equal(fs.existsSync(path.join(other, 'agents')), false);
+  });
+
   test('an agent naming a provider that is not set up gets a clear error before any model call', async () => {
     const dir = makeTempDir();
     writeAgent(dir, baseAgent('main', { provider: 'Claude 1' }));
