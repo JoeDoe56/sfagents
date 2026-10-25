@@ -852,9 +852,10 @@ export async function screenSetupSteps(screen: ScreenMirror, setupDir: string, f
   const willHave = Boolean(source) || installedVersion() === SCREEN_VERSION;
   if (!willHave) return steps;
 
-  // SFAGENTS_SCREEN_VDISPLAY=0: no virtual display driver or task (the real screens only).
-  if (process.env['SFAGENTS_SCREEN_VDISPLAY'] === '0') {
-    log('screen: the virtual display is turned off (SFAGENTS_SCREEN_VDISPLAY=0)');
+  // The virtual display stays out until it is proven on a real PC (it took
+  // over the owner's screen once, 25/10/2026): SFAGENTS_SCREEN_VDISPLAY=1 sets it up.
+  if (process.env['SFAGENTS_SCREEN_VDISPLAY'] !== '1') {
+    log('screen: the virtual display is off (SFAGENTS_SCREEN_VDISPLAY=1 turns it on)');
   } else {
     steps.push(...(await vdisplaySetupSteps(screen, setupDir, exe, steps.length > 0)));
   }
