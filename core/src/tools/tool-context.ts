@@ -1,5 +1,6 @@
 import type { WorkspaceContext } from '../permissions/workspace.js';
 import type { SandboxPolicy } from '../sandbox/sandbox.js';
+import type { WebGrant } from '../sandbox/host-channel.js';
 
 /**
  * Everything a built-in tool needs from its owning agent. Replaces upstream's
@@ -18,6 +19,8 @@ export interface ToolContext {
   readonly sandbox: SandboxPolicy;
   /** Ask before each shell command (`tools.ask`). */
   readonly askShell: boolean;
+  /** Web access through `sf-web` ("web" in tools.allow), with this run's remaining requests. */
+  readonly web?: WebGrant;
 }
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 30_000;

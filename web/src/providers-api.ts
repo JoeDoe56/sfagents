@@ -11,6 +11,7 @@
  *   POST /api/providers/signin/<id> {callbackUrl | code}      finishes it (pasted address or code)
  *   POST /api/providers/signin/<id> {action: "cancel"}
  *   POST /api/providers/<id> {action: "rename", name} | {action: "remove"}
+ *   POST /api/providers/web {apiKey} | {action: "remove"}     the Bright Data key for agents' web access
  */
 
 import { randomUUID } from 'node:crypto';
@@ -112,7 +113,8 @@ export class ProvidersApi {
 
   async providers() {
     const { reason, available, label } = await this.keyringStatus();
-    return { providers: this.list(), keyring: { available, label, ...(reason ? { reason } : {}) }, suggestions: this.suggestions() };
+    const brightData = available ? (await this.options.registry.webKey()) !== null : false;
+    return { providers: this.list(), keyring: { available, label, ...(reason ? { reason } : {}) }, suggestions: this.suggestions(), web: { brightData } };
   }
 
   private suggestions(): Record<ProviderKind, string> {
@@ -148,6 +150,7 @@ export class ProvidersApi {
     if (!a) return this.wrap(this.addKeyProvider(body));
     if (a === 'signin' && !b) return this.wrap(this.startSignIn(body));
     if (a === 'signin' && b) return this.wrap(this.continueSignIn(b, body));
+    if (a === 'web' && !b) return this.wrap(this.setWebKey(body));
     const record = this.options.registry.list().find((r) => r.id === a);
     if (!record) throw new ApiError(404, 'No such provider.');
     if (body['action'] === 'rename') {
@@ -173,6 +176,19 @@ export class ProvidersApi {
     const record = await this.options.registry.add({ name, kind, baseUrl: typeof body['baseUrl'] === 'string' ? body['baseUrl'] : undefined, secret: { apiKey } });
     this.options.log(`web: added provider "${record.name}" (${record.kind})`);
     return describeProvider(record);
+  }
+
+  private async setWebKey(body: Record<string, unknown>) {
+    if (body['action'] === 'remove') {
+      await this.options.registry.setWebKey(null);
+      this.options.log('web: removed the Bright Data key');
+      return { ok: true };
+    }
+    const keyring = await this.keyringStatus(true);
+    if (!keyring.available) throw new ApiError(503, keyring.reason ?? 'No keyring.');
+    await this.options.registry.setWebKey(typeof body['apiKey'] === 'string' ? body['apiKey'] : '');
+    this.options.log('web: saved a Bright Data key');
+    return { ok: true };
   }
 
   private async startSignIn(body: Record<string, unknown>) {

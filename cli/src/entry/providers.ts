@@ -9,6 +9,7 @@
  *   sfagents providers add anthropic [--name N]  Claude sign-in in the browser
  *   sfagents providers rename <name> <new name>
  *   sfagents providers remove <name>
+ *   sfagents providers web-key [remove]        the Bright Data key for agents' web access (asks for it, hidden)
  *   sfagents settings [set <key> <value> | reset <key>]
  */
 
@@ -84,6 +85,7 @@ export async function providersCommand(
           streams.stdout.write(`${style.bold(p.name)}  ${style.dim(PROVIDER_KIND_LABELS[p.kind])}${p.baseUrl ? `  ${p.baseUrl}` : ''}${p.account ? `  ${p.account}` : ''}\n`);
         }
         streams.stdout.write(style.dim(`\nKeys and sign-ins are in the ${registry.secrets.label}. Use a provider by its name in an agent file: "provider": "${list[0]!.name}".\n`));
+        streams.stdout.write(style.dim(`Web access (Bright Data): ${(await registry.webKey()) ? 'key added' : 'no key ("sfagents providers web-key" adds one)'}.\n`));
         return OK;
       }
       case 'add': {
@@ -155,8 +157,20 @@ export async function providersCommand(
         streams.stdout.write(`${style.green('✓')} Removed "${record.name}" and its key or sign-in.\n`);
         return OK;
       }
+      case 'web-key': {
+        if (rest[0] === 'remove') {
+          await registry.setWebKey(null);
+          streams.stdout.write(`${style.green('✓')} Removed the Bright Data key. Agents have no web access until you add one again.\n`);
+          return OK;
+        }
+        await registry.secrets.check();
+        const key = await prompt('Bright Data API key: ', streams, true);
+        await registry.setWebKey(key);
+        streams.stdout.write(`${style.green('✓')} Saved. Agents with "web" in tools.allow can now use sf-web. The key is in the ${registry.secrets.label}.\n`);
+        return OK;
+      }
       default:
-        streams.stderr.write(`Unknown command "providers ${sub}". Use list, add, rename or remove.\n`);
+        streams.stderr.write(`Unknown command "providers ${sub}". Use list, add, rename, remove or web-key.\n`);
         return USAGE_ERROR;
     }
   } catch (error) {

@@ -45,6 +45,7 @@ import {
   type ProjectWatcher,
   ProviderRegistry,
   createDefaultProviderFactory,
+  BrightDataWeb,
 } from '@sfagents/core';
 import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
@@ -357,6 +358,7 @@ export class WebServer {
       approveAll: options.approveAll,
       providerFactory: options.providerFactory ?? createDefaultProviderFactory({ registry: this.registry, accounts: this.accounts }),
       confirm: (request, signal) => this.confirm(request, signal),
+      web: new BrightDataWeb(() => this.registry.webKey()),
     });
     this.session = this.runtime.createSession();
     this.agentSettings = new AgentSettingsStore(options.conversation.dir);

@@ -64,7 +64,7 @@ Usage:
   sfagents agents validate [options]    Check the agents folder: every agent, its tools, and skipped files
   sfagents mcp list [options]           Show configured MCP servers, status and tools
   sfagents web [options]                Serve the web interface (default http://127.0.0.1:${DEFAULT_PORT})
-  sfagents providers [list|add <openrouter|openai|anthropic|custom>|rename|remove]
+  sfagents providers [list|add <openrouter|openai|anthropic|custom>|rename|remove|web-key [remove]]
                                         Model providers: API keys and ChatGPT/Claude sign-ins (kept in
                                         the system keyring); agent files name them in "provider"
   sfagents settings [list|set <key> <value>|reset <key>]

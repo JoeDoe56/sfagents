@@ -27,6 +27,9 @@ import { ShellTool } from '../tools/shell.js';
 import { WorkspaceContext } from '../permissions/workspace.js';
 import { buildSandboxPolicy } from '../sandbox/policy.js';
 import type { SandboxPolicy } from '../sandbox/sandbox.js';
+import { DEFAULT_WEB_REQUESTS } from '../sandbox/host-channel.js';
+import { BrightDataWeb, type WebAccess } from '../web/brightdata.js';
+import { ProviderRegistry } from '../providers/registry.js';
 import { McpManager } from '../mcp/manager.js';
 import { DiscoveredMcpTool, mcpFunctionName } from '../mcp/mcp-tool.js';
 import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
@@ -63,6 +66,8 @@ export interface RuntimeOptions {
    * keeps an ephemeral in-memory conversation.
    */
   conversation?: ConversationService;
+  /** Web access for agents with "web" (default: Bright Data, with the key added in Settings). */
+  web?: WebAccess;
 }
 
 interface RunParams {
@@ -151,6 +156,7 @@ export class AgentRuntime implements AgentMessenger {
   readonly threads: ThreadService;
   private disposed = false;
   readonly conversation?: ConversationService;
+  private readonly web: WebAccess;
 
   constructor(options: RuntimeOptions) {
     this.tree = options.tree;
@@ -164,6 +170,7 @@ export class AgentRuntime implements AgentMessenger {
     this.approveAll = options.approveAll ?? false;
     this.conversation = options.conversation;
     this.threads = new ThreadService(options.conversation?.dir);
+    this.web = options.web ?? new BrightDataWeb(() => new ProviderRegistry().webKey());
   }
 
   /**
@@ -197,6 +204,7 @@ export class AgentRuntime implements AgentMessenger {
         shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
         sandbox,
         askShell: d.tools?.ask === true,
+        ...(allow.includes(ToolNames.WEB) ? { web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS } } : {}),
       };
       const factories: Record<string, () => AnyDeclarativeTool> = {
         [ToolNames.SHELL]: () => new ShellTool(ctx),
@@ -575,7 +583,7 @@ export class AgentRuntime implements AgentMessenger {
     if (this.disposed) return;
     this.disposed = true;
     this.threads.close();
-    await Promise.all([this.mcp.dispose(), ...this.retired.map((m) => m.dispose())]);
+    await Promise.all([this.mcp.dispose(), ...this.retired.map((m) => m.dispose()), this.web.close()]);
   }
 }
 

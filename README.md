@@ -125,14 +125,14 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | `workspace.roots` | Directories the agent may read and write, relative to the project directory. Default `["."]`. Shell commands are sandboxed to them. |
 | `workspace.access` | Exceptions to the roots, like folder sharing: `[{ "path": "~/.cargo", "mode": "read" }, { "path": "secrets", "mode": "none" }]`. Modes `read`, `write`, `none`; the longest matching path wins. Paths are relative to the project directory, `~` is your home folder. Applies to shell commands and to artifact files alike. SF Agents' own files stay protected whatever an entry says. |
 | `workspace.network` | `true` lets shell commands use the network (`npm install`, `git push`). Default `false`: commands are offline. |
-| `tools.allow` | The built-in tool `shell`, which reads, searches and edits files too (in the sandbox). Older files that list `read_file`, `write_file`, `edit`, `glob`, `grep` or `list_directory` still load: those entries become `shell`, with the workspace read-only when none of them could write. And **grants**: `"N-name.json"` lets this agent message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
+| `tools.allow` | `"web"` adds the `sf-web` command to the shell (see Web access). The built-in tool `shell`, which reads, searches and edits files too (in the sandbox). Older files that list `read_file`, `write_file`, `edit`, `glob`, `grep` or `list_directory` still load: those entries become `shell`, with the workspace read-only when none of them could write. And **grants**: `"N-name.json"` lets this agent message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
 | `tools.mcpServers` | Server names from `mcp.json`, optionally limited to listed tools. |
 | `tools.autoApprove` | Tools that skip the confirmation prompt. Built-in IDs, `mcp__<server>__<tool>` or `mcp__<server>__*`. |
 | `tools.ask` | `true` asks before each shell command. Default `false`: the sandbox is the boundary. |
 | `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Default: `organize` when the agent replies in the conversation, `none` when it replies in a thread. |
 | `artifacts.access` | Artifacts: `create` (create, update, list and read), `read` (list and read) or `none`. Same defaults as `conversation.access`. |
 | `context` | Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
-| `limits` | Turn budget and timeouts. Defaults are shown above. |
+| `limits` | Turn budget, timeouts and `webRequests` (web requests per run, default 25). Defaults are shown above. |
 
 Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. Each agent's permissions are its own. An agent it may message can have wider permissions, or entirely different tools, roots and MCP servers; grants may form any graph, including two agents that may message each other.
 
@@ -233,6 +233,18 @@ cross-origin writes. The sign-in gate still applies, and the session cookie is m
 - **Provider keys and sign-ins** live in the system keyring; no shell command, MCP server or terminal tab gets them in its environment, and they are never sent to a model.
 - **Conversation state** (`.sfagents/`, including threads and uploads) is invisible to shell commands; it changes only through the conversation service and the web server.
 - **Secrets:** the configuration directory's `.env` cannot be read or written by shell commands or artifacts (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model.
+
+## Web access
+
+Shell commands are offline, but an agent with `"web"` in `tools.allow` (next to `"shell"`) gets an `sf-web` command in its sandbox:
+
+```sh
+sf-web search kiln firing schedule cone 6 > results.json   # Google results, as JSON
+sf-web markdown https://example.com/glazes > glazes.md      # a page as Markdown
+sf-web html https://example.com/glazes                      # a page as HTML
+```
+
+`sf-web` talks to SF Agents through a socket that exists only while the command runs; SF Agents makes the request with [Bright Data](https://brightdata.com)'s hosted MCP server (`search_engine`, `scrape_as_markdown`, `scrape_as_html`). Add the Bright Data API key in **Settings → Providers → Web Access**, or with `sfagents providers web-key`. It is kept in the system keyring and never enters the sandbox. Each run may make `limits.webRequests` requests (default 25); a result is cut at 1 MB, and a request times out after 90 seconds. Bright Data includes 5,000 free requests a month, then bills per request: set a spend limit in its control panel.
 
 ## MCP servers
 

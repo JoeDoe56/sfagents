@@ -61,6 +61,9 @@ export class ProviderRegistryError extends Error {
   }
 }
 
+/** Keyring entry of the Bright Data key (web access is not a model provider, so it has no record). */
+const WEB_KEY = 'web:brightdata';
+
 const NAME_PATTERN = /^[^\x00-\x1f\x7f]{1,60}$/;
 
 export function validateProviderName(name: unknown): string {
@@ -230,6 +233,28 @@ export class ProviderRegistry {
 
   async setSecret(id: string, secret: ProviderSecret): Promise<void> {
     await this.secrets.set(this.secretKey(id), JSON.stringify(secret));
+  }
+
+  /** The Bright Data API key for agents' web access (`sf-web`), or null. */
+  async webKey(): Promise<string | null> {
+    try {
+      return await this.secrets.get(WEB_KEY);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Stores (or with null, removes) the Bright Data API key. */
+  async setWebKey(key: string | null): Promise<void> {
+    if (key === null) {
+      await this.secrets.delete(WEB_KEY);
+    } else {
+      const k = key.trim();
+      if (!k || k.length > 4000 || /\s/.test(k)) throw new ProviderRegistryError('That does not look like an API key.');
+      await this.secrets.check();
+      await this.secrets.set(WEB_KEY, k);
+    }
+    this.emit();
   }
 
   close(): void {

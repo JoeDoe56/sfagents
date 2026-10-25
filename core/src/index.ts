@@ -140,3 +140,7 @@ export type { Sandbox, SandboxPolicy, SandboxRule, SandboxAccess, SandboxStatus,
 export { buildSandboxPolicy, GIT_PROTECTED } from './sandbox/policy.js';
 export { BubblewrapSandbox, bubblewrapCommand, findBubblewrap } from './sandbox/linux.js';
 export { SeatbeltSandbox, seatbeltProfile } from './sandbox/macos.js';
+export { openHostChannel, webTools, SF_WEB_SCRIPT, DEFAULT_WEB_REQUESTS, MAX_WEB_RESULT_BYTES } from './sandbox/host-channel.js';
+export type { HostChannel, WebGrant } from './sandbox/host-channel.js';
+export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
+export type { WebAccess, WebOperation } from './web/brightdata.js';

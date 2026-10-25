@@ -181,8 +181,70 @@ export function openSettingsSheet(device) {
     const note = data && !data.keyring.available
       ? data.keyring.reason
       : `Keys and sign-ins are kept in the ${data?.keyring.label ?? 'system keyring'}, never in a file. Agent files name a provider in "provider", e.g. "${data?.providers?.[0]?.name ?? 'OpenRouter 1'}".`;
-    providersBox.replaceChildren(section('Providers', rows, data ? note : ''));
+    const web = data?.web?.brightData;
+    const webRow = createRow({
+      icon: 'globe',
+      iconTint: '#0a84ff',
+      title: 'Bright Data',
+      subtitle: !data ? '' : web ? 'Key added' : 'No key yet',
+      accessory: web ? 'ellipsis' : 'chevron',
+      onTap: () =>
+        web
+          ? showMenu({
+              anchor: webRow.el,
+              align: 'end',
+              groups: [
+                [{ label: 'Replace Key', symbol: 'key', action: () => openWebKey(true) }],
+                [{ label: 'Remove Key', symbol: 'trash', role: 'destructive', action: () => removeWebKey() }],
+              ],
+            })
+          : openWebKey(false),
+    });
+    providersBox.replaceChildren(
+      section('Providers', rows, data ? note : ''),
+      section('Web Access', [webRow], 'Agents with "web" in tools.allow search and fetch pages with `sf-web` in their shell, through Bright Data. The key stays in the keyring and in SF Agents; the sandbox never sees it.'),
+    );
     ctx.refresh();
+  }
+
+  function openWebKey(replace) {
+    const key = field({ label: 'API Key', type: 'password', placeholder: 'Bright Data API key', autocomplete: 'new-password' });
+    // eslint-disable-next-line prefer-const
+    let sheet;
+    sheet = openSheet({
+      title: replace ? 'Replace Bright Data Key' : 'Bright Data',
+      detents: ['medium'],
+      className: 'st-sheet',
+      z: 1200,
+      build(s) {
+        s.body.append(section(null, [key.row], 'Create a key in the Bright Data control panel (Account settings → API keys). New accounts include free monthly requests; set a spend limit there too.'));
+        key.input.addEventListener('input', () => sheet?.setDirty(!!key.input.value.trim()));
+        setTimeout(() => key.input.focus(), 350);
+      },
+      onConfirm: async () => {
+        try {
+          await postJson('/api/providers/web', { apiKey: key.input.value });
+          key.input.value = '';
+          toast('Bright Data key saved', { symbol: 'checkmark', timeout: 2200 });
+          loadProviders();
+          return true;
+        } catch (error) {
+          showError(error.message, "Couldn't save the key");
+          return false;
+        }
+      },
+    });
+  }
+
+  async function removeWebKey() {
+    const ok = await confirmDialog('Remove the Bright Data key?', 'Agents lose web access until you add a key again.', 'Remove', true);
+    if (!ok) return;
+    try {
+      await postJson('/api/providers/web', { action: 'remove' });
+      loadProviders();
+    } catch (error) {
+      showError(error.message, "Couldn't remove the key");
+    }
   }
 
   async function renameProvider(p) {

@@ -12,10 +12,12 @@ export const ToolNames = {
   SHELL: 'shell',
   /** SF Agents: messages another agent in their persistent thread. */
   MESSAGE_AGENT: 'message_agent',
+  /** Not a tool the model calls: puts the `sf-web` command in the agent's shell. */
+  WEB: 'web',
 } as const;
 
 /** Built-in tool IDs an agent definition may list in `tools.allow`. */
-export const BUILTIN_TOOL_IDS: readonly string[] = [ToolNames.SHELL];
+export const BUILTIN_TOOL_IDS: readonly string[] = [ToolNames.SHELL, ToolNames.WEB];
 
 /**
  * File tools that sandboxed shell commands replaced. Old agent files that

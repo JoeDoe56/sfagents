@@ -90,7 +90,7 @@ export function seatbeltProfile(policy: SandboxPolicy, tempDir: string, rules: r
     `(allow mach-lookup ${MACH_SERVICES.map((s) => `(global-name ${sbString(s)})`).join(' ')})`,
     '(allow ipc-posix-shm-read-data (ipc-posix-name "apple.shm.notification_center"))',
     // Symlinks at the top level (/etc, /tmp, /var) and the folders above granted paths.
-    `(allow file-read-metadata ${ancestors([...MACOS_SYSTEM_PATHS, ...rules.map((r) => r.path), tempDir]).map((p) => `(literal ${sbString(p)})`).join(' ')} (literal "/etc") (literal "/tmp") (literal "/var"))`,
+    `(allow file-read-metadata ${ancestors([...MACOS_SYSTEM_PATHS, ...rules.map((r) => r.path), ...(policy.tools ?? []).map((t) => t.path), tempDir]).map((p) => `(literal ${sbString(p)})`).join(' ')} (literal "/etc") (literal "/tmp") (literal "/var"))`,
     `(allow file-read* ${MACOS_SYSTEM_PATHS.map((p) => `(subpath ${sbString(p)})`).join(' ')})`,
     `(allow file-read* file-write* ${DEVICE_FILES.map((p) => `(literal ${sbString(p)})`).join(' ')} (subpath "/dev/fd") (regex #"^/dev/ttys[0-9]+$"))`,
     `(allow file-read* file-write* (subpath ${sbString(tempDir)}))`,

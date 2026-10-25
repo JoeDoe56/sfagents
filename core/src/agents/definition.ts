@@ -122,6 +122,8 @@ export interface AgentDefinition {
     toolTimeoutSeconds?: number;
     shellTimeoutSeconds?: number;
     maxToolOutputChars?: number;
+    /** Web requests (`sf-web`) per run, for agents with "web" (default 25). */
+    webRequests?: number;
   };
 }
 
@@ -410,6 +412,9 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     const legacyInfo = legacy.length
       ? { tools: legacy, access: (hadShell || legacy.some((id) => LEGACY_WRITE_TOOL_IDS.includes(id)) ? 'write' : 'read') as 'read' | 'write' }
       : undefined;
+    if (allow.includes(ToolNames.WEB) && !allow.includes(ToolNames.SHELL)) {
+      c.fail('tools.allow', '"web" gives the shell an `sf-web` command, so it needs "shell" too');
+    }
     const autoApprove = c
       .stringArray(t['autoApprove'], 'tools.autoApprove', { unique: true, nonEmptyItems: true })
       ?.filter((entry) => !LEGACY_FILE_TOOL_IDS.includes(entry));
@@ -424,8 +429,8 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
         if (!serverNames.includes(parts[0]!)) {
           c.fail(field, `refers to MCP server "${parts[0]}", which is not in tools.mcpServers`);
         }
-      } else if (!BUILTIN_TOOL_IDS.includes(entry)) {
-        c.fail(field, `unknown tool "${entry}"`);
+      } else if (!BUILTIN_TOOL_IDS.includes(entry) || entry === ToolNames.WEB) {
+        c.fail(field, entry === ToolNames.WEB ? '"web" is not a tool call, so it never asks' : `unknown tool "${entry}"`);
       } else if (!(allow ?? []).includes(entry)) {
         c.fail(field, `"${entry}" is not in tools.allow, so it cannot be auto-approved`);
       }
@@ -481,6 +486,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       'toolTimeoutSeconds',
       'shellTimeoutSeconds',
       'maxToolOutputChars',
+      'webRequests',
     ]);
     limits = {
       maxTurns: c.integer(l['maxTurns'], 'limits.maxTurns', 1, 500),
@@ -488,6 +494,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       toolTimeoutSeconds: c.integer(l['toolTimeoutSeconds'], 'limits.toolTimeoutSeconds', 1, 24 * 3600),
       shellTimeoutSeconds: c.integer(l['shellTimeoutSeconds'], 'limits.shellTimeoutSeconds', 1, 24 * 3600),
       maxToolOutputChars: c.integer(l['maxToolOutputChars'], 'limits.maxToolOutputChars', 1000, 2_000_000),
+      webRequests: c.integer(l['webRequests'], 'limits.webRequests', 1, 10_000),
     };
   }
 
