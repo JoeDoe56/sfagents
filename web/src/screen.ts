@@ -852,20 +852,11 @@ export async function screenSetupSteps(screen: ScreenMirror, setupDir: string, f
   const willHave = Boolean(source) || installedVersion() === SCREEN_VERSION;
   if (!willHave) return steps;
 
-  const vdInstalled = await screen
-    .info(true)
-    .then((i) => i.host.nativeDisplay?.virtual_display?.installed === true)
-    .catch(() => false);
-  if (!vdInstalled) {
-    const dir = path.join(setupDir, 'vdisplay-install');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'request.json'), '{"action":"install"}\n');
-    steps.push({ file: exe, args: ['--vdisplay-apply', '--stage=driver', '--vdisplay-dir', dir], ok: [0, 3010] });
-  }
-  if (!vdisplayTaskCurrent() || steps.length) {
-    const xml = path.join(setupDir, 'vdisplay-task.xml');
-    fs.writeFileSync(xml, vdisplayTaskXml(exe));
-    steps.push({ file: 'schtasks.exe', args: ['/Create', '/TN', VDISPLAY_TASK, '/XML', xml, '/F'] });
+  // SFAGENTS_SCREEN_VDISPLAY=0: no virtual display driver or task (the real screens only).
+  if (process.env['SFAGENTS_SCREEN_VDISPLAY'] === '0') {
+    log('screen: the virtual display is turned off (SFAGENTS_SCREEN_VDISPLAY=0)');
+  } else {
+    steps.push(...(await vdisplaySetupSteps(screen, setupDir, exe, steps.length > 0)));
   }
   if (spawnSync('netsh.exe', ['advfirewall', 'firewall', 'show', 'rule', `name=${FIREWALL_RULE}`], { stdio: 'ignore', windowsHide: true }).status !== 0) {
     steps.push({ file: 'netsh.exe', args: ['advfirewall', 'firewall', 'add', 'rule', `name=${FIREWALL_RULE}`, 'dir=in', 'action=allow', `program=${exe}`, 'enable=yes', 'profile=any'] });
@@ -886,6 +877,27 @@ export async function screenSetupSteps(screen: ScreenMirror, setupDir: string, f
     }
   }
   return steps;
+}
+
+/** The virtual display's driver and its task, when they are missing or out of date. */
+async function vdisplaySetupSteps(screen: ScreenMirror, setupDir: string, exe: string, helperCopied: boolean): Promise<SetupStep[]> {
+  const out: SetupStep[] = [];
+  const vdInstalled = await screen
+    .info(true)
+    .then((i) => i.host.nativeDisplay?.virtual_display?.installed === true)
+    .catch(() => false);
+  if (!vdInstalled) {
+    const dir = path.join(setupDir, 'vdisplay-install');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'request.json'), '{"action":"install"}\n');
+    out.push({ file: exe, args: ['--vdisplay-apply', '--stage=driver', '--vdisplay-dir', dir], ok: [0, 3010] });
+  }
+  if (!vdisplayTaskCurrent() || out.length || helperCopied) {
+    const xml = path.join(setupDir, 'vdisplay-task.xml');
+    fs.writeFileSync(xml, vdisplayTaskXml(exe));
+    out.push({ file: 'schtasks.exe', args: ['/Create', '/TN', VDISPLAY_TASK, '/XML', xml, '/F'] });
+  }
+  return out;
 }
 
 /** Linux: the udev rule that lets the helper type and click (/dev/uinput), when it is missing. */
