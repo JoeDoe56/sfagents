@@ -214,7 +214,7 @@ describe('policy', () => {
       protectedFiles: [path.join(dir, 'mcp.json'), path.join(dir, 'agents', 'main.json')],
       agentsDir: path.join(dir, 'agents'),
     });
-    const access = Object.fromEntries(policy.rules.map((r) => [path.relative(dir, r.path) || '.', r.access]));
+    const access = Object.fromEntries(policy.rules.map((r) => [path.relative(dir, r.path).split(path.sep).join('/') || '.', r.access]));
     assert.deepEqual(access, {
       '.': 'write',
       '.git/hooks': 'read',

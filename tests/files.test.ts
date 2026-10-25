@@ -31,7 +31,9 @@ function setup() {
   const home = makeTempDir('sfagents-home-');
   const state = path.join(home, 'project', '.sfagents');
   fs.mkdirSync(state, { recursive: true });
-  const service = new FileService({ platform: 'linux', home, stateDir: state, projectDir: path.join(home, 'project'), env: { XDG_DATA_HOME: path.join(home, '.local', 'share') } });
+  const env = { XDG_DATA_HOME: path.join(home, '.local', 'share') };
+  const trash = new Trash({ platform: 'linux', home, stateDir: state, env });
+  const service = new FileService({ home, stateDir: state, projectDir: path.join(home, 'project'), env, trash });
   return { home, state, service };
 }
 
@@ -199,9 +201,10 @@ describe('files: service', () => {
 
   test('locations: home, standard folders (localized on Linux), the project and the trash', async () => {
     const { home, service } = setup();
-    tree(home, { 'Desktop': null, 'Downloads': null, 'Bilder': null, '.config/user-dirs.dirs': 'XDG_PICTURES_DIR="$HOME/Bilder"\n' });
+    const pictures = process.platform === 'linux' ? 'Bilder' : 'Pictures';
+    tree(home, { 'Desktop': null, 'Downloads': null, [pictures]: null, '.config/user-dirs.dirs': 'XDG_PICTURES_DIR="$HOME/Bilder"\n' });
     const loc = await service.locations();
-    assert.deepEqual(loc.places.map((p) => p.name), [path.basename(home), 'Desktop', 'Downloads', 'Bilder']);
+    assert.deepEqual(loc.places.map((p) => p.name), [path.basename(home), 'Desktop', 'Downloads', pictures]);
     assert.equal(loc.project, path.join(home, 'project'));
     assert.equal(loc.trash, path.join(home, '.local', 'share', 'Trash', 'files'));
   });

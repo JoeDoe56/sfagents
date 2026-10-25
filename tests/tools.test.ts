@@ -59,11 +59,11 @@ describe('removed file tools', () => {
     assert.deepEqual(tree.root.access.map((r) => r.access), ['read']);
     assert.deepEqual(loadAgentTree(rw.dir).root.access, []);
     if (!sandboxed) return;
-    const denied = await call(ro, 'shell', { command: 'cat src/a.txt && echo x > src/a.txt' });
+    const denied = await call(ro, 'shell', { command: isWin ? 'type src\\a.txt && echo x>src\\a.txt' : 'cat src/a.txt && echo x > src/a.txt' });
     assert.match(denied.result!.llmContent, /alpha/);
     assert.equal(fs.readFileSync(path.join(ro.work, 'src', 'a.txt'), 'utf8'), 'alpha\nbeta\ngamma\n');
-    await call(rw, 'shell', { command: 'echo changed > src/a.txt' });
-    assert.equal(fs.readFileSync(path.join(rw.work, 'src', 'a.txt'), 'utf8'), 'changed\n');
+    await call(rw, 'shell', { command: isWin ? 'echo changed>src\\a.txt' : 'echo changed > src/a.txt' });
+    assert.equal(fs.readFileSync(path.join(rw.work, 'src', 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'changed\n');
   });
 
   test('auto-approval entries for removed tools are ignored', async () => {

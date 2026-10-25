@@ -290,6 +290,8 @@ export interface FileServiceOptions {
   /** The agent tree's folder, offered as a location. */
   projectDir?: string;
   env?: NodeJS.ProcessEnv;
+  /** Override the Trash adapter, for example for an isolated test directory. */
+  trash?: Trash;
 }
 
 const MAX_LIST = 10_000;
@@ -321,7 +323,7 @@ export class FileService {
   constructor(private readonly options: FileServiceOptions = {}) {
     this.platform = options.platform ?? process.platform;
     this.home = path.resolve(options.home ?? os.homedir());
-    this.trash = new Trash({ platform: this.platform, home: this.home, stateDir: options.stateDir, env: options.env });
+    this.trash = options.trash ?? new Trash({ platform: this.platform, home: this.home, stateDir: options.stateDir, env: options.env });
     this.protectedDirs = options.stateDir ? [path.resolve(options.stateDir)] : [];
   }
 

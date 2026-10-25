@@ -91,7 +91,7 @@ describe('agents folder', () => {
     assert.match(why['old.json']!, /spawn.*N-name\.json/);
     assert.match(why['typo.json']!, /\[tool\]: unknown field/);
     assert.equal(why['notes.txt'], undefined, 'only .json files are read');
-    assert.match(describeTree(tree), /skipped agents\/broken\.json/);
+    assert.match(describeTree(tree), /skipped agents[/\\]broken\.json/);
   });
 
   test('a grant to an agent that is not loaded is dropped with a note', () => {
