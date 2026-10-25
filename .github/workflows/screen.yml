@@ -127,7 +127,7 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
-          modules: qtwebsockets qtwayland
+          modules: qtwebsockets
           aqtsource: git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b
           py7zrversion: ==1.1.0
           extra: --base https://download.qt.io
