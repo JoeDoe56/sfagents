@@ -86,8 +86,6 @@ set(SCREEN_SOURCES
     ${MW}/src/streaming/LinkLoss.h
     ${MW}/src/streaming/MediaTrackRelay.cpp
     ${MW}/src/streaming/MediaTrackRelay.h
-    ${MW}/src/streaming/MoonlightShim.cpp
-    ${MW}/src/streaming/MoonlightShim.h
     ${MW}/src/streaming/NativeBench.cpp
     ${MW}/src/streaming/NativeBench.h
     ${MW}/src/streaming/NativeMediaEngine.cpp

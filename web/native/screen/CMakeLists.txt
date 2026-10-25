@@ -51,11 +51,9 @@ find_package(Threads REQUIRED)
 option(MW_BUILD_TESTS "Build MoonlightWeb's native engine tests" OFF)
 add_subdirectory(${MW}/native-host native-host)
 
-# ── moonlight-common-c ──────────────────────────────────────────────────────
-# TODO(sfagents): only Limelight.h's codec and format constants are wanted;
-# MoonlightShim (the GameStream engine) still links it until it is cut out.
-add_subdirectory(${MW}/third_party/moonlight-common-c moonlight-common-c EXCLUDE_FROM_ALL)
-set(MW_LIMELIGHT_INCLUDE ${MW}/third_party/moonlight-common-c/src ${MW}/third_party/moonlight-common-c/enet/include)
+# ── moonlight-common-c: only Limelight.h, for its codec and format constants;
+# none of its GameStream connection code is built.
+set(MW_LIMELIGHT_INCLUDE ${MW}/third_party/moonlight-common-c/src)
 
 # ── libdatachannel, with MoonlightWeb's patches ────────────────────────────
 find_package(Git REQUIRED)
@@ -110,7 +108,6 @@ target_compile_definitions(sfagents-screen PRIVATE
 target_link_libraries(sfagents-screen PRIVATE
     Qt6::Core Qt6::Gui Qt6::Network Qt6::WebSockets
     mw-native-host
-    moonlight-common-c
     LibDataChannel::LibDataChannel
     OpenSSL::SSL OpenSSL::Crypto
     Threads::Threads

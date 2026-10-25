@@ -22,7 +22,6 @@
 #include "MediaTrackRelay.h"
 #include "SignalingServer.h"
 #include "StreamRelay.h"
-#include "MoonlightShim.h"
 #include "NativeMediaEngine.h"
 #include "NativeBench.h"
 #include "InputMessageCodec.h"
@@ -47,6 +46,7 @@ extern "C" {
 #include <QThread>
 #include <QTimer>
 #include <QMetaObject>
+#include <QPointer>
 
 QSet<QString> StreamSession::s_ActiveUniqueIds;
 
@@ -614,24 +614,23 @@ void StreamSession::onLaunchResult(bool ok, const BackendError& err, const Media
     // The single place a media engine is chosen. Adding one means a case here
     // plus an IMediaEngine implementation — the relays below speak to the
     // interface's signals, never to GameStream, so nothing downstream changes.
-    MoonlightShim::InitParams params;
-    switch (media.type) {
-    case MediaType::GameStreamRtsp:
-        params.hostAddress = media.gameStream.hostAddress;
-        params.appVersion = media.gameStream.appVersion;
-        params.gfeVersion = media.gameStream.gfeVersion;
-        params.rtspSessionUrl = media.gameStream.rtspSessionUrl;
-        params.serverCodecModeSupport = media.gameStream.serverCodecModeSupport;
-        params.aesKey = media.gameStream.aesKey;
-        params.rikeyid = media.gameStream.rikeyid;
-        break;
-
-    case MediaType::NativeHost:
-        // Nothing to fill in: a native descriptor carries no address, no
-        // session URL and no key, because there is nothing to dial. What it
-        // does carry — the display, the codec mask, the HDR request — is read
-        // where the engine is built, a few lines below.
-        break;
+    // SF Agents: the native host is the only engine (no GameStream).
+    struct
+    {
+        int width = 1920;
+        int height = 1080;
+        int fps = 60;
+        int bitrateKbps = 20000;
+        int supportedVideoFormats = 0x0001;
+        int colorSpace = 1;
+        int audioConfiguration = 0;
+        bool slowOpus = false;
+    } params;
+    if (media.type != MediaType::NativeHost) {
+        m_Respond(HttpResponse::error(502, "Only this computer's own screen can be streamed"));
+        emit sessionFailed("not a native host");
+        deleteLater();
+        return;
     }
 
     // Session-level settings below are transport-agnostic: they describe what
@@ -731,10 +730,6 @@ void StreamSession::onLaunchResult(bool ok, const BackendError& err, const Media
                 &StreamSession::portalGrantReceived);
 
         startEngine = [native, nativeParams]() { native->startCapture(nativeParams); };
-    } else {
-        auto* shim = new MoonlightShim(this);
-        m_Engine = shim;
-        startEngine = [shim, params]() { shim->startConnection(params); };
     }
 
     // Clipboard sync is only possible when the streamed host is this machine

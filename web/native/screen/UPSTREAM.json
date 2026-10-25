@@ -12,5 +12,14 @@
     "backend/installer/drivers/vdd (the MIT-licensed virtual display driver, signed)"
   ],
   "fetched": "scripts/build-screen.mjs: libdatachannel, moonlight-common-c, opus and openh264 at the commits this MoonlightWeb commit pins them at",
-  "changed": []
+  "changed": [
+    {
+      "file": "backend/src/streaming/Session.cpp",
+      "why": "The GameStream engine (MoonlightShim, moonlight-common-c's connection code) is gone: a session streams the native host only. Includes <QPointer> it used to get through MoonlightShim.h."
+    }
+  ],
+  "removed": [
+    "backend/src/streaming/MoonlightShim.cpp",
+    "backend/src/streaming/MoonlightShim.h"
+  ]
 }
