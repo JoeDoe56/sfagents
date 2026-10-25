@@ -16,6 +16,14 @@
     {
       "file": "backend/src/streaming/Session.cpp",
       "why": "The GameStream engine (MoonlightShim, moonlight-common-c's connection code) is gone: a session streams the native host only. Includes <QPointer> it used to get through MoonlightShim.h."
+    },
+    {
+      "file": "backend/src/common/Edition.cpp",
+      "why": "With MW_SFAGENTS the product is named \"SF Agents\": the virtual display, its scheduled task and its staging folder carry SF Agents' name, apart from a MoonlightWeb install on the same machine."
+    },
+    {
+      "file": "backend/src/backend/streambackend/NativeHostBackend.cpp",
+      "why": "With MW_SFAGENTS the host is named after the computer alone."
     }
   ],
   "removed": [

@@ -30,7 +30,9 @@
 #include "mw/native/NativeHost.h"
 #include "backend/streambackend/NativeHostBackend.h"
 #include "backend/streambackend/NativeProbeService.h"
+#include "backend/VirtualDisplay.h"
 #include "backend/VirtualDisplayApply.h"
+#include "backend/NvApp.h"
 #include "streaming/DataChannelRelay.h"
 #include "streaming/NativeMediaEngine.h"
 #include "streaming/MediaTrackRelay.h"
@@ -566,6 +568,54 @@ static int runStreamWorker(QCoreApplication& app)
 
 namespace {
 
+/// --info: this computer as the stream page knows a host, and what it can
+/// stream (MoonlightWeb's GET /api/hosts and /api/hosts/:id/apps for its
+/// native host, ComputerManager::nativeDisplayJson, NvComputer::toJson).
+int runInfo()
+{
+    const mw::native::Capabilities caps = NativeProbeService::instance().snapshot();
+    QJsonObject native;
+    native["state"] = caps.available ? QStringLiteral("ok")
+                      : caps.reason == mw::native::Unavailability::NoDisplay
+                          ? QStringLiteral("no_display")
+                      : caps.reason == mw::native::Unavailability::CapturePermission
+                          ? QStringLiteral("no_capture_permission")
+                          : QStringLiteral("unavailable");
+    native["input_permission"] = caps.inputPermission;
+    native["virtual_display"] = VirtualDisplay::toJson(VirtualDisplay::probe());
+    native["hid"] = QStringLiteral("unsupported");
+    native["pyrowave"] = false;
+    native["diagnostic"] = QString::fromStdString(caps.diagnostic);
+
+    QJsonObject host;
+    host["uuid"] = NativeHostBackend::hostUuid();
+    host["name"] = NativeHostBackend::hostDisplayName();
+    host["state"] = QStringLiteral("online");
+    host["reachable"] = true;
+    host["pairState"] = QStringLiteral("paired");
+    host["serverCodecModeSupport"] = NativeHostBackend::codecModeSupport();
+    host["isLocalHost"] = true;
+    host["backendType"] = NativeHostBackend::typeName();
+    host["resumableApps"] = false;
+    host["runningAppPerDevice"] = false;
+    host["nativeDisplay"] = native;
+
+    QJsonArray apps;
+    NativeHostBackend().getAppList(NativeHostBackend::seatId(),
+                                   [&apps](bool ok, const BackendError&, const QVector<NvApp>& list) {
+                                       if (!ok) return;
+                                       for (const NvApp& app : list) apps.append(app.toJson());
+                                   });
+
+    const QByteArray json =
+        QJsonDocument(QJsonObject{{QStringLiteral("host"), host}, {QStringLiteral("apps"), apps}})
+            .toJson(QJsonDocument::Compact) +
+        "\n";
+    std::fwrite(json.constData(), 1, static_cast<size_t>(json.size()), stdout);
+    std::fflush(stdout);
+    return 0;
+}
+
 void messageToLogger(QtMsgType type, const QMessageLogContext&, const QString& msg)
 {
     switch (type) {
@@ -582,6 +632,7 @@ void messageToLogger(QtMsgType type, const QMessageLogContext&, const QString& m
  * sfagents-screen                 one stream: the session config on stdin,
  *                                 the protocol in StreamWorkerMain.h
  * sfagents-screen --probe         what this computer can stream, as JSON
+ * sfagents-screen --info          this computer as a host, and its displays
  * sfagents-screen --vdisplay-apply --stage=driver --vdisplay-dir <dir>
  *                                 install the virtual display's driver
  *                                 (elevated, at SF Agents' startup approval)
@@ -619,13 +670,16 @@ int main(int argc, char* argv[])
     QCommandLineOption vdisplayDirOption(QStringLiteral("vdisplay-dir"),
                                          QStringLiteral("The staging directory"),
                                          QStringLiteral("dir"));
+    QCommandLineOption infoOption(QStringLiteral("info"),
+                                  QStringLiteral("Print this computer as a host, and its displays"));
     QCommandLineOption verboseOption(QStringLiteral("verbose"), QStringLiteral("Verbose logs"));
-    parser.addOptions({probeOption, vdisplayApplyOption, vdisplayStageOption, vdisplayDirOption,
+    parser.addOptions({probeOption, infoOption, vdisplayApplyOption, vdisplayStageOption, vdisplayDirOption,
                        verboseOption});
     parser.process(app);
     mw::run::setVerboseFromCli(parser.isSet(verboseOption));
 
     if (parser.isSet(probeOption)) return NativeProbeService::runProbeCommand();
+    if (parser.isSet(infoOption)) return runInfo();
     if (parser.isSet(vdisplayApplyOption))
         return VirtualDisplayApply::run(parser.value(vdisplayStageOption),
                                         parser.value(vdisplayDirOption));

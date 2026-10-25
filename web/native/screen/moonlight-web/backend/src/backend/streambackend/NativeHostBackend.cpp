@@ -465,9 +465,14 @@ QString NativeHostBackend::hostDisplayName()
 {
     QString host = QHostInfo::localHostName();
     if (host.isEmpty()) host = QStringLiteral("This PC");
+#ifdef MW_SFAGENTS
+    // SF Agents streams this computer only: its name is enough.
+    return host;
+#else
     // The suffix is what makes the card unmistakable in a list that may also
     // hold Sunshine and Wolf hosts.
     return QStringLiteral("%1 — MoonlightWeb Host").arg(host);
+#endif
 }
 
 BackendCapabilities NativeHostBackend::capabilities() const

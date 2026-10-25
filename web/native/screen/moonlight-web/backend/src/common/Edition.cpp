@@ -42,7 +42,15 @@ constexpr bool kDevBuild =
 
 QString productNameFor(bool devBuild)
 {
+#ifdef MW_SFAGENTS
+    // SF Agents: its own name on what Windows shows (the virtual display, the
+    // task that turns it on) and its own data, apart from a MoonlightWeb
+    // install on the same machine.
+    Q_UNUSED(devBuild);
+    return QStringLiteral("SF Agents");
+#else
     return devBuild ? QStringLiteral("MoonlightWebDev") : QStringLiteral("MoonlightWeb");
+#endif
 }
 
 QString dataNameFor(bool devBuild, bool devFlag)
@@ -59,6 +67,11 @@ QString productName()
 
 QString displayNameFor(bool devBuild, bool devFlag)
 {
+#ifdef MW_SFAGENTS
+    Q_UNUSED(devBuild);
+    Q_UNUSED(devFlag);
+    return QStringLiteral("SF Agents");
+#endif
     return devBuild || devFlag ? QStringLiteral("MoonlightWebDev") : QStringLiteral("MoonlightWeb");
 }
 

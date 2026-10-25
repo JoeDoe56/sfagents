@@ -134,7 +134,7 @@ if(WIN32)
     # A console program: SF Agents starts it hidden and reads its stdout.
     target_link_libraries(sfagents-screen PRIVATE ws2_32 winmm Bcrypt Crypt32 iphlpapi Dbghelp avrt
                                                   wtsapi32 userenv ole32 oleaut32
-                                                  setupapi newdev cfgmgr32 advapi32 shell32)
+                                                  setupapi newdev cfgmgr32 advapi32 shell32 taskschd)
 elseif(APPLE)
     target_link_libraries(sfagents-screen PRIVATE
         "-framework Security" "-framework CoreFoundation" "-framework Foundation")
