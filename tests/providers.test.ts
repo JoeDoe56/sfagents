@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import {
   AccountState,
   AppSettings,
+  ClaudeSignIn,
   CodexProvider,
   FailoverProvider,
   MemorySecretStore,
@@ -396,5 +397,65 @@ describe('app settings', () => {
     assert.equal(s.get('web.port'), 8093);
     assert.ok(s.all().find((x) => x.key === 'web.port')!.restart);
     assert.ok(fs.existsSync(path.join(path.dirname(s.file), 'settings.json')));
+  });
+});
+
+describe('Windows: busy folders never break sign-in or removal', () => {
+  /** Makes fs.rmSync fail like Windows does on a folder a process still holds. */
+  const busy = (match: (p: string) => boolean): (() => void) => {
+    const real = fs.rmSync;
+    let failures = 0;
+    (fs as { rmSync: typeof fs.rmSync }).rmSync = ((p: fs.PathLike, o?: fs.RmOptions) => {
+      if (match(String(p)) && failures++ < 1) throw Object.assign(new Error(`EPERM, Permission denied: ${p}`), { code: 'EPERM' });
+      return real(p, o);
+    }) as typeof fs.rmSync;
+    return () => {
+      (fs as { rmSync: typeof fs.rmSync }).rmSync = real;
+    };
+  };
+
+  test('a Claude sign-in that finishes keeps its token when its folder is busy', { skip: process.platform === 'win32' }, async () => {
+    const dir = makeTempDir();
+    const script = path.join(dir, 'claude');
+    fs.writeFileSync(
+      script,
+      `#!/bin/sh\necho "Opening https://claude.ai/oauth/authorize?code=true&state=abc123"\nsleep 0.5\necho "Your token: sk-ant-oat01-${'a'.repeat(40)}"\nsleep 30\n`,
+      { mode: 0o755 },
+    );
+    const restore = busy((p) => p.includes('sfagents-claude-signin-'));
+    try {
+      const signIn = await ClaudeSignIn.start({ executable: script, timeoutMs: 5000 });
+      assert.match(signIn.url, /^https:\/\/claude\.ai\/oauth\/authorize/);
+      assert.equal(await signIn.done, `sk-ant-oat01-${'a'.repeat(40)}`);
+      signIn.cancel(); // after it finished: a no-op, never a throw
+    } finally {
+      restore();
+    }
+  });
+
+  test('removing a provider whose folder is busy still removes it', async () => {
+    const dir = makeTempDir();
+    const reg = new ProviderRegistry({ dir, secrets: new MemorySecretStore(), cleanup: async () => {} });
+    const record = await reg.add({ name: 'Old ChatGPT', kind: 'openai', secret: { refreshToken: 'old' } as never });
+    const state = reg.stateDir(record);
+    fs.mkdirSync(state, { recursive: true });
+    const restore = busy((p) => p === state);
+    try {
+      await reg.remove(record.id);
+    } finally {
+      restore();
+    }
+    assert.equal(reg.list().length, 0);
+    for (let i = 0; i < 50 && fs.existsSync(state); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(fs.existsSync(state), false, 'deleted once it is free');
+  });
+
+  test('an old ChatGPT sign-in does not start Codex for usage', async () => {
+    const dir = makeTempDir();
+    const reg = new ProviderRegistry({ dir, secrets: new MemorySecretStore(), cleanup: async () => {} });
+    const record = await reg.add({ name: 'Old ChatGPT', kind: 'openai', secret: { refreshToken: 'old' } as never });
+    const factory = createDefaultProviderFactory({ registry: reg, usage: new PlanUsageStore() });
+    await assert.rejects(factory.readPlanUsage!(record), /signed in the old way/);
+    assert.equal(fs.existsSync(reg.stateDir(record)), false, 'no Codex home made');
   });
 });

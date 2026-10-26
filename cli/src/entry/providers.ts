@@ -13,7 +13,6 @@
  *   sfagents settings [set <key> <value> | reset <key>]
  */
 
-import fs from 'node:fs';
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import {
@@ -26,6 +25,7 @@ import {
   SETTINGS,
   getErrorMessage,
   openInBrowser,
+  removeDir,
   type ProviderKind,
 } from '@sfagents/core';
 import { createStyle } from '../terminal/style.js';
@@ -117,7 +117,7 @@ export async function providersCommand(
           try {
             signIn = await CodexSignIn.start({ home });
           } catch (error) {
-            fs.rmSync(home, { recursive: true, force: true });
+            removeDir(home);
             throw error;
           }
           const opened = await openInBrowser(signIn.url);
@@ -129,7 +129,7 @@ export async function providersCommand(
             const record = await registry.add({ id, name, kind, account: result.email, secret: { codex: true } });
             streams.stdout.write(`${style.green('✓')} Signed in${result.email ? ` as ${result.email}` : ''}. Added "${record.name}".\n`);
           } catch (error) {
-            fs.rmSync(home, { recursive: true, force: true });
+            removeDir(home);
             throw error;
           }
           return OK;

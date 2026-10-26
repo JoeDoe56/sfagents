@@ -177,6 +177,16 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
   const env = options.env ?? process.env;
   const accounts = options.accounts ?? new AccountState();
   const cache = new Map<string, ModelProvider>();
+  // A removed provider's Codex process stops, so its folder can be deleted (Windows keeps a running process's folder).
+  options.registry?.onChange(() => {
+    const ids = new Set(options.registry!.list().map((r) => r.id));
+    for (const [key, provider] of cache) {
+      const [source, id] = key.split('\0');
+      if (source !== 'rec' || ids.has(id!)) continue;
+      cache.delete(key);
+      (provider as { close?: () => void }).close?.();
+    }
+  });
 
   const lazySecret = <T>(record: ProviderRecord): (() => Promise<T>) => {
     return async () => {
@@ -213,18 +223,24 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
         const secret = lazySecret<OpenAISecret | { refreshToken?: string }>(record);
         const codex = new CodexProvider(record.name, record.id, options.registry!.stateDir(record), { usage: options.usage });
         let checked = false;
+        // Added before SF Agents used Codex: that sign-in can't be carried over, and Codex is not started for it.
+        const check = async () => {
+          if (checked) return;
+          if (!('codex' in (await secret()))) throw new ProviderError(`Provider "${record.name}" was signed in the old way. Remove it and add it again in Settings → Providers.`, 401);
+          checked = true;
+        };
         provider = {
           id: record.name,
           async *stream(request) {
-            if (!checked) {
-              // Added before SF Agents used Codex: that sign-in can't be carried over.
-              if (!('codex' in (await secret()))) throw new ProviderError(`Provider "${record.name}" was signed in the old way. Remove it and add it again in Settings → Providers.`, 401);
-              checked = true;
-            }
+            await check();
             yield* codex.stream(request);
           },
-          readPlanUsage: () => codex.readPlanUsage(),
-        } as ModelProvider & { readPlanUsage(): Promise<PlanUsage | undefined> };
+          readPlanUsage: async () => {
+            await check();
+            return codex.readPlanUsage();
+          },
+          close: () => codex.close(),
+        } as ModelProvider & { readPlanUsage(): Promise<PlanUsage | undefined>; close(): void };
         break;
       }
       case 'anthropic': {

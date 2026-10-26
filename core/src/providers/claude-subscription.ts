@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { removeDir } from '../utils/remove-dir.js';
 import {
   ProviderError,
   type AssistantMessage,
@@ -108,9 +109,10 @@ export class ClaudeSignIn {
         this.finished = true;
         clearTimeout(timer);
         clearInterval(poll);
-        this.cancel();
+        // Settle first: cleaning up must never lose a token that arrived.
         if (error) reject(error);
         else resolve(token!);
+        this.cleanUp();
       };
       const timer = setTimeout(() => finish(new ProviderError('Sign-in timed out after 10 minutes. Start again.', 408)), timeoutMs);
       timer.unref?.();
@@ -169,8 +171,12 @@ export class ClaudeSignIn {
       sub.dispose();
       return new ClaudeSignIn(child, url, dir, output, options.signInTimeoutMs ?? 600_000);
     } catch (error) {
-      child.kill();
-      fs.rmSync(dir, { recursive: true, force: true });
+      try {
+        child.kill();
+      } catch {
+        // already gone
+      }
+      removeDir(dir);
       throw error;
     }
   }
@@ -180,9 +186,20 @@ export class ClaudeSignIn {
       this.abort(new ProviderError('Sign-in cancelled.', 400));
       return;
     }
-    if (!this.exited) this.pty.kill();
+    this.cleanUp();
+  }
+
+  /** Stops Claude and deletes the throwaway profile; never throws (on Windows the folder may stay busy for a moment). */
+  private cleanUp(): void {
     this.output = '';
-    fs.rmSync(this.dir, { recursive: true, force: true });
+    if (!this.exited) {
+      try {
+        this.pty.kill();
+      } catch {
+        // already gone
+      }
+    }
+    removeDir(this.dir);
   }
 }
 

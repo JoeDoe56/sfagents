@@ -18,7 +18,6 @@
  *   POST /api/providers/web {apiKey} | {action: "remove"}     the Bright Data key for agents' web access
  */
 
-import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
   AppSettings,
@@ -28,6 +27,7 @@ import {
   PROVIDER_KIND_LABELS,
   ProviderRegistry,
   ProviderRegistryError,
+  removeDir,
   SettingsError,
   getErrorMessage,
   openInBrowser,
@@ -159,6 +159,8 @@ export class ProvidersApi {
   private wrap<T>(promise: Promise<T>): Promise<T> {
     return promise.catch((error: unknown) => {
       if (error instanceof ApiError) throw error;
+      // Also in the terminal: the sheet's alert is easy to miss and can't be copied.
+      this.options.log(`web: provider change failed: ${getErrorMessage(error)}`);
       if (error instanceof ProviderRegistryError) throw new ApiError(error.status, error.message);
       if (error instanceof KeyringUnavailableError) throw new ApiError(503, error.message);
       throw new ApiError(400, getErrorMessage(error));
@@ -231,7 +233,7 @@ export class ProvidersApi {
         const recordId = randomUUID();
         const home = this.options.registry.stateDir({ id: recordId, kind });
         const codex = await this.starters.codex(home).catch((error) => {
-          fs.rmSync(home, { recursive: true, force: true });
+          removeDir(home);
           throw error;
         });
         session = { id, kind, name, url: codex.url, state: 'waiting', codex, home, timer };
@@ -282,7 +284,7 @@ export class ProvidersApi {
       s.codex?.cancel();
       s.claude?.cancel();
       // A failed ChatGPT sign-in leaves nothing behind (Codex wrote no keyring entry, or it is unused).
-      if (s.home) setTimeout(() => fs.rmSync(s.home!, { recursive: true, force: true }), 1000).unref();
+      if (s.home) setTimeout(() => removeDir(s.home!), 1000).unref();
     }
     this.options.broadcast('signin', { id, state: s.state, error: error ?? null, provider: provider ? describeProvider(provider) : null });
     setTimeout(() => this.signIns.delete(id), 60_000).unref();

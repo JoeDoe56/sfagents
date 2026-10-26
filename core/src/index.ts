@@ -68,6 +68,7 @@ export { ToolNames, BUILTIN_TOOL_IDS } from './tools/tool-names.js';
 export { stripAnsiAndControl } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
 export { openInBrowser } from './utils/open-url.js';
+export { removeDir } from './utils/remove-dir.js';
 export * from './conversation/types.js';
 export { parseConversation, serializeConversation, serializeRecord, decorationFor } from './conversation/format.js';
 export { ConversationState, SemanticError } from './conversation/state.js';

@@ -14,6 +14,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readJsonFile, sfagentsHome, writeFileAtomic } from '../settings/home.js';
 import { KeyringSecretStore, type SecretStore } from './secrets.js';
+import { removeDir } from '../utils/remove-dir.js';
 
 export const PROVIDER_KINDS = ['openrouter', 'openai', 'anthropic', 'custom'] as const;
 export type ProviderKind = (typeof PROVIDER_KINDS)[number];
@@ -249,7 +250,8 @@ export class ProviderRegistry {
       } catch {
         // signing out is best effort; the listing goes either way
       }
-      fs.rmSync(dir, { recursive: true, force: true });
+      // Never blocks the removal: on Windows a Codex process that just stopped can hold the folder for a moment.
+      removeDir(dir);
     }
     try {
       await this.secrets.delete(this.secretKey(id));

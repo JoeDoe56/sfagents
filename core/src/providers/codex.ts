@@ -21,6 +21,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { removeDir } from '../utils/remove-dir.js';
 import {
   ProviderError,
   type AssistantMessage,
@@ -420,7 +421,7 @@ export class CodexSignIn {
   private async account(): Promise<CodexSignInResult> {
     const file = path.join(this.home, 'auth.json');
     if (fs.existsSync(file)) {
-      fs.rmSync(file, { force: true });
+      removeDir(file);
       throw new ProviderError('Codex could not keep the sign-in in the system keyring and wrote it to a file instead, so it was deleted. Check that the keyring is unlocked, then sign in again.', 503);
     }
     const r = await this.server.request('account/read', { refreshToken: false }, 15_000);
