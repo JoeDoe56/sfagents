@@ -203,7 +203,14 @@ bool elevatedTaskUsable()
                          .arg(taskName(), taskExe));
         return false;
     }
+#ifdef MW_SFAGENTS
+    // SF Agents' task names its staging folder too (--vdisplay-dir): the
+    // elevated run then never depends on finding it through its environment.
+    return taskArgs == applyArgument() ||
+           taskArgs.startsWith(applyArgument() + QStringLiteral(" --vdisplay-dir "));
+#else
     return taskArgs == applyArgument();
+#endif
 }
 
 /// Cached: the answer changes only with an install, and each call is a COM

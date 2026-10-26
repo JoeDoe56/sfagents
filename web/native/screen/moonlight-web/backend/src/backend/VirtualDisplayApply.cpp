@@ -937,6 +937,16 @@ bool applyTopology(const Topology& t, QString* error)
     return true;
 }
 
+#ifdef MW_SFAGENTS
+/// SF Agents never writes a layout with its display in it to Windows' display
+/// database: a node left on (the PC restarted mid-stream) would otherwise come
+/// back at the next sign-in in that layout, the desktop on a screen no one
+/// sees (25/10/2026). Applied for this session only, it goes with the node.
+constexpr UINT32 kSaveLayout = 0;
+#else
+constexpr UINT32 kSaveLayout = SDC_SAVE_TO_DATABASE;
+#endif
+
 /// Query the active display configuration, let @p edit change it, apply it.
 /// The CCD API (what Windows Settings uses), not ChangeDisplaySettingsEx:
 /// on the bench an indirect display just brought up took neither a mode nor
@@ -960,7 +970,7 @@ template <typename Edit> bool applyDisplayConfig(Edit edit, QString* error)
     if (!edit(paths, modes, error)) return false;
     const LONG rc = SetDisplayConfig(
         UINT32(paths.size()), paths.data(), UINT32(modes.size()), modes.data(),
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | kSaveLayout);
     if (rc != ERROR_SUCCESS) {
         *error = QStringLiteral("SetDisplayConfig: %1").arg(lastErrorText(DWORD(rc)));
         return false;
@@ -1187,7 +1197,7 @@ bool imposeTopology(const Topology& t, const QString& devicePath, QString* error
 
     const LONG rc = SetDisplayConfig(
         UINT32(out.paths.size()), out.paths.data(), UINT32(out.modes.size()), out.modes.data(),
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | kSaveLayout);
     if (rc != ERROR_SUCCESS) {
         *error = QStringLiteral("SetDisplayConfig: %1").arg(lastErrorText(DWORD(rc)));
         return false;
@@ -1443,8 +1453,23 @@ int stageMode(Context& ctx)
         Logger::warning(
             QStringLiteral("[vdisplay-apply] SDR refused: %1").arg(lastErrorText(DWORD(hr))));
 
+#ifdef MW_SFAGENTS
+    // SF Agents mirrors the screen in front of the owner: its display takes
+    // the primary role (the taskbar, Start, every new window, the secure
+    // desktop) only on a PC with no other screen on.
+    bool othersOn = false;
+    for (const ActivePath& p : activePaths())
+        if (p.devicePath.compare(target->devicePath, Qt::CaseInsensitive) != 0) othersOn = true;
+    if (othersOn) {
+        Logger::info(QStringLiteral("[vdisplay-apply] other displays are on: ours stays secondary"));
+        ctx.result.previousPrimary.clear();
+    } else if (!makePrimary(target->devicePath, &error)) {
+        Logger::warning(QStringLiteral("[vdisplay-apply] not made primary: %1").arg(error));
+    }
+#else
     if (!makePrimary(target->devicePath, &error))
         Logger::warning(QStringLiteral("[vdisplay-apply] not made primary: %1").arg(error));
+#endif
 
     ctx.result.ok = true;
     ctx.result.stage = QStringLiteral("done");

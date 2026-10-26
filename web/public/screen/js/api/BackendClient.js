@@ -166,7 +166,8 @@ export class BackendClient {
                 client_tearing_real: CANVAS_TEARING_IS_REAL,
                 ...streamingSettings,
             },
-            { timeoutMs: 60000 },
+            // Past SF Agents' own limit (150 s), which says why.
+            { timeoutMs: 160000 },
         );
     }
 

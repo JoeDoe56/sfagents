@@ -119,9 +119,10 @@ function writeSetting(key, value) {
 const settings = {
   quality: QUALITIES.includes(params.get('quality')) ? params.get('quality') : QUALITIES.includes(readSetting('quality', 'auto')) ? readSetting('quality', 'auto') : 'auto',
   enterSends: readSetting('enterSends', !coarse) === true,
+  reverseSheetScroll: readSetting('reverseSheetScroll', false) === true,
 };
 
-configureUi({ quality: settings.quality });
+configureUi({ quality: settings.quality, reverseSheetScroll: settings.reverseSheetScroll });
 // Every button in the app presses like iOS's (the rows and tiles keep their own highlight).
 installPress({
   exclude: '.fm-row, .fm-tile, .fm-place, .ui-row, .menu-item, .menu-quick-item, .fm-crumb, .proc-row, .user-row, .tile, .stat, .drive, .ag-slider, .dialog-button, .toast-cancel, .fm-back, .fm-textbtn, .peek-back, summary',
@@ -627,7 +628,7 @@ function applySnapshot(s) {
   setArtifacts(s.artifacts);
   setSections(s.sections);
   if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
-  for (const text of s.notices || []) notice(text);
+  for (const n of s.notices || []) typeof n === 'string' ? notice(n) : notice(n.text, n.level);
   render();
   updateComposer();
   requestAnimationFrame(scrollToBottom);
@@ -1152,10 +1153,14 @@ function openSettings() {
       return settings.quality === 'auto' ? `Chosen for this device: ${tier}. Lowers itself if frames get slow.` : `Drawing with: ${tier}.`;
     },
     enterSends: () => settings.enterSends,
+    reverseSheetScroll: () => settings.reverseSheetScroll,
     save: (local) => {
       setQuality(local.quality, true);
       settings.enterSends = local.enterSends;
       writeSetting('enterSends', local.enterSends);
+      settings.reverseSheetScroll = local.reverseSheetScroll;
+      writeSetting('reverseSheetScroll', local.reverseSheetScroll);
+      configureUi({ reverseSheetScroll: local.reverseSheetScroll });
     },
     onClose: () => (settingsSheet = null),
   });

@@ -65,11 +65,12 @@ describe('screen: stream configuration', () => {
 
 describe('screen: Windows setup', () => {
   test('the virtual display task runs the installed helper with the highest rights, on demand', () => {
-    const xml = vdisplayTaskXml('C:\\Program Files\\SF Agents\\Screen\\sfagents-screen.exe', 'PC\\caleb');
+    const xml = vdisplayTaskXml('C:\\Program Files\\SF Agents\\Screen\\sfagents-screen.exe', 'C:\\Users\\caleb\\AppData\\Local\\SF Agents\\vdisplay', 'PC\\caleb');
     assert.match(xml, /<UserId>PC\\caleb<\/UserId>/);
     assert.match(xml, /<RunLevel>HighestAvailable<\/RunLevel>/);
     assert.match(xml, /<Command>"C:\\Program Files\\SF Agents\\Screen\\sfagents-screen.exe"<\/Command>/);
-    assert.match(xml, /<Arguments>--vdisplay-apply<\/Arguments>/);
+    // The staging folder is named, so the elevated run never looks for it in its environment.
+    assert.match(xml, /<Arguments>--vdisplay-apply --vdisplay-dir "C:\\Users\\caleb\\AppData\\Local\\SF Agents\\vdisplay"<\/Arguments>/);
     assert.doesNotMatch(xml, /<Triggers>/);
   });
 

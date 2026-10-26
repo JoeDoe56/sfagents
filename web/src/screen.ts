@@ -37,7 +37,7 @@ import { pipeline } from 'node:stream/promises';
 import { getErrorMessage, readJsonFile, sfagentsHome, writeFileAtomic } from '@sfagents/core';
 
 /** The helper's version: CI publishes it under the tag screen-v<version>. */
-export const SCREEN_VERSION = '0.1.0';
+export const SCREEN_VERSION = '0.1.2';
 export const SCREEN_RELEASES = `https://github.com/JoeDoe56/sfagents/releases/download/screen-v${SCREEN_VERSION}`;
 
 interface Asset {
@@ -49,8 +49,8 @@ interface Asset {
 
 /** Per platform-arch; an empty SHA-256 is a build not published yet. */
 export const SCREEN_ASSETS: Readonly<Record<string, Asset>> = {
-  'win32-x64': { name: 'sfagents-screen-win-x64.zip', sha256: 'd2866bd388cc8d564693875c025f814c7d3a5eccce53254269ab9892f9bf322f', exe: 'sfagents-screen/sfagents-screen.exe' },
-  'linux-x64': { name: 'sfagents-screen-linux-x64.tar.gz', sha256: '51036a0f1c617d8d59140f07c13c599b81f4b9045a4200b7a416d3e204a12b67', exe: 'sfagents-screen/bin/sfagents-screen' },
+  'win32-x64': { name: 'sfagents-screen-win-x64.zip', sha256: '4c2921f46e662391fe0025994d2d8f4f35694e2b4552d366e4ac5953a244dd4c', exe: 'sfagents-screen/sfagents-screen.exe' },
+  'linux-x64': { name: 'sfagents-screen-linux-x64.tar.gz', sha256: '652ae926d400fd34aa5cd69f7bc71705a8570438acdb0331f4f1b459eb580cef', exe: 'sfagents-screen/bin/sfagents-screen' },
 };
 
 /** The page's names for this computer, as MoonlightWeb's native host has them. */
@@ -65,8 +65,8 @@ const MEDIA_PORT = 48560;
 const STUN_SERVER = 'stun:stun.l.google.com:19302';
 /** The virtual display stays on this long after its last stream (a reload, a quality change). */
 const VDISPLAY_GRACE_MS = 5_000;
-/** How long a launch may take before the page is told it failed. */
-const START_TIMEOUT_MS = 60_000;
+/** How long a launch may take before the page is told it failed: past the helper's own two minutes for the virtual display, so its reason comes through. */
+const START_TIMEOUT_MS = 150_000;
 /** How long a stream's end is remembered for the page's stream-state question. */
 const ENDS_KEEP_MS = 10 * 60_000;
 
@@ -94,7 +94,7 @@ export interface ScreenStatus {
 
 /** What the helper's --info says: this computer as the page knows a host, and its displays. */
 export interface ScreenInfo {
-  host: Record<string, unknown> & { nativeDisplay?: { state?: string; diagnostic?: string; virtual_display?: { installed?: boolean } } };
+  host: Record<string, unknown> & { nativeDisplay?: { state?: string; diagnostic?: string; virtual_display?: { installed?: boolean; enabled?: boolean } } };
   apps: Array<Record<string, unknown> & { id: number }>;
 }
 
@@ -463,6 +463,24 @@ export class ScreenMirror {
     return value;
   }
 
+  /**
+   * Windows, at startup: the virtual display off when an earlier run left it
+   * on (SF Agents or the PC stopped mid-stream), so that it never outlives
+   * the stream it was made for.
+   */
+  async resetVirtualDisplay(): Promise<void> {
+    if (this.platform !== 'win32' || this.stream) return;
+    const exe = this.helper();
+    if (!exe) return;
+    const on = await this.info(true)
+      .then((i) => i.host.nativeDisplay?.virtual_display?.enabled === true)
+      .catch(() => false);
+    if (!on || this.stream) return;
+    this.log('screen: the virtual display was left on; turning it off');
+    const child = spawn(exe, ['--vdisplay-off'], { stdio: 'ignore', windowsHide: true, cwd: path.dirname(exe) });
+    child.on('error', () => {});
+  }
+
   /** The device streaming now, if any. */
   streamingDevice(): string | null {
     return this.stream?.streaming ? this.stream.device : null;
@@ -557,6 +575,7 @@ export class ScreenMirror {
       this.prune();
       return { code: 200, body: { ...result.body, slot: 0, dual_supported: false, stream_id: id } };
     }
+    this.log(`screen: the stream did not start (${result.code}): ${String(result.body['error'] ?? result.body['status'] ?? '')}${tail.trim() ? `\n${tail.trim().split('\n').slice(-15).join('\n')}` : ''}`);
     if (this.stream === stream) await this.stop(false);
     return result;
   }
@@ -759,10 +778,6 @@ function regKeyExists(key: string): boolean {
   return spawnSync('reg.exe', ['query', key], { stdio: 'ignore', windowsHide: true }).status === 0;
 }
 
-function taskExists(name: string): boolean {
-  return spawnSync('schtasks.exe', ['/Query', '/TN', name], { stdio: 'ignore', windowsHide: true }).status === 0;
-}
-
 /** Who the scheduled task runs as, the way schtasks resolves it (MoonlightWeb's installer, TaskPrincipal). */
 function taskPrincipal(env: NodeJS.ProcessEnv = process.env): string {
   let domain = env['USERDOMAIN'] ?? '';
@@ -775,19 +790,32 @@ function xmlEscape(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!).replace(/[^\x20-\x7e]/g, (c) => `&#${c.codePointAt(0)};`);
 }
 
+/** Where the stream leaves the virtual display's requests for the task (VirtualDisplay::stagingDir). */
+export function vdisplayStagingDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.win32.join(env['LOCALAPPDATA'] ?? '', 'SF Agents', 'vdisplay');
+}
+
+/** The task is there, and names its staging folder (helper 0.1.1 on). */
+function vdisplayTaskCurrent(): boolean {
+  const r = spawnSync('schtasks.exe', ['/Query', '/TN', VDISPLAY_TASK, '/XML'], { encoding: 'utf8', windowsHide: true });
+  return r.status === 0 && String(r.stdout).includes('--vdisplay-dir');
+}
+
 /**
  * The trigger-less, elevated task the helper starts (`schtasks /Run`) to turn
  * its virtual display on and off without a prompt: MoonlightWeb's installer's
  * RegisterVirtualDisplayTask. Its command is the copy under Program Files,
- * which only an administrator can change.
+ * which only an administrator can change. It names the staging folder
+ * itself, so that the elevated run does not depend on its environment to find
+ * the request.
  */
-export function vdisplayTaskXml(exe: string, principal = taskPrincipal()): string {
+export function vdisplayTaskXml(exe: string, stagingDir = vdisplayStagingDir(), principal = taskPrincipal()): string {
   return [
     '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
     '  <RegistrationInfo><Author>SF Agents</Author></RegistrationInfo>',
     `  <Principals><Principal id="Author"><UserId>${xmlEscape(principal)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>`,
     '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowStartOnDemand>true</AllowStartOnDemand><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>',
-    `  <Actions Context="Author"><Exec><Command>"${xmlEscape(exe)}"</Command><Arguments>--vdisplay-apply</Arguments></Exec></Actions>`,
+    `  <Actions Context="Author"><Exec><Command>"${xmlEscape(exe)}"</Command><Arguments>--vdisplay-apply --vdisplay-dir "${xmlEscape(stagingDir)}"</Arguments></Exec></Actions>`,
     '</Task>',
     '',
   ].join('\r\n');
@@ -824,20 +852,12 @@ export async function screenSetupSteps(screen: ScreenMirror, setupDir: string, f
   const willHave = Boolean(source) || installedVersion() === SCREEN_VERSION;
   if (!willHave) return steps;
 
-  const vdInstalled = await screen
-    .info(true)
-    .then((i) => i.host.nativeDisplay?.virtual_display?.installed === true)
-    .catch(() => false);
-  if (!vdInstalled) {
-    const dir = path.join(setupDir, 'vdisplay-install');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'request.json'), '{"action":"install"}\n');
-    steps.push({ file: exe, args: ['--vdisplay-apply', '--stage=driver', '--vdisplay-dir', dir], ok: [0, 3010] });
-  }
-  if (!taskExists(VDISPLAY_TASK) || steps.length) {
-    const xml = path.join(setupDir, 'vdisplay-task.xml');
-    fs.writeFileSync(xml, vdisplayTaskXml(exe));
-    steps.push({ file: 'schtasks.exe', args: ['/Create', '/TN', VDISPLAY_TASK, '/XML', xml, '/F'] });
+  // The virtual display stays out until it is proven on a real PC (it took
+  // over the owner's screen once, 25/10/2026): SFAGENTS_SCREEN_VDISPLAY=1 sets it up.
+  if (process.env['SFAGENTS_SCREEN_VDISPLAY'] !== '1') {
+    log('screen: the virtual display is off (SFAGENTS_SCREEN_VDISPLAY=1 turns it on)');
+  } else {
+    steps.push(...(await vdisplaySetupSteps(screen, setupDir, exe, steps.length > 0)));
   }
   if (spawnSync('netsh.exe', ['advfirewall', 'firewall', 'show', 'rule', `name=${FIREWALL_RULE}`], { stdio: 'ignore', windowsHide: true }).status !== 0) {
     steps.push({ file: 'netsh.exe', args: ['advfirewall', 'firewall', 'add', 'rule', `name=${FIREWALL_RULE}`, 'dir=in', 'action=allow', `program=${exe}`, 'enable=yes', 'profile=any'] });
@@ -858,6 +878,27 @@ export async function screenSetupSteps(screen: ScreenMirror, setupDir: string, f
     }
   }
   return steps;
+}
+
+/** The virtual display's driver and its task, when they are missing or out of date. */
+async function vdisplaySetupSteps(screen: ScreenMirror, setupDir: string, exe: string, helperCopied: boolean): Promise<SetupStep[]> {
+  const out: SetupStep[] = [];
+  const vdInstalled = await screen
+    .info(true)
+    .then((i) => i.host.nativeDisplay?.virtual_display?.installed === true)
+    .catch(() => false);
+  if (!vdInstalled) {
+    const dir = path.join(setupDir, 'vdisplay-install');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'request.json'), '{"action":"install"}\n');
+    out.push({ file: exe, args: ['--vdisplay-apply', '--stage=driver', '--vdisplay-dir', dir], ok: [0, 3010] });
+  }
+  if (!vdisplayTaskCurrent() || out.length || helperCopied) {
+    const xml = path.join(setupDir, 'vdisplay-task.xml');
+    fs.writeFileSync(xml, vdisplayTaskXml(exe));
+    out.push({ file: 'schtasks.exe', args: ['/Create', '/TN', VDISPLAY_TASK, '/XML', xml, '/F'] });
+  }
+  return out;
 }
 
 /** Linux: the udev rule that lets the helper type and click (/dev/uinput), when it is missing. */

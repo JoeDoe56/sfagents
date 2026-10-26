@@ -44,7 +44,7 @@ export async function startRepl(options: ReplOptions): Promise<number> {
   const session = options.runtime.createSession();
   const root = options.runtime.tree.root;
   output.write(
-    `${style.bold('SF Agents')} ${style.dim(`— agent "${root.id}" (${root.definition.provider}:${root.definition.model})`)}\n${style.dim('Type /help for commands.')}\n`,
+    `${style.bold('SF Agents')} ${style.dim(`— agent "${root.id}" (${root.definition.provider ? `${root.definition.provider}:${root.definition.model}` : 'no provider yet'})`)}\n${style.dim('Type /help for commands.')}\n`,
   );
   for (const notice of options.notices ?? []) output.write(`${style.dim(notice)}\n`);
 
@@ -141,7 +141,7 @@ export async function startRepl(options: ReplOptions): Promise<number> {
             else {
               session.setAgent(name);
               const d = session.node.definition;
-              output.write(style.dim(`"${name}" (${d.provider}:${d.model}) replies from now on.\n`));
+              output.write(style.dim(`"${name}" (${d.provider ? `${d.provider}:${d.model}` : 'no provider yet'}) replies from now on.\n`));
             }
           } else output.write(style.dim(`"${session.node.id}" replies. Agents: ${[...options.runtime.tree.byId.keys()].join(', ')}\n`));
           prompt();

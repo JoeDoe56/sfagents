@@ -45,6 +45,7 @@ import {
   ProviderRegistry,
   PlanUsageStore,
   createDefaultProviderFactory,
+  DEFAULT_MODELS,
   BrightDataWeb,
   type PlanUsage,
 } from '@sfagents/core';
@@ -433,6 +434,7 @@ export class WebServer {
   async setupFeatures(): Promise<void> {
     const dictation = this.dictation.status().state === 'missing' ? this.dictation.install().catch((error) => this.log(`Dictation could not be set up: ${getErrorMessage(error)}`)) : Promise.resolve();
     await this.screen.ensure();
+    await this.screen.resetVirtualDisplay();
     const r = this.screen.status();
     if (r.state !== 'ready' && r.error) this.log(`Screen mirroring is not available: ${r.error}`);
     await dictation;
@@ -1257,8 +1259,13 @@ export class WebServer {
    */
   private accountChoices(node: AgentNode) {
     const d = node.definition;
-    const entries = d.providers?.length ? d.providers : [{ provider: d.provider, model: d.model }];
     const out: Array<{ name: string; model: string; kind: string | null; listed: boolean; available: boolean }> = [];
+    // An agent file that names no provider may reply with any added one.
+    if (!d.provider) {
+      for (const r of this.registry.list()) out.push({ name: r.name, model: d.model || DEFAULT_MODELS[r.kind] || 'default', kind: r.kind, listed: false, available: true });
+      return out;
+    }
+    const entries = d.providers?.length ? d.providers : [{ provider: d.provider, model: d.model }];
     const kinds = new Set<string>();
     for (const e of entries) {
       const record = this.registry.find(e.provider);
@@ -1277,11 +1284,12 @@ export class WebServer {
     const node = this.session.node;
     const accounts = this.accountChoices(node);
     const picked = this.accounts.get(node.id);
-    const current = accounts.find((a) => a.name.toLowerCase() === picked?.toLowerCase()) ?? accounts[0]!;
+    // None when the agent names no provider and none is added yet.
+    const current = accounts.find((a) => a.name.toLowerCase() === picked?.toLowerCase()) ?? accounts.at(0);
     return {
       ...this.describeAgent(node),
-      model: current.model,
-      account: current.name,
+      model: current?.model ?? node.definition.model,
+      account: current?.name ?? '',
       accounts,
       reasoning: this.session.reasoning ?? node.definition.reasoning ?? null,
       levels: EFFORT_LEVELS,
@@ -1350,7 +1358,12 @@ export class WebServer {
       sections: displaySections(this.conversation.state),
       live: this.live ? { id: this.live.id, segments: this.live.segments } : null,
       approvals: [...this.approvals.values()].map((a) => a.display),
-      notices: this.conversation.notices.filter((n) => n.kind === 'interrupted' || n.kind === 'recovered').map((n) => n.message),
+      notices: [
+        ...this.conversation.notices.filter((n) => n.kind === 'interrupted' || n.kind === 'recovered').map((n) => n.message),
+        // Broken agent files and mcp.json don't stop the app; say what was left out.
+        ...this.runtime.tree.skipped.map((sk) => ({ text: `${path.basename(sk.file)} was skipped: ${sk.error}`, level: 'error' })),
+        ...this.runtime.tree.warnings.map((w) => ({ text: w, level: 'error' })),
+      ],
       limits: { maxUploadBytes: this.up2k.maxBytes, maxAttachments: MAX_ATTACHMENTS, maxMessageChars: MAX_MESSAGE_CHARS },
     };
   }

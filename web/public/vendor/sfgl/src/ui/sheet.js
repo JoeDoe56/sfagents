@@ -21,14 +21,15 @@
  *
  * Gestures: drag the handle, the header or an empty part of the sheet; pull
  * the body down from the top (or push it up from a lower detent); scroll
- * the wheel over the handle (up opens, down closes); tap the handle to step.
+ * the wheel over the handle (down opens, up closes, or the other way round
+ * with `configure({reverseSheetScroll: true})`); tap the handle to step.
  * A sheet with unsaved changes (`setDirty(true)`) does not close on a swipe,
  * the X or a tap outside: it asks first, in a popover that grows out of the
  * X button.
  * @module
  */
 
-import {el, icon, spring, reducedMotion, clamp, lerp, onConfigure} from './core.js';
+import {el, icon, spring, reducedMotion, clamp, lerp, onConfigure, settings} from './core.js';
 import {createLayer} from './layers.js';
 import {createGlassHost} from './glasshost.js';
 import {createBar} from './bar.js';
@@ -297,8 +298,8 @@ export function createSheet(o = {}) {
     // Medium and below is glass; the large sheet is opaque.
     opaque = isBar ? smooth(1.15, 1.6, t) : isWindow ? smooth(0.5, 1, t) : smooth(1.2, 1.7, t);
     s.backgroundColor = `rgba(${sheetRGB[0]},${sheetRGB[1]},${sheetRGB[2]},${opaque.toFixed(3)})`;
-    // The inner box keeps the width the content was made for while the sheet is still growing out of a button.
-    const innerW = Math.max(rect.width, k[1].width);
+    // The content follows the sheet's width, so nothing is cut off at the sides while it opens.
+    const innerW = rect.width;
     const visibleH = edge === 'bottom' ? Math.min(rect.height, H - rect.top - shift) : rect.height + Math.min(0, rect.top + shift);
     inner.style.width = `${innerW}px`;
     inner.style.left = `${(rect.width - innerW) / 2}px`;
@@ -485,6 +486,7 @@ export function createSheet(o = {}) {
     removeEventListener('pointermove', onPointerMove);
     removeEventListener('pointerup', pointerEnd);
     removeEventListener('pointercancel', pointerEnd);
+    removeEventListener('wheel', onWindowWheel, {capture: true});
     visualViewport?.removeEventListener('resize', relayout);
     offConfigure();
     o.onClose?.(confirmed);
@@ -734,35 +736,54 @@ export function createSheet(o = {}) {
   }
 
   // Scrolling over the handle moves the sheet like a finger would: scroll
-  // down (content moving up, a finger swiping up) opens it, scroll up closes it.
+  // down (content moving up, a finger swiping up) opens it, scroll up closes
+  // it. `reverseSheetScroll` swaps the two.
   let wheelSum = 0;
   let wheelAt = 0;
-  grab.addEventListener(
-    'wheel',
-    (e) => {
-      e.preventDefault();
-      const t0 = now();
-      if (t0 - wheelAt > 220) wheelSum = 0;
-      wheelAt = t0;
-      if (t0 < wheelLock) return;
-      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-      wheelSum += edge === 'bottom' ? dy : -dy;
-      if (Math.abs(wheelSum) < 24) return;
-      const up = wheelSum > 0;
-      wheelSum = 0;
-      wheelLock = t0 + 380;
-      if (up) stepUp();
-      else stepDown();
-    },
-    {passive: false},
-  );
   let wheelLock = 0;
-  // From a lower detent, scrolling the body up expands the sheet instead of scrolling it.
+  let handleWheel = false;
+  /** The wheel's delta toward opening the sheet, in px. */
+  const wheelOpen = (e) => {
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    const v = edge === 'bottom' ? dy : -dy;
+    return settings.reverseSheetScroll ? -v : v;
+  };
+  const onHandleWheel = (e) => {
+    e.preventDefault();
+    const t0 = now();
+    if (t0 - wheelAt > 220) wheelSum = 0;
+    wheelAt = t0;
+    handleWheel = true;
+    if (t0 < wheelLock) return;
+    wheelSum += wheelOpen(e);
+    if (Math.abs(wheelSum) < 24) return;
+    const up = wheelSum > 0;
+    wheelSum = 0;
+    wheelLock = t0 + 380;
+    if (up) stepUp();
+    else stepDown();
+  };
+  grab.addEventListener('wheel', onHandleWheel, {passive: false});
+  // A wheel gesture that starts on the handle stays with the sheet after the
+  // handle moves out from under the pointer: its tail (a trackpad's momentum)
+  // must not scroll what is behind.
+  const onWindowWheel = (e) => {
+    if (!handleWheel) return;
+    if (now() - wheelAt > 220) {
+      handleWheel = false;
+      return;
+    }
+    if (grab.contains(e.target)) return;
+    e.stopPropagation();
+    onHandleWheel(e);
+  };
+  addEventListener('wheel', onWindowWheel, {capture: true, passive: false});
+  // From a lower detent, scrolling the body toward opening expands the sheet instead of scrolling it.
   panel.addEventListener(
     'wheel',
     (e) => {
       if (e.target.closest('.sf-sheet-grab') || !body.contains(e.target) || t >= highest - 0.02 || closing) return;
-      if ((edge === 'bottom' ? e.deltaY : -e.deltaY) > 4) {
+      if (wheelOpen(e) > 4) {
         e.preventDefault();
         if (now() >= wheelLock) {
           wheelLock = now() + 380;
