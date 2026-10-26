@@ -399,9 +399,15 @@ pub fn run(args: &[String]) -> Result<i32> {
         if node.path.contains(['%', '"', '\r', '\n']) {
             return Err("unsupported Node path for sf-web".into());
         }
+        // The run folder lives under the host profile, whose folders (e.g.
+        // AppData) the sandbox account cannot lstat. Node's default realpath of
+        // the main script walks every ancestor; preserving the path skips that.
         fs::write(
             tool_dir.join("sf-web.cmd"),
-            format!("@\"{}\" \"%~dp0sf-web.cjs\" %*\r\n", node.path),
+            format!(
+                "@\"{}\" --preserve-symlinks-main \"%~dp0sf-web.cjs\" %*\r\n",
+                node.path
+            ),
         )
         .map_err(|e| e.to_string())?;
         fs::write(
