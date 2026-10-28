@@ -37,6 +37,10 @@ jobs:
         with:
           node-version: 22
 
+      - name: Rust's license texts for the sandbox build (Windows)
+        if: runner.os == 'Windows'
+        run: rustup component add rust-docs
+
       - name: Install and build
         shell: bash
         env:
