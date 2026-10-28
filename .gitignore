@@ -17,6 +17,8 @@ web/native/bin/
 core/native/bin/
 web/native/windows/bin/
 web/native/windows/obj/
+web/native/windows-input/bin/
+web/native/windows-input/obj/
 __pycache__/
 *.pyc
 

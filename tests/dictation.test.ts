@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { Dictation, deviceFromLog, runtimeChoices, transcriptFromAnswer, wavSeconds, type DictationStatus } from '@sfagents/web';
+import { Dictation, deviceFromList, deviceFromLog, runtimeChoices, transcriptFromAnswer, wavSeconds, type DictationStatus } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('dictation helpers', () => {
@@ -40,6 +40,9 @@ describe('dictation helpers', () => {
   test('the device a GPU build found is read from its log', () => {
     assert.equal(deviceFromLog('load_tensors: using device Vulkan0 (AMD Radeon RX 7900 XTX) - 24560 MiB free'), 'AMD Radeon RX 7900 XTX');
     assert.equal(deviceFromLog('ggml_cuda_init: found 1 CUDA devices:\n  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9'), 'NVIDIA GeForce RTX 4090');
+    assert.equal(deviceFromList('ggml_cuda_init: found 1 CUDA devices\nAvailable devices:\n  CUDA0: NVIDIA GeForce GTX 1660 SUPER (6143 MiB, 5000 MiB free)\n'), 'NVIDIA GeForce GTX 1660 SUPER');
+    assert.equal(deviceFromList('Available devices:\n  Vulkan0: AMD Radeon RX 7900 XTX (RADV NAVI31) (24560 MiB, 24000 MiB free)'), 'AMD Radeon RX 7900 XTX (RADV NAVI31)');
+    assert.equal(deviceFromList('Available devices:\n'), undefined);
     assert.equal(deviceFromLog('nothing here'), undefined);
   });
 
@@ -201,6 +204,49 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
     } finally {
       d.close();
       server.close();
+    }
+  });
+});
+
+describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the stand-in llama-server is a shell script' }, () => {
+  test('stays running without an idle stop, and starts again when llama-server exits', async () => {
+    const dir = makeTempDir();
+    const bin = path.join(dir, 'runtime', 'cpu');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'fake.mjs'), FAKE_SERVER);
+    fs.writeFileSync(path.join(bin, 'llama-server'), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/fake.mjs" "$@"\n`, { mode: 0o755 });
+    fs.mkdirSync(path.join(dir, 'models'));
+    fs.writeFileSync(path.join(dir, 'models', 'model.gguf'), 'm');
+    fs.writeFileSync(path.join(dir, 'models', 'mmproj.gguf'), 'p');
+    fs.writeFileSync(path.join(dir, 'runtime.json'), JSON.stringify({ runtimes: { cpu: { dir: 'runtime/cpu', tag: 'b1' } } }));
+    const logs: string[] = [];
+    const d = new Dictation({
+      dir,
+      keepLoaded: true,
+      hardware: () => ({ platform: 'linux', arch: process.arch, nvidia: false, vulkan: false }),
+      models: [
+        { name: 'model.gguf', size: 1, sha256: '' },
+        { name: 'mmproj.gguf', size: 1, sha256: '' },
+      ],
+      log: (l) => logs.push(l),
+    });
+    try {
+      assert.equal(d.status().state, 'ready');
+      const first = await d.start();
+      assert.equal(d.status().state, 'running');
+      assert.equal((d as unknown as { idle: unknown }).idle, null, 'no idle timer');
+      (d as unknown as { child: { kill(): void } }).child.kill();
+      let again = '';
+      for (let i = 0; i < 100 && !again; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (d.status().state === 'running') again = (d as unknown as { url: string }).url;
+      }
+      assert.ok(again, `started again (${logs.join(' | ')})`);
+      assert.notEqual(again, first, 'on a new port');
+      assert.ok(logs.some((l) => /starting it again/.test(l)));
+      assert.equal(await d.transcribe(wav(16000)), 'hello from 0 layers, max 40');
+    } finally {
+      d.close();
     }
   });
 });

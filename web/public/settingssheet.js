@@ -2,8 +2,8 @@
  * Settings: everything that isn't an agent or an MCP server. This device's
  * look (glass quality, Return sends), the providers (OpenRouter keys,
  * ChatGPT and Claude sign-ins, custom endpoints), and the app settings kept
- * on the computer (the web server's port and address, sensors, terminal
- * output). The check button saves; the close button, a swipe down or Escape
+ * on the computer (the web server's port and address, push-to-talk's hotkey,
+ * terminal output). The check button saves; the close button, a swipe down or Escape
  * leave everything as it was. Adding, renaming or removing a provider is its
  * own action and happens at once.
  */
@@ -292,9 +292,10 @@ export function openSettingsSheet(device) {
 
   // ---------------------------------------------------------------- server settings
 
+  let pushToTalk = null; // its status, for the hotkey's hint
   async function loadServer() {
     try {
-      server = await getJson('/api/settings');
+      [server, pushToTalk] = await Promise.all([getJson('/api/settings'), getJson('/api/push-to-talk').catch(() => null)]);
       renderServer();
     } catch (error) {
       serverBox.replaceChildren(section('On This Computer', [createRow({ title: error.message, wrap: true })]));
@@ -311,6 +312,8 @@ export function openSettingsSheet(device) {
       let node;
       if (s.type === 'boolean') {
         node = switchRow(s.label, hint, value === true, (v) => setDraft(s, v)).row;
+      } else if (s.type === 'hotkey') {
+        node = hotkeyField(s, value, [hint, pushToTalkNote()].filter(Boolean).join('\n'));
       } else {
         node = field({
           label: s.label,
@@ -339,6 +342,46 @@ export function openSettingsSheet(device) {
     if (!v.built) return short(v.checkout);
     if (v.checkout && v.checkout !== v.built) return `${short(v.built)} (checkout is on ${short(v.checkout)}; rebuild to run it)`;
     return short(v.built);
+  }
+
+  /** What push-to-talk is doing, when that is not simply "ready". */
+  function pushToTalkNote() {
+    const p = pushToTalk;
+    if (!p) return '';
+    if (p.state === 'unavailable') return `Not working: ${p.error ?? 'unavailable'}`;
+    if (p.error) return `Last time: ${p.error}`;
+    if (p.elevated === false && p.state !== 'off' && navigator.userAgent.includes('Windows')) return 'Apps running as administrator do not get the text (the administrator approval was not given at startup).';
+    return '';
+  }
+
+  /**
+   * The hotkey: pressing a key (with any of Ctrl, Alt, Shift and Meta) in
+   * the field sets it; Backspace or Delete sets Off. On a phone's keyboard,
+   * which sends no key names, it is typed (F13, Ctrl+Shift+Space, Off).
+   */
+  function hotkeyField(s, value, hint) {
+    const f = field({ label: s.label, hint, value: String(value), placeholder: 'F13', onInput: (v) => setDraft(s, v.trim()) });
+    const NAMES = { ControlRight: 'CtrlRight', AltRight: 'AltRight', ShiftRight: 'ShiftRight', MetaRight: 'MetaRight', OSRight: 'MetaRight', Enter: 'Enter', NumpadEnter: 'Enter' };
+    const MODIFIER_CODES = /^(Control|Alt|Shift|Meta|OS)(Left)?$/;
+    f.input.addEventListener('keydown', (e) => {
+      if (!e.code || e.key === 'Unidentified' || e.key === 'Process') return;
+      if (e.code === 'Escape' || (e.code === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if ((e.code === 'Backspace' || e.code === 'Delete') && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+        f.input.value = 'Off';
+        setDraft(s, 'Off');
+        return;
+      }
+      if (MODIFIER_CODES.test(e.code)) return; // wait for the key that goes with it
+      const key = NAMES[e.code] ?? e.code.replace(/^Key/, '').replace(/^Digit/, '');
+      const own = { CtrlRight: 'ctrlKey', AltRight: 'altKey', ShiftRight: 'shiftKey', MetaRight: 'metaKey' }[key];
+      const mods = [['Ctrl', 'ctrlKey'], ['Alt', 'altKey'], ['Shift', 'shiftKey'], ['Meta', 'metaKey']].filter(([, k]) => e[k] && k !== own).map(([m]) => m);
+      const combo = [...mods, key].join('+');
+      f.input.value = combo;
+      setDraft(s, combo);
+    });
+    return f.row;
   }
 
   function setDraft(s, v) {

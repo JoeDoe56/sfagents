@@ -1,0 +1,81 @@
+# Push-to-talk on the three platforms: builds SF Agents (on Windows that
+# includes SfAgents.Input.exe, web/native/windows-input), runs the
+# push-to-talk and dictation tests, and checks that each platform's keyboard
+# program and native modules start.
+name: Push to talk
+
+on:
+  push:
+    branches: [main, push-to-talk]
+    paths:
+      - web/src/push-to-talk.ts
+      - web/src/keyboard-worker.ts
+      - web/src/dictation.ts
+      - web/native/windows-input/**
+      - web/sounds/**
+      - scripts/build-sensors.mjs
+      - tests/push-to-talk.test.ts
+      - tests/dictation.test.ts
+      - .github/workflows/push-to-talk.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install and build
+        shell: bash
+        env:
+          SFAGENTS_REQUIRE_SENSORS: ${{ runner.os == 'Windows' && '1' || '0' }}
+        # Without the Windows sandbox build (prepare-sandbox), which this
+        # workflow does not test and which needs more of Rust than the runner has.
+        run: |
+          npm ci --ignore-scripts
+          node scripts/prepare-sensors.mjs
+          npx tsc -b web cli tests
+
+      - name: An X display and xdotool (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q xvfb xdotool
+
+      - name: Tests
+        shell: bash
+        run: |
+          # On Linux under a virtual X display, so the keyboard worker's test runs too.
+          if [ "$RUNNER_OS" = Linux ]; then x='xvfb-run -a'; else x=''; fi
+          $x node scripts/run-tests.mjs push-to-talk dictation audit
+
+      - name: The Windows keyboard program starts and answers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "web/native/bin/win-x64/SfAgents.Input.exe"
+          if (-not (Test-Path $exe)) { throw "SfAgents.Input.exe was not built" }
+          $out = "hotkey 124 0" | & $exe
+          Write-Output $out
+          if ($out -notcontains 'ready') { throw "SfAgents.Input.exe did not answer ready" }
+
+      - name: The native modules load
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then x='xvfb-run -a'; else x=''; fi
+          $x node -e "
+            const { PvRecorder } = require('@picovoice/pvrecorder-node');
+            const { PvSpeaker } = require('@picovoice/pvspeaker-node');
+            const { UiohookKey } = require('uiohook-napi');
+            console.log('recorder', PvRecorder.getAvailableDevices().length, 'devices; speaker', PvSpeaker.getAvailableDevices().length, 'devices; F13 =', UiohookKey.F13);
+          "

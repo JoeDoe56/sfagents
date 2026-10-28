@@ -6,6 +6,7 @@
  */
 
 import path from 'node:path';
+import { formatHotkey, parseHotkey } from './hotkey.js';
 import { readJsonFile, sfagentsHome, writeFileAtomic } from './home.js';
 
 export type SettingValue = string | number | boolean;
@@ -15,8 +16,8 @@ export interface SettingSpec {
   label: string;
   /** One line shown under the control. */
   hint: string;
-  group: 'Web server' | 'Remote Desktop' | 'Terminal output';
-  type: 'port' | 'host' | 'boolean';
+  group: 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'Terminal output';
+  type: 'port' | 'host' | 'boolean' | 'hotkey';
   default: SettingValue;
   /** Applies on the next start of `sfagents web` (or `start`), not at once. */
   restart: boolean;
@@ -34,6 +35,15 @@ export const SETTINGS: readonly SettingSpec[] = [
     type: 'host',
     default: '127.0.0.1',
     restart: true,
+  },
+  {
+    key: 'dictation.hotkey',
+    label: 'Hotkey',
+    hint: 'Hold it to dictate into any app on this computer; let go to type what you said. Off turns push-to-talk off.',
+    group: 'Push to Talk',
+    type: 'hotkey',
+    default: 'F13',
+    restart: false,
   },
   { key: 'cli.showReasoning', label: 'Show reasoning', hint: 'Print model reasoning in the terminal when the provider returns it.', group: 'Terminal output', type: 'boolean', default: false, restart: false },
   { key: 'cli.showContext', label: 'Show context size', hint: 'Print the estimated size of each turn\'s working context in the terminal.', group: 'Terminal output', type: 'boolean', default: false, restart: false },
@@ -66,6 +76,14 @@ export function parseSetting(key: string, value: unknown): SettingValue {
       const s = typeof value === 'string' ? value.trim() : '';
       if (!s || s.length > 255 || /[\s/@]/.test(s)) throw new SettingsError(`${spec.label} must be an IP address or host name.`);
       return s;
+    }
+    case 'hotkey': {
+      if (typeof value !== 'string') throw new SettingsError(`${spec.label} must be a key, such as F13 or Ctrl+Shift+Space, or Off.`);
+      try {
+        return formatHotkey(parseHotkey(value));
+      } catch (error) {
+        throw new SettingsError(`${spec.label}: ${error instanceof Error ? error.message : String(error)}. Use a key such as F13 or Ctrl+Shift+Space, or Off.`);
+      }
     }
   }
 }
