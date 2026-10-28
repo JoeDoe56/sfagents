@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { AppSettings, HOTKEY_KEYS, formatHotkey, parseHotkey, type Hotkey } from '@sfagents/core';
-import { PushToTalk, SOUNDS_DIR, KeyboardProcess, KEYBOARD_WORKER, namedHotkeyLine, windowsHotkeyLine, modifierMask, pcmToWav, readWav, windowsVirtualKey, type Chimes, type Keyboard, type KeyboardEvents, type Microphone } from '@sfagents/web';
+import { PushToTalk, SOUNDS_DIR, hasSpeech, isFiller, KeyboardProcess, KEYBOARD_WORKER, namedHotkeyLine, windowsHotkeyLine, modifierMask, pcmToWav, readWav, windowsVirtualKey, type Chimes, type Keyboard, type KeyboardEvents, type Microphone } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('push-to-talk hotkeys', () => {
@@ -56,6 +56,21 @@ describe('push-to-talk hotkeys', () => {
 });
 
 describe('push-to-talk audio', () => {
+  test('silence, and the start chime alone, are not speech', () => {
+    assert.equal(hasSpeech(speech(2), 16000), true);
+    assert.equal(hasSpeech(speech(2, false), 16000), false);
+    assert.equal(hasSpeech(new Int16Array(32000), 16000), false);
+    // A loud chime in the first half second, then quiet.
+    const chimeOnly = speech(2, false);
+    for (let i = 1600; i < 8000; i++) chimeOnly[i] = Math.round(Math.sin(i / 5) * 8000);
+    assert.equal(hasSpeech(chimeOnly, 16000), false);
+  });
+
+  test('a hesitation alone is not typed', () => {
+    for (const t of ['嗯。', 'Um.', 'uh...', '。', 'Hmm']) assert.equal(isFiller(t), true, t);
+    for (const t of ['Hello.', '你好', 'Um, hello']) assert.equal(isFiller(t), false, t);
+  });
+
   test('PCM goes into a WAV file and comes back out', () => {
     const pcm = Int16Array.from({ length: 1600 }, (_, i) => Math.round(Math.sin(i / 10) * 8000));
     const wav = pcmToWav(pcm, 16000);
@@ -76,8 +91,15 @@ describe('push-to-talk audio', () => {
   });
 });
 
+/** A recording: quiet room noise, then a loud tone from 0.8 s on (stands in for speech). */
+function speech(seconds: number, loud = true): Int16Array {
+  return Int16Array.from({ length: Math.round(16000 * seconds) }, (_, i) =>
+    Math.round((Math.random() - 0.5) * 60 + (loud && i > 16000 * 0.8 ? Math.sin(i / 7) * 6000 : 0)),
+  );
+}
+
 /** A keyboard, microphone and chimes that record what push-to-talk does with them. */
-function fakes(seconds = 1) {
+function fakes(seconds = 2) {
   const log: string[] = [];
   let events: KeyboardEvents | null = null;
   let hotkey: Hotkey | null = null;
@@ -98,7 +120,7 @@ function fakes(seconds = 1) {
     start: () => log.push('mic start'),
     stop: async () => {
       log.push('mic stop');
-      return new Int16Array(Math.round(16000 * seconds));
+      return speech(seconds);
     },
     close: () => log.push('mic closed'),
   });

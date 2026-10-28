@@ -32,7 +32,7 @@ export { PowerShell } from './powershell.js';
 export { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
 export { Dictation, MODEL_FILES, wavSeconds, detectHardware, runtimeChoices, transcriptFromAnswer, deviceFromLog, deviceFromList } from './dictation.js';
 export type { DictationStatus, Hardware, Backend } from './dictation.js';
-export { PushToTalk, KeyboardProcess, windowsHotkeyLine, namedHotkeyLine, KEYBOARD_WORKER, pcmToWav, readWav, windowsVirtualKey, modifierMask, WINDOWS_INPUT_EXE, SOUNDS_DIR } from './push-to-talk.js';
+export { PushToTalk, hasSpeech, isFiller, KeyboardProcess, windowsHotkeyLine, namedHotkeyLine, KEYBOARD_WORKER, pcmToWav, readWav, windowsVirtualKey, modifierMask, WINDOWS_INPUT_EXE, SOUNDS_DIR } from './push-to-talk.js';
 export type { PushToTalkStatus, Keyboard, KeyboardEvents, Microphone, Chimes } from './push-to-talk.js';
 export { ScreenMirror, DISPLAY_SCALES, SCREEN_RESOLUTIONS, streamConfig, transportChain, classifyAddress, vdisplayTaskXml, SCREEN_VERSION, SCREEN_ASSETS } from './screen.js';
 export type { ScreenStatus, ScreenInfo, DeviceScreenSettings } from './screen.js';

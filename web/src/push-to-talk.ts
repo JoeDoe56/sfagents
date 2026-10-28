@@ -186,14 +186,17 @@ export class PushToTalk {
         this.set({ state: this.recording ? 'recording' : 'idle', error: `Recording failed: ${getErrorMessage(error)}` });
         return;
       }
-      if (pcm.length < SAMPLE_RATE * MIN_SECONDS) {
+      // Given silence (and the start chime, which the microphone hears), the
+      // model makes something up: what has no speech in it is not sent.
+      if (pcm.length < SAMPLE_RATE * MIN_SECONDS || !hasSpeech(pcm, SAMPLE_RATE)) {
+        if (pcm.length >= SAMPLE_RATE * MIN_SECONDS) this.log('nothing was said.');
         this.set({ state: 'idle' });
         return;
       }
       this.set({ state: 'transcribing' });
       try {
         const text = (await this.options.transcribe(pcmToWav(pcm.subarray(0, SAMPLE_RATE * MAX_SECONDS), SAMPLE_RATE))).trim();
-        if (text && this.keyboard) await this.keyboard.type(text);
+        if (text && !isFiller(text) && this.keyboard) await this.keyboard.type(text);
         this.set({ state: this.recording ? 'recording' : 'idle' });
       } catch (error) {
         this.set({ state: this.recording ? 'recording' : 'idle', error: getErrorMessage(error) });
@@ -225,6 +228,35 @@ export class PushToTalk {
 }
 
 // -------------------------------------------------------------------- audio
+
+/** An answer that is only a hesitation or punctuation ("嗯。", "Um.") is not worth typing. */
+export function isFiller(text: string): boolean {
+  const bare = text.toLowerCase().replace(/[\p{P}\p{S}\s]/gu, '');
+  return !bare || /^(?:嗯|呃|啊|哦|um+|uh+|hm+|mm+|ah+|er+)+$/u.test(bare);
+}
+
+/** The start chime as the microphone may hear it (its lead-in and its length), with some echo. */
+const CHIME_SECONDS = 0.7;
+
+/**
+ * Whether a recording has speech in it: at least a quarter of a second, after
+ * the start chime, clearly louder (10 dB) than the recording's own quiet
+ * parts and than a floor that room noise stays under.
+ */
+export function hasSpeech(pcm: Int16Array, rate: number): boolean {
+  const frame = Math.round(rate * 0.03);
+  const levels: number[] = [];
+  for (let at = 0; at + frame <= pcm.length; at += frame) {
+    let sum = 0;
+    for (let i = at; i < at + frame; i++) sum += pcm[i]! * pcm[i]!;
+    levels.push(Math.sqrt(sum / frame));
+  }
+  const after = levels.slice(Math.ceil(CHIME_SECONDS / 0.03));
+  if (!after.length) return false;
+  const floor = [...levels].sort((a, b) => a - b)[Math.floor(levels.length * 0.1)]!;
+  const threshold = Math.max(floor * Math.sqrt(10), 150);
+  return after.filter((l) => l > threshold).length * 0.03 >= 0.25;
+}
 
 /** 16-bit mono PCM as a WAV file. */
 export function pcmToWav(pcm: Int16Array, rate: number): Buffer {
