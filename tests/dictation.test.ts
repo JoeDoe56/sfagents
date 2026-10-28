@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { Dictation, deviceFromLog, runtimeChoices, transcriptFromAnswer, wavSeconds, type DictationStatus } from '@sfagents/web';
+import { Dictation, deviceFromList, deviceFromLog, runtimeChoices, transcriptFromAnswer, wavSeconds, type DictationStatus } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('dictation helpers', () => {
@@ -40,6 +40,9 @@ describe('dictation helpers', () => {
   test('the device a GPU build found is read from its log', () => {
     assert.equal(deviceFromLog('load_tensors: using device Vulkan0 (AMD Radeon RX 7900 XTX) - 24560 MiB free'), 'AMD Radeon RX 7900 XTX');
     assert.equal(deviceFromLog('ggml_cuda_init: found 1 CUDA devices:\n  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9'), 'NVIDIA GeForce RTX 4090');
+    assert.equal(deviceFromList('ggml_cuda_init: found 1 CUDA devices\nAvailable devices:\n  CUDA0: NVIDIA GeForce GTX 1660 SUPER (6143 MiB, 5000 MiB free)\n'), 'NVIDIA GeForce GTX 1660 SUPER');
+    assert.equal(deviceFromList('Available devices:\n  Vulkan0: AMD Radeon RX 7900 XTX (RADV NAVI31) (24560 MiB, 24000 MiB free)'), 'AMD Radeon RX 7900 XTX (RADV NAVI31)');
+    assert.equal(deviceFromList('Available devices:\n'), undefined);
     assert.equal(deviceFromLog('nothing here'), undefined);
   });
 

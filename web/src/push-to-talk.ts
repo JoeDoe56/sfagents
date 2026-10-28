@@ -346,6 +346,8 @@ interface PvSpeakerClass {
   new (sampleRate: number, bitsPerSample: number, options?: { bufferSizeSecs?: number; deviceIndex?: number }): { start(): void; stop(): void; write(pcm: ArrayBuffer): number; release(): void };
 }
 
+const LEAD_IN_SECONDS = 0.15;
+
 /** How long the speaker stays open after a chime (opening it for each one can clip the chime's start). */
 const SPEAKER_IDLE_MS = 30_000;
 
@@ -372,19 +374,23 @@ export function defaultChimes(): Chimes {
   };
   return {
     play(which) {
-      const { samples } = sounds[which];
+      // A lead-in of silence: an output that is starting, or waking from its
+      // power saving (Bluetooth, USB), loses its first moments, and they should
+      // not be the chime's.
+      const samples = new Int16Array(Math.round(rate * LEAD_IN_SECONDS) + sounds[which].samples.length);
+      samples.set(sounds[which].samples, samples.length - sounds[which].samples.length);
       if (!speaker) {
         speaker = new PvSpeaker(rate, 16, { bufferSizeSecs: 2, deviceIndex: -1 });
         speaker.start();
       }
       try {
-        speaker.write(samples.slice().buffer);
+        speaker.write(samples.buffer);
       } catch {
         // The output device changed or went away: open the current one.
         shut();
         speaker = new PvSpeaker(rate, 16, { bufferSizeSecs: 2, deviceIndex: -1 });
         speaker.start();
-        speaker.write(samples.slice().buffer);
+        speaker.write(samples.buffer);
       }
       if (idle) clearTimeout(idle);
       idle = setTimeout(shut, SPEAKER_IDLE_MS);

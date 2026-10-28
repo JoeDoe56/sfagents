@@ -137,6 +137,30 @@ export function deviceFromLog(log: string): string | undefined {
   return (m[2] ?? m[1])!.trim();
 }
 
+/** The first GPU in `llama-server --list-devices` ("  CUDA0: NVIDIA GeForce GTX 1660 SUPER (6143 MiB, 5000 MiB free)"). */
+export function deviceFromList(out: string): string | undefined {
+  const m = /^\s*(?:CUDA|Vulkan|ROCm|Metal|MTL|SYCL)\d*: (.+?)(?: \(\d+ MiB.*)?$/m.exec(out);
+  return m?.[1]?.trim();
+}
+
+function listedDevice(exe: string, cwd: string, env: Record<string, string>): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const child = spawn(exe, ['--list-devices'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let out = '';
+    child.stdout?.on('data', (d: Buffer) => (out += d.toString()));
+    child.stderr?.on('data', (d: Buffer) => (out += d.toString()));
+    const timer = setTimeout(() => child.kill(), 15_000);
+    child.once('error', () => {
+      clearTimeout(timer);
+      resolve(undefined);
+    });
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve(deviceFromList(out));
+    });
+  });
+}
+
 /** The transcript in Qwen3-ASR's answer ("language English<asr_text>…"). */
 export function transcriptFromAnswer(answer: string): string {
   let text = answer;
@@ -483,7 +507,8 @@ export class Dictation {
       throw error;
     }
     // A GPU build that found no GPU runs on the CPU: fine, but say so.
-    const device = backend === 'cpu' ? 'CPU' : found ?? deviceFromLog(head) ?? 'CPU';
+    // Recent builds print the device only at higher verbosity: then ask the build itself.
+    const device = backend === 'cpu' ? 'CPU' : found ?? deviceFromLog(head) ?? (await listedDevice(exe, bin, env)) ?? 'CPU';
     // What it said while starting, for when that is not what was expected.
     try {
       fs.writeFileSync(path.join(this.dir, 'llama-server.log'), head.length < 256_000 ? head : `${head}\n…\n${log}`);
