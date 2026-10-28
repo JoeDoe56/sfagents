@@ -387,6 +387,8 @@
 /* ---- Settings: fields, providers ---- */
 
 .st-note { margin: 0 4px 14px; }
+.st-version { margin: 4px 4px 14px; text-align: center; font-size: 12px; opacity: 0.4; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: text; }
+.st-version:empty { display: none; }
 .st-add { width: 100%; border: 0; background: none; font: inherit; text-align: left; color: var(--blue); gap: 10px; }
 .st-add > i { color: var(--blue) !important; }
 .st-add > i:last-child { width: 19px; height: 19px; }

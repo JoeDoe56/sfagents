@@ -35,6 +35,7 @@ import {
   type ProviderKind,
   type ProviderRecord,
 } from '@sfagents/core';
+import { runningVersion } from './version.js';
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -116,6 +117,7 @@ export class ProvidersApi {
         .filter((s) => !s.platform || s.platform === process.platform)
         .map((s) => ({ ...s, running: this.options.running[s.key] ?? s.value })),
       file: this.options.settings.file,
+      version: runningVersion(),
     };
   }
 

@@ -64,6 +64,7 @@ import { PerformanceMonitor } from './performance.js';
 import { ProcessError, ProcessMonitor } from './processes.js';
 import type { LhmReader } from './lhm.js';
 import type { Privileges } from './privileges.js';
+import { runningVersion } from './version.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
 
@@ -353,6 +354,7 @@ export class WebServer {
       if (settings.accounts?.[agent] !== provider) this.agentSettings.set({ ...settings, accounts: { ...(settings.accounts ?? {}), [agent]: provider } });
       if (agent === this.session.node.id) this.broadcast('agent', this.agentInfo());
     });
+    runningVersion(); // read the checkout's commit now, before a pull can move it
     this.providersApi = new ProvidersApi({
       registry: this.registry,
       settings: options.settings ?? new AppSettings(),

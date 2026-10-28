@@ -90,6 +90,7 @@ export function openSettingsSheet(device) {
   const draft = {}; // key → value
   let providersBox = null;
   let serverBox = null;
+  let versionBox = null;
   let signInBox = null;
   let qualityRow = null;
   let deviceSection = null;
@@ -128,6 +129,7 @@ export function openSettingsSheet(device) {
       providersBox = el('div');
       serverBox = el('div');
       signInBox = el('div');
+      versionBox = el('p', 'st-version');
       body.append(
         el('p', 'sf-section-note st-note', 'Agents and MCP servers are set up in their own files (the gear in the agent sheet opens an agent’s file).'),
         providersBox,
@@ -135,6 +137,7 @@ export function openSettingsSheet(device) {
         deviceSection.el,
         signInBox,
         serverBox,
+        versionBox,
       );
     },
     onConfirm: async () => {
@@ -326,7 +329,16 @@ export function openSettingsSheet(device) {
       boxes.push(section(group, nodes, restart ? 'Takes effect the next time SF Agents starts.' : ''));
     }
     serverBox.replaceChildren(...boxes);
+    versionBox.textContent = versionText(server.version);
     ctx.refresh();
+  }
+
+  function versionText(v) {
+    const short = (c) => c.slice(0, 7);
+    if (!v || (!v.built && !v.checkout)) return '';
+    if (!v.built) return short(v.checkout);
+    if (v.checkout && v.checkout !== v.built) return `${short(v.built)} (checkout is on ${short(v.checkout)}; rebuild to run it)`;
+    return short(v.built);
   }
 
   function setDraft(s, v) {
