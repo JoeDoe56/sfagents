@@ -9,9 +9,12 @@
  *     the next one is tried, down to the CPU build.
  *   - the model and its audio encoder (about 2.5 GB), checked against their
  *     SHA-256.
- * llama-server then runs on demand on a loopback port (started when the mic
- * button is pressed, so it loads while you speak) and stops after ten idle
- * minutes to give the memory back.
+ * llama-server then runs on a loopback port. With keepLoaded (the web server's
+ * choice) it starts with SF Agents and stays loaded, so neither the mic
+ * button nor push-to-talk waits for the model, and it is started again if it
+ * stops; otherwise it starts on demand (when the mic button is pressed, so it
+ * loads while you speak) and stops after ten idle minutes to give the memory
+ * back.
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -156,7 +159,13 @@ export interface DictationOptions {
   /** Where the files come from (tests). */
   modelBaseUrl?: string;
   releasesUrl?: string;
+  /** Keep llama-server running (no idle stop), and start it again when it exits. */
+  keepLoaded?: boolean;
 }
+
+/** How long llama-server must have run for its exit not to count as one of the quick failures. */
+const STEADY_MS = 60_000;
+const RESTARTS = 3;
 
 export class Dictation {
   readonly dir: string;
@@ -170,6 +179,8 @@ export class Dictation {
   private idle: NodeJS.Timeout | null = null;
   private busy = 0;
   private closed = false;
+  private restart: NodeJS.Timeout | null = null;
+  private quickExits = 0;
 
   constructor(private readonly options: DictationOptions = {}) {
     this.dir = options.dir ?? path.join(sfagentsHome(), 'dictation');
@@ -469,11 +480,26 @@ export class Dictation {
     const device = backend === 'cpu' ? 'CPU' : deviceFromLog(log) ?? 'CPU';
     this.child = child;
     this.url = url;
-    child.once('exit', () => {
+    const started = Date.now();
+    child.once('exit', (code) => {
       if (this.child !== child) return;
       this.child = null;
       this.url = null;
-      if (!this.closed) this.refreshInstalled();
+      if (this.closed) return;
+      this.refreshInstalled();
+      if (!this.options.keepLoaded) return;
+      // Kept loaded: start it again, unless it keeps exiting soon after it starts.
+      this.quickExits = Date.now() - started < STEADY_MS ? this.quickExits + 1 : 0;
+      if (this.quickExits >= RESTARTS) {
+        this.options.log?.(`dictation: llama-server exited (${code ?? 'signal'}) ${RESTARTS} times soon after starting; it starts again when dictation is next used. ${lastLines(log)}`);
+        return;
+      }
+      this.options.log?.(`dictation: llama-server exited (${code ?? 'signal'}); starting it again.`);
+      this.restart = setTimeout(() => {
+        this.restart = null;
+        this.start().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`));
+      }, 3000);
+      this.restart.unref?.();
     });
     this.set({ state: 'running', downloadSize: 0, backend, device });
     this.touch();
@@ -481,6 +507,7 @@ export class Dictation {
   }
 
   private touch(): void {
+    if (this.options.keepLoaded) return;
     if (this.idle) clearTimeout(this.idle);
     this.idle = setTimeout(() => {
       if (this.busy === 0) this.stop();
@@ -492,6 +519,8 @@ export class Dictation {
   stop(): void {
     if (this.idle) clearTimeout(this.idle);
     this.idle = null;
+    if (this.restart) clearTimeout(this.restart);
+    this.restart = null;
     const c = this.child;
     this.child = null;
     this.url = null;

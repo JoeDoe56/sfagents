@@ -56,6 +56,8 @@ export { ClaudeSignIn, ClaudeSubscriptionProvider, CLAUDE_MODELS, CLAUDE_MODEL_A
 export { sfagentsHome, writeFileAtomic, readJsonFile } from './settings/home.js';
 export { AppSettings, SETTINGS, SettingsError, parseSetting, settingSpec } from './settings/settings.js';
 export type { SettingSpec, SettingValue } from './settings/settings.js';
+export { HOTKEY_KEYS, HOTKEY_MODIFIERS, HOTKEY_OFF, formatHotkey, parseHotkey } from './settings/hotkey.js';
+export type { Hotkey, HotkeyModifier } from './settings/hotkey.js';
 export type { ProviderFactory } from './providers/factory.js';
 export * from './mcp/config.js';
 export { McpManager } from './mcp/manager.js';

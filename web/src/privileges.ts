@@ -12,7 +12,9 @@
  *     driver); on Linux the udev rule that lets screen mirroring type and
  *     click;
  *   - the programs that run elevated while SF Agents runs: on Windows the
- *     read-only sensor worker, on Linux the sensor collectors (smartctl and
+ *     read-only sensor worker and push-to-talk's keyboard program (so that
+ *     its hotkey works, and its text arrives, in apps running as
+ *     administrator: push-to-talk.ts), on Linux the sensor collectors (smartctl and
  *     ipmitool read drive temperatures and the BMC only as root).
  *
  * On Windows that is one UAC prompt: an elevated PowerShell runs the installs
@@ -36,6 +38,7 @@ import { getErrorMessage, sfagentsHome } from '@sfagents/core';
 import { pawnioInstalled, pawnioStep } from './sensor-driver.js';
 import { LINUX_SENSORS_PYTHON } from './linux-sensors.js';
 import { WINDOWS_SENSORS_EXE } from './windows-sensors.js';
+import { WINDOWS_INPUT_EXE } from './push-to-talk.js';
 import { linuxInputNeedsSetup, linuxInputScript, screenSetupSteps, type ScreenMirror } from './screen.js';
 
 export interface ElevatedStep {
@@ -48,6 +51,8 @@ export interface ElevatedStep {
 export interface Privileges {
   /** Windows: the elevated sensor worker's pipe, and whether the approval started it. */
   windowsSensors?: { pipe: string; approved: Promise<boolean> };
+  /** Windows: push-to-talk's elevated keyboard program's pipe, and whether the approval started it. */
+  windowsInput?: { pipe: string; approved: Promise<boolean> };
   /** Linux: sudo's credentials are cached; the sensor collectors run as root. */
   linuxSudo?: boolean;
   /** Settles when the approval and the installs are done (or declined). */
@@ -77,6 +82,8 @@ export async function acquirePrivileges(options: PrivilegeOptions = {}): Promise
   if (platform === 'win32') {
     const worker = fs.existsSync(WINDOWS_SENSORS_EXE);
     const pipe = `sfagents-sensors-${crypto.randomBytes(16).toString('hex')}`;
+    const input = fs.existsSync(WINDOWS_INPUT_EXE);
+    const inputPipe = `sfagents-input-${crypto.randomBytes(16).toString('hex')}`;
     const done = (async () => {
       const installs: ElevatedStep[] = [];
       if (!pawnioInstalled()) {
@@ -93,8 +100,12 @@ export async function acquirePrivileges(options: PrivilegeOptions = {}): Promise
           log(`Screen mirroring could not be set up: ${getErrorMessage(error)}`);
         }
       }
-      if (!installs.length && !worker) return false;
-      await runElevatedWindows(installs, worker ? [{ file: WINDOWS_SENSORS_EXE, args: ['--pipe-worker', pipe] }] : []);
+      const workers: ElevatedStep[] = [
+        ...(worker ? [{ file: WINDOWS_SENSORS_EXE, args: ['--pipe-worker', pipe] }] : []),
+        ...(input ? [{ file: WINDOWS_INPUT_EXE, args: ['--pipe-worker', inputPipe] }] : []),
+      ];
+      if (!installs.length && !workers.length) return false;
+      await runElevatedWindows(installs, workers);
       return true;
     })();
     const approved = done.then(
@@ -104,7 +115,11 @@ export async function acquirePrivileges(options: PrivilegeOptions = {}): Promise
         return false;
       },
     );
-    return { ...(worker ? { windowsSensors: { pipe, approved } } : {}), done: approved.then(() => undefined) };
+    return {
+      ...(worker ? { windowsSensors: { pipe, approved } } : {}),
+      ...(input ? { windowsInput: { pipe: inputPipe, approved } } : {}),
+      done: approved.then(() => undefined),
+    };
   }
   if (platform === 'linux') {
     // Only when something would use it: no prompt on a machine that needs nothing.

@@ -20,6 +20,9 @@
     "native/windows/*.csproj",
     "native/windows/NuGet.Config",
     "native/windows/packages.lock.json",
+    "native/windows-input/*.cs",
+    "native/windows-input/*.csproj",
+    "sounds",
     "native/linux",
     "native/NOTICE.md",
     "native/licenses"
@@ -29,9 +32,13 @@
   },
   "dependencies": {
     "@sfagents/core": "0.1.0",
-    "@simplewebauthn/server": "^14.0.3"
+    "@simplewebauthn/server": "^14.0.3",
+    "clipboardy": "5.3.2"
   },
   "optionalDependencies": {
-    "node-pty": "1.1.0"
+    "@picovoice/pvrecorder-node": "1.2.9",
+    "@picovoice/pvspeaker-node": "1.0.3",
+    "node-pty": "1.1.0",
+    "uiohook-napi": "1.5.5"
   }
 }

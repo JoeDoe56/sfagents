@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Publish the Windows adapter with its own .NET runtime. No SDK/runtime or
 // separate LibreHardwareMonitor application is required on the end user's PC.
+// Push-to-talk's keyboard program (web/native/windows-input) is published
+// next to it and shares that runtime.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,14 +14,16 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const rid = `win-${process.arch}`;
 if (!['win-x64', 'win-arm64'].includes(rid)) throw new Error(`Windows sensors do not support ${rid}.`);
 const project = path.join(root, 'web/native/windows');
+const inputProject = path.join(root, 'web/native/windows-input');
 const output = path.join(root, 'web/native/bin', rid);
 const stamp = path.join(output, '.source-hash');
 const sourceHash = createHash('sha256');
 sourceHash.update(fs.readFileSync(fileURLToPath(import.meta.url)));
 for (const name of ['SfAgents.Sensors.csproj', 'Program.cs', 'NuGet.Config']) sourceHash.update(fs.readFileSync(path.join(project, name)));
+for (const name of ['SfAgents.Input.csproj', 'Program.cs']) sourceHash.update(fs.readFileSync(path.join(inputProject, name)));
 sourceHash.update(rid);
 const expected = sourceHash.digest('hex');
-if (fs.existsSync(path.join(output, 'SfAgents.Sensors.exe')) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8') === expected) process.exit(0);
+if (['SfAgents.Sensors.exe', 'SfAgents.Input.exe'].every((exe) => fs.existsSync(path.join(output, exe))) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8') === expected) process.exit(0);
 
 const sdkVersion = '10.0.402';
 const tools = path.join(root, '.tools');
@@ -49,6 +53,8 @@ if (installed.status !== 0 || Number(installed.stdout?.split('.')[0]) < 10) {
 const env = { ...process.env, DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1', DOTNET_CLI_HOME: path.join(tools, 'dotnet-home'), NUGET_PACKAGES: path.join(tools, 'nuget') };
 const result = spawnSync(dotnet, ['publish', path.join(project, 'SfAgents.Sensors.csproj'), '--configfile', path.join(project, 'NuGet.Config'), '-c', 'Release', '-r', rid, '--self-contained', 'true', '-o', output], { env, stdio: 'inherit', windowsHide: true });
 if (result.status !== 0) throw new Error(`dotnet publish exited with code ${result.status ?? 'unknown'}`);
+const input = spawnSync(dotnet, ['publish', path.join(inputProject, 'SfAgents.Input.csproj'), '--configfile', path.join(project, 'NuGet.Config'), '-c', 'Release', '-r', rid, '--self-contained', 'true', '-o', output], { env, stdio: 'inherit', windowsHide: true });
+if (input.status !== 0) throw new Error(`dotnet publish (push-to-talk input) exited with code ${input.status ?? 'unknown'}`);
 // Keep upstream license texts and package provenance beside the redistributed
 // assemblies, including the self-contained .NET runtime.
 const notices = path.join(output, 'licenses');

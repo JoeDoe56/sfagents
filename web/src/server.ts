@@ -53,6 +53,7 @@ import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
 import { AuthError, WebAuth } from './auth.js';
 import { Dictation } from './dictation.js';
+import { PushToTalk } from './push-to-talk.js';
 import { DISPLAY_SCALES, ScreenMirror } from './screen.js';
 import { getDisplayScale, setDisplayScale } from './remote-dpi.js';
 import { TerminalError, TerminalManager } from './terminal.js';
@@ -119,6 +120,8 @@ export interface WebServerOptions {
   auth?: WebAuth | false;
   /** Speech to text for the mic button (default: llama.cpp + Qwen3-ASR, downloaded on first use). */
   dictation?: Dictation;
+  /** Hold-to-dictate into any app (default: the system-wide hotkey; started by setupFeatures). */
+  pushToTalk?: PushToTalk;
   /** Screen mirroring (default: the helper built from MoonlightWeb, downloaded on first start). */
   screen?: ScreenMirror;
   publicDir?: string;
@@ -273,6 +276,9 @@ export class WebServer {
   private readonly apps: AppProxy;
   readonly auth: WebAuth | null;
   readonly dictation: Dictation;
+  readonly pushToTalk: PushToTalk;
+  private readonly appSettings: AppSettings;
+  private pushToTalkStarted = false;
   readonly screen: ScreenMirror;
   /** Which device streams the screen now (its display scaling is read back when it stops). */
   private screenStreamer: string | null = null;
@@ -319,7 +325,18 @@ export class WebServer {
         hideEnv: credentialEnvNames([...options.tree.byId.values()].map((n) => n.definition)),
         log: (line) => this.log(line),
         onChange: (status) => this.broadcast('dictation', status),
+        // Loaded with SF Agents and kept loaded, so dictating never waits for the model.
+        keepLoaded: true,
       });
+    this.pushToTalk =
+      options.pushToTalk ??
+      new PushToTalk({
+        transcribe: (wav) => this.dictation.transcribe(wav),
+        elevated: options.privileges?.windowsInput,
+        log: (line) => this.log(line),
+        onChange: (status) => this.broadcast('push-to-talk', status),
+      });
+    this.appSettings = options.settings ?? new AppSettings();
     this.screen =
       options.screen ??
       new ScreenMirror({
@@ -355,10 +372,11 @@ export class WebServer {
     });
     this.providersApi = new ProvidersApi({
       registry: this.registry,
-      settings: options.settings ?? new AppSettings(),
+      settings: this.appSettings,
       running: { 'web.port': this.port, 'web.host': this.host },
       broadcast: (event, data) => {
         this.broadcast(event, data);
+        if (event === 'settings' && this.pushToTalkStarted) this.pushToTalk.setHotkey(this.appSettings.get<string>('dictation.hotkey'));
         if (event === 'providers') this.broadcast('agent', this.agentInfo());
       },
       log: this.log,
@@ -428,11 +446,19 @@ export class WebServer {
    * Everything the features need that is not in the package, set up at the
    * first start without being asked for: the screen mirroring helper and
    * the dictation model (the drivers come with the administrator approval at
-   * startup, privileges.ts). Runs in the background; progress goes to the log
-   * and to the pages as events.
+   * startup, privileges.ts). Then the dictation model is loaded, to stay
+   * loaded, and push-to-talk's hotkey is turned on. Runs in the background;
+   * progress goes to the log and to the pages as events.
    */
   async setupFeatures(): Promise<void> {
-    const dictation = this.dictation.status().state === 'missing' ? this.dictation.install().catch((error) => this.log(`Dictation could not be set up: ${getErrorMessage(error)}`)) : Promise.resolve();
+    this.pushToTalkStarted = true;
+    this.pushToTalk.setHotkey(this.appSettings.get<string>('dictation.hotkey'));
+    const dictation = (this.dictation.status().state === 'missing' ? this.dictation.install() : Promise.resolve())
+      .then(() => this.dictation.start())
+      .then(
+        (url) => this.log(`Dictation is loaded (${this.dictation.status().device ?? this.dictation.status().backend ?? 'llama.cpp'}, ${url}).`),
+        (error) => this.log(`Dictation could not be set up: ${getErrorMessage(error)}`),
+      );
     await this.screen.ensure();
     await this.screen.resetVirtualDisplay();
     const r = this.screen.status();
@@ -451,6 +477,7 @@ export class WebServer {
     for (const c of this.clients) c.end();
     this.clients.clear();
     this.terminals.dispose();
+    this.pushToTalk.close();
     this.dictation.close();
     this.screen.close();
     for (const sock of this.upgraded) sock.destroy();
@@ -729,6 +756,9 @@ export class WebServer {
           } else throw new HttpError(400, 'Unknown action.');
           return sendJson(res, 200, this.dictation.status());
         }
+        case 'GET push-to-talk':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, this.pushToTalk.status());
         case 'GET screen':
           this.checkFetchSite(req);
           return this.getScreen(parts[1] ?? '', url, req, res);
