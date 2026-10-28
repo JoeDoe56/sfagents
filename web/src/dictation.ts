@@ -450,8 +450,14 @@ export class Dictation {
     this.set({ state: 'starting', downloadSize: 0, backend });
     const child = spawn(exe, args, { cwd: bin, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let log = '';
+    // The start of the output too: the line that names the GPU comes early,
+    // and loading the model and its audio encoder prints more than the tail keeps.
+    let head = '';
+    let found: string | undefined;
     const keep = (d: Buffer) => {
       log = (log + d.toString()).slice(-64_000);
+      if (head.length < 256_000) head += d.toString();
+      found ??= deviceFromLog(log) ?? deviceFromLog(head);
     };
     child.stdout?.on('data', keep);
     child.stderr?.on('data', keep);
@@ -477,10 +483,10 @@ export class Dictation {
       throw error;
     }
     // A GPU build that found no GPU runs on the CPU: fine, but say so.
-    const device = backend === 'cpu' ? 'CPU' : deviceFromLog(log) ?? 'CPU';
+    const device = backend === 'cpu' ? 'CPU' : found ?? deviceFromLog(head) ?? 'CPU';
     // What it said while starting, for when that is not what was expected.
     try {
-      fs.writeFileSync(path.join(this.dir, 'llama-server.log'), log);
+      fs.writeFileSync(path.join(this.dir, 'llama-server.log'), head.length < 256_000 ? head : `${head}\n…\n${log}`);
     } catch {
       // not worth failing over
     }
