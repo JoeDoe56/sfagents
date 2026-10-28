@@ -123,11 +123,8 @@ export class PushToTalk {
     }
     this.hotkey = hotkey;
     const name = hotkey ? [...hotkey.modifiers, hotkey.key].join('+') : 'Off';
-    if (!hotkey) {
-      this.keyboard?.setHotkey(null);
-      this.set({ state: 'off', hotkey: name });
-      return;
-    }
+    // The keyboard program starts even with the hotkey off: on Windows the
+    // elevated one, started by the approval at startup, waits for it only so long.
     if (!this.keyboard) {
       try {
         this.keyboard = (this.options.keyboard ?? ((events) => defaultKeyboard(events, this.options.elevated)))({
@@ -141,13 +138,13 @@ export class PushToTalk {
           log: (line) => this.log(line),
         });
       } catch (error) {
-        this.set({ state: 'unavailable', hotkey: name, error: getErrorMessage(error) });
+        this.set({ state: hotkey ? 'unavailable' : 'off', hotkey: name, error: getErrorMessage(error) });
         this.log(`${getErrorMessage(error)}`);
         return;
       }
     }
     this.keyboard.setHotkey(hotkey);
-    this.set({ state: this.recording ? 'recording' : 'idle', hotkey: name, elevated: this.keyboard.elevated });
+    this.set({ state: !hotkey ? 'off' : this.recording ? 'recording' : 'idle', hotkey: name, elevated: this.keyboard.elevated });
   }
 
   private pressed(): void {
@@ -457,6 +454,7 @@ export class KeyboardProcess implements Keyboard {
   private elevatedVia: PushToTalkOptions['elevated'];
   private closed = false;
   private failures = 0;
+  private readyOnce = false;
   elevated = false;
 
   constructor(
@@ -485,6 +483,18 @@ export class KeyboardProcess implements Keyboard {
     this.elevated = Boolean(via);
     const child = spawn(this.options.exe, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: keyboardEnvironment(process.env) });
     this.child = child;
+    // An elevated worker that never connects (the approval is still showing,
+    // or it gave up waiting): after a while, carry on at the user's level.
+    const waiting = via ? setTimeout(() => {
+      if (this.child === child && this.elevatedVia && !this.readyOnce) {
+        this.events.log('the elevated keyboard program did not connect; running it without administrator rights.');
+        child.kill();
+      }
+    }, 150_000) : null;
+    waiting?.unref?.();
+    child.once('exit', () => {
+      if (waiting) clearTimeout(waiting);
+    });
     const decoder = new StringDecoder('utf8');
     let buffered = '';
     child.stdout.on('data', (d: Buffer) => {
@@ -532,6 +542,7 @@ export class KeyboardProcess implements Keyboard {
   private onLine(line: string): void {
     if (line === 'ready') {
       this.failures = 0;
+      this.readyOnce = true;
       this.send(this.options.hotkeyLine(this.hotkey));
     } else if (line === 'down') this.events.down();
     else if (line === 'up') this.events.up();

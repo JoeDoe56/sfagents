@@ -1,10 +1,11 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { AppSettings, HOTKEY_KEYS, formatHotkey, parseHotkey, type Hotkey } from '@sfagents/core';
-import { PushToTalk, SOUNDS_DIR, KeyboardProcess, windowsHotkeyLine, modifierMask, pcmToWav, readWav, windowsVirtualKey, type Chimes, type Keyboard, type KeyboardEvents, type Microphone } from '@sfagents/web';
+import { PushToTalk, SOUNDS_DIR, KeyboardProcess, KEYBOARD_WORKER, namedHotkeyLine, windowsHotkeyLine, modifierMask, pcmToWav, readWav, windowsVirtualKey, type Chimes, type Keyboard, type KeyboardEvents, type Microphone } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('push-to-talk hotkeys', () => {
@@ -254,6 +255,37 @@ describe('the Windows keyboard program protocol', () => {
       assert.equal(lines[0], 'hotkey 124 0');
       assert.equal(Buffer.from(lines[1]!.slice(5), 'base64').toString('utf8'), 'Grüße, world');
       assert.deepEqual(seen, []);
+    } finally {
+      kb.close();
+    }
+  });
+});
+
+const xdotool = process.platform === 'linux' && Boolean(process.env['DISPLAY']) && spawnSync('which', ['xdotool']).status === 0;
+describe('the keyboard worker on X11', { skip: !xdotool && 'needs an X display and xdotool' }, () => {
+  test('sees the hotkey go down and up, and only with its modifiers', async () => {
+    let downs = 0;
+    let ups = 0;
+    const logs: string[] = [];
+    const kb = new KeyboardProcess(
+      { down: () => downs++, up: () => ups++, failed: (e) => logs.push(e.message), log: (l) => logs.push(l) },
+      { exe: process.execPath, args: [KEYBOARD_WORKER], hotkeyLine: namedHotkeyLine },
+    );
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 100 && !ok(); i++) await new Promise((r) => setTimeout(r, 30));
+    };
+    try {
+      kb.setHotkey(parseHotkey('Ctrl+F9'));
+      await new Promise((r) => setTimeout(r, 800));
+      spawnSync('xdotool', ['key', 'F9']);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(downs, 0, 'F9 without Ctrl is not the hotkey');
+      spawnSync('xdotool', ['keydown', 'ctrl+F9']);
+      await until(() => downs === 1);
+      spawnSync('xdotool', ['keyup', 'F9']);
+      spawnSync('xdotool', ['keyup', 'ctrl']);
+      await until(() => ups === 1);
+      assert.deepEqual([downs, ups], [1, 1], logs.join(' | '));
     } finally {
       kb.close();
     }

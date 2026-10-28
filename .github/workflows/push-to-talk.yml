@@ -43,9 +43,16 @@ jobs:
           SFAGENTS_REQUIRE_SENSORS: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: npm ci
 
+      - name: An X display and xdotool (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q xvfb xdotool
+
       - name: Tests
         shell: bash
-        run: node scripts/run-tests.mjs push-to-talk dictation audit
+        run: |
+          # On Linux under a virtual X display, so the keyboard worker's test runs too.
+          if [ "$RUNNER_OS" = Linux ]; then x='xvfb-run -a'; else x=''; fi
+          $x node scripts/run-tests.mjs push-to-talk dictation audit
 
       - name: The Windows keyboard program starts and answers
         if: runner.os == 'Windows'
@@ -60,7 +67,8 @@ jobs:
       - name: The native modules load
         shell: bash
         run: |
-          node -e "
+          if [ "$RUNNER_OS" = Linux ]; then x='xvfb-run -a'; else x=''; fi
+          $x node -e "
             const { PvRecorder } = require('@picovoice/pvrecorder-node');
             const { PvSpeaker } = require('@picovoice/pvspeaker-node');
             const { UiohookKey } = require('uiohook-napi');

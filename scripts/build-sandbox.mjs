@@ -39,7 +39,9 @@ export function buildWindowsSandbox({ required = false } = {}) {
   fs.mkdirSync(output, { recursive: true });
   fs.copyFileSync(path.join(crate, 'target', target, 'release/sfagents-sandbox.exe'), exe);
   fs.copyFileSync(path.join(root, 'LICENSE'), path.join(output, 'LICENSE'));
-  const metadata = spawnSync(cargo, ['metadata', '--locked', '--offline', '--format-version=1', '--manifest-path', path.join(crate, 'Cargo.toml')], { env, encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+  // Not --offline: the build fetched only this target's crates, and metadata
+  // lists every platform's (a fresh machine has the others nowhere yet).
+  const metadata = spawnSync(cargo, ['metadata', '--locked', '--format-version=1', '--manifest-path', path.join(crate, 'Cargo.toml')], { env, encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
   if (metadata.status !== 0) throw new Error(`Cannot collect sandbox dependency licenses: ${metadata.stderr}`);
   const licenseDir = path.join(output, 'licenses');
   fs.mkdirSync(licenseDir, { recursive: true });
