@@ -100,6 +100,7 @@ export function describeCall(name: string, argsJson: string): string {
     case 'message_agent':
       return `Messaged ${str(args['agent']) ?? 'an agent'}${str(args['message']) ? `: ${clip(String(args['message']), 60)}` : ''}`;
     case 'create_artifact':
+      if (str(args['id'])) return `Updated ${str(args['id'])}${str(args['title']) ? ` “${clip(String(args['title']), 50)}”` : ''}`;
       return `Created ${str(args['title']) ? `“${clip(String(args['title']), 60)}”` : 'an artifact'}`;
     case 'create_app_artifact':
       return `Opened ${str(args['title']) ? `“${clip(String(args['title']), 60)}”` : 'an app'}${typeof args['port'] === 'number' ? ` (port ${args['port']})` : ''}`;
@@ -141,10 +142,11 @@ function threadOf(name: string, argsJson: string, from: string): { thread?: stri
   }
 }
 
-/** The artifact a create_artifact or update_artifact call made or changed. */
+/** The artifact a create_artifact (or older update_artifact) call made or changed. */
 function artifactOf(name: string, argsJson: string, created: string | undefined): { artifact?: string } {
-  if (name === 'create_artifact' || name === 'create_app_artifact') return created ? { artifact: created } : {};
-  if (name !== 'update_artifact') return {};
+  if (name === 'create_app_artifact' || (name === 'create_artifact' && created)) return created ? { artifact: created } : {};
+  // update_artifact is from older conversations; create_artifact with "id" replaced it.
+  if (name !== 'update_artifact' && name !== 'create_artifact') return {};
   try {
     const id = (JSON.parse(argsJson) as { id?: unknown }).id;
     return typeof id === 'string' ? { artifact: id } : {};
@@ -175,6 +177,7 @@ export function displayItems(
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {
         if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent });
         for (const c of m.toolCalls ?? []) {
+          if (c.name === 'keep_section') continue; // only confirms the topic
           items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
         }
       }

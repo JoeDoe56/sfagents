@@ -127,9 +127,9 @@ describe('artifacts: model tools and grants', () => {
         case 2:
           return { text: `Done: ${lastToolContent(req)}` };
         case 3:
-          return { toolCalls: [{ name: 'read_artifact', args: { id } }] };
+          return { toolCalls: [{ name: 'create_artifact', args: { id, content: 'old pond\nfrog jumps in' } }] };
         case 4:
-          return { toolCalls: [{ name: 'update_artifact', args: { id, title: 'Haiku (two lines)' } }] };
+          return { toolCalls: [{ name: 'create_artifact', args: { id, title: 'Haiku (two lines)' } }] };
         case 5:
           return { toolCalls: [{ name: 'create_artifact', args: { title: 'Outside', path: '../elsewhere.md', content: 'x' } }] };
         default:
@@ -148,15 +148,16 @@ describe('artifacts: model tools and grants', () => {
     assert.deepEqual([haiku.file, haiku.type, haiku.rev], ['haiku.md', 'document', 1]);
     const numbers = conversation.artifacts().find((v) => v.title === 'Numbers')!;
     assert.deepEqual([numbers.file, numbers.type], ['docs/existing.csv', 'data']);
-    // Editing the file is editing the artifact.
-    fs.writeFileSync(path.join(dir, 'haiku.md'), 'old pond\nfrog jumps in');
+    // create_artifact with "id" writes the artifact's file and retitles it.
     await session.run('Add a second line');
     const requests = providers.get('main')!.requests;
-    assert.match(JSON.stringify(requests[4]!.messages), /frog jumps in/);
+    assert.equal(fs.readFileSync(path.join(dir, 'haiku.md'), 'utf8'), 'old pond\nfrog jumps in');
+    assert.match(JSON.stringify(requests[4]!.messages), /Wrote the file of artifact/);
     const v = conversation.artifacts().find((x) => x.id === haiku.id)!;
     assert.deepEqual([v.title, v.rev, v.file], ['Haiku (two lines)', 2, 'haiku.md']);
     const firstTools = (requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name);
-    for (const n of ['create_artifact', 'update_artifact', 'list_artifacts', 'read_artifact', 'create_app_artifact']) assert.ok(firstTools.includes(n), n);
+    for (const n of ['create_artifact', 'create_app_artifact']) assert.ok(firstTools.includes(n), n);
+    for (const n of ['update_artifact', 'list_artifacts', 'read_artifact']) assert.ok(!firstTools.includes(n), n);
     assert.match((requests[0]!.messages[0] as { content: string }).content, /<artifacts_guidance>/);
     assert.match((requests[3]!.messages[0] as { content: string }).content, new RegExp(`<artifacts>[\\s\\S]*\\[${haiku.id}\\] Haiku — haiku.md, document`));
     // Outside the agent's workspace: refused.
@@ -199,7 +200,7 @@ describe('artifacts: model tools and grants', () => {
     again.close();
   });
 
-  test('agents in a thread have no artifact tools by default; "read" cannot create', async () => {
+  test('agents in a thread have no artifact tools by default; "read" only sees the index', async () => {
     const dir = project({}, { 'agents/helper.json': baseAgent('helper') });
     const tree = loadAgentTree(dir);
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
@@ -216,8 +217,15 @@ describe('artifacts: model tools and grants', () => {
     const c2 = ConversationService.open(path.join(ro, '.sfagents', 'conversation.md'), { configDir: t2.configDir });
     const rt2 = new AgentRuntime({ tree: t2, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation: c2 });
     const names = [...(await rt2.buildTools(t2.root, ['main'], () => {}, undefined, c2)).keys()];
-    assert.ok(names.includes('list_artifacts') && names.includes('read_artifact'));
-    assert.ok(!names.includes('create_artifact') && !names.includes('update_artifact'));
+    assert.equal(names.some((k) => k.includes('artifact')), false);
+    // ...but it still sees the index, and reads the files with the shell.
+    fs.writeFileSync(path.join(ro, 'notes.md'), '# Notes');
+    c2.linkArtifact({ title: 'Notes', file: path.join(ro, 'notes.md') });
+    const seen = scriptedFactory(() => ({ text: 'ok' }));
+    const rt3 = new AgentRuntime({ tree: t2, providerFactory: seen.factory, conversation: c2 });
+    await rt3.createSession().run('what artifacts are there?');
+    assert.match((seen.providers.get('main')!.requests[0]!.messages[0] as { content: string }).content, /<artifacts>[\s\S]*Notes — notes.md/);
+    await rt3.dispose();
     await rt2.dispose();
     c2.close();
 

@@ -10,8 +10,8 @@
  * the authoritative list. Pinning is a user action (`artifact_pin`).
  *
  * Tools (granted by the agent definition's `artifacts.access`):
- *   read:   list_artifacts, read_artifact
- *   create: also create_artifact, update_artifact
+ *   read:   none; the agent sees the artifact index and reads files with the shell
+ *   create: create_artifact (also changes an existing one), create_app_artifact
  */
 
 import path from 'node:path';
@@ -30,9 +30,6 @@ export const ARTIFACT_ACCESS_LEVELS: readonly ArtifactAccess[] = ['none', 'read'
 
 export const ArtifactToolNames = {
   CREATE: 'create_artifact',
-  UPDATE: 'update_artifact',
-  LIST: 'list_artifacts',
-  READ: 'read_artifact',
   APP: 'create_app_artifact',
 } as const;
 
@@ -173,7 +170,7 @@ export function artifactIndex(service: ConversationService, limit = 20): string 
   return [
     '<artifacts>',
     ...shown.map((v) => `- ${describeArtifact(v)}`),
-    ...(more > 0 ? [`${more} older artifact(s) not listed; use list_artifacts.`] : []),
+    ...(more > 0 ? [`${more} older artifact(s) not listed.`] : []),
     '</artifacts>',
   ].join('\n');
 }
@@ -181,7 +178,8 @@ export function artifactIndex(service: ConversationService, limit = 20): string 
 export const ARTIFACT_GUIDANCE = `<artifacts_guidance>
 Artifacts are outputs the user keeps and opens outside the chat: documents (.md), code, web pages (.html), drawings (.svg), data (.json, .csv), PDFs, images, and running web apps. An artifact is a file in your workspace, not a copy: it appears in the chat with a preview where you created it, and always shows the file as it is now.
 - To make one, write the file (create_artifact can write it for you with "content"), then create_artifact with its path. Keep your reply short and refer to the artifact by title.
-- To change an artifact, change its file (edit, write_file, or create_artifact's content again). Do not create a second artifact for the same file; update_artifact only retitles one or points it at another file.
+- To change an artifact, change its file (with the shell, or create_artifact with its "id" and new "content"). Do not create a second artifact for the same file. create_artifact with "id" also retitles an artifact or points it at another file.
+- To read an artifact, read its file (the index below gives each file).
 - A web app you started (a dev server listening on a port of this computer) becomes an artifact with create_app_artifact: the user opens it inside SF Agents, also from their phone.
 - Short answers and small snippets belong in the chat reply, not in an artifact.
 </artifacts_guidance>`;
@@ -202,8 +200,9 @@ function existingFile(workspace: WorkspaceContext | undefined, p: string): strin
 }
 
 interface CreateParams {
-  title: string;
-  path: string;
+  id?: string;
+  title?: string;
+  path?: string;
   content?: string;
 }
 
@@ -217,12 +216,33 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
     super(params);
   }
   getDescription(): string {
-    return `"${this.params.title}" (${this.params.path})`;
+    const p = this.params;
+    if (p.id) return `${p.id}${p.title ? ` → "${p.title}"` : ''}${p.path ? ` (${p.path})` : ''}`;
+    return `"${p.title}" (${p.path})`;
+  }
+  /** The artifact named by "id", if any. */
+  private existing(): ArtifactView | undefined {
+    if (this.params.id === undefined) return undefined;
+    const v = this.service.state.artifactViews.get(this.params.id);
+    if (!v) throw new ArtifactError(`There is no artifact "${this.params.id}". The <artifacts> index lists the IDs.`);
+    return v;
+  }
+  /** The file "content" is written to: "path", or the file the artifact already shows. */
+  private target(view: ArtifactView | undefined): string | undefined {
+    if (this.params.path !== undefined) return this.params.path;
+    return view?.file ? this.service.resolveArtifactFile(view.file) : undefined;
   }
   // The workspace checks (roots, workspace.access, SF Agents' own files) are the boundary, as for shell.
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.params.content === undefined) return 'allow';
-    const check = this.workspace?.check(this.params.path, 'write');
+    let target: string | undefined;
+    try {
+      target = this.target(this.existing());
+    } catch {
+      return 'allow'; // execute reports the unknown ID
+    }
+    if (target === undefined) return 'allow'; // execute reports the missing path
+    const check = this.workspace?.check(target, 'write');
     if (!check?.ok) {
       this.denialReason = check?.reason ?? 'This agent has no workspace folders to write in.';
       return 'deny';
@@ -231,21 +251,35 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
   }
   async execute(_signal: AbortSignal, _update?: (o: string) => void, context?: ToolCallContext): Promise<ToolResult> {
     try {
-      let file: string;
-      if (this.params.content !== undefined) {
-        if (this.params.content.length > MAX_ARTIFACT_CHARS) throw new ArtifactError(`The content is too large (${this.params.content.length} characters; the limit is ${MAX_ARTIFACT_CHARS}).`);
-        const check = this.workspace?.check(this.params.path, 'write');
+      const p = this.params;
+      const view = this.existing();
+      if (view) {
+        if (view.type === 'app' && (p.path !== undefined || p.content !== undefined)) throw new ArtifactError(`Artifact ${view.id} is an app; only its "title" can change here.`);
+        if (p.title === undefined && p.path === undefined && p.content === undefined) throw new ArtifactError('Give a new "title", "path" or "content" for the artifact.');
+      } else if (!p.title || !p.path) throw new ArtifactError('A new artifact needs a "title" and a "path".');
+      const target = this.target(view);
+      let file: string | undefined;
+      if (p.content !== undefined) {
+        if (target === undefined) throw new ArtifactError(`Artifact ${view?.id} has no file to write; give a "path".`);
+        if (p.content.length > MAX_ARTIFACT_CHARS) throw new ArtifactError(`The content is too large (${p.content.length} characters; the limit is ${MAX_ARTIFACT_CHARS}).`);
+        const check = this.workspace?.check(target, 'write');
         if (!check?.ok || !check.resolvedPath) throw new ArtifactError(check?.reason ?? 'Path not permitted.');
         fs.mkdirSync(path.dirname(check.resolvedPath), { recursive: true });
-        fs.writeFileSync(check.resolvedPath, this.params.content.replace(/\r\n/g, '\n'), 'utf8');
+        fs.writeFileSync(check.resolvedPath, p.content.replace(/\r\n/g, '\n'), 'utf8');
         file = check.resolvedPath;
-      } else file = existingFile(this.workspace, this.params.path);
+      } else if (p.path !== undefined) file = existingFile(this.workspace, p.path);
+      if (view) {
+        const repoint = p.path !== undefined && file !== undefined;
+        if (!repoint && p.title === undefined) return ok(`Wrote the file of artifact ${view.id} "${view.title}"; the artifact shows it as it is now.`, `updated ${view.id}`);
+        const v = this.service.relinkArtifact(view.id, { title: p.title, file: repoint ? file : undefined, run: this.runId, callId: context?.callId });
+        return ok(`Updated artifact ${v.id} "${v.title}".`, `updated ${v.id}`);
+      }
       // One artifact per file: showing it again only retitles it.
       const recorded = [...this.service.state.artifactViews.values()].find((v) => v.file && this.service.resolveArtifactFile(v.file) === file);
       const v = recorded
-        ? this.service.relinkArtifact(recorded.id, { title: this.params.title, run: this.runId, callId: context?.callId })
-        : this.service.linkArtifact({ title: this.params.title, file, run: this.runId, callId: context?.callId });
-      return ok(`${recorded ? 'Artifact' : 'Created artifact'} ${v.id} "${v.title}" shows ${this.params.path}. It follows the file: edit the file to change it.`, `${recorded ? 'updated' : 'created'} ${v.id}`);
+        ? this.service.relinkArtifact(recorded.id, { title: p.title, run: this.runId, callId: context?.callId })
+        : this.service.linkArtifact({ title: p.title!, file: file!, run: this.runId, callId: context?.callId });
+      return ok(`${recorded ? 'Artifact' : 'Created artifact'} ${v.id} "${v.title}" shows ${p.path}. It follows the file: edit the file to change it.`, `${recorded ? 'updated' : 'created'} ${v.id}`);
     } catch (error) {
       return fail(error);
     }
@@ -261,16 +295,16 @@ class CreateArtifactTool extends BaseDeclarativeTool<CreateParams, ToolResult> {
     super(
       ArtifactToolNames.CREATE,
       ArtifactToolNames.CREATE,
-      'Shows a file from your workspace as an artifact the user keeps: a document, code, a web page (.html), an SVG drawing, data, a PDF or an image. Give "content" to write the file at the same time. The artifact follows the file from then on.',
+      'Shows a file from your workspace as an artifact the user keeps: a document, code, a web page (.html), an SVG drawing, data, a PDF or an image. Give "content" to write the file at the same time. The artifact follows the file from then on. With "id", changes an existing artifact instead: a new title, another file ("path"), or new "content" for its file.',
       Kind.Edit,
       {
         type: 'object',
         properties: {
-          title: { type: 'string', maxLength: 120, description: 'Short title shown on the artifact.' },
-          path: { type: 'string', description: 'The file, relative to your workspace (e.g. "docs/plan.md") or absolute.' },
+          id: { type: 'string', description: 'Optional: an existing artifact to change (e.g. "a12"). Omit to create one.' },
+          title: { type: 'string', maxLength: 120, description: 'Short title shown on the artifact. Required when creating.' },
+          path: { type: 'string', description: 'The file, relative to your workspace (e.g. "docs/plan.md") or absolute. Required when creating.' },
           content: { type: 'string', description: 'Optional: the complete content to write to the file first.' },
         },
-        required: ['title', 'path'],
       },
     );
   }
@@ -333,66 +367,8 @@ export function createArtifactTools(
   const tools: Array<ArtifactTool<never>> = [];
   const add = <P extends object>(t: ArtifactTool<P>) => tools.push(t as unknown as ArtifactTool<never>);
 
-  add(
-    new ArtifactTool<{ include_transcripts?: boolean }>(
-      service,
-      ArtifactToolNames.LIST,
-      'Lists the artifacts in this conversation, newest first, with IDs, titles, file names, revisions and whether the user pinned them.',
-      Kind.Read,
-      { type: 'object', properties: { include_transcripts: { type: 'boolean', description: 'Also list the threads between agents (default false).' } } },
-      () => 'artifacts',
-      (s, p) => {
-        const views = sortedArtifacts(s.state.artifactViews.values()).filter((v) => p.include_transcripts || v.type !== 'agent_transcript');
-        if (views.length === 0) return ok('There are no artifacts yet.', 'none');
-        return ok(views.map((v) => `- ${describeArtifact(v)}`).join('\n'), `${views.length} artifact(s)`);
-      },
-    ),
-  );
-
-  add(
-    new ArtifactTool<{ id: string }>(
-      service,
-      ArtifactToolNames.READ,
-      'Returns the text content of an artifact (its file as it is now).',
-      Kind.Read,
-      { type: 'object', properties: { id: { type: 'string', description: 'Artifact ID, e.g. "a12".' } }, required: ['id'] },
-      (p) => p.id,
-      (s, p) => {
-        const content = s.artifactContent(p.id);
-        if (!isTextMime(content.mime)) throw new ArtifactError(`Artifact ${p.id} is ${content.mime}, not text; it cannot be read as text.`);
-        const text = content.data.toString('utf8');
-        return ok(`Artifact ${p.id} "${content.view.title}" (${content.filename}):\n\n${text}`, content.filename);
-      },
-    ),
-  );
-
   if (access === 'create') {
     tools.push(new CreateArtifactTool(service, workspace, runId) as unknown as ArtifactTool<never>);
-    add(
-      new ArtifactTool<{ id: string; title?: string; path?: string }>(
-        service,
-        ArtifactToolNames.UPDATE,
-        'Retitles an artifact, or points it at another file. (To change its content, change its file.)',
-        Kind.Other,
-        {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Artifact ID, e.g. "a12".' },
-            title: { type: 'string', maxLength: 120 },
-            path: { type: 'string', description: 'Another file in your workspace for the artifact to show.' },
-          },
-          required: ['id'],
-        },
-        (p) => `${p.id}${p.title ? ` → "${p.title}"` : ''}`,
-        (s, p, ctx) => {
-          if (!p.title && !p.path) throw new ArtifactError('Give a new "title" or "path". To change the content, change the file itself.');
-          let file: string | undefined;
-          if (p.path) file = existingFile(workspace, p.path);
-          const v = s.relinkArtifact(p.id, { title: p.title, file, run: runId, callId: ctx?.callId });
-          return ok(`Updated artifact ${v.id} "${v.title}".`, v.id);
-        },
-      ),
-    );
     add(
       new ArtifactTool<{ title: string; port: number; path?: string }>(
         service,

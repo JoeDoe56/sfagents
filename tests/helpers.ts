@@ -10,7 +10,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectSandbox, setSandboxForTesting } from '@sfagents/core';
+import { detectSandbox, SECTION_REMINDER, setSandboxForTesting } from '@sfagents/core';
 import type {
   AgentDefinition,
   AssistantMessage,
@@ -46,18 +46,52 @@ export interface ScriptStep {
 
 export type Script = (request: ModelRequest, call: number, agentId: string) => ScriptStep;
 
+export interface ScriptOptions {
+  /**
+   * Leave the runtime's "settle this turn's section" reminders to the
+   * script. By default the provider answers them itself (keep_section, then
+   * an empty reply) without counting them as script calls, so scripts that
+   * are not about sections stay as they are.
+   */
+  scriptSectionReminders?: boolean;
+}
+
+function lastIsSectionReminder(request: ModelRequest): boolean {
+  const last = request.messages[request.messages.length - 1];
+  return last?.role === 'user' && last.content === SECTION_REMINDER;
+}
+
+function answersSectionReminder(request: ModelRequest): boolean {
+  const n = request.messages.length;
+  const prev = request.messages[n - 2];
+  return request.messages[n - 1]?.role === 'tool' && prev?.role === 'assistant' && prev.tool_calls?.[0]?.function.name === 'keep_section' && request.messages[n - 3]?.role === 'user' && (request.messages[n - 3] as { content: string }).content === SECTION_REMINDER;
+}
+
 /** A ModelProvider that answers from a script and records every request. */
 export class ScriptedProvider implements ModelProvider {
   readonly id = 'scripted';
   readonly requests: Array<{ agentId: string; request: ModelRequest; messages: unknown[] }> = [];
   private calls = new Map<string, number>();
+  private reminders = 0;
 
   constructor(
     private readonly script: Script,
     private readonly agentId: string,
+    private readonly options: ScriptOptions = {},
   ) {}
 
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamEvent> {
+    if (!this.options.scriptSectionReminders && (lastIsSectionReminder(request) || answersSectionReminder(request))) {
+      // Not a script call: answer the reminder with keep_section, then end the turn.
+      const keep = lastIsSectionReminder(request);
+      const id = `call_${this.agentId}_keep_${this.reminders++}`;
+      const message: AssistantMessage = keep
+        ? { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'keep_section', arguments: '{}' } }] }
+        : { role: 'assistant', content: null };
+      const toolCalls: ParsedToolCall[] = keep ? [{ id, name: 'keep_section', args: {}, rawArguments: '{}' }] : [];
+      yield { type: 'done', message, toolCalls, finishReason: keep ? 'tool_calls' : 'stop', usage: { totalTokens: 1 } };
+      return;
+    }
     const n = this.calls.get(this.agentId) ?? 0;
     this.calls.set(this.agentId, n + 1);
     this.requests.push({ agentId: this.agentId, request, messages: structuredClone(request.messages) as unknown[] });
@@ -101,12 +135,12 @@ export class ScriptedProvider implements ModelProvider {
 }
 
 /** Provider factory handing each agent its own ScriptedProvider sharing one script. */
-export function scriptedFactory(script: Script) {
+export function scriptedFactory(script: Script, options: ScriptOptions = {}) {
   const providers = new Map<string, ScriptedProvider>();
   const factory = (def: Readonly<AgentDefinition>) => {
     let p = providers.get(def.id);
     if (!p) {
-      p = new ScriptedProvider(script, def.id);
+      p = new ScriptedProvider(script, def.id, options);
       providers.set(def.id, p);
     }
     return p;
@@ -215,8 +249,13 @@ export async function startMockOpenAI(handler: MockChatHandler): Promise<{ baseU
         return;
       }
       const body = JSON.parse(raw);
-      requests.push(body);
-      const step = handler(body);
+      // Section reminders are answered here (keep_section, then an empty reply) and not counted as requests.
+      const msgs = body.messages as Array<{ role: string; content?: string; tool_calls?: Array<{ function: { name: string } }> }>;
+      const n = msgs.length;
+      const reminder = msgs[n - 1]?.role === 'user' && msgs[n - 1]?.content === SECTION_REMINDER;
+      const answered = msgs[n - 1]?.role === 'tool' && msgs[n - 2]?.tool_calls?.[0]?.function.name === 'keep_section' && msgs[n - 3]?.content === SECTION_REMINDER;
+      if (!reminder && !answered) requests.push(body);
+      const step: ScriptStep = reminder ? { toolCalls: [{ name: 'keep_section', id: `call_keep_${n}` }] } : answered ? {} : handler(body);
       if (step.error) {
         res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { message: step.error.message } }));
         return;

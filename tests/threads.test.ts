@@ -72,7 +72,8 @@ describe('agents messaging each other in threads', () => {
     const result = await runtime.createSession().run('Ask the worker.', { onEvent });
     assert.equal(result.status, AgentTerminateMode.GOAL);
     assert.equal(result.text, 'Worker (replied): number is echo:7');
-    const payload = JSON.parse(lastToolContent(providers.get('main')!.requests[1]!.request)!) as AgentReplyPayload;
+    const second = providers.get('main')!.requests[1]!;
+    const payload = JSON.parse(lastToolContent({ ...second.request, messages: second.messages } as ModelRequest)!) as AgentReplyPayload;
     assert.deepEqual({ agent: payload.agent, thread: payload.thread, turns: payload.turns }, { agent: 'worker', thread: 1, turns: 3 });
     // The worker answers in its thread: its own prompt and tools (wider than main's: it has the shell).
     const first = providers.get('worker')!.requests[0]!;

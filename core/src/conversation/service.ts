@@ -350,7 +350,7 @@ export class ConversationService {
 
   private requireArtifact(id: string): ArtifactView {
     const view = this.state.artifactViews.get(id);
-    if (!view) throw new ArtifactError(`There is no artifact "${id}". Use list_artifacts to see the IDs.`);
+    if (!view) throw new ArtifactError(`There is no artifact "${id}". The <artifacts> index lists the IDs.`);
     return view;
   }
 

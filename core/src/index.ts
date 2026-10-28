@@ -124,7 +124,7 @@ export {
   CURRENT_EXCHANGE,
 } from './conversation/sections.js';
 export type { SectionEntry, SectionPage, SearchHit, SearchResult, FetchResult } from './conversation/sections.js';
-export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE } from './conversation/tools.js';
+export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER, MAX_SECTION_REMINDERS } from './conversation/tools.js';
 export type { ConversationAccess } from './conversation/tools.js';
 export {
   buildWorkingContext,

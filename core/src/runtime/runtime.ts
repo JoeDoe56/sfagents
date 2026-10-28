@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
-import { createConversationTools, ORGANIZE_GUIDANCE } from '../conversation/tools.js';
+import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
 import { ARTIFACT_GUIDANCE, ArtifactToolNames, artifactIndex, createArtifactTools } from '../conversation/artifacts.js';
 import type { AttachmentRef } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
@@ -34,7 +34,7 @@ import { McpManager } from '../mcp/manager.js';
 import { DiscoveredMcpTool, mcpFunctionName } from '../mcp/mcp-tool.js';
 import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
 import { createDefaultProviderFactory, credentialEnvNames, type ProviderFactory } from '../providers/factory.js';
-import { executeToolCall } from './tool-executor.js';
+import { executeToolCall, type ToolExecutionOutcome } from './tool-executor.js';
 import {
   AgentTerminateMode,
   type AgentRunResult,
@@ -108,6 +108,12 @@ function addUsage(total: TokenUsage, add?: TokenUsage): void {
   for (const key of ['promptTokens', 'completionTokens', 'totalTokens', 'cost'] as const) {
     if (add[key] !== undefined) total[key] = (total[key] ?? 0) + add[key]!;
   }
+}
+
+/** A call other than a section choice, made after a section reminder: refused without running. */
+function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
+  const content = `Not run: only keep_section, add_section or edit_section can be called now. Your reply was already delivered.`;
+  return { message: { role: 'tool', tool_call_id: call.id, content }, activity: { name: call.name, ok: false }, status: 'error' };
 }
 
 export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string): string {
@@ -406,7 +412,7 @@ export class AgentRuntime implements AgentMessenger {
         return finish(AgentTerminateMode.ERROR, message);
       }
     }
-    if (params.conversation?.file && tools.has(ArtifactToolNames.LIST)) {
+    if (params.conversation?.file && artifactAccess(node.definition, (params.role ?? 'main') === 'main' ? 0 : 1) !== 'none') {
       const index = artifactIndex(params.conversation);
       if (index) systemExtra = systemExtra ? `${systemExtra}\n\n${index}` : index;
     }
@@ -418,6 +424,14 @@ export class AgentRuntime implements AgentMessenger {
     this.sessionApprovals.set(node.id, approvals);
 
     try {
+    // An organizing agent must settle every turn's section; a turn that ends without it is sent back, at most twice.
+    const mustChooseSection = tools.has(ConversationToolNames.KEEP);
+    let sectionChosen = false;
+    let sectionReminders = 0;
+    // The reminder and the round it starts are bookkeeping: they stay out of the record (section changes are their own records).
+    const recordTurn: typeof record = (fn) => {
+      if (sectionReminders === 0) record(fn);
+    };
     while (turns < maxTurns) {
       if (signal.aborted) return finish(...stopReason());
       turns++;
@@ -460,13 +474,22 @@ export class AgentRuntime implements AgentMessenger {
       if (done.usage) emit({ type: 'model_usage', agentPath, usage: done.usage });
       const assistantMessage = done.message;
       const finishReason = done.finishReason;
-      record((r) => r.assistant(assistantMessage, finishReason));
+      recordTurn((r) => r.assistant(assistantMessage, finishReason));
       messages.push(done.message);
-      if (done.message.content) lastText = done.message.content;
+      // After a section reminder the reply has already been given; keep it as the result.
+      if (done.message.content && sectionReminders === 0) lastText = done.message.content;
 
       if (done.toolCalls.length === 0) {
         if (done.finishReason === 'length') {
           return finish(AgentTerminateMode.GOAL, 'The model hit its output token limit; the answer may be incomplete.');
+        }
+        if (mustChooseSection && !sectionChosen) {
+          if (sectionReminders < MAX_SECTION_REMINDERS) {
+            sectionReminders++;
+            messages.push({ role: 'user', content: SECTION_REMINDER });
+            continue;
+          }
+          emit({ type: 'warning', agentPath, message: 'The model ended its turn without keep_section, add_section or edit_section; this turn stays in the current section.' });
         }
         return finish(AgentTerminateMode.GOAL);
       }
@@ -482,7 +505,7 @@ export class AgentRuntime implements AgentMessenger {
         toolTimeoutMs: (d.limits?.toolTimeoutSeconds ?? DEFAULT_TOOL_TIMEOUT_MS / 1000) * 1000,
         maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
         emit,
-        beforeExecute: (callId: string, tool: string) => record((r) => r.toolStart(callId, tool)),
+        beforeExecute: (callId: string, tool: string) => recordTurn((r) => r.toolStart(callId, tool)),
       };
       const pending: ParsedToolCall[] = [...done.toolCalls];
       while (pending.length > 0) {
@@ -490,7 +513,7 @@ export class AgentRuntime implements AgentMessenger {
           // Keep the conversation valid: every tool call gets a response.
           for (const c of pending) {
             const cancelled = { role: 'tool' as const, tool_call_id: c.id, content: 'Cancelled before execution.' };
-            record((r) => r.toolResult(cancelled, c.name, 'not_started'));
+            recordTurn((r) => r.toolResult(cancelled, c.name, 'not_started'));
             messages.push(cancelled);
           }
           return finish(...stopReason());
@@ -501,12 +524,20 @@ export class AgentRuntime implements AgentMessenger {
         if (batch[0]!.name === ToolNames.MESSAGE_AGENT) {
           while (pending[0]?.name === ToolNames.MESSAGE_AGENT) batch.push(pending.shift()!);
         }
-        const outcomes = await Promise.all(batch.map((call) => executeToolCall(call, execContext, signal)));
+        const outcomes = await Promise.all(
+          batch.map((call) =>
+            // After a reminder only the section choice is left to do.
+            sectionReminders > 0 && !SECTION_CHOICE_TOOLS.includes(call.name)
+              ? Promise.resolve(sectionOnlyOutcome(call))
+              : executeToolCall(call, execContext, signal),
+          ),
+        );
         batch.forEach((call, i) => {
           const outcome = outcomes[i]!;
-          record((r) => r.toolResult(outcome.message, call.name, outcome.status));
+          recordTurn((r) => r.toolResult(outcome.message, call.name, outcome.status));
           messages.push(outcome.message);
-          activity.push(outcome.activity);
+          if (sectionReminders === 0) activity.push(outcome.activity);
+          if (outcome.status === 'ok' && SECTION_CHOICE_TOOLS.includes(call.name)) sectionChosen = true;
         });
       }
     }
@@ -657,7 +688,7 @@ export class AgentSession {
       schema: tool.schema,
     }));
     const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
-    const index = conversation.file && tools.has(ArtifactToolNames.LIST) ? artifactIndex(conversation) : undefined;
+    const index = conversation.file && artifactAccess(definition, 0) !== 'none' ? artifactIndex(conversation) : undefined;
     const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()]), list, {
       retrievable,
       resolveAttachment: (ref) => conversation.readAttachment(ref),

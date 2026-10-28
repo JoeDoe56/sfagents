@@ -14,7 +14,11 @@ import {
   readConversation,
   searchConversation,
   SectionOperationError,
+  MAX_SECTION_REMINDERS,
+  SECTION_REMINDER,
   type ChatMessage,
+  type ModelRequest,
+  type RuntimeEvent,
   type FunctionDeclaration,
 } from '@sfagents/core';
 import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
@@ -29,6 +33,11 @@ function project(agent: Record<string, unknown> = {}, files: Record<string, unkn
 function open(dir: string) {
   const tree = loadAgentTree(path.join(dir, 'agent.json'));
   return { tree, conversation: ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir }) };
+}
+
+function collect() {
+  const events: RuntimeEvent[] = [];
+  return { events, onEvent: (e: RuntimeEvent) => void events.push(e) };
 }
 
 /** Writes simple user/assistant exchanges straight through the recorder. */
@@ -163,7 +172,7 @@ describe('sections: model tools and grants', () => {
     // Tools and guidance were offered to the persistent root.
     const first = providers.get('main')!.requests[0]!;
     const names = (first.request.tools as FunctionDeclaration[]).map((t) => t.name);
-    for (const n of ['list_sections', 'add_section', 'edit_section', 'search_sections', 'search_conversation', 'fetch_section']) assert.ok(names.includes(n), n);
+    for (const n of ['list_sections', 'add_section', 'edit_section', 'keep_section', 'search_sections', 'search_conversation', 'fetch_section']) assert.ok(names.includes(n), n);
     assert.match((first.messages[0] as { content: string }).content, /<conversation_memory>/);
     // After /clear, the old exchange is not in the request; it was retrieved on demand.
     const afterClear = providers.get('main')!.requests.find((r) => (r.messages as ChatMessage[]).some((m) => m.role === 'user' && String(m.content).startsWith('What retry limit')))!;
@@ -206,6 +215,59 @@ describe('sections: model tools and grants', () => {
     assert.equal(conversation.state.sections.size, 0);
     // Search covers the main conversation only, never threads between agents.
     assert.equal(searchConversation(conversation.state, 'find the codename').hits.filter((h) => h.role === 'user').length, 0);
+    await runtime.dispose();
+    conversation.close();
+  });
+
+  test('every turn must settle its section: a turn that ends without it is sent back, unrecorded', async () => {
+    const dir = project();
+    const { tree, conversation } = open(dir);
+    const isReminder = (req: ModelRequest) => {
+      const last = req.messages[req.messages.length - 1]!;
+      return last.role === 'user' && last.content === SECTION_REMINDER;
+    };
+    const script: Script = (req) => {
+      const last = req.messages[req.messages.length - 1]!;
+      if (isReminder(req)) return { toolCalls: [{ name: 'add_section', args: { title: 'Uploader', messages: ['current_exchange'] } }] };
+      if (last.role === 'tool') return lastToolContent(req)!.startsWith('This turn stays') || lastToolContent(req)!.startsWith('Created section') ? {} : { text: 'unexpected' };
+      if (String(last.content).startsWith('Plan the uploader')) return { text: 'Use backoff.' };
+      if (String(last.content).startsWith('And jitter')) return { toolCalls: [{ name: 'keep_section' }] };
+      return { text: 'Forgot again.' };
+    };
+    const { factory, providers } = scriptedFactory(script, { scriptSectionReminders: true });
+    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
+    const session = runtime.createSession();
+    const { events, onEvent } = collect();
+
+    // Forgot: sent back once, chose a section, and the reply stays the result.
+    const r1 = await session.run('Plan the uploader', { onEvent });
+    assert.equal(r1.text, 'Use backoff.');
+    assert.deepEqual(r1.toolCalls, [], 'the reminder round is bookkeeping');
+    const requests = providers.get('main')!.requests;
+    assert.equal(requests.length, 3);
+    assert.ok(isReminder({ ...requests[1]!.request, messages: requests[1]!.messages } as ModelRequest));
+    const state = conversation.state;
+    const plan = state.messages.find((m) => m.role === 'user' && m.content === 'Plan the uploader')!;
+    assert.equal(state.sectionOf(plan.id), 's1');
+    // Only the exchange itself is recorded: no reminder, no extra assistant messages.
+    assert.deepEqual(state.messages.map((m) => `${m.role}:${m.content ?? ''}`), ['user:Plan the uploader', 'assistant:Use backoff.']);
+
+    // Chose first: no reminder.
+    const before = requests.length;
+    await session.run('And jitter?', { onEvent });
+    assert.equal(requests.length - before, 2);
+    assert.equal(requests.slice(before).some((r) => isReminder({ ...r.request, messages: r.messages } as ModelRequest)), false);
+    assert.equal(state.sectionOf(state.messages.find((m) => m.content === 'And jitter?')!.id), 's1');
+
+    // Never chooses: two reminders, then a warning and the reply stands.
+    const script2: Script = (req) => (isReminder(req) || req.messages.at(-1)!.role === 'tool' ? {} : { text: 'Stubborn.' });
+    const second = scriptedFactory(script2, { scriptSectionReminders: true });
+    const rt2 = new AgentRuntime({ tree, providerFactory: second.factory, conversation });
+    const r3 = await rt2.createSession().run('Hello', { onEvent });
+    assert.equal(r3.text, 'Stubborn.');
+    assert.equal(second.providers.get('main')!.requests.length, 1 + MAX_SECTION_REMINDERS);
+    assert.ok(events.some((e) => e.type === 'warning' && /without keep_section/.test(e.message)));
+    await rt2.dispose();
     await runtime.dispose();
     conversation.close();
   });

@@ -120,7 +120,7 @@ File artifacts record `file`: the user's file the artifact shows, relative to th
 
 The runtime writes `agent_transcript` artifacts for child runs. Model-created artifacts (`create_artifact`) store their content under `artifacts/<id>/r1/<file name>` and use a display `type` derived from the file extension: `document` (Markdown), `html`, `image` (SVG and raster images), `code`, `data` or `text`. Readers accept any `type` string.
 
-`update_artifact` writes the next revision to `artifacts/<id>/r<rev>/<file name>` and appends an `artifact_update`; earlier revision files are kept. `artifact_pin` records are written by clients when the user pins or unpins. The current view of an artifact (latest path, title, revision, pin state) is the `artifact` record with every later `artifact_update` and `artifact_pin` for it applied in order. An update that skips a revision, or an update or pin naming an unknown artifact, is a semantic error.
+Retitling or repointing an artifact (`create_artifact` with its `id`; `update_artifact` in older conversations) writes the next revision to `artifacts/<id>/r<rev>/<file name>` and appends an `artifact_update`; earlier revision files are kept. `artifact_pin` records are written by clients when the user pins or unpins. The current view of an artifact (latest path, title, revision, pin state) is the `artifact` record with every later `artifact_update` and `artifact_pin` for it applied in order. An update that skips a revision, or an update or pin naming an unknown artifact, is a semantic error.
 
 `artifact_update` and `artifact_pin` were added after the first release of version 1. Older SF Agents builds report them as unknown record kinds.
 

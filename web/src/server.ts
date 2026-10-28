@@ -1592,6 +1592,8 @@ export class WebServer {
         return;
       }
       case 'tool_request': {
+        // keep_section only confirms the topic; it is not worth a line in the chat.
+        if (event.name === 'keep_section') return;
         const prefix = root ? '' : `${event.agentPath.slice(1).join(' › ')}: `;
         const seg: LiveSegment = { kind: 'activity', id: `${event.agentPath.join('/')}:${event.callId}`, text: prefix + describeCall(event.name, JSON.stringify(event.args)), status: 'running' };
         if (event.name === 'message_agent' && typeof event.args['agent'] === 'string') {
@@ -1599,13 +1601,14 @@ export class WebServer {
           seg.agent = event.args['agent'];
           seg.thread = threadKey(event.agentPath[event.agentPath.length - 1]!, event.args['agent'], typeof event.args['thread'] === 'number' ? event.args['thread'] : 1);
         }
-        if (event.name === 'update_artifact' && typeof event.args['id'] === 'string') seg.artifact = event.args['id'];
+        if ((event.name === 'update_artifact' || event.name === 'create_artifact') && typeof event.args['id'] === 'string') seg.artifact = event.args['id'];
         live.segments.push(seg);
         this.broadcast('activity', { run: live.id, segment: seg });
         if (seg.thread) setTimeout(() => this.publishThreads(), 50);
         return;
       }
       case 'tool_result': {
+        if (event.name === 'keep_section') return;
         const id = `${event.agentPath.join('/')}:${event.callId}`;
         const seg = live.segments.find((s) => s.id === id);
         const status = event.ok ? 'ok' : event.errorType === 'execution_denied' ? 'denied' : 'error';
@@ -1613,7 +1616,8 @@ export class WebServer {
         // A new or changed artifact shows in the chat where it was made.
         let artifact: string | undefined;
         if (seg && event.ok && (event.name === 'create_artifact' || event.name === 'update_artifact' || event.name === 'create_app_artifact')) {
-          if (event.name === 'update_artifact') artifact = seg.artifact;
+          // An update names its artifact ("id"); a new one is found by the record this call wrote.
+          if (seg.artifact) artifact = seg.artifact;
           else {
             // The record this call wrote (an artifact, or an update when the file or app was shown before); call ids can repeat across runs.
             const records = this.conversation.state.records;
