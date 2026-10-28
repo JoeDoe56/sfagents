@@ -37,15 +37,16 @@ jobs:
         with:
           node-version: 22
 
-      - name: Rust's license texts for the sandbox build (Windows)
-        if: runner.os == 'Windows'
-        run: rustup component add rust-docs
-
       - name: Install and build
         shell: bash
         env:
           SFAGENTS_REQUIRE_SENSORS: ${{ runner.os == 'Windows' && '1' || '0' }}
-        run: npm ci
+        # Without the Windows sandbox build (prepare-sandbox), which this
+        # workflow does not test and which needs more of Rust than the runner has.
+        run: |
+          npm ci --ignore-scripts
+          node scripts/prepare-sensors.mjs
+          npx tsc -b web cli tests
 
       - name: An X display and xdotool (Linux)
         if: runner.os == 'Linux'
