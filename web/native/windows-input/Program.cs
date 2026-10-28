@@ -142,7 +142,10 @@ internal static class Program
 
         private const int WH_KEYBOARD_LL = 13;
         private const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
-        private const uint LLKHF_INJECTED = 0x10;
+        // Marks the keys this program types, so that its hook can tell them from
+        // the user's. (Not LLKHF_INJECTED: mouse and macro software sends its
+        // keys, such as a mouse button bound to F13, as injected input too.)
+        private static readonly IntPtr OwnInput = new(0x53465054);
         private const int VK_LSHIFT = 0xA0, VK_RSHIFT = 0xA1, VK_LCONTROL = 0xA2, VK_RCONTROL = 0xA3, VK_LMENU = 0xA4, VK_RMENU = 0xA5, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
         private const int VK_RETURN = 0x0D, VK_TAB = 0x09;
 
@@ -211,7 +214,7 @@ internal static class Program
                 var isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
                 var isUp = msg == WM_KEYUP || msg == WM_SYSKEYUP;
                 // Our own typing is not the user's.
-                if ((info.flags & LLKHF_INJECTED) == 0)
+                if (info.dwExtraInfo != OwnInput)
                 {
                     var wasDown = Down[vk];
                     if (isDown) Down[vk] = true;
@@ -270,12 +273,12 @@ internal static class Program
 
         private static void AddVk(List<INPUT> inputs, int vk)
         {
-            inputs.Add(new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = (ushort)vk } } });
-            inputs.Add(new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = (ushort)vk, dwFlags = 0x0002 } } });
+            inputs.Add(new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = (ushort)vk, dwExtraInfo = OwnInput } } });
+            inputs.Add(new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = (ushort)vk, dwFlags = 0x0002, dwExtraInfo = OwnInput } } });
         }
 
         private static INPUT Unicode(char ch, bool up) =>
-            new() { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wScan = ch, dwFlags = 0x0004 | (up ? 0x0002u : 0) } } };
+            new() { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wScan = ch, dwFlags = 0x0004 | (up ? 0x0002u : 0), dwExtraInfo = OwnInput } } };
 
         [StructLayout(LayoutKind.Sequential)]
         private struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }

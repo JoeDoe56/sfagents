@@ -144,6 +144,8 @@ export class PushToTalk {
       }
     }
     this.keyboard.setHotkey(hotkey);
+    if (name !== this.status_.hotkey || this.status_.state === 'off' || this.status_.state === 'unavailable')
+      this.log(hotkey ? `hold ${name} to dictate${this.keyboard.elevated ? ' (into apps running as administrator too)' : ''}.` : 'off.');
     this.set({ state: !hotkey ? 'off' : this.recording ? 'recording' : 'idle', hotkey: name, elevated: this.keyboard.elevated });
   }
 

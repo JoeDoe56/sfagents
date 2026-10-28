@@ -478,6 +478,12 @@ export class Dictation {
     }
     // A GPU build that found no GPU runs on the CPU: fine, but say so.
     const device = backend === 'cpu' ? 'CPU' : deviceFromLog(log) ?? 'CPU';
+    // What it said while starting, for when that is not what was expected.
+    try {
+      fs.writeFileSync(path.join(this.dir, 'llama-server.log'), log);
+    } catch {
+      // not worth failing over
+    }
     this.child = child;
     this.url = url;
     const started = Date.now();
