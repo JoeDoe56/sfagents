@@ -243,7 +243,7 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
     }
   });
 
-  test('a dropped download is tried again from where it stopped, and the two models download one after the other', async () => {
+  test('a dropped download is tried again from where it stopped, and dictation does not wait behind the voice model', async () => {
     const work = makeTempDir();
     const model = crypto.randomBytes(200_000);
     const voice = crypto.randomBytes(50_000);
@@ -286,8 +286,9 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
       await both;
       assert.ok(fs.readFileSync(path.join(work, 'models', 'asr.gguf')).equals(model));
       assert.equal(d.status().voice.state, 'ready');
-      assert.deepEqual(seen, ['/asr.gguf 0', '/asr.gguf 100000', '/tts.gguf 0']);
-      assert.equal(most, 1, 'one at a time');
+      assert.deepEqual(seen.filter((x) => x.startsWith('/asr')), ['/asr.gguf 0', '/asr.gguf 100000']);
+      assert.deepEqual(seen.filter((x) => x.startsWith('/tts')), ['/tts.gguf 0']);
+      assert.equal(most, 2, 'the two lanes at once');
     } finally {
       d.close();
       server.close();
@@ -303,13 +304,14 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
     try {
       fs.writeFileSync(path.join(work, 'audiocpp.json'), JSON.stringify({ runtimes: { cpu: { dir: 'x', tag: 'v1' } } }));
       const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
-      fs.writeFileSync(path.join(work, 'download.lock'), String(other.pid));
+      fs.mkdirSync(path.join(work, 'models'), { recursive: true });
+      fs.writeFileSync(path.join(work, 'models', 'asr.gguf.lock'), String(other.pid));
       await assert.rejects(() => d.install(), /Another SF Agents/);
       other.kill();
       await new Promise((r) => other.once('exit', r));
       await d.install();
       assert.equal(d.status().state, 'ready');
-      assert.equal(fs.existsSync(path.join(work, 'download.lock')), false);
+      assert.equal(fs.existsSync(path.join(work, 'models', 'asr.gguf.lock')), false);
     } finally {
       d.close();
       server.close();
@@ -373,6 +375,25 @@ describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the s
       assert.equal(await d.transcribe(wav(16000)), 'hello from cpu, max 40, context SF Agents, Caleb');
     } finally {
       d.close();
+    }
+  });
+});
+
+describe('dictation that was not set up', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
+  test('push-to-talk downloads what is missing and starts, instead of failing', async () => {
+    const dir = makeTempDir();
+    standIn(dir);
+    fs.rmSync(path.join(dir, 'models', 'asr.gguf'));
+    const server = http.createServer((_req, res) => res.end('a'));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, modelBaseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}` });
+    try {
+      assert.equal(d.status().state, 'missing');
+      assert.equal(await d.transcribe(wav(16000)), 'hello from cpu, max 40');
+      assert.equal(d.status().state, 'running');
+    } finally {
+      d.close();
+      server.close();
     }
   });
 });

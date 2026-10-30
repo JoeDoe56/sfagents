@@ -313,8 +313,8 @@ export class Dictation {
   private quickExits = 0;
   /** Whether the running server's config has VibeVoice. */
   private serverHasVoice = false;
-  /** Downloads, one at a time. */
-  private downloads: Promise<unknown> = Promise.resolve();
+  /** Downloads, one at a time in each lane. */
+  private downloads: Record<'speech' | 'voice', Promise<unknown>> = { speech: Promise.resolve(), voice: Promise.resolve() };
   /** Speaking, one reply at a time. */
   private speaking: Promise<unknown> = Promise.resolve();
   /** While the models are swapped: settles when Qwen3-ASR is back. */
@@ -424,6 +424,8 @@ export class Dictation {
         if (Object.keys(st.runtimes).length === 0) await this.installRuntime(this.choices(st)[0]!);
         await this.downloadModel(this.asrModel, 'Speech model', (progress) => this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress }));
         this.refreshInstalled();
+        // Kept loaded: loaded as soon as it is there, whoever asked for the download.
+        if (this.options.keepLoaded && !this.child && !this.starting) setImmediate(() => void this.start().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`)));
       } catch (error) {
         this.set({ state: 'error', downloadSize: this.status_.downloadSize, error: getErrorMessage(error) });
         throw error;
@@ -463,7 +465,7 @@ export class Dictation {
 
   private downloadModel(f: ModelFile, label: string, report: (p: Progress) => void): Promise<void> {
     fs.mkdirSync(path.join(this.dir, 'models'), { recursive: true });
-    return this.download(`${this.options.modelBaseUrl ?? MODEL_REPO}/${f.name}`, this.modelPath(f), f.size, f.sha256, label, report);
+    return this.download(`${this.options.modelBaseUrl ?? MODEL_REPO}/${f.name}`, this.modelPath(f), f.size, f.sha256, label, report, f === this.ttsModel ? 'voice' : 'speech');
   }
 
   private choices(st = this.readState()): RuntimeChoice[] {
@@ -506,13 +508,14 @@ export class Dictation {
   }
 
   /**
-   * One download at a time (Qwen3-ASR and VibeVoice in parallel saturate the
-   * line, and the second connection timed out). A dropped or refused
-   * connection is retried, resuming where it stopped.
+   * Downloads in two lanes, each one file at a time: dictation's (the runtime
+   * and Qwen3-ASR) and the voice's (VibeVoice), so dictation never waits
+   * behind the 3 GB voice model. A dropped or refused connection is retried,
+   * resuming where it stopped.
    */
-  private download(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string, report: (p: Progress) => void): Promise<void> {
-    const run = this.downloads.then(async () => {
-      const release = this.lockDownloads();
+  private download(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string, report: (p: Progress) => void, lane: 'speech' | 'voice' = 'speech'): Promise<void> {
+    const run = this.downloads[lane].then(async () => {
+      const release = this.lockDownload(file);
       try {
         for (let attempt = 1; ; attempt++) {
           try {
@@ -528,17 +531,17 @@ export class Dictation {
         release();
       }
     });
-    this.downloads = run.catch(() => {});
+    this.downloads[lane] = run.catch(() => {});
     return run;
   }
 
   /**
-   * Only one SF Agents downloads into this folder at a time: two (an old one
-   * still running next to a new one) appending to the same .part file corrupt it.
+   * Only one SF Agents downloads a file at a time: two (an old one still
+   * running next to a new one) appending to the same .part file corrupt it.
    */
-  private lockDownloads(): () => void {
-    fs.mkdirSync(this.dir, { recursive: true });
-    const lock = path.join(this.dir, 'download.lock');
+  private lockDownload(file: string): () => void {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const lock = `${file}.lock`;
     for (let i = 0; i < 2; i++) {
       try {
         fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
@@ -617,7 +620,11 @@ export class Dictation {
     if (this.starting) return this.starting;
     this.starting = (async () => {
       try {
-        if (!this.have(this.asrModel) || Object.keys(this.readState().runtimes).length === 0) throw new Error('Dictation is not set up yet.');
+        // Not downloaded yet (or a download failed): get it now instead of failing.
+        if (!this.have(this.asrModel) || Object.keys(this.readState().runtimes).length === 0) {
+          this.refreshInstalled();
+          await this.install();
+        }
         let lastError: unknown;
         for (;;) {
           const st = this.readState();
