@@ -75,6 +75,7 @@ import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, messageUserText, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
 import { isEmoji, ReactionStore } from './reactions.js';
 import { LogBook } from './logs.js';
+import { changedRepos, repoDiff, type RepoChanges } from './diffs.js';
 import { SharedViewStore } from './shared-view.js';
 
 export const DEFAULT_PORT = 8093;
@@ -283,6 +284,11 @@ export class WebServer {
   private readonly server: http.Server;
   private readonly up2k: Up2kStore;
   private readonly clients = new Set<ServerResponse>();
+  /** Repositories with uncommitted changes (the pills above the composer). */
+  private diffs: RepoChanges[] = [];
+  private diffsTimer: NodeJS.Timeout | undefined;
+  private diffsPoll: NodeJS.Timeout | undefined;
+  private diffsBusy: Promise<void> | undefined;
   /** In-process clients (the terminal interface): every event the pages get, as it is sent. */
   private readonly listeners = new Set<(event: string, data: unknown) => void>();
   /** When the agent picked up the last message (the "Read" receipt), the same on every page. */
@@ -506,6 +512,12 @@ export class WebServer {
       if (this.clients.size) this.publishArtifacts();
     }, 2000);
     this.fileWatch.unref?.();
+    // Uncommitted changes: checked now, after the agent's steps, and now and then while a page is open.
+    this.refreshDiffs(0);
+    this.diffsPoll = setInterval(() => {
+      if (this.clients.size) this.refreshDiffs(0);
+    }, 10_000);
+    this.diffsPoll.unref?.();
     if (options_watch(this.options)) this.projectWatcher = watchProject({ configDir: this.runtime.tree.configDir, mcpFile: this.mcpFile, onChange: () => this.reloadAgents() });
     const shown = this.host === '0.0.0.0' || this.host === '::' ? 'localhost' : this.host.includes(':') ? `[${this.host}]` : this.host;
     return `http://${shown}:${this.port}/`;
@@ -544,6 +556,8 @@ export class WebServer {
     this.pending = [];
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.fileWatch) clearInterval(this.fileWatch);
+    if (this.diffsPoll) clearInterval(this.diffsPoll);
+    clearTimeout(this.diffsTimer);
     await this.system.close();
     this.processes.close();
     this.live?.controller.abort(new Error('server stopping'));
@@ -957,6 +971,14 @@ export class WebServer {
         case 'GET agents':
           this.checkFetchSite(req);
           return sendJson(res, 200, this.agentsInfo());
+        case 'GET diffs': {
+          this.checkFetchSite(req);
+          // Asked for directly, the list is checked now rather than served from the last poll.
+          if (!parts[1]) return sendJson(res, 200, { repos: await this.checkDiffs() });
+          const repo = this.diffs.find((r) => r.id === parts[1]) ?? (await this.checkDiffs()).find((r) => r.id === parts[1]);
+          if (!repo) throw new HttpError(404, 'That repository has no uncommitted changes.');
+          return sendJson(res, 200, await repoDiff(repo.path));
+        }
         case 'GET threads': {
           this.checkFetchSite(req);
           if (!parts[1]) return sendJson(res, 200, { threads: this.runtime.threads.list() });
@@ -1535,6 +1557,7 @@ export class WebServer {
       items,
       more,
       artifacts: this.displayArtifacts(),
+      diffs: this.diffs,
       sections: displaySections(this.conversation.state),
       live: this.live ? { id: this.live.id, segments: this.live.segments, ...(this.live.replyTo ? { replyTo: this.live.replyTo } : {}) } : null,
       reactions: this.reactions.all(),
@@ -1799,6 +1822,38 @@ export class WebServer {
   }
 
   /** The threads between agents (the chat links to them; the sheet shows them). */
+  /** The folders whose repositories are checked: the project and every agent's workspace roots. */
+  private diffDirs(): string[] {
+    const dirs = new Set<string>([this.runtime.tree.configDir]);
+    for (const node of this.runtime.tree.byId.values()) for (const root of node.roots) dirs.add(root);
+    return [...dirs];
+  }
+
+  /** Checks the repositories again (after `delayMs`, coalescing calls) and tells the pages when something changed. */
+  private refreshDiffs(delayMs = 600): void {
+    clearTimeout(this.diffsTimer);
+    this.diffsTimer = setTimeout(() => {
+      if (!this.diffsBusy && !this.closing) void this.checkDiffs();
+    }, delayMs);
+    this.diffsTimer.unref?.();
+  }
+
+  /** Checks the repositories now (joining a check already running) and tells the pages when something changed. */
+  private async checkDiffs(): Promise<RepoChanges[]> {
+    this.diffsBusy ??= changedRepos(this.diffDirs())
+      .then((repos) => {
+        if (JSON.stringify(repos) === JSON.stringify(this.diffs)) return;
+        this.diffs = repos;
+        this.broadcast('diffs', { repos });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.diffsBusy = undefined;
+      });
+    await this.diffsBusy;
+    return this.diffs;
+  }
+
   private publishThreads(): void {
     this.broadcast('threads', { threads: this.runtime.threads.list() });
   }
@@ -2008,6 +2063,7 @@ export class WebServer {
         agentReactions: chatEffects(this.conversation.state).reactions,
       });
       this.sectionSignature = this.sectionsKey();
+      this.refreshDiffs(0);
       // What arrived after the agent's last step starts the next reply.
       const next = this.pending.shift();
       if (next && !this.closing) {
@@ -2102,6 +2158,7 @@ export class WebServer {
           if (artifact) seg.artifact = artifact;
         }
         this.broadcast('activity_end', { run: live.id, id, status, ...(artifact ? { artifact } : {}) });
+        this.refreshDiffs();
         this.publishArtifacts();
         this.publishSections();
         if (event.name === 'message_agent') this.publishThreads();

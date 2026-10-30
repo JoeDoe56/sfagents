@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree, parseSetting } from '@sfagents/core';
@@ -789,4 +789,43 @@ test("model windows come from the provider's model list, cached", async () => {
   assert.equal(await w.lookup(def('c/d')), 128000);
   assert.equal(await w.lookup(def('x/y')), null);
   assert.equal(calls, 3);
+});
+
+describe('diff pills', () => {
+  test('lists repositories with uncommitted changes and serves their diff', async () => {
+    const s = await startServer(() => ({ text: 'ok' }));
+    try {
+      const repo = path.join(s.dir, 'service');
+      fs.mkdirSync(repo);
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
+      git('init', '-q', '-b', 'trunk');
+      git('config', 'user.email', 't@example.com');
+      git('config', 'user.name', 'T');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'one\ntwo\n');
+      git('add', '.');
+      git('commit', '-qm', 'init');
+      const list = async () => JSON.parse((await request(s.base, '/api/diffs')).body.toString()).repos as Array<Record<string, unknown>>;
+      assert.deepEqual(await list(), []);
+
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'one\nTWO\nthree\n');
+      fs.writeFileSync(path.join(repo, 'b.js'), 'x\n');
+      const [r] = await list();
+      assert.equal(r?.['name'], 'service');
+      assert.equal(r?.['branch'], 'trunk');
+      assert.equal(r?.['files'], 2);
+      assert.equal(r?.['added'], 3);
+      assert.equal(r?.['removed'], 1);
+
+      const diff = JSON.parse((await request(s.base, `/api/diffs/${r?.['id']}`)).body.toString());
+      const byPath = Object.fromEntries(diff.files.map((f: { path: string }) => [f.path, f]));
+      assert.equal(byPath['a.txt'].status, 'modified');
+      assert.match(byPath['a.txt'].patch, /^-two$/m);
+      assert.match(byPath['a.txt'].patch, /^\+TWO$/m);
+      assert.equal(byPath['b.js'].status, 'untracked');
+      assert.match(byPath['b.js'].patch, /^\+x$/m);
+      assert.equal((await request(s.base, '/api/diffs/000000000000')).status, 404);
+    } finally {
+      await s.stop();
+    }
+  });
 });

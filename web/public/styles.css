@@ -880,3 +880,98 @@ button { -webkit-tap-highlight-color: transparent; }
 
 /* The plus and the mic sit inside the field with no glass of their own. */
 .sf-button.composer-icon { background: transparent; box-shadow: none; }
+
+/* ------------------------------------------------------------------ the dock above the composer */
+
+/* Diff pills (one per repository with uncommitted changes) on the leading side, the scroll-down circle on the trailing side, level with the bottom pill. */
+.chat-dock {
+  position: fixed;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 4px;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.chat-dock.covered { opacity: 0; visibility: hidden; transition: opacity 0.12s ease, visibility 0s 0.12s; }
+.dock-pills { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; flex: 0 1 auto; }
+.dock-glass {
+  border: 0;
+  color: var(--ink);
+  background: rgba(44, 44, 46, 0.72);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.12) inset, 0 4px 16px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+  cursor: pointer;
+}
+/* With sfgl glass drawn under it, the element only carries its contents. */
+.dock-glass.has-glass { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+.diff-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  max-width: 100%;
+  padding: 0 14px 0 12px;
+  border-radius: 18px;
+  font: 600 14px/18px var(--font);
+  white-space: nowrap;
+}
+.diff-pill .pill-icon { display: inline-flex; color: var(--ink-2); }
+.diff-pill .pill-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.diff-pill .pill-branch { font-weight: 500; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; max-width: 12em; }
+.diff-pill .pill-files { font-weight: 500; color: var(--ink-2); }
+.pill-add { color: #32d74b; font-variant-numeric: tabular-nums; }
+.pill-del { color: #ff453a; font-variant-numeric: tabular-nums; }
+.dock-down-wrap {
+  flex: none;
+  margin-left: auto;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform-origin: 50% 100%;
+}
+.dock-down-wrap.shown { pointer-events: auto; }
+.dock-down {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+}
+.dock-down i { color: var(--ink); }
+@media (prefers-reduced-motion: reduce) {
+  .chat-dock { transition: none; }
+}
+
+/* The diff sheet */
+.diff-summary { margin: 4px 20px 12px; color: var(--ink-2); font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.diff-list { padding: 0 12px 40px; }
+.diff-empty, .diff-note { margin: 10px 8px; color: var(--ink-2); font-size: 14px; }
+.diff-file { margin: 0 0 10px; border-radius: 12px; background: #2c2c2e; overflow: hidden; }
+.diff-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 18px;
+  cursor: pointer;
+  list-style: none;
+}
+.diff-file-head::-webkit-details-marker { display: none; }
+.diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.diff-status { flex: none; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; background: rgba(120, 120, 128, 0.3); color: var(--ink-2); }
+.diff-status.added, .diff-status.untracked { background: rgba(50, 215, 75, 0.18); color: #32d74b; }
+.diff-status.deleted { background: rgba(255, 69, 58, 0.18); color: #ff453a; }
+.diff-counts { flex: none; display: inline-flex; gap: 6px; font-size: 13px; }
+.diff-body { border-top: 0.5px solid rgba(84, 84, 88, 0.6); overflow-x: auto; }
+.diff-lines { margin: 0; padding: 6px 0; font: 12px/18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; tab-size: 4; }
+.diff-line { display: block; padding: 0 12px; min-width: max-content; }
+.diff-line.add { background: rgba(50, 215, 75, 0.14); color: #c7f7cf; }
+.diff-line.del { background: rgba(255, 69, 58, 0.14); color: #ffd0cc; }
+.diff-line.hunk { color: #64d2ff; background: rgba(100, 210, 255, 0.08); }
+.diff-line.note { color: var(--ink-3); }
