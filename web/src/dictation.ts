@@ -40,14 +40,15 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { getErrorMessage, sfagentsHome } from '@sfagents/core';
 
-const MODEL_REPO = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main';
+// A fixed revision: the files on main change (Qwen3-ASR's did on 2026-10-19), and a pinned checksum would then refuse them.
+const MODEL_REPO = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/874fcb41ececda20bcbc0782d6b4ea7f7d069ea8';
 export interface ModelFile {
   /** The path in the model repository; it is saved under models/ by its base name. */
   name: string;
   size: number;
   sha256: string;
 }
-export const ASR_MODEL: ModelFile = { name: 'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf', size: 2_473_010_048, sha256: 'da4fc2ac7f24dee784d1684eb1f35836cdbf559519452ae11777670734c0a4f8' };
+export const ASR_MODEL: ModelFile = { name: 'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf', size: 2_473_017_600, sha256: '3bc2462eca3a3a8f56abcd860d0943ffdc0546547dde55a9d08589607d6f3936' };
 export const TTS_MODEL: ModelFile = { name: 'VibeVoice-1.5B-GGUF/vibevoice-1.5b-q8_0.gguf', size: 3_224_706_114, sha256: 'e9ca80a31ffe7e4726fcad9798ba10ba1e514d89174fd48ea548d21022e0e6f8' };
 /**
  * The audio.cpp release SF Agents runs, pinned with its files' SHA-256 (from
