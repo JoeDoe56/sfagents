@@ -1,6 +1,6 @@
 /**
  * The mic button: records speech in the browser and has the computer
- * transcribe it (Qwen3-ASR through llama.cpp; see web/src/dictation.ts).
+ * transcribe it (Qwen3-ASR through audio.cpp; see web/src/dictation.ts).
  *
  * Tap to start, tap again to stop; the text goes in at the cursor. The first
  * use asks before downloading the model. Recording needs a secure origin
@@ -16,19 +16,32 @@ let status = null;
 let installToast = null;
 const waiters = new Set();
 
+/** The last status the computer sent (speech to text, and text to speech under `voice`), or null. */
+export function dictationStatus() {
+  return status;
+}
+
+/** Calls fn with each status from now on; returns a function that stops. */
+export function onDictation(fn) {
+  waiters.add(fn);
+  return () => waiters.delete(fn);
+}
+
 /** Server "dictation" events. */
 export function dictationEvent(s) {
   status = s;
-  if (s.state === 'installing' && s.progress) {
-    const { label, done, total } = s.progress;
+  // Either model downloading: one toast with its progress.
+  const p = s.state === 'installing' && s.progress ? s.progress : s.voice?.state === 'installing' && s.voice.progress ? s.voice.progress : null;
+  if (p) {
+    const { label, done, total } = p;
     const text = `Downloading ${label}… ${total ? `${(done / 1e9).toFixed(2)} of ${(total / 1e9).toFixed(2)} GB` : ''}`;
     if (!installToast) installToast = toast(text, { progress: total ? done / total : null, symbol: 'arrow.down' });
     else installToast.set(text, total ? done / total : null);
   } else if (installToast) {
-    installToast.close(s.state === 'error' ? 0 : 400);
+    installToast.close(s.state === 'error' || s.voice?.state === 'error' ? 0 : 400);
     installToast = null;
   }
-  for (const w of waiters) w(s);
+  for (const w of [...waiters]) w(s);
 }
 
 function waitFor(pred) {
@@ -45,7 +58,8 @@ function waitFor(pred) {
 
 // ------------------------------------------------------------ audio → 16 kHz WAV
 
-async function toWav(blob) {
+/** Any audio the browser can decode, as a mono 16-bit WAV at `rate` (the first `maxSeconds` of it). */
+export async function toWav(blob, { rate = 16000, maxSeconds = Infinity } = {}) {
   const data = await blob.arrayBuffer();
   const Ctx = window.AudioContext || window.webkitAudioContext;
   const ctx = new Ctx();
@@ -55,8 +69,7 @@ async function toWav(blob) {
   } finally {
     ctx.close?.();
   }
-  const rate = 16000;
-  const frames = Math.max(1, Math.ceil(decoded.duration * rate));
+  const frames = Math.max(1, Math.ceil(Math.min(decoded.duration, maxSeconds) * rate));
   const off = new OfflineAudioContext(1, frames, rate);
   const src = off.createBufferSource();
   src.buffer = decoded; // mixed down to mono by the one-channel context

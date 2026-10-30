@@ -119,7 +119,7 @@ export interface WebServerOptions {
    * the OS keyring. `false` turns it off (tests and embedding only).
    */
   auth?: WebAuth | false;
-  /** Speech to text for the mic button (default: llama.cpp + Qwen3-ASR, downloaded on first use). */
+  /** Speech to text and text to speech (default: audio.cpp with Qwen3-ASR and VibeVoice, downloaded on first use). */
   dictation?: Dictation;
   /** Hold-to-dictate into any app (default: the system-wide hotkey; started by setupFeatures). */
   pushToTalk?: PushToTalk;
@@ -328,6 +328,11 @@ export class WebServer {
         onChange: (status) => this.broadcast('dictation', status),
         // Loaded with SF Agents and kept loaded, so dictating never waits for the model.
         keepLoaded: true,
+        settings: () => ({
+          autoSwap: this.appSettings.get<boolean>('speech.autoSwap'),
+          guidanceScale: this.appSettings.get<number>('speech.guidanceScale'),
+          glossary: this.appSettings.get<string>('dictation.glossary'),
+        }),
       });
     this.pushToTalk =
       options.pushToTalk ??
@@ -379,6 +384,7 @@ export class WebServer {
       broadcast: (event, data) => {
         this.broadcast(event, data);
         if (event === 'settings' && this.pushToTalkStarted) this.pushToTalk.setHotkey(this.appSettings.get<string>('dictation.hotkey'));
+        if (event === 'settings') this.dictation.applySettings();
         if (event === 'providers') this.broadcast('agent', this.agentInfo());
       },
       log: this.log,
@@ -458,7 +464,7 @@ export class WebServer {
     const dictation = (this.dictation.status().state === 'missing' ? this.dictation.install() : Promise.resolve())
       .then(() => this.dictation.start())
       .then(
-        (url) => this.log(`Dictation is loaded (${this.dictation.status().device ?? this.dictation.status().backend ?? 'llama.cpp'}, ${url}).`),
+        (url) => this.log(`Dictation is loaded (${this.dictation.status().device ?? this.dictation.status().backend ?? 'audio.cpp'}, ${url}).`),
         (error) => this.log(`Dictation could not be set up: ${getErrorMessage(error)}`),
       );
     await this.screen.ensure();
@@ -755,8 +761,52 @@ export class WebServer {
             this.dictation.start().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
           } else if (body['action'] === 'stop') {
             this.dictation.stop();
+          } else if (body['action'] === 'install-voice') {
+            // VibeVoice, for Speak Response; progress arrives as "dictation" events too.
+            this.dictation.installVoice().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
           } else throw new HttpError(400, 'Unknown action.');
           return sendJson(res, 200, this.dictation.status());
+        }
+        case 'GET voice': {
+          // The reference voice clip VibeVoice copies.
+          this.checkFetchSite(req);
+          let clip: Buffer;
+          try {
+            clip = fs.readFileSync(this.dictation.voicePath);
+          } catch {
+            throw new HttpError(404, 'No voice clip is set.');
+          }
+          res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'Content-Length': clip.length });
+          return void res.end(clip);
+        }
+        case 'POST voice': {
+          const type = String(req.headers['content-type'] ?? '');
+          if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
+          try {
+            this.dictation.setReference(await readBody(req, MAX_AUDIO_BYTES));
+          } catch (error) {
+            if (error instanceof HttpError) throw error;
+            throw new HttpError(400, getErrorMessage(error));
+          }
+          return sendJson(res, 200, this.dictation.status());
+        }
+        case 'DELETE voice':
+          this.dictation.setReference(null);
+          return sendJson(res, 200, this.dictation.status());
+        case 'POST speak': {
+          // Text to speech with VibeVoice: the whole reply as one WAV file.
+          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+          const text = typeof body['text'] === 'string' ? body['text'] : '';
+          if (!text.trim()) throw new HttpError(400, 'Nothing to say.');
+          if (text.length > 20_000) throw new HttpError(413, 'That is too long to speak at once.');
+          let wav: Buffer;
+          try {
+            wav = await this.dictation.speak(text);
+          } catch (error) {
+            throw new HttpError(this.dictation.status().voice.state === 'missing' ? 409 : 503, getErrorMessage(error));
+          }
+          res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'Content-Length': wav.length });
+          return void res.end(wav);
         }
         case 'GET push-to-talk':
           this.checkFetchSite(req);

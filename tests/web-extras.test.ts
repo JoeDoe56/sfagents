@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { AppSettings, ConversationService, MemorySecretStore, ProviderRegistry, loadAgentTree } from '@sfagents/core';
-import { ProvidersApi, WebServer } from '@sfagents/web';
+import { Dictation, ProvidersApi, WebServer } from '@sfagents/web';
 import { baseAgent, makeTempDir, scriptedFactory, writeAgent, writeJson } from './helpers.js';
 
-async function start(options: { agent?: Record<string, unknown>; keyring?: boolean; watch?: boolean; files?: Record<string, unknown> } = {}) {
+async function start(options: { agent?: Record<string, unknown>; keyring?: boolean; watch?: boolean; files?: Record<string, unknown>; dictation?: Dictation } = {}) {
   const dir = makeTempDir();
   writeAgent(dir, { ...baseAgent('main'), ...(options.agent ?? {}) });
   for (const [f, v] of Object.entries(options.files ?? {})) writeJson(path.join(dir, f), v);
@@ -24,6 +24,7 @@ async function start(options: { agent?: Record<string, unknown>; keyring?: boole
     settings: new AppSettings(home),
     watchAgents: options.watch === true,
     auth: false,
+    ...(options.dictation ? { dictation: options.dictation } : {}),
   });
   const base = (await server.start()).replace(/\/$/, '');
   return {
@@ -124,6 +125,43 @@ describe('settings and providers in the web interface', () => {
       assert.equal((await req(none.base, '/api/providers')).json.providers.length, 0);
     } finally {
       await none.stop();
+    }
+  });
+});
+
+describe('speech settings and the voice', () => {
+  test('the STT & TTS settings are checked, the reference clip is kept, and speaking asks for the model first', async () => {
+    const dictation = new Dictation({ dir: makeTempDir() });
+    const app = await start({ dictation });
+    try {
+      const saved = await req(app.base, '/api/settings', { body: { values: { 'speech.guidanceScale': '2.35', 'speech.autoSwap': true, 'dictation.glossary': ' SF Agents, Caleb ' } } });
+      assert.equal(saved.status, 200, saved.text);
+      const value = (k: string) => saved.json.settings.find((s: { key: string }) => s.key === k).value;
+      assert.equal(value('speech.guidanceScale'), 2.4, 'to the slider step');
+      assert.equal(value('speech.autoSwap'), true);
+      assert.equal(value('dictation.glossary'), 'SF Agents, Caleb');
+      assert.equal((await req(app.base, '/api/settings', { body: { values: { 'speech.guidanceScale': 3.5 } } })).status, 400, 'above 3');
+      assert.equal((await req(app.base, '/api/settings', { body: { values: { 'speech.guidanceScale': 0.4 } } })).status, 400, 'below 0.5');
+
+      assert.equal((await req(app.base, '/api/voice')).status, 404);
+      const clip = Buffer.concat([Buffer.from('RIFF\0\0\0\0WAVEfmt '), Buffer.alloc(40)]);
+      const put = await fetch(`${app.base}/api/voice`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: clip });
+      assert.equal(put.status, 200);
+      assert.equal(((await put.json()) as { voice: { reference: boolean } }).voice.reference, true);
+      const got = await fetch(`${app.base}/api/voice`);
+      assert.ok(Buffer.from(await got.arrayBuffer()).equals(clip));
+      const bad = await fetch(`${app.base}/api/voice`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: 'not audio' });
+      assert.equal(bad.status, 400);
+      const del = await fetch(`${app.base}/api/voice`, { method: 'DELETE' });
+      assert.equal(((await del.json()) as { voice: { reference: boolean } }).voice.reference, false);
+
+      const spoken = await req(app.base, '/api/speak', { body: { text: 'Hello.' } });
+      assert.equal(spoken.status, 409, 'the voice model is not downloaded');
+      assert.match(spoken.json.error, /not set up/);
+      assert.equal((await req(app.base, '/api/speak', { body: { text: ' ' } })).status, 400);
+    } finally {
+      await app.stop();
+      dictation.close();
     }
   });
 });

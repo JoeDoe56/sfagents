@@ -1,47 +1,60 @@
 /**
- * Dictation: speech to text on this computer with Qwen3-ASR 1.7B (Q8_0, from
- * unsloth's GGUF build), run by llama.cpp's llama-server.
+ * Speech on this computer, run by audio.cpp's audiocpp_server: speech to
+ * text with Qwen3-ASR 1.7B (dictation and push-to-talk), and text to speech
+ * with VibeVoice 1.5B (Speak Response). Both are audio.cpp's official Q8_0
+ * GGUFs (huggingface.co/audio-cpp/audio.cpp-gguf).
  *
  * Nothing is bundled. The first use downloads, into <SF Agents home>/dictation:
- *   - a llama.cpp release build for this platform, GPU first: Metal on macOS;
- *     CUDA when an NVIDIA driver is present; else Vulkan when a Vulkan loader
- *     is; else the CPU build. When a GPU build cannot start or load the model,
- *     the next one is tried, down to the CPU build.
- *   - the model and its audio encoder (about 2.5 GB), checked against their
- *     SHA-256.
- * llama-server then runs on a loopback port. With keepLoaded (the web server's
- * choice) it starts with SF Agents and stays loaded, so neither the mic
- * button nor push-to-talk waits for the model, and it is started again if it
- * stops; otherwise it starts on demand (when the mic button is pressed, so it
- * loads while you speak) and stops after ten idle minutes to give the memory
- * back.
+ *   - an audio.cpp release build for this platform, GPU first: Metal on
+ *     macOS; CUDA on Windows when an NVIDIA driver is present; else Vulkan
+ *     when a Vulkan loader is; else the CPU build. When a GPU build cannot
+ *     start or load the model, the next one is tried, down to the CPU build.
+ *   - the Qwen3-ASR model (about 2.5 GB), checked against its SHA-256.
+ * The VibeVoice model (about 3.2 GB) downloads only when it is asked for
+ * (Settings → STT & TTS, or the first Speak Response).
+ *
+ * audiocpp_server then runs on a loopback port with both models in its
+ * config. Qwen3-ASR loads when the server starts. With keepLoaded (the web
+ * server's choice) the server starts with SF Agents and stays up, so neither
+ * the mic button nor push-to-talk waits for the model, and it is started
+ * again if it stops; otherwise it starts on demand and stops after ten idle
+ * minutes to give the memory back. VibeVoice loads on its first use.
+ *
+ * Automatic model swap (Settings → STT & TTS), for GPUs without room for
+ * both: Qwen3-ASR is unloaded while VibeVoice speaks, VibeVoice is unloaded
+ * when it is done, and Qwen3-ASR is loaded again at once. Dictation that
+ * comes in meanwhile waits for it. Without the swap both stay loaded.
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { getErrorMessage, sfagentsHome } from '@sfagents/core';
 
-const MODEL_REPO = 'https://huggingface.co/unslothai/Qwen3-ASR-1.7B-GGUF/resolve/main';
+const MODEL_REPO = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main';
 export interface ModelFile {
+  /** The path in the model repository; it is saved under models/ by its base name. */
   name: string;
   size: number;
   sha256: string;
 }
-export const MODEL_FILES: readonly [ModelFile, ModelFile] = [
-  { name: 'Qwen3-ASR-1.7B-Q8_0.gguf', size: 2_165_034_944, sha256: '58e22d0532d4eacaf034cfac17a6fed159f37c41390c710186783be439d1fc57' },
-  { name: 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf', size: 355_709_344, sha256: '46c1d533af3f354ceb37ce855dbceff7da7fa7cf1e6a523df3b13440bd164c0d' },
-] as const;
-// The builds are published as pre-releases, so "latest" does not find them: list the recent ones.
-const RELEASES = 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10';
-/** A release known to run Qwen3-ASR, used when the GitHub API cannot be reached. */
-const FALLBACK_TAG = 'b11846';
+export const ASR_MODEL: ModelFile = { name: 'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf', size: 2_473_010_048, sha256: 'da4fc2ac7f24dee784d1684eb1f35836cdbf559519452ae11777670734c0a4f8' };
+export const TTS_MODEL: ModelFile = { name: 'VibeVoice-1.5B-GGUF/vibevoice-1.5b-q8_0.gguf', size: 3_224_706_114, sha256: 'e9ca80a31ffe7e4726fcad9798ba10ba1e514d89174fd48ea548d21022e0e6f8' };
+const RELEASES = 'https://api.github.com/repos/0xShug0/audio.cpp/releases?per_page=10';
+/** A release known to run both models, used when the GitHub API cannot be reached. */
+const FALLBACK_TAG = 'v0.9.2-drama3-base-small';
 const IDLE_MS = 10 * 60_000;
-const START_TIMEOUT_MS = 180_000;
+const START_TIMEOUT_MS = 300_000;
+/** The ids the models have in the server's config. */
+const ASR_ID = 'qwen3-asr';
+const TTS_ID = 'vibevoice';
+/** What the old llama.cpp setup left in the folder, removed once audio.cpp runs. */
+const LLAMA_LEFTOVERS = ['runtime', 'runtime.json', 'llama-server.log', 'models/Qwen3-ASR-1.7B-Q8_0.gguf', 'models/Qwen3-ASR-1.7B-Q8_0.gguf.part', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf.part'];
 
 export type Backend = 'metal' | 'cuda' | 'vulkan' | 'cpu';
 
@@ -53,15 +66,45 @@ export interface RuntimeChoice {
   extra?: RegExp;
 }
 
+interface Progress {
+  label: string;
+  done: number;
+  total: number;
+}
+
+export interface VoiceStatus {
+  /** loaded: in memory now; speaking: generating. */
+  state: 'missing' | 'installing' | 'ready' | 'loaded' | 'speaking' | 'error';
+  /** Bytes still to download before first use. */
+  downloadSize: number;
+  progress?: Progress;
+  error?: string;
+  /** A reference voice clip is set. */
+  reference: boolean;
+}
+
 export interface DictationStatus {
   state: 'missing' | 'installing' | 'ready' | 'starting' | 'running' | 'error';
   /** Bytes still to download before first use. */
   downloadSize: number;
-  progress?: { label: string; done: number; total: number };
+  progress?: Progress;
   backend?: Backend;
   device?: string;
   error?: string;
+  /** Text to speech (VibeVoice). */
+  voice: VoiceStatus;
 }
+
+export interface SpeechSettings {
+  /** Unload Qwen3-ASR while VibeVoice speaks, and VibeVoice afterwards. */
+  autoSwap: boolean;
+  /** VibeVoice's classifier-free guidance scale (0.5 to 3). */
+  guidanceScale: number;
+  /** Words Qwen3-ASR should know, separated by commas. */
+  glossary: string;
+}
+
+export const DEFAULT_SPEECH_SETTINGS: SpeechSettings = { autoSwap: false, guidanceScale: 1.3, glossary: '' };
 
 export interface Hardware {
   platform: NodeJS.Platform;
@@ -94,28 +137,29 @@ export function detectHardware(): Hardware {
   return { platform, arch, nvidia, vulkan };
 }
 
-/** The llama.cpp builds to try, best first. */
+/**
+ * The audio.cpp builds to try, best first. Windows and Linux builds are x64
+ * only (Windows on Arm runs them emulated). The CPU and Vulkan builds are
+ * the portable ones, which do not assume the build machine's processor. On
+ * Linux an NVIDIA GPU runs the Vulkan build: audio.cpp ships no Linux CUDA
+ * server.
+ */
 export function runtimeChoices(hw: Hardware): RuntimeChoice[] {
-  const arch = hw.arch === 'arm64' ? 'arm64' : 'x64';
   const out: RuntimeChoice[] = [];
   if (hw.platform === 'darwin') {
-    // The macOS builds use Metal (and fall back to the CPU by themselves).
-    out.push({ backend: 'metal', asset: new RegExp(`-bin-macos-${arch}\\.(tar\\.gz|zip)$`) });
+    const arch = hw.arch === 'arm64' ? 'arm64' : 'x64';
+    out.push({ backend: 'metal', asset: new RegExp(`^audio-.*-bin-macos-${arch}-metal\\.tar\\.gz$`) });
     return out;
   }
   if (hw.platform === 'win32') {
-    if (hw.nvidia) out.push({ backend: 'cuda', asset: new RegExp(`^llama-.*-bin-win-cuda-12\\.[\\d.]+-${arch}\\.zip$`), extra: new RegExp(`^cudart-llama-bin-win-cuda-12\\.[\\d.]+-${arch}\\.zip$`) });
-    if (hw.vulkan) out.push({ backend: 'vulkan', asset: new RegExp(`^llama-.*-bin-win-vulkan-${arch}\\.zip$`) });
-    out.push({ backend: 'cpu', asset: new RegExp(`^llama-.*-bin-win-cpu-${arch}\\.zip$`) });
+    // CUDA 12 runs on older drivers (and older GPUs) than CUDA 13.
+    if (hw.nvidia) out.push({ backend: 'cuda', asset: /^audio-.*-bin-windows-x64-cuda12\.[\d.]+\.zip$/, extra: /^audio-.*-cudart-windows-x64-cuda12\.[\d.]+\.zip$/ });
+    if (hw.vulkan) out.push({ backend: 'vulkan', asset: /^audio-.*-bin-windows-x64-vulkan-portable\.zip$/ });
+    out.push({ backend: 'cpu', asset: /^audio-.*-bin-windows-x64-cpu-portable\.zip$/ });
     return out;
   }
-  // Linux (and other Unix): the Ubuntu builds.
-  if (hw.nvidia) {
-    const cuda = arch === 'x64' ? '12\\.[\\d.]+' : '1[23]\\.[\\d.]+';
-    out.push({ backend: 'cuda', asset: new RegExp(`^llama-.*-bin-ubuntu-cuda-${cuda}-${arch}\\.tar\\.gz$`), extra: new RegExp(`^cudart-llama-.*-bin-ubuntu-cuda-${cuda}-${arch}\\.tar\\.gz$`) });
-  }
-  if (hw.vulkan) out.push({ backend: 'vulkan', asset: new RegExp(`^llama-.*-bin-ubuntu-vulkan-${arch}\\.tar\\.gz$`) });
-  out.push({ backend: 'cpu', asset: new RegExp(`^llama-.*-bin-ubuntu-${arch}\\.tar\\.gz$`) });
+  if (hw.vulkan || hw.nvidia) out.push({ backend: 'vulkan', asset: /^audio-.*-bin-ubuntu-x64-vulkan-portable\.tar\.gz$/ });
+  out.push({ backend: 'cpu', asset: /^audio-.*-bin-ubuntu-x64-cpu-portable\.tar\.gz$/ });
   return out;
 }
 
@@ -126,29 +170,31 @@ interface ReleaseAsset {
   sha256?: string;
 }
 
-/** What the llama-server output says it runs on. */
-export function deviceFromLog(log: string): string | undefined {
-  const m =
-    /using device (\w+) \(([^)]+)\)/.exec(log) ??
-    /ggml_vulkan: 0 = ([^|\n(]+)/.exec(log) ??
-    /Device 0: ([^,\n]+)/.exec(log) ??
-    /GPU name:\s+(.+)/.exec(log);
-  if (!m) return undefined;
-  return (m[2] ?? m[1])!.trim();
+/**
+ * The GPU in `audiocpp_server --list-devices --json` for this backend. Builds
+ * before the JSON form print lines like `CUDA:0 "NVIDIA GeForce GTX 1660 SUPER" [GPU]`.
+ */
+export function deviceFromList(out: string, backend: Backend): string | undefined {
+  const brace = out.indexOf('{');
+  if (brace >= 0) {
+    try {
+      const data = JSON.parse(out.slice(brace)) as { devices?: Array<{ backend?: string | null; name?: string | null; description?: string | null; type?: string | null }> };
+      const gpus = (data.devices ?? []).filter((d) => d.type !== 'cpu' && d.type !== 'accel');
+      const d = gpus.find((g) => (g.backend ?? '').toLowerCase() === backend) ?? gpus[0];
+      return (d?.description || d?.name || undefined)?.trim();
+    } catch {
+      // the text form, below
+    }
+  }
+  const lines = [...out.matchAll(/^\s*(\w+):\d+ "([^"]+)" \[(\w+)\]/gm)].filter((m) => m[3]!.toUpperCase() !== 'CPU');
+  return (lines.find((m) => m[1]!.toLowerCase() === backend) ?? lines[0])?.[2]?.trim();
 }
 
-/** The first GPU in `llama-server --list-devices` ("  CUDA0: NVIDIA GeForce GTX 1660 SUPER (6143 MiB, 5000 MiB free)"). */
-export function deviceFromList(out: string): string | undefined {
-  const m = /^\s*(?:CUDA|Vulkan|ROCm|Metal|MTL|SYCL)\d*: (.+?)(?: \(\d+ MiB.*)?$/m.exec(out);
-  return m?.[1]?.trim();
-}
-
-function listedDevice(exe: string, cwd: string, env: Record<string, string>): Promise<string | undefined> {
+function listedDevice(exe: string, cwd: string, env: Record<string, string>, backend: Backend): Promise<string | undefined> {
   return new Promise((resolve) => {
-    const child = spawn(exe, ['--list-devices'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(exe, ['--list-devices', '--json'], { cwd, env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     let out = '';
     child.stdout?.on('data', (d: Buffer) => (out += d.toString()));
-    child.stderr?.on('data', (d: Buffer) => (out += d.toString()));
     const timer = setTimeout(() => child.kill(), 15_000);
     child.once('error', () => {
       clearTimeout(timer);
@@ -156,18 +202,29 @@ function listedDevice(exe: string, cwd: string, env: Record<string, string>): Pr
     });
     child.once('exit', () => {
       clearTimeout(timer);
-      resolve(deviceFromList(out));
+      resolve(deviceFromList(out, backend));
     });
   });
 }
 
-/** The transcript in Qwen3-ASR's answer ("language English<asr_text>…"). */
+/** The transcript in a Qwen3-ASR answer that still has its markers ("language English<asr_text>…"). */
 export function transcriptFromAnswer(answer: string): string {
   let text = answer;
   const i = text.indexOf('<asr_text>');
   if (i >= 0) text = text.slice(i + '<asr_text>'.length);
-  else text = text.replace(/^\s*language\s+[A-Za-z]+\s*/, '');
+  else text = text.replace(/^\s*language\s+[A-Za-z]+\s*$/, '');
   return text.replace(/<\/?asr_text>/g, '').replace(/<\|[^|]*\|>/g, '').trim();
+}
+
+/** The glossary setting as Qwen3-ASR's context: the terms, comma separated, without blanks or repeats. */
+export function glossaryContext(glossary: string): string {
+  const terms = glossary.split(/[,\n]/).map((t) => t.trim()).filter(Boolean);
+  return [...new Set(terms)].join(', ');
+}
+
+/** A reply as VibeVoice's one-speaker script ("Speaker 1: …"). */
+export function speakerScript(text: string): string {
+  return `Speaker 1: ${text.replace(/\s+/g, ' ').trim()}`;
 }
 
 export interface DictationOptions {
@@ -175,28 +232,40 @@ export interface DictationOptions {
   hardware?: () => Hardware;
   fetch?: typeof fetch;
   log?: (line: string) => void;
-  /** Environment variables not passed to llama-server (provider keys). */
+  /** Environment variables not passed to audiocpp_server (provider keys). */
   hideEnv?: readonly string[];
   onChange?: (status: DictationStatus) => void;
-  /** The model and its audio encoder (tests use small stand-ins). */
-  models?: readonly [ModelFile, ModelFile];
+  /** The models (tests use small stand-ins). */
+  asrModel?: ModelFile;
+  ttsModel?: ModelFile;
   /** Where the files come from (tests). */
   modelBaseUrl?: string;
   releasesUrl?: string;
-  /** Keep llama-server running (no idle stop), and start it again when it exits. */
+  /** Keep audiocpp_server running (no idle stop), and start it again when it exits. */
   keepLoaded?: boolean;
+  /** Settings → STT & TTS, read at each use. */
+  settings?: () => SpeechSettings;
 }
 
-/** How long llama-server must have run for its exit not to count as one of the quick failures. */
+/** How long audiocpp_server must have run for its exit not to count as one of the quick failures. */
 const STEADY_MS = 60_000;
 const RESTARTS = 3;
 
+interface State {
+  runtimes: Record<string, { dir: string; tag: string }>;
+  working?: Backend;
+  failed?: Backend[];
+}
+
 export class Dictation {
   readonly dir: string;
-  private readonly models: readonly [ModelFile, ModelFile];
+  private readonly asrModel: ModelFile;
+  private readonly ttsModel: ModelFile;
   private readonly fetch: typeof fetch;
-  private status_: DictationStatus;
+  private status_: Omit<DictationStatus, 'voice'>;
+  private voice_: VoiceStatus;
   private installing: Promise<void> | null = null;
+  private installingVoice: Promise<void> | null = null;
   private starting: Promise<string> | null = null;
   private child: ChildProcess | null = null;
   private url: string | null = null;
@@ -205,23 +274,32 @@ export class Dictation {
   private closed = false;
   private restart: NodeJS.Timeout | null = null;
   private quickExits = 0;
+  /** Whether the running server's config has VibeVoice. */
+  private serverHasVoice = false;
+  /** Speaking, one reply at a time. */
+  private speaking: Promise<unknown> = Promise.resolve();
+  /** While the models are swapped: settles when Qwen3-ASR is back. */
+  private swapped: Promise<void> | null = null;
 
   constructor(private readonly options: DictationOptions = {}) {
     this.dir = options.dir ?? path.join(sfagentsHome(), 'dictation');
     this.fetch = options.fetch ?? fetch;
-    this.models = options.models ?? MODEL_FILES;
+    this.asrModel = options.asrModel ?? ASR_MODEL;
+    this.ttsModel = options.ttsModel ?? TTS_MODEL;
     this.status_ = { state: 'missing', downloadSize: 0 };
+    this.voice_ = { state: 'missing', downloadSize: 0, reference: false };
     this.refreshInstalled();
+    this.refreshVoice();
   }
 
   // ---------------------------------------------------------------- state
 
   private stateFile(): string {
-    return path.join(this.dir, 'runtime.json');
+    return path.join(this.dir, 'audiocpp.json');
   }
 
   /** The runtimes installed so far, and the one that worked. */
-  private readState(): { runtimes: Record<string, { dir: string; tag: string }>; working?: Backend; failed?: Backend[] } {
+  private readState(): State {
     try {
       return JSON.parse(fs.readFileSync(this.stateFile(), 'utf8'));
     } catch {
@@ -229,72 +307,122 @@ export class Dictation {
     }
   }
 
-  private writeState(s: ReturnType<Dictation['readState']>): void {
+  private writeState(s: State): void {
     fs.mkdirSync(this.dir, { recursive: true });
     fs.writeFileSync(this.stateFile(), `${JSON.stringify(s, null, 2)}\n`);
   }
 
-  private modelReady(): boolean {
-    return this.models.every((f) => {
-      try {
-        return fs.statSync(path.join(this.dir, 'models', f.name)).size === f.size;
-      } catch {
-        return false;
-      }
-    });
+  private modelPath(f: ModelFile): string {
+    return path.join(this.dir, 'models', path.basename(f.name));
   }
 
-  private missingBytes(): number {
-    let n = 0;
-    for (const f of this.models) {
-      let have = 0;
-      try {
-        have = fs.statSync(path.join(this.dir, 'models', f.name)).size === f.size ? f.size : 0;
-      } catch {
-        have = 0;
-      }
-      n += f.size - have;
+  private have(f: ModelFile): boolean {
+    try {
+      return fs.statSync(this.modelPath(f)).size === f.size;
+    } catch {
+      return false;
     }
-    if (Object.keys(this.readState().runtimes).length === 0) n += 60_000_000; // roughly, a llama.cpp build
-    return n;
+  }
+
+  /** The reference voice clip VibeVoice copies (Settings → STT & TTS). */
+  get voicePath(): string {
+    return path.join(this.dir, 'voice.wav');
+  }
+
+  private runtimeBytes(): number {
+    if (Object.keys(this.readState().runtimes).length) return 0;
+    // Roughly: the CUDA build comes with its runtime libraries.
+    return this.choices()[0]?.backend === 'cuda' ? 1_050_000_000 : 80_000_000;
+  }
+
+  private settings(): SpeechSettings {
+    return { ...DEFAULT_SPEECH_SETTINGS, ...this.options.settings?.() };
   }
 
   private refreshInstalled(): void {
     const st = this.readState();
-    const ready = this.modelReady() && Object.keys(st.runtimes).length > 0;
-    this.set({ state: ready ? (this.child ? 'running' : 'ready') : 'missing', downloadSize: ready ? 0 : this.missingBytes(), backend: st.working });
+    const ready = this.have(this.asrModel) && Object.keys(st.runtimes).length > 0;
+    this.set({
+      state: ready ? (this.child ? 'running' : 'ready') : 'missing',
+      downloadSize: ready ? 0 : (this.have(this.asrModel) ? 0 : this.asrModel.size) + this.runtimeBytes(),
+      backend: st.working,
+      device: this.child ? this.status_.device : undefined,
+    });
   }
 
-  private set(s: DictationStatus): void {
+  private refreshVoice(state?: VoiceStatus['state']): void {
+    const have = this.have(this.ttsModel);
+    this.setVoice({
+      state: state ?? (have ? 'ready' : 'missing'),
+      downloadSize: have ? 0 : this.ttsModel.size,
+      reference: fs.existsSync(this.voicePath),
+    });
+  }
+
+  private set(s: Omit<DictationStatus, 'voice'>): void {
     this.status_ = s;
-    this.options.onChange?.(s);
+    this.options.onChange?.(this.status());
+  }
+
+  private setVoice(v: VoiceStatus): void {
+    this.voice_ = v;
+    this.options.onChange?.(this.status());
   }
 
   status(): DictationStatus {
-    return this.status_;
+    return { ...this.status_, voice: this.voice_ };
   }
 
   // ---------------------------------------------------------------- install
 
-  /** Downloads the model and a runtime. Safe to call again (it resumes). */
+  /** Downloads Qwen3-ASR and a runtime. Safe to call again (it resumes). */
   install(): Promise<void> {
     if (this.installing) return this.installing;
     if (this.status_.state !== 'missing' && this.status_.state !== 'error') return Promise.resolve();
     this.installing = (async () => {
       try {
-        fs.mkdirSync(path.join(this.dir, 'models'), { recursive: true });
         const st = this.readState();
         if (Object.keys(st.runtimes).length === 0) await this.installRuntime(this.choices(st)[0]!);
-        for (const f of this.models) await this.download(`${this.options.modelBaseUrl ?? MODEL_REPO}/${f.name}`, path.join(this.dir, 'models', f.name), f.size, f.sha256, f.name.startsWith('mmproj') ? 'Audio encoder' : 'Speech model');
+        await this.downloadModel(this.asrModel, 'Speech model', (progress) => this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress }));
         this.refreshInstalled();
       } catch (error) {
-        this.set({ state: 'error', downloadSize: this.missingBytes(), error: getErrorMessage(error) });
+        this.set({ state: 'error', downloadSize: this.status_.downloadSize, error: getErrorMessage(error) });
         throw error;
       } finally {
         this.installing = null;
       }
     })();
     return this.installing;
+  }
+
+  /**
+   * Downloads VibeVoice (resuming). A running server is started again with
+   * VibeVoice in its config.
+   */
+  installVoice(): Promise<void> {
+    if (this.installingVoice) return this.installingVoice;
+    if (this.have(this.ttsModel)) return Promise.resolve();
+    this.installingVoice = (async () => {
+      try {
+        await this.downloadModel(this.ttsModel, 'Voice model', (progress) => this.setVoice({ ...this.voice_, state: 'installing', progress }));
+        this.refreshVoice();
+        if (this.child && !this.serverHasVoice) {
+          this.stop();
+          await this.start();
+        }
+      } catch (error) {
+        this.setVoice({ ...this.voice_, state: 'error', progress: undefined, error: getErrorMessage(error) });
+        throw error;
+      } finally {
+        this.installingVoice = null;
+      }
+    })();
+    return this.installingVoice;
+  }
+
+  private downloadModel(f: ModelFile, label: string, report: (p: Progress) => void): Promise<void> {
+    fs.mkdirSync(path.join(this.dir, 'models'), { recursive: true });
+    return this.download(`${this.options.modelBaseUrl ?? MODEL_REPO}/${f.name}`, this.modelPath(f), f.size, f.sha256, label, report);
   }
 
   private choices(st = this.readState()): RuntimeChoice[] {
@@ -305,7 +433,7 @@ export class Dictation {
     return ok.length ? ok : all.slice(-1);
   }
 
-  /** Recent llama.cpp releases, newest first. */
+  /** Recent audio.cpp releases, newest first. */
   private async releases(): Promise<Array<{ tag: string; assets: ReleaseAsset[] }>> {
     try {
       const res = await this.fetch(this.options.releasesUrl ?? RELEASES, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'SF-Agents' } });
@@ -313,7 +441,7 @@ export class Dictation {
       const data = (await res.json()) as Array<{ tag_name: string; draft?: boolean; assets: Array<{ name: string; browser_download_url: string; size: number; digest?: string | null }> }>;
       if (!Array.isArray(data)) throw new Error('unexpected answer');
       const list = data
-        .filter((r) => !r.draft && /^b\d+$/.test(r.tag_name))
+        .filter((r) => !r.draft && /^v\d/.test(r.tag_name))
         .map((r) => ({
           tag: r.tag_name,
           assets: r.assets.map((a) => ({ name: a.name, url: a.browser_download_url, size: a.size, sha256: a.digest?.startsWith('sha256:') ? a.digest.slice(7) : undefined })),
@@ -321,49 +449,46 @@ export class Dictation {
       if (!list.length) throw new Error('no builds listed');
       return list;
     } catch (error) {
-      this.options.log?.(`dictation: the llama.cpp release list is unavailable (${getErrorMessage(error)}); using ${FALLBACK_TAG}`);
-      // Without the list, guess the names the release workflow gives its files.
+      this.options.log?.(`dictation: the audio.cpp release list is unavailable (${getErrorMessage(error)}); using ${FALLBACK_TAG}`);
+      // Without the list, the names the release workflow gives its files.
       const t = FALLBACK_TAG;
-      const base = `https://github.com/ggml-org/llama.cpp/releases/download/${t}`;
+      const base = `https://github.com/0xShug0/audio.cpp/releases/download/${t}`;
       const names = [
-        `llama-${t}-bin-macos-arm64.tar.gz`, `llama-${t}-bin-macos-x64.tar.gz`,
-        `llama-${t}-bin-ubuntu-x64.tar.gz`, `llama-${t}-bin-ubuntu-arm64.tar.gz`,
-        `llama-${t}-bin-ubuntu-vulkan-x64.tar.gz`, `llama-${t}-bin-ubuntu-vulkan-arm64.tar.gz`,
-        `llama-${t}-bin-ubuntu-cuda-12.8-x64.tar.gz`, `cudart-llama-${t}-bin-ubuntu-cuda-12.8-x64.tar.gz`,
-        `llama-${t}-bin-ubuntu-cuda-13.4-arm64.tar.gz`, `cudart-llama-${t}-bin-ubuntu-cuda-13.4-arm64.tar.gz`,
-        `llama-${t}-bin-win-cpu-x64.zip`, `llama-${t}-bin-win-cpu-arm64.zip`,
-        `llama-${t}-bin-win-vulkan-x64.zip`, `llama-${t}-bin-win-vulkan-arm64.zip`,
-        `llama-${t}-bin-win-cuda-12.4-x64.zip`, 'cudart-llama-bin-win-cuda-12.4-x64.zip',
+        `audio-${t}-bin-macos-arm64-metal.tar.gz`, `audio-${t}-bin-macos-x64-metal.tar.gz`,
+        `audio-${t}-bin-ubuntu-x64-cpu-portable.tar.gz`, `audio-${t}-bin-ubuntu-x64-vulkan-portable.tar.gz`,
+        `audio-${t}-bin-windows-x64-cpu-portable.zip`, `audio-${t}-bin-windows-x64-vulkan-portable.zip`,
+        `audio-${t}-bin-windows-x64-cuda12.4.zip`, `audio-${t}-cudart-windows-x64-cuda12.4.zip`,
       ];
       return [{ tag: t, assets: names.map((name) => ({ name, url: `${base}/${name}`, size: 0 })) }];
     }
   }
 
   private async installRuntime(choice: RuntimeChoice): Promise<void> {
-    // The newest release that has this build (a release's files appear over an hour or so).
+    // The newest release that has this build.
     const all = await this.releases();
     const rel = all.find((r) => r.assets.some((a) => choice.asset.test(a.name)) && (!choice.extra || r.assets.some((a) => choice.extra!.test(a.name))));
     const asset = rel?.assets.find((a) => choice.asset.test(a.name));
-    if (!rel || !asset) throw new Error(`No recent llama.cpp release has a ${choice.backend} build for this computer.`);
+    if (!rel || !asset) throw new Error(`No recent audio.cpp release has a ${choice.backend} build for this computer.`);
     const extra = choice.extra ? rel.assets.find((a) => choice.extra!.test(a.name)) : undefined;
-    const target = path.join(this.dir, 'runtime', choice.backend);
+    const target = path.join(this.dir, 'audiocpp', choice.backend);
     fs.rmSync(target, { recursive: true, force: true });
     fs.mkdirSync(target, { recursive: true });
+    const label = `audio.cpp (${choice.backend === 'cpu' ? 'CPU' : choice.backend === 'cuda' ? 'CUDA' : choice.backend === 'metal' ? 'Metal' : 'Vulkan'})`;
     for (const a of [asset, ...(extra ? [extra] : [])]) {
-      const file = path.join(this.dir, 'runtime', a.name);
-      await this.download(a.url, file, a.size || undefined, a.sha256, `llama.cpp (${choice.backend === 'cpu' ? 'CPU' : choice.backend === 'cuda' ? 'CUDA' : choice.backend === 'metal' ? 'Metal' : 'Vulkan'})`);
+      const file = path.join(this.dir, 'audiocpp', a.name);
+      await this.download(a.url, file, a.size || undefined, a.sha256, label, (progress) => this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress }));
       await extract(file, target);
       fs.rmSync(file, { force: true });
     }
-    const server = findFile(target, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server');
-    if (!server) throw new Error(`The llama.cpp ${choice.backend} build has no llama-server.`);
-    if (process.platform !== 'win32') fs.chmodSync(server, 0o755);
+    const server = findFile(target, process.platform === 'win32' ? 'audiocpp_server.exe' : 'audiocpp_server');
+    if (!server) throw new Error(`The audio.cpp ${choice.backend} build has no audiocpp_server.`);
+    if (process.platform !== 'win32') for (const f of fs.readdirSync(path.dirname(server))) if (f.startsWith('audiocpp_')) fs.chmodSync(path.join(path.dirname(server), f), 0o755);
     if (process.platform === 'darwin') spawnSync('xattr', ['-dr', 'com.apple.quarantine', target]);
     // The CUDA runtime libraries go next to the binaries.
     if (extra) {
       const bin = path.dirname(server);
       for (const f of listFiles(target)) {
-        if (/(cudart|cublas)/i.test(path.basename(f)) && path.dirname(f) !== bin) fs.copyFileSync(f, path.join(bin, path.basename(f)));
+        if (/(cudart|cublas|cufft)/i.test(path.basename(f)) && path.dirname(f) !== bin) fs.copyFileSync(f, path.join(bin, path.basename(f)));
       }
     }
     const st = this.readState();
@@ -372,7 +497,7 @@ export class Dictation {
   }
 
   /** Downloads to a .part file (resuming one that exists), checks it, and renames it. */
-  private async download(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string): Promise<void> {
+  private async download(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string, report: (p: Progress) => void): Promise<void> {
     if (size !== undefined && fs.existsSync(file) && fs.statSync(file).size === size) return;
     const part = `${file}.part`;
     let have = fs.existsSync(part) ? fs.statSync(part).size : 0;
@@ -390,7 +515,7 @@ export class Dictation {
       const now = Date.now();
       if (!force && now - last < 250) return;
       last = now;
-      this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress: { label, done, total } });
+      report({ label, done, total });
     };
     progress(true);
     const body = Readable.fromWeb(res.body as import('node:stream/web').ReadableStream);
@@ -412,7 +537,7 @@ export class Dictation {
 
   // ---------------------------------------------------------------- running
 
-  /** Starts llama-server (if it is not running) and resolves with its address. */
+  /** Starts audiocpp_server with Qwen3-ASR loaded (if it is not running) and resolves with its address. */
   start(): Promise<string> {
     if (this.url && this.child) {
       this.touch();
@@ -421,7 +546,7 @@ export class Dictation {
     if (this.starting) return this.starting;
     this.starting = (async () => {
       try {
-        if (!this.modelReady() || Object.keys(this.readState().runtimes).length === 0) throw new Error('Dictation is not set up yet.');
+        if (!this.have(this.asrModel) || Object.keys(this.readState().runtimes).length === 0) throw new Error('Dictation is not set up yet.');
         let lastError: unknown;
         for (;;) {
           const st = this.readState();
@@ -435,6 +560,7 @@ export class Dictation {
             const now = this.readState();
             now.working = choice.backend;
             this.writeState(now);
+            this.removeLlamaCpp();
             return url;
           } catch (error) {
             lastError = error;
@@ -447,7 +573,7 @@ export class Dictation {
           }
         }
       } catch (error) {
-        this.set({ state: 'error', downloadSize: this.missingBytes(), error: getErrorMessage(error) });
+        this.set({ state: 'error', downloadSize: this.status_.downloadSize, error: getErrorMessage(error) });
         throw error;
       } finally {
         this.starting = null;
@@ -456,45 +582,60 @@ export class Dictation {
     return this.starting;
   }
 
+  /** The server's config: Qwen3-ASR loaded at start, VibeVoice (when downloaded) on its first use. */
+  private writeConfig(backend: Backend, port: number): string {
+    const models: unknown[] = [{ id: ASR_ID, family: 'qwen3_asr', path: this.modelPath(this.asrModel), task: 'asr', mode: 'offline', lazy: false }];
+    this.serverHasVoice = this.have(this.ttsModel);
+    if (this.serverHasVoice) models.push({ id: TTS_ID, family: 'vibevoice', path: this.modelPath(this.ttsModel), task: 'tts', mode: 'offline', lazy: true });
+    const config = {
+      host: '127.0.0.1',
+      port,
+      backend,
+      device: 0,
+      // The server's default is one thread, which leaves the CPU build (and the CPU parts of the others) slow.
+      threads: Math.min(16, os.availableParallelism()),
+      lazy_load: true,
+      // The swap is done here, not by a residency limit.
+      max_loaded_models: 0,
+      // Requests are queued here; speaking a long reply can take minutes.
+      busy_timeout_ms: 0,
+      models,
+    };
+    const file = path.join(this.dir, 'server.json');
+    fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+    return file;
+  }
+
   private async launch(backend: Backend): Promise<string> {
     const st = this.readState();
     const bin = path.join(this.dir, st.runtimes[backend]!.dir);
-    const exe = path.join(bin, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server');
+    const exe = path.join(bin, process.platform === 'win32' ? 'audiocpp_server.exe' : 'audiocpp_server');
     const port = await freePort();
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !this.options.hideEnv?.includes(k)) env[k] = v;
     if (process.platform === 'linux') env['LD_LIBRARY_PATH'] = [bin, process.env['LD_LIBRARY_PATH']].filter(Boolean).join(':');
-    const args = [
-      '-m', path.join(this.dir, 'models', this.models[0].name),
-      '--mmproj', path.join(this.dir, 'models', this.models[1].name),
-      '--host', '127.0.0.1', '--port', String(port),
-      '-ngl', backend === 'cpu' ? '0' : '999',
-      '-c', '8192', '-np', '1', '--no-webui',
-    ];
+    const args = ['--config', this.writeConfig(backend, port), '--no-ui', '--backend', backend, '--host', '127.0.0.1', '--port', String(port), '--log'];
     this.set({ state: 'starting', downloadSize: 0, backend });
+    this.refreshVoice();
     const child = spawn(exe, args, { cwd: bin, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let log = '';
-    // The start of the output too: the line that names the GPU comes early,
-    // and loading the model and its audio encoder prints more than the tail keeps.
     let head = '';
-    let found: string | undefined;
     const keep = (d: Buffer) => {
       log = (log + d.toString()).slice(-64_000);
       if (head.length < 256_000) head += d.toString();
-      found ??= deviceFromLog(log) ?? deviceFromLog(head);
     };
     child.stdout?.on('data', keep);
     child.stderr?.on('data', keep);
     const url = `http://127.0.0.1:${port}`;
     const exited = new Promise<never>((_, reject) => {
       child.once('error', (e) => reject(e));
-      child.once('exit', (code) => reject(new Error(`llama-server exited (${code ?? 'signal'}). ${lastLines(log)}`)));
+      child.once('exit', (code) => reject(new Error(`audiocpp_server exited (${code ?? 'signal'}). ${lastLines(log)}`)));
     });
     exited.catch(() => {});
     const deadline = Date.now() + START_TIMEOUT_MS;
     try {
       for (;;) {
-        if (Date.now() > deadline) throw new Error('llama-server did not become ready in time.');
+        if (Date.now() > deadline) throw new Error('audiocpp_server did not become ready in time.');
         const ok = await Promise.race([
           this.fetch(`${url}/health`).then((r) => r.ok, () => false),
           exited,
@@ -502,16 +643,16 @@ export class Dictation {
         if (ok) break;
         await Promise.race([new Promise((r) => setTimeout(r, 400)), exited]);
       }
+      // Qwen3-ASR is loaded and runs: a GPU build that cannot load it fails here, and the next build is tried.
+      await Promise.race([this.recognize(url, silence(0.5)), exited]);
     } catch (error) {
       child.kill();
       throw error;
     }
-    // A GPU build that found no GPU runs on the CPU: fine, but say so.
-    // Recent builds print the device only at higher verbosity: then ask the build itself.
-    const device = backend === 'cpu' ? 'CPU' : found ?? deviceFromLog(head) ?? (await listedDevice(exe, bin, env)) ?? 'CPU';
+    const device = backend === 'cpu' ? 'CPU' : (await listedDevice(exe, bin, env, backend)) ?? backend.toUpperCase();
     // What it said while starting, for when that is not what was expected.
     try {
-      fs.writeFileSync(path.join(this.dir, 'llama-server.log'), head.length < 256_000 ? head : `${head}\n…\n${log}`);
+      fs.writeFileSync(path.join(this.dir, 'audiocpp-server.log'), head.length < 256_000 ? head : `${head}\n…\n${log}`);
     } catch {
       // not worth failing over
     }
@@ -524,14 +665,15 @@ export class Dictation {
       this.url = null;
       if (this.closed) return;
       this.refreshInstalled();
+      this.refreshVoice();
       if (!this.options.keepLoaded) return;
       // Kept loaded: start it again, unless it keeps exiting soon after it starts.
       this.quickExits = Date.now() - started < STEADY_MS ? this.quickExits + 1 : 0;
       if (this.quickExits >= RESTARTS) {
-        this.options.log?.(`dictation: llama-server exited (${code ?? 'signal'}) ${RESTARTS} times soon after starting; it starts again when dictation is next used. ${lastLines(log)}`);
+        this.options.log?.(`dictation: audiocpp_server exited (${code ?? 'signal'}) ${RESTARTS} times soon after starting; it starts again when dictation is next used. ${lastLines(log)}`);
         return;
       }
-      this.options.log?.(`dictation: llama-server exited (${code ?? 'signal'}); starting it again.`);
+      this.options.log?.(`dictation: audiocpp_server exited (${code ?? 'signal'}); starting it again.`);
       this.restart = setTimeout(() => {
         this.restart = null;
         this.start().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`));
@@ -562,32 +704,148 @@ export class Dictation {
     this.child = null;
     this.url = null;
     c?.kill();
-    if (!this.closed) this.refreshInstalled();
+    if (!this.closed) {
+      this.refreshInstalled();
+      this.refreshVoice();
+    }
   }
 
-  /** Speech (a WAV file) to text. */
+  /** Speech (a WAV file) to text. While the models are swapped, it waits for Qwen3-ASR to be back. */
   async transcribe(wav: Buffer, language?: string): Promise<string> {
-    const url = await this.start();
+    // Counted as busy before anything is awaited, so a swap that starts now waits for it.
+    while (this.swapped) await this.swapped;
     this.busy++;
     try {
-      const prompt = language ? [{ type: 'text', text: `language ${language}` }] : [];
-      const res = await this.fetch(`${url}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: wav.toString('base64'), format: 'wav' } }, ...prompt] }],
-          temperature: 0,
-          // Speech runs at a few tokens a second; a cap keeps a confused model from looping.
-          max_tokens: Math.ceil(wavSeconds(wav) * 8) + 32,
-          stream: false,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
-      if (!res.ok) throw new Error(data.error?.message ?? `llama-server answered HTTP ${res.status}.`);
-      return transcriptFromAnswer(data.choices?.[0]?.message?.content ?? '');
+      const url = await this.start();
+      return await this.recognize(url, wav, language, glossaryContext(this.settings().glossary));
     } finally {
       this.busy--;
       this.touch();
+    }
+  }
+
+  private async recognize(url: string, wav: Buffer, language?: string, context?: string): Promise<string> {
+    // The server reads the audio from a file (its upload form has no token cap).
+    const tmp = path.join(this.dir, 'tmp');
+    fs.mkdirSync(tmp, { recursive: true });
+    const file = path.join(tmp, `${crypto.randomUUID()}.wav`);
+    fs.writeFileSync(file, wav);
+    try {
+      const res = await this.fetch(`${url}/v1/audio/transcriptions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: ASR_ID,
+          audio: file,
+          ...(language ? { language } : {}),
+          ...(context ? { text: context } : {}),
+          // Speech runs at a few tokens a second; a cap keeps a confused model from looping.
+          options: { max_tokens: Math.ceil(wavSeconds(wav) * 8) + 32 },
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { text?: string; error?: { message?: string } | string };
+      if (!res.ok) throw new Error((typeof data.error === 'string' ? data.error : data.error?.message) ?? `audiocpp_server answered HTTP ${res.status}.`);
+      const text = data.text ?? '';
+      return text.includes('<asr_text>') ? transcriptFromAnswer(text) : text.trim();
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  }
+
+  // ---------------------------------------------------------------- speaking
+
+  /** Text to speech (a WAV file), in the reference voice when one is set. One reply at a time. */
+  speak(text: string): Promise<Buffer> {
+    if (!text.trim()) return Promise.reject(new Error('There is nothing to say.'));
+    if (!this.have(this.ttsModel)) return Promise.reject(new Error('Text to speech is not set up yet.'));
+    const run = this.speaking.then(() => this.speakNow(text));
+    this.speaking = run.catch(() => {});
+    return run;
+  }
+
+  private async speakNow(text: string): Promise<Buffer> {
+    const s = this.settings();
+    let url = await this.start();
+    if (!this.serverHasVoice) {
+      // Downloaded after the server started.
+      this.stop();
+      url = await this.start();
+    }
+    let back: (() => void) | null = null;
+    if (s.autoSwap) {
+      this.swapped = new Promise((resolve) => (back = resolve));
+      while (this.busy > 0) await new Promise((r) => setTimeout(r, 50));
+      await this.unload(url, [ASR_ID]);
+    }
+    this.refreshVoice('speaking');
+    try {
+      const reference = fs.existsSync(this.voicePath);
+      const res = await this.fetch(`${url}/v1/audio/speech`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: TTS_ID,
+          input: speakerScript(text),
+          response_format: 'wav',
+          options: {
+            guidance_scale: Math.min(3, Math.max(0.5, s.guidanceScale)),
+            ...(reference ? { voice_samples: this.voicePath } : {}),
+          },
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } | string };
+        throw new Error((typeof data.error === 'string' ? data.error : data.error?.message) ?? `audiocpp_server answered HTTP ${res.status}.`);
+      }
+      return Buffer.from(await res.arrayBuffer());
+    } finally {
+      if (s.autoSwap) {
+        await this.unload(url, [TTS_ID]).catch((error) => this.options.log?.(`dictation: unloading VibeVoice failed: ${getErrorMessage(error)}`));
+        // Qwen3-ASR straight back into memory, before anyone dictates.
+        await this.recognize(url, silence(0.5)).catch((error) => this.options.log?.(`dictation: reloading Qwen3-ASR failed: ${getErrorMessage(error)}`));
+        this.swapped = null;
+        (back as (() => void) | null)?.();
+      }
+      this.refreshVoice(this.child ? (s.autoSwap ? 'ready' : 'loaded') : undefined);
+    }
+  }
+
+  /** After the settings change: with the swap on, VibeVoice does not stay in memory. */
+  applySettings(): void {
+    if (this.voice_.state !== 'loaded' || !this.url || !this.settings().autoSwap) return;
+    const url = this.url;
+    this.speaking = this.speaking.then(() =>
+      this.unload(url, [TTS_ID]).then(
+        () => this.refreshVoice(),
+        (error) => this.options.log?.(`dictation: unloading VibeVoice failed: ${getErrorMessage(error)}`),
+      ),
+    );
+  }
+
+  private async unload(url: string, ids: string[]): Promise<void> {
+    const res = await this.fetch(`${url}/v1/tasks/unload_models`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model_ids: ids }) });
+    if (!res.ok) throw new Error(`audiocpp_server answered HTTP ${res.status}.`);
+  }
+
+  /** Sets (or with null, removes) the reference voice clip, a WAV file. */
+  setReference(wav: Buffer | null): void {
+    if (wav) {
+      if (wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') throw new Error('The voice clip must be a WAV file.');
+      fs.mkdirSync(this.dir, { recursive: true });
+      fs.writeFileSync(`${this.voicePath}.tmp`, wav);
+      fs.renameSync(`${this.voicePath}.tmp`, this.voicePath);
+    } else fs.rmSync(this.voicePath, { force: true });
+    this.setVoice({ ...this.voice_, reference: !!wav });
+  }
+
+  /** What the llama.cpp version of dictation downloaded (about 2.5 GB), now unused. */
+  private removeLlamaCpp(): void {
+    for (const f of LLAMA_LEFTOVERS) {
+      try {
+        fs.rmSync(path.join(this.dir, f), { recursive: true, force: true });
+      } catch {
+        // tried again at the next start
+      }
     }
   }
 
@@ -610,6 +868,25 @@ export function wavSeconds(wav: Buffer): number {
     // fall through
   }
   return Math.max(0, wav.length - 44) / 32000;
+}
+
+/** A 16 kHz mono WAV of silence, to load the model. */
+function silence(seconds: number): Buffer {
+  const samples = Math.round(16000 * seconds);
+  const b = Buffer.alloc(44 + samples * 2);
+  b.write('RIFF', 0, 'ascii');
+  b.writeUInt32LE(36 + samples * 2, 4);
+  b.write('WAVEfmt ', 8, 'ascii');
+  b.writeUInt32LE(16, 16);
+  b.writeUInt16LE(1, 20);
+  b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(16000, 24);
+  b.writeUInt32LE(32000, 28);
+  b.writeUInt16LE(2, 32);
+  b.writeUInt16LE(16, 34);
+  b.write('data', 36, 'ascii');
+  b.writeUInt32LE(samples * 2, 40);
+  return b;
 }
 
 function lastLines(log: string): string {

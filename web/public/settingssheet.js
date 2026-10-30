@@ -3,7 +3,7 @@
  * look (glass quality, Return sends), the providers (OpenRouter keys,
  * ChatGPT and Claude sign-ins, custom endpoints), and the app settings kept
  * on the computer (the web server's port and address, push-to-talk's hotkey,
- * terminal output). The check button saves; the close button, a swipe down or Escape
+ * terminal output, and the speech models' own sheet: speechsheet.js). The check button saves; the close button, a swipe down or Escape
  * leave everything as it was. Adding, renaming or removing a provider is its
  * own action and happens at once.
  */
@@ -15,6 +15,7 @@ import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showMenu } from './menu.js';
 import { confirmDialog, promptDialog, showError, toast } from './dialogs.js';
 import { createRow, createSection, createButton } from './vendor/sfgl/src/ui/index.js';
+import { openSpeechSheet } from './speechsheet.js';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -305,6 +306,7 @@ export function openSettingsSheet(device) {
   function renderServer() {
     const groups = new Map();
     for (const s of server.settings) {
+      if (s.group === 'STT & TTS') continue; // in its own sheet
       if (!groups.has(s.group)) groups.set(s.group, []);
       const value = s.key in draft ? draft[s.key] : s.value;
       const pending = s.restart && String(s.value) !== String(s.running) ? `Now ${s.running}; ${s.value} after a restart` : '';
@@ -326,7 +328,23 @@ export function openSettingsSheet(device) {
       if (pending) node.classList.add('st-pending');
       groups.get(s.group).push(node);
     }
-    const boxes = [];
+    // The speech models and their settings: a sheet of their own.
+    const speech = createRow({
+      icon: 'waveform',
+      iconTint: '#ff9f0a',
+      title: 'STT & TTS',
+      subtitle: 'Dictation and reading replies aloud',
+      accessory: 'chevron',
+      onTap: () =>
+        openSpeechSheet({
+          settings: server.settings,
+          onSaved: (next) => {
+            server = next;
+            renderServer();
+          },
+        }),
+    });
+    const boxes = [section('Speech', [speech])];
     for (const [group, nodes] of groups) {
       const restart = server.settings.some((s) => s.group === group && s.restart);
       boxes.push(section(group, nodes, restart ? 'Takes effect the next time SF Agents starts.' : ''));

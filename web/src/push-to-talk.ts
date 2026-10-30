@@ -2,7 +2,7 @@
  * Push-to-talk: hold the hotkey (Settings → Push to Talk, F13 by default)
  * anywhere on this computer to dictate, let go to have what you said typed
  * into the window that has the focus. The speech to text is dictation's
- * (Qwen3-ASR, kept loaded: dictation.ts); the rest is here:
+ * (Qwen3-ASR through audio.cpp, kept loaded: dictation.ts); the rest is here:
  *
  *   - the hotkey and the typing, in a process of their own (KeyboardProcess).
  *     On Windows, SfAgents.Input.exe (web/native/windows-input), which the

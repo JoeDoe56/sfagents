@@ -393,6 +393,12 @@
 .st-add > i { color: var(--blue) !important; }
 .st-add > i:last-child { width: 19px; height: 19px; }
 .st-status { min-height: 18px; }
+
+/* ---- Settings → STT & TTS: the guidance scale's slider ---- */
+
+.sp-range { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; max-width: 260px; margin-left: auto; }
+.sp-range input[type='range'] { flex: 1 1 auto; min-width: 90px; accent-color: var(--blue); touch-action: pan-x; }
+.sp-range-value { flex: none; min-width: 2.2em; text-align: right; font-variant-numeric: tabular-nums; opacity: 0.6; }
 .st-status.st-done { display: flex; align-items: center; justify-content: center; gap: 6px; color: #30d158; font-weight: 600; }
 .st-problem { margin-bottom: 14px; }
 

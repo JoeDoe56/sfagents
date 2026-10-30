@@ -11,7 +11,7 @@
  * this computer. It:
  *
  *   - downloads the helper for this platform on first start, checked against
- *     the SHA-256 pinned here (as dictation downloads llama.cpp). On Windows
+ *     the SHA-256 pinned here (as dictation downloads audio.cpp). On Windows
  *     the startup administrator approval copies it under Program Files and
  *     registers the elevated task that turns its virtual display on and off,
  *     as MoonlightWeb's installer does (screenSetupSteps);

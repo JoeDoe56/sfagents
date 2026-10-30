@@ -16,13 +16,17 @@ export interface SettingSpec {
   label: string;
   /** One line shown under the control. */
   hint: string;
-  group: 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'Terminal output';
-  type: 'port' | 'host' | 'boolean' | 'hotkey';
+  group: 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'STT & TTS' | 'Terminal output';
+  type: 'port' | 'host' | 'boolean' | 'hotkey' | 'number' | 'text';
   default: SettingValue;
   /** Applies on the next start of `sfagents web` (or `start`), not at once. */
   restart: boolean;
   /** Only meaningful on this platform. */
   platform?: NodeJS.Platform;
+  /** A number's range and step. */
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export const SETTINGS: readonly SettingSpec[] = [
@@ -43,6 +47,36 @@ export const SETTINGS: readonly SettingSpec[] = [
     group: 'Push to Talk',
     type: 'hotkey',
     default: 'F13',
+    restart: false,
+  },
+  {
+    key: 'speech.autoSwap',
+    label: 'Automatic Model Swap',
+    hint: 'For graphics cards without room for both models: Qwen3-ASR leaves memory while VibeVoice speaks, and comes back when it is done.',
+    group: 'STT & TTS',
+    type: 'boolean',
+    default: false,
+    restart: false,
+  },
+  {
+    key: 'speech.guidanceScale',
+    label: 'Guidance Scale',
+    hint: 'How closely VibeVoice follows the text and the reference voice. Higher is more exact, lower more natural.',
+    group: 'STT & TTS',
+    type: 'number',
+    default: 1.3,
+    min: 0.5,
+    max: 3,
+    step: 0.1,
+    restart: false,
+  },
+  {
+    key: 'dictation.glossary',
+    label: 'Glossary',
+    hint: 'Names and terms Qwen3-ASR should spell your way, separated by commas.',
+    group: 'STT & TTS',
+    type: 'text',
+    default: '',
     restart: false,
   },
   { key: 'cli.showReasoning', label: 'Show reasoning', hint: 'Print model reasoning in the terminal when the provider returns it.', group: 'Terminal output', type: 'boolean', default: false, restart: false },
@@ -76,6 +110,18 @@ export function parseSetting(key: string, value: unknown): SettingValue {
       const s = typeof value === 'string' ? value.trim() : '';
       if (!s || s.length > 255 || /[\s/@]/.test(s)) throw new SettingsError(`${spec.label} must be an IP address or host name.`);
       return s;
+    }
+    case 'number': {
+      const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+      if (typeof n !== 'number' || !Number.isFinite(n) || (spec.min !== undefined && n < spec.min) || (spec.max !== undefined && n > spec.max)) {
+        throw new SettingsError(`${spec.label} must be a number${spec.min !== undefined && spec.max !== undefined ? ` from ${spec.min} to ${spec.max}` : ''}.`);
+      }
+      return spec.step ? Number((Math.round(n / spec.step) * spec.step).toFixed(6)) : n;
+    }
+    case 'text': {
+      if (typeof value !== 'string') throw new SettingsError(`${spec.label} must be text.`);
+      if (value.length > 4000) throw new SettingsError(`${spec.label} is too long.`);
+      return value.trim();
     }
     case 'hotkey': {
       if (typeof value !== 'string') throw new SettingsError(`${spec.label} must be a key, such as F13 or Ctrl+Shift+Space, or Off.`);

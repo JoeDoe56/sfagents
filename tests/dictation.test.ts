@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { Dictation, deviceFromList, deviceFromLog, runtimeChoices, transcriptFromAnswer, wavSeconds, type DictationStatus } from '@sfagents/web';
+import { Dictation, deviceFromList, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus, type SpeechSettings } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('dictation helpers', () => {
@@ -15,35 +15,49 @@ describe('dictation helpers', () => {
     assert.deepEqual(names(runtimeChoices({ platform: 'win32', arch: 'x64', nvidia: true, vulkan: true })), ['cuda', 'vulkan', 'cpu']);
     assert.deepEqual(names(runtimeChoices({ platform: 'win32', arch: 'x64', nvidia: false, vulkan: false })), ['cpu']);
     assert.deepEqual(names(runtimeChoices({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: true })), ['vulkan', 'cpu']);
+    assert.deepEqual(names(runtimeChoices({ platform: 'linux', arch: 'x64', nvidia: true, vulkan: false })), ['vulkan', 'cpu'], 'NVIDIA on Linux runs the Vulkan build');
+    const t = 'v0.9.2-drama3-base-small';
     const win = runtimeChoices({ platform: 'win32', arch: 'x64', nvidia: true, vulkan: true });
-    assert.ok(win[0]!.asset.test('llama-b11846-bin-win-cuda-12.4-x64.zip'));
-    assert.ok(!win[0]!.asset.test('llama-b11846-bin-win-cuda-13.4-x64.zip'), 'CUDA 12 runs on older drivers');
-    assert.ok(win[0]!.extra!.test('cudart-llama-bin-win-cuda-12.4-x64.zip'));
-    assert.ok(win[1]!.asset.test('llama-b11846-bin-win-vulkan-x64.zip'));
-    assert.ok(win[2]!.asset.test('llama-b11846-bin-win-cpu-x64.zip'));
-    const linux = runtimeChoices({ platform: 'linux', arch: 'x64', nvidia: true, vulkan: true });
-    assert.ok(linux[0]!.asset.test('llama-b11846-bin-ubuntu-cuda-12.8-x64.tar.gz'));
-    assert.ok(linux[0]!.extra!.test('cudart-llama-b11846-bin-ubuntu-cuda-12.8-x64.tar.gz'));
-    assert.ok(linux[1]!.asset.test('llama-b11846-bin-ubuntu-vulkan-x64.tar.gz'));
-    assert.ok(linux[2]!.asset.test('llama-b11846-bin-ubuntu-x64.tar.gz'));
-    assert.ok(!linux[2]!.asset.test('llama-b11846-bin-ubuntu-vulkan-x64.tar.gz'));
-    assert.ok(runtimeChoices({ platform: 'darwin', arch: 'arm64', nvidia: false, vulkan: false })[0]!.asset.test('llama-b11846-bin-macos-arm64.tar.gz'));
+    assert.ok(win[0]!.asset.test(`audio-${t}-bin-windows-x64-cuda12.4.zip`));
+    assert.ok(!win[0]!.asset.test(`audio-${t}-bin-windows-x64-cuda13.3.zip`), 'CUDA 12 runs on older drivers');
+    assert.ok(win[0]!.extra!.test(`audio-${t}-cudart-windows-x64-cuda12.4.zip`));
+    assert.ok(!win[0]!.asset.test(`audio-${t}-lib-windows-x64-cuda12.4.zip`), 'not the C library');
+    assert.ok(win[1]!.asset.test(`audio-${t}-bin-windows-x64-vulkan-portable.zip`));
+    assert.ok(win[2]!.asset.test(`audio-${t}-bin-windows-x64-cpu-portable.zip`));
+    assert.ok(!win[2]!.asset.test(`audio-${t}-bin-windows-x64-cpu.zip`), 'the portable build');
+    const linux = runtimeChoices({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: true });
+    assert.ok(linux[0]!.asset.test(`audio-${t}-bin-ubuntu-x64-vulkan-portable.tar.gz`));
+    assert.ok(linux[1]!.asset.test(`audio-${t}-bin-ubuntu-x64-cpu-portable.tar.gz`));
+    assert.ok(runtimeChoices({ platform: 'darwin', arch: 'arm64', nvidia: false, vulkan: false })[0]!.asset.test(`audio-${t}-bin-macos-arm64-metal.tar.gz`));
   });
 
-  test('the transcript is taken out of Qwen3-ASR answers', () => {
+  test('the transcript is taken out of Qwen3-ASR answers that still have their markers', () => {
     assert.equal(transcriptFromAnswer('language English<asr_text>Hello there.'), 'Hello there.');
     assert.equal(transcriptFromAnswer('language German<asr_text> Guten Tag </asr_text>'), 'Guten Tag');
     assert.equal(transcriptFromAnswer('language None<asr_text>'), '');
     assert.equal(transcriptFromAnswer('plain text'), 'plain text');
   });
 
-  test('the device a GPU build found is read from its log', () => {
-    assert.equal(deviceFromLog('load_tensors: using device Vulkan0 (AMD Radeon RX 7900 XTX) - 24560 MiB free'), 'AMD Radeon RX 7900 XTX');
-    assert.equal(deviceFromLog('ggml_cuda_init: found 1 CUDA devices:\n  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9'), 'NVIDIA GeForce RTX 4090');
-    assert.equal(deviceFromList('ggml_cuda_init: found 1 CUDA devices\nAvailable devices:\n  CUDA0: NVIDIA GeForce GTX 1660 SUPER (6143 MiB, 5000 MiB free)\n'), 'NVIDIA GeForce GTX 1660 SUPER');
-    assert.equal(deviceFromList('Available devices:\n  Vulkan0: AMD Radeon RX 7900 XTX (RADV NAVI31) (24560 MiB, 24000 MiB free)'), 'AMD Radeon RX 7900 XTX (RADV NAVI31)');
-    assert.equal(deviceFromList('Available devices:\n'), undefined);
-    assert.equal(deviceFromLog('nothing here'), undefined);
+  test('the glossary becomes Qwen3-ASR context, and a reply a one-speaker script', () => {
+    assert.equal(glossaryContext(' SF Agents, Qwen3 ,, VibeVoice,Qwen3 '), 'SF Agents, Qwen3, VibeVoice');
+    assert.equal(glossaryContext(''), '');
+    assert.equal(speakerScript('Hello.\n\nHow are   you?'), 'Speaker 1: Hello. How are you?');
+  });
+
+  test('the GPU is read from the device list', () => {
+    const json = JSON.stringify({ schema_version: 1, devices: [
+      { backend: 'cpu', name: 'CPU', description: 'AMD Ryzen 7', type: 'cpu' },
+      { backend: 'cuda', name: 'CUDA0', description: 'NVIDIA GeForce GTX 1660 SUPER', type: 'gpu' },
+      { backend: 'vulkan', name: 'Vulkan0', description: 'NVIDIA GeForce GTX 1660 SUPER (Vulkan)', type: 'gpu' },
+    ] });
+    assert.equal(deviceFromList(json, 'cuda'), 'NVIDIA GeForce GTX 1660 SUPER');
+    assert.equal(deviceFromList(json, 'vulkan'), 'NVIDIA GeForce GTX 1660 SUPER (Vulkan)');
+    assert.equal(deviceFromList('{"devices":[]}', 'cuda'), undefined);
+    assert.equal(deviceFromList('not json', 'cuda'), undefined);
+    // Builds without --json print text.
+    const text = 'available_devices=2\nCPU:0 "Intel(R) Xeon(R)" [CPU]\nCUDA:0 "NVIDIA GeForce GTX 1660 SUPER" [GPU]\nselect with: --backend <cuda|cpu>\n';
+    assert.equal(deviceFromList(text, 'cuda'), 'NVIDIA GeForce GTX 1660 SUPER');
+    assert.equal(deviceFromList('CPU:0 "Intel(R) Xeon(R)" [CPU]\n', 'cpu'), undefined);
   });
 
   test('a WAV file knows its length', () => {
@@ -70,40 +84,80 @@ function wav(samples: number): Buffer {
 }
 
 const FAKE_SERVER = `
+import fs from 'node:fs';
 import http from 'node:http';
 const args = process.argv.slice(2);
-const port = Number(args[args.indexOf('--port') + 1]);
-const seen = [];
+const config = JSON.parse(fs.readFileSync(args[args.indexOf('--config') + 1], 'utf8'));
+const backend = args[args.indexOf('--backend') + 1];
+const ids = config.models.map((m) => m.id);
+const loaded = new Set(config.models.filter((m) => m.lazy === false).map((m) => m.id));
+const calls = [];
+const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
 http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
-    if (req.url === '/health') return res.end('{"status":"ok"}');
-    const j = JSON.parse(body);
-    const audio = j.messages[0].content.find((c) => c.type === 'input_audio');
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ choices: [{ message: { content: 'language English<asr_text>' + (audio.input_audio.format === 'wav' ? 'hello from ' + args[args.indexOf('-ngl') + 1] + ' layers, max ' + j.max_tokens : 'wrong') } }] }));
+    if (req.url === '/health') return json(res, 200, { status: 'ok', backend });
+    if (req.url === '/calls') return json(res, 200, calls);
+    const j = JSON.parse(body || '{}');
+    if (req.url === '/v1/tasks/unload_models') {
+      for (const id of j.model_ids) loaded.delete(id);
+      calls.push('unload ' + j.model_ids.join(','));
+      return json(res, 200, { unloaded: j.model_ids, not_found: [] });
+    }
+    if (!ids.includes(j.model)) return json(res, 404, { error: { message: 'unknown model ' + j.model } });
+    loaded.add(j.model);
+    const resident = [...loaded].sort().join('+');
+    if (req.url === '/v1/audio/transcriptions') {
+      const audio = fs.readFileSync(j.audio);
+      if (audio.toString('ascii', 0, 4) !== 'RIFF') return json(res, 400, { error: { message: 'not a wav' } });
+      calls.push('asr ' + resident);
+      return json(res, 200, { text: 'hello from ' + backend + ', max ' + j.options.max_tokens + (j.text ? ', context ' + j.text : '') });
+    }
+    if (req.url === '/v1/audio/speech') {
+      calls.push('tts ' + resident + ' ' + JSON.stringify(j));
+      res.writeHead(200, { 'Content-Type': 'audio/wav' });
+      return res.end('RIFF....WAVE' + j.input);
+    }
+    json(res, 404, { error: 'not found' });
   });
-}).listen(port, '127.0.0.1', () => console.error('server is listening'));
+}).listen(config.port, '127.0.0.1', () => console.error('server is listening'));
 `;
 
-describe('dictation install and fallback', { skip: process.platform !== 'linux' && 'the stand-in llama-server is a shell script' }, () => {
-  test('downloads (resuming), checks, falls back from a broken GPU build to the CPU build, and transcribes', async () => {
+/** A runtime folder with a stand-in audiocpp_server, and the model files (any size will do with size 1 below). */
+function standIn(dir: string, script = ''): void {
+  const bin = path.join(dir, 'audiocpp', 'cpu');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'fake.mjs'), FAKE_SERVER);
+  fs.writeFileSync(path.join(bin, 'audiocpp_server'), script || `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/fake.mjs" "$@"\n`, { mode: 0o755 });
+  fs.mkdirSync(path.join(dir, 'models'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'models', 'asr.gguf'), 'a');
+  fs.writeFileSync(path.join(dir, 'audiocpp.json'), JSON.stringify({ runtimes: { cpu: { dir: 'audiocpp/cpu', tag: 'v1' } } }));
+}
+
+const SMALL = { asrModel: { name: 'asr.gguf', size: 1, sha256: '' }, ttsModel: { name: 'tts.gguf', size: 1, sha256: '' } };
+
+async function calls(d: Dictation): Promise<string[]> {
+  const url = (d as unknown as { url: string }).url;
+  return (await fetch(`${url}/calls`)).json() as Promise<string[]>;
+}
+
+describe('dictation install and fallback', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
+  test('downloads (resuming), checks, falls back from a broken GPU build to the CPU build, transcribes, and removes the llama.cpp files', async () => {
     const work = makeTempDir();
-    // Two llama.cpp "builds": the Vulkan one crashes at start, the CPU one works.
+    // Two audio.cpp "builds": the Vulkan one crashes at start, the CPU one works.
     const pack = (name: string, script: string) => {
-      const d = path.join(work, name, 'llama-b100');
+      const d = path.join(work, name);
       fs.mkdirSync(d, { recursive: true });
       fs.writeFileSync(path.join(d, 'fake.mjs'), FAKE_SERVER);
-      fs.writeFileSync(path.join(d, 'llama-server'), script);
+      fs.writeFileSync(path.join(d, 'audiocpp_server'), script);
       const out = path.join(work, `${name}.tar.gz`);
-      assert.equal(spawnSync('tar', ['-czf', out, '-C', path.join(work, name), 'llama-b100']).status, 0);
+      assert.equal(spawnSync('tar', ['-czf', out, '-C', d, '.']).status, 0);
       return fs.readFileSync(out);
     };
     const vulkan = pack('vulkan', '#!/bin/sh\necho "no Vulkan device" >&2\nexit 3\n');
     const cpu = pack('cpu', `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/fake.mjs" "$@"\n`);
     const model = crypto.randomBytes(300_000);
-    const mmproj = crypto.randomBytes(50_000);
     const sha = (b: Buffer) => crypto.createHash('sha256').update(b).digest('hex');
     const ranges: string[] = [];
     const server = http.createServer((req, res) => {
@@ -123,32 +177,32 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
         res.setHeader('Content-Type', 'application/json');
         return res.end(
           JSON.stringify([
-            { tag_name: 'b100', assets: [
-              { name: 'llama-b100-bin-ubuntu-vulkan-x64.tar.gz', browser_download_url: `${base}/dl/vulkan`, size: vulkan.length, digest: `sha256:${sha(vulkan)}` },
-              { name: 'llama-b100-bin-ubuntu-vulkan-arm64.tar.gz', browser_download_url: `${base}/dl/vulkan`, size: vulkan.length, digest: `sha256:${sha(vulkan)}` },
-              { name: 'llama-b100-bin-ubuntu-x64.tar.gz', browser_download_url: `${base}/dl/cpu`, size: cpu.length, digest: `sha256:${sha(cpu)}` },
-              { name: 'llama-b100-bin-ubuntu-arm64.tar.gz', browser_download_url: `${base}/dl/cpu`, size: cpu.length, digest: `sha256:${sha(cpu)}` },
+            { tag_name: 'v9.0.0', assets: [
+              { name: 'audio-v9.0.0-bin-ubuntu-x64-vulkan-portable.tar.gz', browser_download_url: `${base}/dl/vulkan`, size: vulkan.length, digest: `sha256:${sha(vulkan)}` },
+              { name: 'audio-v9.0.0-bin-ubuntu-x64-cpu-portable.tar.gz', browser_download_url: `${base}/dl/cpu`, size: cpu.length, digest: `sha256:${sha(cpu)}` },
             ] },
           ]),
         );
       }
       if (u === '/dl/vulkan') return send(vulkan);
       if (u === '/dl/cpu') return send(cpu);
-      if (u === '/models/model.gguf') return send(model);
-      if (u === '/models/mmproj.gguf') return send(mmproj);
+      if (u === '/models/Qwen3-ASR/asr.gguf') return send(model);
       res.writeHead(404).end();
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const dir = path.join(work, 'home');
+    // What the llama.cpp version left behind.
+    fs.mkdirSync(path.join(dir, 'runtime', 'cpu'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'models'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'models', 'Qwen3-ASR-1.7B-Q8_0.gguf'), 'old');
+    fs.writeFileSync(path.join(dir, 'runtime.json'), '{}');
     const states: DictationStatus[] = [];
     const d = new Dictation({
       dir,
-      hardware: () => ({ platform: 'linux', arch: process.arch, nvidia: false, vulkan: true }),
-      models: [
-        { name: 'model.gguf', size: model.length, sha256: sha(model) },
-        { name: 'mmproj.gguf', size: mmproj.length, sha256: sha(mmproj) },
-      ],
+      hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: true }),
+      asrModel: { name: 'Qwen3-ASR/asr.gguf', size: model.length, sha256: sha(model) },
+      ttsModel: { name: 'VibeVoice/tts.gguf', size: 10, sha256: '' },
       modelBaseUrl: `${base}/models`,
       releasesUrl: `${base}/releases`,
       onChange: (s) => states.push(s),
@@ -156,22 +210,24 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
     try {
       assert.equal(d.status().state, 'missing');
       assert.ok(d.status().downloadSize > model.length);
+      assert.equal(d.status().voice.state, 'missing');
       // Half of the model is already there from an interrupted download.
-      fs.mkdirSync(path.join(dir, 'models'), { recursive: true });
-      fs.writeFileSync(path.join(dir, 'models', 'model.gguf.part'), model.subarray(0, 100_000));
+      fs.writeFileSync(path.join(dir, 'models', 'asr.gguf.part'), model.subarray(0, 100_000));
       await d.install();
       assert.equal(d.status().state, 'ready');
-      assert.deepEqual(ranges, ['/models/model.gguf 100000']);
+      assert.deepEqual(ranges, ['/models/Qwen3-ASR/asr.gguf 100000']);
       assert.ok(states.some((s) => s.state === 'installing' && s.progress?.label === 'Speech model'));
-      assert.ok(fs.readFileSync(path.join(dir, 'models', 'model.gguf')).equals(model));
+      assert.ok(fs.readFileSync(path.join(dir, 'models', 'asr.gguf')).equals(model));
 
       const text = await d.transcribe(wav(32000));
-      assert.equal(text, 'hello from 0 layers, max 48', 'the CPU build ran, with the token cap for two seconds');
-      const st = JSON.parse(fs.readFileSync(path.join(dir, 'runtime.json'), 'utf8'));
+      assert.equal(text, 'hello from cpu, max 48', 'the CPU build ran, with the token cap for two seconds');
+      const st = JSON.parse(fs.readFileSync(path.join(dir, 'audiocpp.json'), 'utf8'));
       assert.equal(st.working, 'cpu');
       assert.deepEqual(st.failed, ['vulkan'], 'the broken GPU build is not tried again');
       assert.equal(d.status().state, 'running');
       assert.equal(d.status().device, 'CPU');
+      for (const f of ['runtime', 'runtime.json', 'models/Qwen3-ASR-1.7B-Q8_0.gguf']) assert.equal(fs.existsSync(path.join(dir, f)), false, `${f} removed`);
+      assert.deepEqual(fs.readdirSync(path.join(dir, 'tmp')), [], 'the recordings are not kept');
       d.stop();
       assert.equal(d.status().state, 'ready');
     } finally {
@@ -188,19 +244,19 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
     const d = new Dictation({
       dir: work,
       hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }),
-      models: [
-        { name: 'model.gguf', size: 13, sha256: '0'.repeat(64) },
-        { name: 'mmproj.gguf', size: 13, sha256: '0'.repeat(64) },
-      ],
+      asrModel: { name: 'asr.gguf', size: 13, sha256: '0'.repeat(64) },
+      ttsModel: { name: 'tts.gguf', size: 13, sha256: '0'.repeat(64) },
       modelBaseUrl: base,
       releasesUrl: `${base}/nothing`,
     });
     try {
       // Write a runtime record so only the model downloads.
-      fs.writeFileSync(path.join(work, 'runtime.json'), JSON.stringify({ runtimes: { cpu: { dir: 'x', tag: 'b1' } } }));
+      fs.writeFileSync(path.join(work, 'audiocpp.json'), JSON.stringify({ runtimes: { cpu: { dir: 'x', tag: 'v1' } } }));
       await assert.rejects(() => d.install(), /checksum/);
       assert.equal(d.status().state, 'error');
-      assert.equal(fs.existsSync(path.join(work, 'models', 'model.gguf.part')), false);
+      assert.equal(fs.existsSync(path.join(work, 'models', 'asr.gguf.part')), false);
+      await assert.rejects(() => d.installVoice(), /checksum/);
+      assert.equal(d.status().voice.state, 'error');
     } finally {
       d.close();
       server.close();
@@ -208,26 +264,17 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
   });
 });
 
-describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the stand-in llama-server is a shell script' }, () => {
-  test('stays running without an idle stop, and starts again when llama-server exits', async () => {
+describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
+  test('stays running without an idle stop, starts again when audiocpp_server exits, and sends the glossary', async () => {
     const dir = makeTempDir();
-    const bin = path.join(dir, 'runtime', 'cpu');
-    fs.mkdirSync(bin, { recursive: true });
-    fs.writeFileSync(path.join(bin, 'fake.mjs'), FAKE_SERVER);
-    fs.writeFileSync(path.join(bin, 'llama-server'), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/fake.mjs" "$@"\n`, { mode: 0o755 });
-    fs.mkdirSync(path.join(dir, 'models'));
-    fs.writeFileSync(path.join(dir, 'models', 'model.gguf'), 'm');
-    fs.writeFileSync(path.join(dir, 'models', 'mmproj.gguf'), 'p');
-    fs.writeFileSync(path.join(dir, 'runtime.json'), JSON.stringify({ runtimes: { cpu: { dir: 'runtime/cpu', tag: 'b1' } } }));
+    standIn(dir);
     const logs: string[] = [];
     const d = new Dictation({
       dir,
       keepLoaded: true,
       hardware: () => ({ platform: 'linux', arch: process.arch, nvidia: false, vulkan: false }),
-      models: [
-        { name: 'model.gguf', size: 1, sha256: '' },
-        { name: 'mmproj.gguf', size: 1, sha256: '' },
-      ],
+      ...SMALL,
+      settings: () => ({ autoSwap: false, guidanceScale: 1.3, glossary: 'SF Agents, Caleb' }),
       log: (l) => logs.push(l),
     });
     try {
@@ -244,7 +291,76 @@ describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the s
       assert.ok(again, `started again (${logs.join(' | ')})`);
       assert.notEqual(again, first, 'on a new port');
       assert.ok(logs.some((l) => /starting it again/.test(l)));
-      assert.equal(await d.transcribe(wav(16000)), 'hello from 0 layers, max 40');
+      assert.equal(await d.transcribe(wav(16000)), 'hello from cpu, max 40, context SF Agents, Caleb');
+    } finally {
+      d.close();
+    }
+  });
+});
+
+describe('text to speech', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
+  test('VibeVoice speaks next to Qwen3-ASR, in the reference voice, with the guidance scale', async () => {
+    const dir = makeTempDir();
+    standIn(dir);
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ autoSwap: false, guidanceScale: 2.4, glossary: '' }) });
+    try {
+      await d.start();
+      await assert.rejects(() => d.speak('Hi.'), /not set up/);
+      // Downloaded while the server runs: it is started again with VibeVoice in its config.
+      fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
+      d.setReference(wav(8000));
+      assert.equal(d.status().voice.reference, true);
+      assert.throws(() => d.setReference(Buffer.from('not a wav file')), /WAV/);
+      const out = await d.speak('Hello\nthere.');
+      assert.equal(out.toString(), 'RIFF....WAVESpeaker 1: Hello there.');
+      const log = await calls(d);
+      const tts = log.find((c) => c.startsWith('tts'))!;
+      assert.match(tts, /^tts qwen3-asr\+vibevoice /, 'both loaded');
+      const req = JSON.parse(tts.slice(tts.indexOf('{')));
+      assert.equal(req.options.guidance_scale, 2.4);
+      assert.equal(req.options.voice_samples, d.voicePath);
+      assert.ok(!log.some((c) => c.startsWith('unload')), 'nothing unloaded without the swap');
+      assert.equal(d.status().voice.state, 'loaded');
+      d.setReference(null);
+      await d.speak('Again.');
+      const last = (await calls(d)).at(-1)!;
+      assert.equal(JSON.parse(last.slice(last.indexOf('{'))).options.voice_samples, undefined, 'no clip, no voice_samples');
+    } finally {
+      d.close();
+    }
+  });
+
+  test('with the automatic swap, Qwen3-ASR leaves while VibeVoice speaks, comes back after, and dictation waits for it', async () => {
+    const dir = makeTempDir();
+    standIn(dir);
+    fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
+    let settings: SpeechSettings = { autoSwap: true, guidanceScale: 9, glossary: '' };
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => settings });
+    try {
+      await d.start();
+      const speaking = d.speak('One.');
+      // Dictation that comes in while VibeVoice speaks.
+      while (d.status().voice.state !== 'speaking') await new Promise((r) => setTimeout(r, 1));
+      const dictated = d.transcribe(wav(16000));
+      await speaking;
+      assert.equal(await dictated, 'hello from cpu, max 40');
+      const log = (await calls(d)).slice(1); // after the load at start
+      const tts = log.findIndex((c) => c.startsWith('tts'));
+      assert.deepEqual(log.slice(0, tts), ['unload qwen3-asr']);
+      assert.match(log[tts]!, /^tts vibevoice /, 'VibeVoice alone');
+      assert.equal(JSON.parse(log[tts]!.slice(log[tts]!.indexOf('{'))).options.guidance_scale, 3, 'clamped to 3');
+      assert.deepEqual(log.slice(tts + 1), ['unload vibevoice', 'asr qwen3-asr', 'asr qwen3-asr'], 'Qwen3-ASR back at once, then the dictation');
+      assert.equal(d.status().voice.state, 'ready');
+
+      // Turning the swap on unloads a VibeVoice left loaded.
+      settings = { ...settings, autoSwap: false };
+      await d.speak('Two.');
+      assert.equal(d.status().voice.state, 'loaded');
+      settings = { ...settings, autoSwap: true };
+      d.applySettings();
+      for (let i = 0; i < 50 && d.status().voice.state === 'loaded'; i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(d.status().voice.state, 'ready');
+      assert.equal((await calls(d)).at(-1), 'unload vibevoice');
     } finally {
       d.close();
     }
