@@ -56,10 +56,26 @@ const MAX_LEAD = 60;
 
 let context = null;
 
-/** One AudioContext, resumed while the tap that asked for speech still counts as a user gesture. */
+/**
+ * One AudioContext, resumed while the tap that asked for speech still counts
+ * as a user gesture. On an iPhone it also has to be told it is playback (or
+ * the ring/silent switch mutes it), it is "interrupted" (not "suspended")
+ * after the phone locks or another app plays, and it only really starts once
+ * something plays during the tap, so a moment of silence does.
+ */
 function audioContext() {
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+  } catch {
+    // older Safari
+  }
+  if (context?.state === 'closed') context = null;
   context ??= new (window.AudioContext || window.webkitAudioContext)();
-  if (context.state === 'suspended') context.resume().catch(() => {});
+  if (context.state !== 'running') context.resume().catch(() => {});
+  const silence = context.createBufferSource();
+  silence.buffer = context.createBuffer(1, 1, context.sampleRate);
+  silence.connect(context.destination);
+  silence.start();
   return context;
 }
 

@@ -148,6 +148,11 @@ describe('speech settings and the voice', () => {
       assert.equal(((await put.json()) as { voice: { reference: boolean } }).voice.reference, true);
       const got = await fetch(`${app.base}/api/voice`);
       assert.ok(Buffer.from(await got.arrayBuffer()).equals(clip));
+      // Safari on iPhone asks for byte ranges and plays nothing without them.
+      const part = await fetch(`${app.base}/api/voice`, { headers: { Range: 'bytes=0-1' } });
+      assert.equal(part.status, 206);
+      assert.equal(part.headers.get('content-range'), `bytes 0-1/${clip.length}`);
+      assert.equal(Buffer.from(await part.arrayBuffer()).toString(), 'RI');
       const bad = await fetch(`${app.base}/api/voice`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: 'not audio' });
       assert.equal(bad.status, 400);
       const del = await fetch(`${app.base}/api/voice`, { method: 'DELETE' });

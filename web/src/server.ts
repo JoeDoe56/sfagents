@@ -846,14 +846,14 @@ export class WebServer {
         case 'GET voice': {
           // The reference voice clip Qwen3-TTS copies.
           this.checkFetchSite(req);
-          let clip: Buffer;
+          // With byte ranges: Safari on iPhone plays no audio served without them.
+          let stat: fs.Stats;
           try {
-            clip = fs.readFileSync(this.dictation.voicePath);
+            stat = fs.statSync(this.dictation.voicePath);
           } catch {
             throw new HttpError(404, 'No voice clip is set.');
           }
-          res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'Content-Length': clip.length });
-          return void res.end(clip);
+          return this.serveFile({ path: this.dictation.voicePath, size: stat.size, modified: stat.mtimeMs, type: { mime: 'audio/wav' } }, false, req, res);
         }
         case 'POST voice': {
           const type = String(req.headers['content-type'] ?? '');
