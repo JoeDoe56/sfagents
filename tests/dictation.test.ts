@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -256,7 +256,7 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
         // Half of it, then the connection drops.
         dropped = true;
         res.writeHead(200, { 'Content-Length': b.length });
-        res.write(b.subarray(0, 100_000), () => setTimeout(() => res.destroy(), 20));
+        res.write(b.subarray(0, 100_000), () => setTimeout(() => res.socket?.resetAndDestroy(), 20));
         return;
       }
       res.writeHead(from ? 206 : 200, { 'Content-Length': b.length - from });
@@ -281,6 +281,28 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
       assert.equal(d.status().voice.state, 'ready');
       assert.deepEqual(seen, ['/asr.gguf 0', '/asr.gguf 100000', '/tts.gguf 0']);
       assert.equal(most, 1, 'one at a time');
+    } finally {
+      d.close();
+      server.close();
+    }
+  });
+
+  test('a second SF Agents does not download into the same folder, and a stale lock is taken over', async () => {
+    const work = makeTempDir();
+    const server = http.createServer((_req, res) => res.end('m'));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const d = new Dictation({ dir: work, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, asrModel: { name: 'asr.gguf', size: 1, sha256: '' }, modelBaseUrl: base });
+    try {
+      fs.writeFileSync(path.join(work, 'audiocpp.json'), JSON.stringify({ runtimes: { cpu: { dir: 'x', tag: 'v1' } } }));
+      const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+      fs.writeFileSync(path.join(work, 'download.lock'), String(other.pid));
+      await assert.rejects(() => d.install(), /Another SF Agents/);
+      other.kill();
+      await new Promise((r) => other.once('exit', r));
+      await d.install();
+      assert.equal(d.status().state, 'ready');
+      assert.equal(fs.existsSync(path.join(work, 'download.lock')), false);
     } finally {
       d.close();
       server.close();

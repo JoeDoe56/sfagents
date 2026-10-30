@@ -519,19 +519,45 @@ export class Dictation {
    */
   private download(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string, report: (p: Progress) => void): Promise<void> {
     const run = this.downloads.then(async () => {
-      for (let attempt = 1; ; attempt++) {
-        try {
-          return await this.downloadOnce(url, file, size, sha256, label, report);
-        } catch (error) {
-          if (!(error instanceof NetworkError) || attempt >= DOWNLOAD_ATTEMPTS) throw error;
-          const wait = Math.min(30_000, 2000 * 2 ** (attempt - 1));
-          this.options.log?.(`dictation: downloading ${path.basename(file)}: ${getErrorMessage(error)}; trying again in ${wait / 1000} s`);
-          await new Promise((r) => setTimeout(r, this.options.retryDelay ?? wait));
+      const release = this.lockDownloads();
+      try {
+        for (let attempt = 1; ; attempt++) {
+          try {
+            return await this.downloadOnce(url, file, size, sha256, label, report);
+          } catch (error) {
+            if (!(error instanceof NetworkError) || attempt >= DOWNLOAD_ATTEMPTS) throw error;
+            const wait = Math.min(30_000, 2000 * 2 ** (attempt - 1));
+            this.options.log?.(`dictation: downloading ${path.basename(file)}: ${getErrorMessage(error)}; trying again in ${wait / 1000} s`);
+            await new Promise((r) => setTimeout(r, this.options.retryDelay ?? wait));
+          }
         }
+      } finally {
+        release();
       }
     });
     this.downloads = run.catch(() => {});
     return run;
+  }
+
+  /**
+   * Only one SF Agents downloads into this folder at a time: two (an old one
+   * still running next to a new one) appending to the same .part file corrupt it.
+   */
+  private lockDownloads(): () => void {
+    fs.mkdirSync(this.dir, { recursive: true });
+    const lock = path.join(this.dir, 'download.lock');
+    for (let i = 0; i < 2; i++) {
+      try {
+        fs.writeFileSync(lock, String(process.pid), { flag: 'wx' });
+        return () => fs.rmSync(lock, { force: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const pid = Number(fs.readFileSync(lock, 'utf8').trim());
+        if (pid && pid !== process.pid && alive(pid)) throw new Error(`Another SF Agents (process ${pid}) is downloading the speech models. Close it, or let it finish.`);
+        fs.rmSync(lock, { force: true }); // left by one that stopped
+      }
+    }
+    throw new Error('The download lock could not be taken.');
   }
 
   /** Downloads to a .part file (resuming one that exists), checks it, and renames it. */
@@ -552,6 +578,7 @@ export class Dictation {
     if (res.status >= 500 || res.status === 429) throw new NetworkError(`HTTP ${res.status}`);
     if (!res.ok || !res.body) throw new Error(`Downloading ${path.basename(file)} failed: HTTP ${res.status}.`);
     if (have > 0 && res.status !== 206) have = 0; // the server ignored the range: start over
+    const resumed = have > 0;
     const total = size ?? have + Number(res.headers.get('content-length') ?? 0);
     let done = have;
     let last = 0;
@@ -578,6 +605,8 @@ export class Dictation {
       const got = await hashFile(part);
       if (got !== sha256) {
         fs.rmSync(part, { force: true });
+        // A resumed download that went wrong: once more, from the start.
+        if (resumed) throw new NetworkError('it did not match its checksum after resuming; starting over');
         throw new Error(`${path.basename(file)} did not match its checksum; it was removed. Try again.`);
       }
     }
@@ -936,6 +965,16 @@ function silence(seconds: number): Buffer {
   b.write('data', 36, 'ascii');
   b.writeUInt32LE(samples * 2, 40);
   return b;
+}
+
+/** Whether a process is running (EPERM: it is, as another user). */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 function lastLines(log: string): string {
