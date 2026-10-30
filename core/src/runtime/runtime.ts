@@ -36,6 +36,7 @@ import { newRunId, toChatMessages } from '../conversation/service.js';
 import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { TOOL_SEARCH, ToolSearchTool, calledToolNames, deferredToolNames, deferredToolsNote } from '../tools/tool-search.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
 import { ShellTool } from '../tools/shell.js';
 import { WorkspaceContext } from '../permissions/workspace.js';
@@ -451,14 +452,20 @@ export class AgentRuntime implements AgentMessenger {
       throw e;
     }
 
-    const declarations = [...tools.values()].map((t) => t.schema);
-    let systemExtra: string | undefined;
+    // Deferred tools stay out of the requests until tool_search loads them.
+    const deferred = new Map([...deferredToolNames(tools, d.tools?.defer)].map((name) => [name, tools.get(name)!]));
+    const loadedTools = new Set<string>();
+    if (deferred.size) tools.set(TOOL_SEARCH, new ToolSearchTool(deferred, loadedTools));
+    const activeNames = () => [...tools.keys()].filter((name) => !deferred.has(name) || loadedTools.has(name));
+    const declarations = () => activeNames().map((name) => tools.get(name)!.schema);
+    const deferredNote = deferred.size ? deferredToolsNote(deferred) : undefined;
+    let systemExtra: string | undefined = deferredNote;
     if (params.prepareContext) {
       try {
-        const base = buildSystemPrompt(node, [...tools.keys()], undefined, link);
-        const prepared = params.prepareContext(base + JSON.stringify(declarations));
+        const base = buildSystemPrompt(node, activeNames(), deferredNote, link);
+        const prepared = params.prepareContext(base + JSON.stringify(declarations()));
         messages.splice(0, messages.length, ...prepared.messages);
-        systemExtra = prepared.systemExtra;
+        systemExtra = [deferredNote, prepared.systemExtra].filter(Boolean).join('\n\n') || undefined;
         if (prepared.report) emit({ type: 'context', agentPath, ...prepared.report });
       } catch (error) {
         const message = getErrorMessage(error);
@@ -470,7 +477,9 @@ export class AgentRuntime implements AgentMessenger {
       const index = artifactIndex(params.conversation);
       if (index) systemExtra = systemExtra ? `${systemExtra}\n\n${index}` : index;
     }
-    const systemPrompt = buildSystemPrompt(node, [...tools.keys()], systemExtra, link);
+    // Tools called earlier in the conversation stay loaded (their calls are in the history).
+    for (const name of calledToolNames(messages)) if (deferred.has(name)) loadedTools.add(name);
+    const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link);
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
     const maxTurns = d.limits?.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -511,7 +520,7 @@ export class AgentRuntime implements AgentMessenger {
         for await (const event of provider.stream({
           model: d.model,
           messages,
-          tools: declarations,
+          tools: declarations(),
           reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,
           maxOutputTokens: d.maxOutputTokens,
@@ -879,6 +888,11 @@ export class AgentSession {
     const definition = this.node.definition;
     const conversation = this.conversation;
     const tools = await this.runtime.buildTools(this.node, [this.node.id], () => undefined, undefined, conversation);
+    // Deferred tools are not sent until loaded: only tool_search and the prompt's list of them count.
+    const deferred = new Map([...deferredToolNames(tools, definition.tools?.defer)].map((name) => [name, tools.get(name)!]));
+    const loaded = new Set(conversation.state.records.flatMap((r) => (r.kind === 'message' && r.tool ? [r.tool] : [])));
+    for (const name of deferred.keys()) if (!loaded.has(name)) tools.delete(name);
+    if (deferred.size) tools.set(TOOL_SEARCH, new ToolSearchTool(deferred, new Set()));
     const list: ContextTool[] = [...tools.entries()].map(([name, tool]) => ({
       name,
       group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.MESSAGE_AGENT ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
@@ -887,7 +901,7 @@ export class AgentSession {
     }));
     const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
     const index = conversation.file && artifactAccess(definition, 0) !== 'none' ? artifactIndex(conversation) : undefined;
-    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()]), list, {
+    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined), list, {
       retrievable,
       resolveAttachment: (ref) => conversation.readAttachment(ref),
       ...(index ? { extraSystem: index } : {}),

@@ -16,6 +16,8 @@ export const ToolNames = {
   WAIT_FOR_MESSAGES: 'wait_for_messages',
   /** SF Agents: the main agent tells or asks the person something mid-turn. */
   MESSAGE_USER: 'message_user',
+  /** SF Agents: loads deferred tools (see tools.defer). */
+  TOOL_SEARCH: 'tool_search',
   /** Not a tool the model calls: puts the `sf-web` command in the agent's shell. */
   WEB: 'web',
 } as const;

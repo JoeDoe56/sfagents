@@ -103,6 +103,10 @@ export function describeCall(name: string, argsJson: string): string {
       return 'Waited for messages';
     case 'message_user':
       return 'Sent a message';
+    case 'tool_search': {
+      const q = str(args['query']) ?? '';
+      return /^select:/i.test(q) ? `Loaded ${clip(q.slice(7).split(',').map((n) => n.trim().replace(/^mcp__[^_]+__/, '')).filter(Boolean).join(', '), 60)}` : `Looked for tools${q ? ` for “${clip(q, 50)}”` : ''}`;
+    }
     case 'create_artifact':
       if (str(args['id'])) return `Updated ${str(args['id'])}${str(args['title']) ? ` “${clip(String(args['title']), 50)}”` : ''}`;
       return `Created ${str(args['title']) ? `“${clip(String(args['title']), 60)}”` : 'an artifact'}`;

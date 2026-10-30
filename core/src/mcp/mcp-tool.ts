@@ -170,6 +170,10 @@ export class DiscoveredMcpTool extends BaseDeclarativeTool<McpToolParams, ToolRe
     );
   }
 
+  override get deferrable(): boolean {
+    return true;
+  }
+
   get approvalKey(): string {
     return mcpApprovalKey(this.serverName, this.serverToolName);
   }

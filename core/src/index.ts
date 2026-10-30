@@ -70,6 +70,7 @@ export { WorkspaceContext } from './permissions/workspace.js';
 export * from './tools/tools.js';
 export { ToolErrorType } from './tools/tool-error.js';
 export { ToolNames, BUILTIN_TOOL_IDS } from './tools/tool-names.js';
+export { TOOL_SEARCH, AUTO_DEFER_MIN, ToolSearchTool, deferredToolNames, matchesToolPattern } from './tools/tool-search.js';
 export { stripAnsiAndControl } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
 export { openInBrowser } from './utils/open-url.js';
