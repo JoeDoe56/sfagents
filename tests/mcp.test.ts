@@ -218,3 +218,49 @@ describe('MCP', () => {
     );
   });
 });
+
+describe('deferred tools', () => {
+  test('defer: true leaves MCP tools out until tool_search loads them, then they can be called', async () => {
+    const { runtime, providers } = setup(
+      { tools: { mcpServers: ['local'], autoApprove: ['mcp__local__*'], defer: true } },
+      { local: stdioServerConfig() },
+      (req, n) =>
+        n === 0
+          ? { toolCalls: [{ name: 'tool_search', args: { query: 'select:mcp__local__echo' } }] }
+          : n === 1
+            ? { toolCalls: [{ name: 'mcp__local__echo', args: { text: 'hi' } }] }
+            : { text: `Tool said: ${lastToolContent(req)}` },
+    );
+    const result = await runtime.createSession().run('use echo');
+    assert.equal(result.text, 'Tool said: echo:hi');
+    const requests = providers.get('main')!.requests;
+    const names = (i: number) => requests[i]!.request.tools!.map((t) => t.name);
+    assert.deepEqual(names(0), ['tool_search']);
+    const system = String(requests[0]!.request.messages[0]!.content);
+    assert.match(system, /<deferred_tools>/);
+    assert.match(system, /- mcp__local__echo: /);
+    // The search result carries the definition, and the tool is sent from the next request on.
+    assert.match(String(requests[1]!.request.messages.at(-1)!.content), /"name":"mcp__local__echo"/);
+    assert.deepEqual(names(1).sort(), ['mcp__local__echo', 'tool_search']);
+    assert.deepEqual(names(2).sort(), ['mcp__local__echo', 'tool_search']);
+  });
+
+  test('keyword search, patterns, and no deferral by default for a few tools', async () => {
+    const { runtime, providers } = setup(
+      { tools: { mcpServers: ['local'], autoApprove: ['mcp__local__*'], defer: ['mcp__local__a*', 'mcp__local__counter'] } },
+      { local: stdioServerConfig() },
+      (req, n) => (n === 0 ? { toolCalls: [{ name: 'tool_search', args: { query: 'increments counter' } }] } : { text: String(lastToolContent(req)) }),
+    );
+    const result = await runtime.createSession().run('count');
+    assert.match(result.text, /^Loaded 1 tool/);
+    const requests = providers.get('main')!.requests;
+    const first = requests[0]!.request.tools!.map((t) => t.name);
+    assert.ok(first.includes('mcp__local__echo'));
+    assert.ok(!first.includes('mcp__local__add') && !first.includes('mcp__local__counter'));
+    assert.ok(requests[1]!.request.tools!.some((t) => t.name === 'mcp__local__counter'));
+
+    const plain = setup({ tools: { mcpServers: ['local'] } }, { local: stdioServerConfig() }, () => ({ text: 'ok' }));
+    await plain.runtime.createSession().run('hi');
+    assert.ok(!plain.providers.get('main')!.requests[0]!.request.tools!.some((t) => t.name === 'tool_search'));
+  });
+});

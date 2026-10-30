@@ -880,3 +880,198 @@ button { -webkit-tap-highlight-color: transparent; }
 
 /* The plus and the mic sit inside the field with no glass of their own. */
 .sf-button.composer-icon { background: transparent; box-shadow: none; }
+
+/* ------------------------------------------------------------------ the dock above the composer */
+
+/* Diff pills (one per repository with uncommitted changes) on the leading side, the scroll-down circle on the trailing side, level with the bottom pill. */
+.chat-dock {
+  position: fixed;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 4px;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.chat-dock.covered { opacity: 0; visibility: hidden; transition: opacity 0.12s ease, visibility 0s 0.12s; }
+.dock-pills { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; flex: 0 1 auto; }
+.dock-glass {
+  border: 0;
+  color: var(--ink);
+  background: rgba(44, 44, 46, 0.72);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.12) inset, 0 4px 16px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+  cursor: pointer;
+}
+/* With sfgl glass drawn under it, the element only carries its contents. */
+.dock-glass.has-glass { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+.diff-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  max-width: 100%;
+  padding: 0 14px 0 12px;
+  border-radius: 18px;
+  font: 600 14px/18px var(--font);
+  white-space: nowrap;
+}
+.diff-pill .pill-icon { display: inline-flex; color: var(--ink-2); }
+.diff-pill .pill-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.diff-pill .pill-branch { font-weight: 500; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; max-width: 12em; }
+.diff-pill .pill-files { font-weight: 500; color: var(--ink-2); }
+.pill-add { color: #32d74b; font-variant-numeric: tabular-nums; }
+.pill-del { color: #ff453a; font-variant-numeric: tabular-nums; }
+.dock-down-wrap {
+  flex: none;
+  margin-left: auto;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform-origin: 50% 100%;
+}
+.dock-down-wrap.shown { pointer-events: auto; }
+.dock-down {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+}
+.dock-down i { color: var(--ink); }
+@media (prefers-reduced-motion: reduce) {
+  .chat-dock { transition: none; }
+}
+
+/* The diff sheet */
+.diff-summary { margin: 4px 20px 12px; color: var(--ink-2); font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.diff-list { padding: 0 12px 40px; }
+.diff-empty, .diff-note { margin: 10px 8px; color: var(--ink-2); font-size: 14px; }
+.diff-file { margin: 0 0 10px; border-radius: 12px; background: #2c2c2e; overflow: hidden; }
+.diff-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 18px;
+  cursor: pointer;
+  list-style: none;
+}
+.diff-file-head::-webkit-details-marker { display: none; }
+.diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.diff-status { flex: none; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; background: rgba(120, 120, 128, 0.3); color: var(--ink-2); }
+.diff-status.added, .diff-status.untracked { background: rgba(50, 215, 75, 0.18); color: #32d74b; }
+.diff-status.deleted { background: rgba(255, 69, 58, 0.18); color: #ff453a; }
+.diff-counts { flex: none; display: inline-flex; gap: 6px; font-size: 13px; }
+.diff-body { border-top: 0.5px solid rgba(84, 84, 88, 0.6); overflow-x: auto; }
+.diff-lines { margin: 0; padding: 6px 0; font: 12px/18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; tab-size: 4; }
+.diff-line { display: block; padding: 0 12px; min-width: max-content; }
+.diff-line.add { background: rgba(50, 215, 75, 0.14); color: #c7f7cf; }
+.diff-line.del { background: rgba(255, 69, 58, 0.14); color: #ffd0cc; }
+.diff-line.hunk { color: #64d2ff; background: rgba(100, 210, 255, 0.08); }
+.diff-line.note { color: var(--ink-3); }
+
+/* The agent tree */
+.tree { padding: 4px 4px 40px; --tree-line: rgba(235, 235, 245, 0.2); --tree-indent: 34px; }
+.tree-root, .tree-children { list-style: none; margin: 0; padding: 0; }
+.tree-root + .tree-heading { margin-top: 22px; }
+.tree-heading { margin: 8px 4px 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); text-transform: none; }
+.tree-children { position: relative; margin-left: 27px; padding-left: calc(var(--tree-indent) - 9px); }
+.tree-node { position: relative; }
+.tree-children > .tree-node::before {
+  /* the elbow from the parent's line into this card */
+  content: '';
+  position: absolute;
+  left: calc(9px - var(--tree-indent));
+  top: 0;
+  width: calc(var(--tree-indent) - 12px);
+  height: 31px;
+  border-left: 1.5px solid var(--tree-line);
+  border-bottom: 1.5px solid var(--tree-line);
+  border-bottom-left-radius: 12px;
+}
+.tree-children > .tree-node:not(:last-child)::after {
+  /* the parent's line continuing past this card to its later children */
+  content: '';
+  position: absolute;
+  left: calc(9px - var(--tree-indent));
+  top: 0;
+  bottom: 0;
+  border-left: 1.5px solid var(--tree-line);
+}
+.tree-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 50px;
+  margin: 6px 0;
+  padding: 8px 14px 8px 9px;
+  border: 0;
+  border-radius: 25px;
+  background: #2c2c2e;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+button.tree-card:active { transform: scale(0.97); background: #3a3a3c; }
+.tree-card.root { background: #3a3a3c; }
+.tree-card.ref, .tree-card.missing { min-height: 40px; padding-top: 5px; padding-bottom: 5px; background: transparent; box-shadow: inset 0 0 0 1px var(--tree-line); cursor: default; }
+.tree-card.ref .tree-avatar, .tree-card.missing .tree-avatar { width: 26px; height: 26px; font-size: 13px; opacity: 0.7; }
+.tree-card.missing .tree-avatar { background: #48484a; }
+.tree-avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: hsl(var(--hue) 62% 46%);
+  color: #fff;
+  font-weight: 600;
+  font-size: 16px;
+}
+.tree-card.working .tree-avatar { animation: tree-pulse 1.6s ease-in-out infinite; }
+@keyframes tree-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.55); }
+  50% { box-shadow: 0 0 0 5px rgba(48, 209, 88, 0); }
+}
+.tree-text { display: flex; flex-direction: column; min-width: 0; }
+.tree-name { display: flex; align-items: center; gap: 6px; font-size: 16px; font-weight: 600; line-height: 21px; overflow-wrap: anywhere; }
+.tree-tag { padding: 1px 7px; border-radius: 9px; background: rgba(10, 132, 255, 0.22); color: #64d2ff; font-size: 11px; font-weight: 600; line-height: 16px; }
+.tree-sub { color: var(--ink-2); font-size: 13px; line-height: 17px; overflow-wrap: anywhere; }
+.tree-live { color: #30d158; font-size: 12px; font-weight: 600; line-height: 16px; }
+.tree-live:empty { display: none; }
+.tree-ref { flex: none; color: var(--ink-2); }
+.tree-edge {
+  position: absolute;
+  left: calc(-1 * var(--tree-indent) + 18px);
+  top: 50%;
+  transform: translate(-50%, -100%);
+  padding: 0 4px;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.tree-edge:empty { display: none; }
+.tree-note { margin: 18px 6px 0; color: var(--ink-2); font-size: 13px; line-height: 18px; }
+@media (prefers-reduced-motion: reduce) {
+  .tree-card.working .tree-avatar { animation: none; box-shadow: 0 0 0 2px #30d158; }
+}
+.tree-card.flash { animation: tree-flash 1.1s ease; }
+@keyframes tree-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0); }
+  25% { box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.8); }
+}

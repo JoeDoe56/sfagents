@@ -235,6 +235,13 @@ export function threadMessages(state: ConversationState, agent: string, target: 
   }
   const emittedReply = new Set<string>();
   for (const m of state.messages) {
+    if (m.role === 'user' && m.event === 'agent') {
+      // A third agent's message that reached the replying agent mid-run: only that agent saw it.
+      if (runAgent(m) !== agent) continue;
+      if (!current) exchanges.push((current = []));
+      current.push({ role: 'user', content: m.content });
+      continue;
+    }
     if (m.role === 'user') {
       if (m.agent === agent) {
         // Its own earlier message to the other agent (when it wrote first).
@@ -290,6 +297,10 @@ export class ThreadRecorder implements RunRecorder {
 
   user(content: string): void {
     this.message({ role: 'user', content });
+  }
+
+  note(from: string, content: string): void {
+    this.store.append({ kind: 'message', id: `m${this.store.state.nextSeq}`, run: this.runId, agent: from, role: 'user', content, event: 'agent' });
   }
 
   start(node: AgentNode): void {

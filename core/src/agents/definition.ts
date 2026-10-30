@@ -66,7 +66,14 @@ export interface AgentDefinition {
     apiKeyEnv: string;
   };
   model: string;
+  /**
+   * The instructions, with references to the prompts folder ("@name.txt"
+   * lines) already filled in by the loader. In the file it may also be a
+   * list of texts and references, joined in order.
+   */
   systemPrompt: string;
+  /** Prompt files the systemPrompt references (filled in by the loader), relative to the project. */
+  prompts?: string[];
   reasoning?: ReasoningEffort;
   temperature?: number;
   maxOutputTokens?: number;
@@ -90,6 +97,12 @@ export interface AgentDefinition {
     ask?: boolean;
     /** Agents this one may message ("N-name.json" entries of tools.allow). */
     agents?: AgentGrant[];
+    /**
+     * Tools left out of requests until the agent loads them with tool_search:
+     * "auto" (default: MCP tools, once there are more than 10), true (all MCP
+     * tools), false (none), or tool names and patterns ("mcp__github__*").
+     */
+    defer?: boolean | 'auto' | string[];
     /**
      * Set when tools.allow listed removed file tools (read_file, edit, ...):
      * they became `shell`, read-only ("read") unless one of them could write.
@@ -318,7 +331,11 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     c.fail('providerOptions', 'is required for provider "openai-compatible" (baseUrl and apiKeyEnv)');
   }
 
-  const systemPrompt = c.string(raw['systemPrompt'], 'systemPrompt', { nonEmpty: true, maxLength: 200_000 });
+  // A list is joined in order; lines like "@working-rules.txt" are filled in from the prompts folder by the loader.
+  const systemPrompt = Array.isArray(raw['systemPrompt'])
+    ? (c.stringArray(raw['systemPrompt'], 'systemPrompt', { nonEmptyItems: true }) ?? []).join('\n\n')
+    : c.string(raw['systemPrompt'], 'systemPrompt', { nonEmpty: true, maxLength: 200_000 });
+  if (!systemPrompt.trim()) c.fail('systemPrompt', 'must not be empty');
 
   let reasoning: ReasoningEffort | undefined;
   if (raw['reasoning'] !== undefined) {
@@ -358,8 +375,14 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
 
   let tools: AgentDefinition['tools'];
   if (raw['tools'] !== undefined) {
-    const t = c.object(raw['tools'], 'tools', ['allow', 'mcpServers', 'autoApprove', 'ask']);
+    const t = c.object(raw['tools'], 'tools', ['allow', 'mcpServers', 'autoApprove', 'ask', 'defer']);
     const ask = c.boolean(t['ask'], 'tools.ask');
+    let defer: boolean | 'auto' | string[] | undefined;
+    if (t['defer'] === 'auto' || typeof t['defer'] === 'boolean') defer = t['defer'] as boolean | 'auto';
+    else if (t['defer'] !== undefined) {
+      if (!Array.isArray(t['defer'])) c.fail('tools.defer', 'must be "auto", true, false, or a list of tool names and patterns like "mcp__github__*"');
+      defer = c.stringArray(t['defer'], 'tools.defer', { unique: true, nonEmptyItems: true });
+    }
     const allowAll = c.stringArray(t['allow'], 'tools.allow', { unique: true });
     const allow: string[] = [];
     const agents: AgentGrant[] = [];
@@ -445,6 +468,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       mcpServers,
       autoApprove,
       ...(ask !== undefined ? { ask } : {}),
+      ...(defer !== undefined ? { defer } : {}),
       ...(agents.length ? { agents } : {}),
       ...(legacyInfo ? { legacy: legacyInfo } : {}),
     };

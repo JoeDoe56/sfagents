@@ -19,19 +19,20 @@ import { createMonitor } from './monitor.js';
 import { openMonitorWindow } from './windows.js';
 import { peekOpen } from './peek.js';
 import { createFileManager } from './files.js';
-import { sheetOpen } from './modalsheet.js';
+import { sheetOpen, openSheet } from './modalsheet.js';
 import { openAgentSheet, agentSheetOpen } from './agentsheet.js';
 import { openSettingsSheet, settingsEvent } from './settingssheet.js';
 import { openTerminal, terminalsChanged } from './terminal.js';
 import { openSearch } from './searchsheet.js';
 import { openApp } from './appview.js';
 import { openRemoteDesktop, remoteEvent } from './remotesheet.js';
-import { goToSignIn } from './api.js';
+import { goToSignIn, getJson } from './api.js';
 import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installBubbleMenus } from './bubblemenu.js';
 import { springAnimate, springyScroll } from './springs.js';
+import { createChatDock, renderDiff } from './chatdock.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
 configureUi({ scheme: 'dark' });
@@ -141,6 +142,22 @@ const SEND_FADE = { duration: 260 };
 
 let clearance = 100;
 let rail = null; // created below
+let dock = null; // the diff pills and the scroll-down circle (created below)
+// What the dock adds above the bar: all of it lifts the rail; the pills also pad the conversation.
+const dockSpace = { height: 0, pills: 0 };
+let sheetT = 0;
+/** Places what floats above the bar (the rail, the dock) and pads the conversation's end. */
+function layoutAboveBar(next = clearance) {
+  const covered = sheetT > 0.03;
+  railEl.style.bottom = `${Math.round(next + 12 + (covered ? 0 : dockSpace.height))}px`;
+  railEl.classList.toggle('covered', covered);
+  const pad = Math.round(next + 18 + (covered ? 0 : dockSpace.pills));
+  if (thread.style.getPropertyValue('--chat-bottom') !== `${pad}px`) {
+    const atBottom = nearBottom();
+    thread.style.setProperty('--chat-bottom', `${pad}px`);
+    if (atBottom) scrollToBottom();
+  }
+}
 const railEl = $('rail');
 sheetScroll.hidden = false;
 
@@ -175,15 +192,11 @@ const sheet = createSheet({
   header: composer.bar,
   content: sheetScroll,
   onMove: ({ t, clearance: next }) => {
-    // The topic rail sits above the collapsed bar and hides while the sheet is up.
-    railEl.style.bottom = `${Math.round(next + 12)}px`;
-    railEl.classList.toggle('covered', t > 0.03);
-    if (Math.abs(next - clearance) > 0.5) {
-      const atBottom = nearBottom();
-      clearance = next;
-      thread.style.setProperty('--chat-bottom', `${Math.round(clearance + 18)}px`);
-      if (atBottom) scrollToBottom();
-    }
+    // The topic rail and the dock sit above the collapsed bar and hide while the sheet is up.
+    sheetT = t;
+    if (Math.abs(next - clearance) > 0.5) clearance = next;
+    layoutAboveBar(next);
+    dock?.setBar({ clearance: next, covered: t > 0.03 });
   },
   onDetent: () => {
     if (monitor) updateMonitor();
@@ -215,6 +228,48 @@ window.addEventListener('sheetchange', () => updateMonitor());
 window.addEventListener('peekchange', updateMonitor);
 window.sfagents.monitor = monitor;
 sheet.present('collapsed');
+
+// ------------------------------------------------------------------ the dock: diff pills and scroll to the end
+
+dock = createChatDock({
+  layer: () => sheet.layer ?? null,
+  bar: composer.bar.el,
+  chat,
+  thread,
+  onOpenDiff: (repo, pill) => openDiff(repo, pill),
+  onLayout: (space) => {
+    Object.assign(dockSpace, space);
+    layoutAboveBar();
+  },
+});
+dock.setBar({ clearance, covered: false });
+
+/** A repository's uncommitted changes, in a sheet that grows out of its pill. */
+function openDiff(repo, pill) {
+  openSheet({
+    title: repo.name,
+    from: pill,
+    className: 'diff-sheet',
+    detents: ['large'],
+    build: (ctx) => {
+      const sub = document.createElement('p');
+      sub.className = 'diff-summary';
+      sub.textContent = `${repo.branch && repo.branch !== 'HEAD' ? `${repo.branch} · ` : ''}${repo.files} file${repo.files === 1 ? '' : 's'} changed · ${repo.path}`;
+      const list = document.createElement('div');
+      list.className = 'diff-list';
+      list.textContent = 'Loading…';
+      ctx.body.append(sub, list);
+      getJson(`/api/diffs/${encodeURIComponent(repo.id)}`)
+        .then((data) => {
+          renderDiff(list, data);
+          ctx.refresh();
+        })
+        .catch((error) => {
+          list.textContent = error.message;
+        });
+    },
+  });
+}
 
 // ------------------------------------------------------------------ time stamps
 
@@ -396,6 +451,7 @@ function decorate(out) {
 
 /** A tool call: a line, a link to a thread between agents, and an artifact's card after the call that made it. */
 function pushActivity(push, key, it) {
+  if (it.hidden) return; // a step that shows as something else (a message to the person)
   if (it.thread) push({ key, type: 'threadlink', text: it.text, status: it.status, thread: it.thread, agent: it.agent });
   else push({ key, type: 'activity', text: it.text, status: it.status });
   if (it.artifact && it.status !== 'error' && it.status !== 'denied') {
@@ -948,6 +1004,7 @@ function applySnapshot(s) {
   if (s.view) fileManager.applyView(s.view.files);
   state.limits = s.limits || state.limits;
   setArtifacts(s.artifacts);
+  dock.setRepos(s.diffs ?? []);
   setSections(s.sections);
   if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
   for (const n of s.notices || []) typeof n === 'string' ? notice(n) : notice(n.text, n.level);
@@ -1168,6 +1225,7 @@ function listen() {
     notice(text, level === 'error' ? 'error' : '');
   });
   stream.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
+  stream.addEventListener('diffs', (e) => dock.setRepos(JSON.parse(e.data).repos));
   stream.addEventListener('reactions', (e) => {
     state.reactions = JSON.parse(e.data).reactions ?? {};
     render();
@@ -1233,9 +1291,10 @@ function setArtifacts(list) {
   render(); // the chat's artifact cards
 }
 
-/** A file artifact opens in the file manager's Quick Look; without a file on disk, in the artifact viewer. */
+/** A file artifact opens in the file manager's Quick Look, a folder in the file manager itself; without a file on disk, in the artifact viewer. */
 function openArtifact(a) {
   if (a.type === 'app') return openApp(a);
+  if (a.type === 'folder' && a.file && !a.missing) return openFiles(a.file);
   if (!a.file || a.missing) return viewer.show(a);
   fileManager.quickLookFile(a.file).catch(() => viewer.show(a));
 }

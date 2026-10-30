@@ -14,6 +14,7 @@ import { createRow, createSection, createGroup, createButton, icon as sfIcon } f
 import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showError, confirmDialog, toast } from './dialogs.js';
 import { showMenu } from './menu.js';
+import { openAgentTree } from './agenttree.js';
 
 const LEVEL_NAMES = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -390,6 +391,23 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     });
   }
 
+  function showTree() {
+    const tree = openAgentTree({
+      current: staged.agent ?? info?.id,
+      onEditFile,
+      // Picking an agent in the tree stages it here, as the menu does.
+      onUseAgent: (id) => {
+        const a = agentById(id);
+        if (!a) return;
+        staged.agent = a.id;
+        staged.account = a.id === saved.agent ? saved.account : null;
+        staged.reasoning = a.id === saved.agent ? saved.reasoning : (a.reasoning ?? null);
+        showStaged();
+        tree.close();
+      },
+    });
+  }
+
   // The gear opens the agent's file in the file manager's editor.
   const gear = createButton({
     symbol: 'gear',
@@ -411,8 +429,11 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       parts.agentRow = createRow({ title: 'Agent', value: info?.name ?? info?.id ?? 'Agent', accessory: 'menu', wrap: true, onTap: pickAgent });
       parts.accountRow = createRow({ title: 'Account', value: info?.account ?? '', accessory: 'menu', onTap: pickAccount });
       parts.accountRow.el.hidden = true;
+      // Who can message whom: a sheet of its own.
+      parts.treeRow = createRow({ icon: 'person.2', iconTint: '#5e5ce6', title: 'Agent Tree', accessory: 'chevron', onTap: showTree });
       parts.agentSection = createSection({ rows: [parts.agentRow, parts.accountRow], note: info?.model ?? '' });
       const line = parts.agentSection.el;
+      const treeSection = createSection({ rows: [parts.treeRow] }).el;
 
       const effort = el('div', 'ag-effort');
       const label = el('p', 'ag-label ag-unit');
@@ -441,7 +462,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       marker.dataset.mediumEnd = '';
 
       parts.details = el('div', 'ag-details');
-      body.append(line, effort, plan.element, bar.element, marker, parts.details);
+      body.append(line, treeSection, effort, plan.element, bar.element, marker, parts.details);
       // The slider's capsule is Liquid Glass, as ChatGPT's is.
       sheet.addGlass(slider.element.querySelector('.ag-track'), 'control');
     },

@@ -17,12 +17,26 @@ import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, 
 import { ARTIFACT_GUIDANCE, ArtifactToolNames, artifactIndex, createArtifactTools } from '../conversation/artifacts.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
-import { AGENT_MESSAGING_GUIDANCE, MessageAgentTool, type AgentMessenger } from '../agents/message-agent.js';
+import {
+  AGENT_MESSAGING_GUIDANCE,
+  MESSAGE_USER_GUIDANCE,
+  MessageAgentTool,
+  THREAD_MESSAGING_GUIDANCE,
+  createMessageUserTool,
+  createWaitTool,
+  mailText,
+  type AgentMessenger,
+  type ChildRun,
+  type MessageOutcome,
+  type RunLink,
+} from '../agents/message-agent.js';
+import { Mailbox } from '../agents/mailbox.js';
 import { ThreadRecorder, ThreadService, threadMessages } from '../agents/threads.js';
 import { newRunId, toChatMessages } from '../conversation/service.js';
 import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { TOOL_SEARCH, ToolSearchTool, calledToolNames, deferredToolNames, deferredToolsNote } from '../tools/tool-search.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
 import { ShellTool } from '../tools/shell.js';
 import { WorkspaceContext } from '../permissions/workspace.js';
@@ -100,6 +114,21 @@ interface RunParams {
    * sees them at its next step, and before the run would end.
    */
   inbox?: () => ChatMessage[];
+  /** Resolves when the person's next message is waiting (root sessions that can answer). */
+  waitForPerson?: (signal: AbortSignal) => Promise<void>;
+  /** How other agents reach this run while it works (made by messageAgent for thread runs). */
+  link?: RunLink;
+}
+
+/** Resolves once `p` settles and the bookkeeping after it (a few ticks) is done. */
+function settled(p: Promise<unknown>): Promise<void> {
+  const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+  return p.then(tick, tick).then(tick).then(tick);
+}
+
+/** A link for a run nobody can reach (context estimates, one-off tool lists). */
+function idleLink(agent: string): RunLink {
+  return { agent, mailbox: new Mailbox(), signal: new AbortController().signal, children: new Map() };
 }
 
 /** Identity of the provider/model an agent uses, as recorded in run_start. */
@@ -119,11 +148,11 @@ function addUsage(total: TokenUsage, add?: TokenUsage): void {
 
 /** A call other than a section choice, made after a section reminder: refused without running. */
 function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
-  const content = `Not run: only keep_section, add_section or edit_section can be called now. Your reply was already delivered.`;
+  const content = `Not run: only keep_section or add_section can be called now. Your reply was already delivered.`;
   return { message: { role: 'tool', tool_call_id: call.id, content }, activity: { name: call.name, ok: false }, status: 'error' };
 }
 
-export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string): string {
+export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink): string {
   const d = node.definition;
   const env = [
     `Agent id: ${node.id}`,
@@ -134,11 +163,14 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
       : 'Workspace: none (this agent has no filesystem access)',
     `Tools available to you: ${toolNames.length ? toolNames.join(', ') : '(none)'}`,
   ];
+  const partner = link?.partner?.id;
   if (toolNames.includes(ToolNames.MESSAGE_AGENT)) {
-    env.push(`Agents you can message with ${ToolNames.MESSAGE_AGENT}: ${[...node.grants.keys()].join(', ')}`);
+    env.push(`Agents you can message with ${ToolNames.MESSAGE_AGENT}: ${[...new Set([...node.grants.keys(), ...(partner ? [partner] : [])])].join(', ')}`);
   }
   let guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
-  if (toolNames.includes(ToolNames.MESSAGE_AGENT)) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
+  if (toolNames.includes(ToolNames.MESSAGE_AGENT) && node.grants.size > 0) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
+  if (partner && toolNames.includes(ToolNames.MESSAGE_AGENT)) guidance += `\n\n${THREAD_MESSAGING_GUIDANCE}`;
+  if (toolNames.includes(ToolNames.MESSAGE_USER)) guidance += `\n\n${MESSAGE_USER_GUIDANCE}`;
   if (toolNames.includes(ArtifactToolNames.CREATE)) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
   if (toolNames.includes(ChatToolNames.REACT)) guidance += `\n\n${CHAT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
@@ -147,7 +179,7 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
 /** What an agent answering another agent in a thread is told about it. */
 function threadNote(node: AgentNode, other: string, omitted: number): string {
   return `<thread>
-You are "${node.id}", answering "${other}" in your persistent thread with it. Its messages arrive as user messages; your final reply goes back to it as the answer. Answer what it asked, terse and structured for an agent to use. If you need something from it, say so in your reply; it can write back in this thread.${omitted ? ` ${omitted} earlier exchange(s) of this thread are not shown.` : ''}
+You are "${node.id}", answering "${other}" in your persistent thread with it. Its messages arrive as user messages; your final reply goes back to it as the answer. Answer what it asked, terse and structured for an agent to use. If you need something from it while you work, message it (it keeps working too, and its answer arrives as a message); it may also send you follow-ups while you work.${omitted ? ` ${omitted} earlier exchange(s) of this thread are not shown.` : ''}
 </thread>`;
 }
 
@@ -203,6 +235,7 @@ export class AgentRuntime implements AgentMessenger {
     recorder?: RunRecorder,
     conversation?: ConversationService,
     role: 'main' | 'thread' = 'main',
+    link: RunLink = idleLink(node.id),
   ): Promise<Map<string, AnyDeclarativeTool>> {
     const d = node.definition;
     // Access defaults depend on where the agent works (see conversationAccess).
@@ -252,9 +285,12 @@ export class AgentRuntime implements AgentMessenger {
       }
     }
 
-    if (node.grants.size > 0) {
-      tools.set(ToolNames.MESSAGE_AGENT, new MessageAgentTool(this, node, this.tree.byId, agentPath, emit, conversation));
+    if (node.grants.size > 0 || link.partner) {
+      tools.set(ToolNames.MESSAGE_AGENT, new MessageAgentTool(this, node, this.tree.byId, agentPath, emit, conversation, link));
+      tools.set(ToolNames.WAIT_FOR_MESSAGES, createWaitTool(link));
     }
+    // The agent replying to the person can talk with them mid-turn.
+    if (role === 'main' && conversation && conversation === this.conversation) tools.set(ToolNames.MESSAGE_USER, createMessageUserTool(link));
     // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
     if (conversation?.file) {
       for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
@@ -280,6 +316,7 @@ export class AgentRuntime implements AgentMessenger {
       stateFiles: state.filter((p) => p !== stateDir && !!path.extname(p)),
       protectedFiles: this.tree.protectedFiles,
       agentsDir: this.tree.agentsDir,
+      promptsDir: this.tree.promptsDir,
       access: node.access,
       network: node.definition.workspace?.network === true,
     });
@@ -353,10 +390,18 @@ export class AgentRuntime implements AgentMessenger {
       controller.abort(new Error('agent timeout'));
     }, timeoutMs);
     const signal = controller.signal;
+    // Agents this run starts without waiting stop when it does.
+    const children = new AbortController();
+    signal.addEventListener('abort', () => children.abort(signal.reason), { once: true });
+    const link: RunLink = params.link ?? { agent: node.id, mailbox: new Mailbox(), signal, children: new Map() };
+    link.signal = children.signal;
+    if (recorder) link.recorder = recorder;
+    if (params.waitForPerson) link.waitForPerson = params.waitForPerson;
 
     const finish = (status: AgentTerminateMode, error?: string): AgentRunResult => {
       clearTimeout(timer);
       params.signal.removeEventListener('abort', onParentAbort);
+      if (link.children.size) children.abort(new Error('The agent that started this one stopped.'));
       let result: AgentRunResult = {
         agentId: node.id,
         status,
@@ -392,7 +437,7 @@ export class AgentRuntime implements AgentMessenger {
     let tools: Map<string, AnyDeclarativeTool>;
     try {
       provider = this.provider(d);
-      tools = await this.buildTools(node, agentPath, emit, recorder, params.conversation, params.role ?? 'main');
+      tools = await this.buildTools(node, agentPath, emit, recorder, params.conversation, params.role ?? 'main', link);
     } catch (error) {
       const message = getErrorMessage(error);
       emit({ type: 'error', agentPath, message });
@@ -407,14 +452,20 @@ export class AgentRuntime implements AgentMessenger {
       throw e;
     }
 
-    const declarations = [...tools.values()].map((t) => t.schema);
-    let systemExtra: string | undefined;
+    // Deferred tools stay out of the requests until tool_search loads them.
+    const deferred = new Map([...deferredToolNames(tools, d.tools?.defer)].map((name) => [name, tools.get(name)!]));
+    const loadedTools = new Set<string>();
+    if (deferred.size) tools.set(TOOL_SEARCH, new ToolSearchTool(deferred, loadedTools));
+    const activeNames = () => [...tools.keys()].filter((name) => !deferred.has(name) || loadedTools.has(name));
+    const declarations = () => activeNames().map((name) => tools.get(name)!.schema);
+    const deferredNote = deferred.size ? deferredToolsNote(deferred) : undefined;
+    let systemExtra: string | undefined = deferredNote;
     if (params.prepareContext) {
       try {
-        const base = buildSystemPrompt(node, [...tools.keys()]);
-        const prepared = params.prepareContext(base + JSON.stringify(declarations));
+        const base = buildSystemPrompt(node, activeNames(), deferredNote, link);
+        const prepared = params.prepareContext(base + JSON.stringify(declarations()));
         messages.splice(0, messages.length, ...prepared.messages);
-        systemExtra = prepared.systemExtra;
+        systemExtra = [deferredNote, prepared.systemExtra].filter(Boolean).join('\n\n') || undefined;
         if (prepared.report) emit({ type: 'context', agentPath, ...prepared.report });
       } catch (error) {
         const message = getErrorMessage(error);
@@ -426,7 +477,9 @@ export class AgentRuntime implements AgentMessenger {
       const index = artifactIndex(params.conversation);
       if (index) systemExtra = systemExtra ? `${systemExtra}\n\n${index}` : index;
     }
-    const systemPrompt = buildSystemPrompt(node, [...tools.keys()], systemExtra);
+    // Tools called earlier in the conversation stay loaded (their calls are in the history).
+    for (const name of calledToolNames(messages)) if (deferred.has(name)) loadedTools.add(name);
+    const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link);
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
     const maxTurns = d.limits?.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -443,9 +496,15 @@ export class AgentRuntime implements AgentMessenger {
       if (sectionReminders === 0) record(fn);
     };
     // Messages the person sent meanwhile join the run before the next request.
+    // So do messages from other agents (replies, questions, follow-ups).
     const takeInbox = (): boolean => {
-      if (!params.inbox || sectionReminders > 0) return false;
-      const arrived = params.inbox();
+      if (sectionReminders > 0) return false;
+      const arrived = params.inbox?.() ?? [];
+      for (const item of link.mailbox.take()) {
+        recordTurn(() => item.record?.());
+        emit({ type: 'agent_message', agentPath, from: item.from, ...(item.thread ? { thread: item.thread } : {}), text: item.content });
+        arrived.push({ role: 'user', content: item.content });
+      }
       if (!arrived.length) return false;
       messages.push(...arrived);
       sectionChosen = false;
@@ -461,7 +520,7 @@ export class AgentRuntime implements AgentMessenger {
         for await (const event of provider.stream({
           model: d.model,
           messages,
-          tools: declarations,
+          tools: declarations(),
           reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,
           maxOutputTokens: d.maxOutputTokens,
@@ -511,7 +570,25 @@ export class AgentRuntime implements AgentMessenger {
             messages.push({ role: 'user', content: SECTION_REMINDER });
             continue;
           }
-          emit({ type: 'warning', agentPath, message: 'The model ended its turn without keep_section, add_section or edit_section; this turn stays in the current section.' });
+          emit({ type: 'warning', agentPath, message: 'The model ended its turn without keep_section or add_section; this turn stays in the current section.' });
+        }
+        // Agents it started are still working: the turn waits for what they send, then goes on.
+        if (link.children.size > 0) {
+          sectionReminders = 0;
+          let arrived = false;
+          while (link.children.size > 0 && !(arrived = takeInbox())) {
+            try {
+              await Promise.race([
+                link.mailbox.changed(signal),
+                ...(params.waitForPerson ? [params.waitForPerson(signal)] : []),
+                // A reply already taken by a waiting call ends that agent's work without a message.
+                ...[...link.children.values()].map((c) => settled(c.done)),
+              ]);
+            } catch {
+              return finish(...stopReason());
+            }
+          }
+          if (arrived || takeInbox()) continue;
         }
         return finish(AgentTerminateMode.GOAL);
       }
@@ -571,10 +648,14 @@ export class AgentRuntime implements AgentMessenger {
   }
 
   /**
-   * AgentMessenger: `from` writes to `to` in their thread; `to` answers with
-   * the thread as its context, and its reply is returned. The exchange is
-   * recorded in the thread's file, and the thread is listed as an artifact
-   * of the main conversation the first time it is used there.
+   * AgentMessenger: `from` writes to `to` in their thread. When `to` is
+   * already working in that thread for `from`, the message joins its run
+   * at its next step. Otherwise `to` starts answering with the thread as its
+   * context: with `wait`, its reply (or the first message it sends `from`)
+   * is returned; without, this returns at once and the reply arrives in the
+   * writer's mailbox. The exchange is recorded in the thread's file, and the
+   * thread is listed as an artifact of the main conversation the first time
+   * it is used there.
    */
   async messageAgent(params: {
     from: AgentNode;
@@ -583,18 +664,37 @@ export class AgentRuntime implements AgentMessenger {
     max: number;
     message: string;
     thread?: number;
+    wait?: boolean;
     signal: AbortSignal;
     emit: (event: RuntimeEvent) => void;
     callId?: string;
     conversation?: ConversationService;
-  }): Promise<{ result: AgentRunResult; thread: string; instance: number }> {
+    link?: RunLink;
+  }): Promise<MessageOutcome> {
     const { from, signal } = params;
     // The newest definition of the agent written to (its file may have changed since the writer started).
     const to = this.tree.byId.get(params.to.id);
     if (from.grants.get(params.to.id) === undefined || !to) {
       throw new Error(`"${from.id}" may not message "${params.to.id}"${to ? '' : ' (it is no longer in the agents folder)'}`);
     }
+    const writer = params.link;
+    const wait = params.wait !== false || !writer;
+
+    // Still working for this writer: the message joins its run.
+    const running = writer ? [...writer.children.values()].filter((c) => c.agent === to.id) : [];
+    let child = params.thread !== undefined ? running.find((c) => c.instance === params.thread) : undefined;
+    // No thread given and every thread it may use is busy with its own work: the newest one.
+    if (!child && params.thread === undefined && running.length >= params.max) child = running[running.length - 1];
+    if (child && writer) {
+      const content = mailText(from.id, child.instance, params.message);
+      const c = child;
+      c.link.mailbox.deliver({ from: from.id, thread: c.thread, content, record: () => c.record(params.message) });
+      if (!wait) return { kind: 'delivered', agent: to.id, thread: c.thread, instance: c.instance };
+      return this.awaitChild(c, writer, signal);
+    }
+
     const lease = await this.threads.acquire(from.id, to.id, params.max, signal, params.thread);
+    let started: ChildRun | undefined;
     try {
       const run = newRunId();
       const store = lease.store;
@@ -609,22 +709,83 @@ export class AgentRuntime implements AgentMessenger {
         const { messages, omitted } = threadMessages(store.state, to.id, target, Math.max(1000, usable));
         return { messages, systemExtra: threadNote(to, from.id, omitted) };
       };
-      const result = await this.run({
+      // How the writer and this run reach each other while both work.
+      const childLink: RunLink = {
+        agent: to.id,
+        mailbox: new Mailbox(),
+        signal,
+        children: new Map(),
+        ...(writer ? { partner: { id: from.id, thread: lease.key, instance: lease.instance, link: writer } } : {}),
+      };
+      const runSignal = writer ? writer.signal : signal;
+      const done = this.run({
         node: to,
         agentPath: [...params.fromPath, to.id],
         messages: [],
         task: params.message,
-        signal,
+        signal: runSignal,
         emit: params.emit,
         recorder,
         conversation: params.conversation,
         prepareContext,
         role: 'thread',
         threadWith: from.id,
+        link: childLink,
       });
-      return { result, thread: lease.key, instance: lease.instance };
+      started = {
+        agent: to.id,
+        thread: lease.key,
+        instance: lease.instance,
+        link: childLink,
+        record: (text) => store.append({ kind: 'message', id: `m${store.state.nextSeq}`, run, role: 'user', agent: from.id, content: text }),
+        done,
+      };
+      const c = started;
+      if (writer) writer.children.set(lease.key, c);
+      void done
+        .then(
+          async (result) => {
+            if (!writer) return;
+            // A writer waiting for this reply gets it as its call's result instead.
+            await new Promise((resolve) => setImmediate(resolve));
+            if (c.collected) return;
+            const status = result.status === AgentTerminateMode.GOAL ? 'replied' : `${result.status.toLowerCase()}${result.error ? `: ${result.error}` : ''}`;
+            const content = mailText(to.id, c.instance, result.text || '(no reply text)', status);
+            writer.mailbox.deliver({ from: to.id, thread: c.thread, content, record: () => writer.recorder?.note?.(to.id, content) });
+          },
+          () => undefined,
+        )
+        .finally(() => {
+          writer?.children.delete(c.thread);
+          lease.release();
+        });
+      if (!wait) return { kind: 'started', agent: to.id, thread: lease.key, instance: lease.instance };
+      return await this.awaitChild(c, writer, signal);
+    } catch (error) {
+      if (!started) lease.release();
+      throw error;
+    }
+  }
+
+  /** The child's final reply, or the first message it sends the writer meanwhile. */
+  private async awaitChild(child: ChildRun, writer: RunLink | undefined, signal: AbortSignal): Promise<MessageOutcome> {
+    if (!writer) return { kind: 'replied', result: await child.done, thread: child.thread, instance: child.instance };
+    const inner = new AbortController();
+    const onAbort = () => inner.abort(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      const first = await Promise.race([
+        child.done.then((result) => ({ result })),
+        writer.mailbox.next((m) => m.from === child.agent && m.thread === child.thread, inner.signal).then((mail) => ({ mail })),
+      ]);
+      if ('result' in first) {
+        child.collected = true;
+        return { kind: 'replied', result: first.result, thread: child.thread, instance: child.instance };
+      }
+      return { kind: 'message', agent: child.agent, thread: child.thread, instance: child.instance, message: first.mail.content };
     } finally {
-      lease.release();
+      signal.removeEventListener('abort', onAbort);
+      inner.abort();
     }
   }
 
@@ -656,6 +817,8 @@ export interface SendOptions {
   event?: 'reaction';
   /** Messages that arrived since; the model takes them between its steps. */
   inbox?: () => InboxItem[];
+  /** Resolves when the person's next message is waiting in the inbox (so the agent can wait for an answer). */
+  waitForInput?: (signal: AbortSignal) => Promise<void>;
   /** Called when a message from the inbox is recorded (the model is about to read it). */
   onInput?: (record: MessageRecord) => void;
   /** Extra system text for this run (read receipts), read when the context is built. */
@@ -725,6 +888,11 @@ export class AgentSession {
     const definition = this.node.definition;
     const conversation = this.conversation;
     const tools = await this.runtime.buildTools(this.node, [this.node.id], () => undefined, undefined, conversation);
+    // Deferred tools are not sent until loaded: only tool_search and the prompt's list of them count.
+    const deferred = new Map([...deferredToolNames(tools, definition.tools?.defer)].map((name) => [name, tools.get(name)!]));
+    const loaded = new Set(conversation.state.records.flatMap((r) => (r.kind === 'message' && r.tool ? [r.tool] : [])));
+    for (const name of deferred.keys()) if (!loaded.has(name)) tools.delete(name);
+    if (deferred.size) tools.set(TOOL_SEARCH, new ToolSearchTool(deferred, new Set()));
     const list: ContextTool[] = [...tools.entries()].map(([name, tool]) => ({
       name,
       group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.MESSAGE_AGENT ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
@@ -733,7 +901,7 @@ export class AgentSession {
     }));
     const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
     const index = conversation.file && artifactAccess(definition, 0) !== 'none' ? artifactIndex(conversation) : undefined;
-    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()]), list, {
+    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined), list, {
       retrievable,
       resolveAttachment: (ref) => conversation.readAttachment(ref),
       ...(index ? { extraSystem: index } : {}),
@@ -806,6 +974,7 @@ export class AgentSession {
           prepareContext,
           role: 'main',
           ...(inbox ? { inbox } : {}),
+          ...(inbox && options.waitForInput ? { waitForPerson: options.waitForInput } : {}),
           ...(this.reasoning ? { reasoning: this.reasoning } : {}),
         })
         .then(

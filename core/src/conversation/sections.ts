@@ -199,13 +199,16 @@ export interface EditSectionInput {
   parent?: string | null;
   assign?: string[];
   unassign?: string[];
+  /** Sections to merge into this one: their messages and subsections move here. */
+  merge?: string[];
   current?: boolean;
-  expectedRevision: number;
+  /** Required for a merge; optional otherwise (checked when given). */
+  expectedRevision?: number;
 }
 
 export function editSection(store: ConversationStore, input: EditSectionInput, activeRun?: string): SectionRecord {
   const state = store.state;
-  const expected = checkRevision(state, input.expectedRevision, true);
+  const expected = checkRevision(state, input.expectedRevision, !!input.merge?.length);
   if (!state.sections.has(input.section)) throw new SectionOperationError(`Unknown section ${input.section}`);
   if (input.parent) {
     if (!state.sections.has(input.parent)) throw new SectionOperationError(`Unknown parent section ${input.parent}`);
@@ -217,8 +220,16 @@ export function editSection(store: ConversationStore, input: EditSectionInput, a
   }
   const assign = input.assign?.length ? resolveMessageRefs(state, input.assign, activeRun) : undefined;
   const unassign = input.unassign?.length ? resolveMessageRefs(state, input.unassign, activeRun) : undefined;
-  if (input.title === undefined && input.parent === undefined && !assign && !unassign && input.current === undefined) {
-    throw new SectionOperationError('Nothing to change: give a title, parent, assign, unassign or current');
+  const merge = input.merge?.length ? [...new Set(input.merge)] : undefined;
+  for (const id of merge ?? []) {
+    if (id === input.section) throw new SectionOperationError(`Section ${id} cannot be merged into itself`);
+    if (!state.sections.has(id)) throw new SectionOperationError(state.merged.has(id) ? `Section ${id} was already merged into ${state.liveSection(id)}` : `Unknown section ${id}`);
+    for (let c: string | null = input.section; c; c = state.sections.get(c)?.parent ?? null) {
+      if (c === id) throw new SectionOperationError(`${input.section} is inside ${id}; merge ${input.section} into ${id} instead`);
+    }
+  }
+  if (input.title === undefined && input.parent === undefined && !assign && !unassign && !merge && input.current === undefined) {
+    throw new SectionOperationError('Nothing to change: give a title, parent, messages, merge or make_current');
   }
   return store.append({
     kind: 'section',
@@ -228,6 +239,7 @@ export function editSection(store: ConversationStore, input: EditSectionInput, a
     ...(input.parent !== undefined ? { parent: input.parent } : {}),
     ...(assign ? { assign } : {}),
     ...(unassign ? { unassign } : {}),
+    ...(merge ? { merge } : {}),
     ...(input.current !== undefined ? { current: input.current } : {}),
     expected,
     rev: expected + 1,
@@ -363,8 +375,10 @@ function ownerOfToolResult(state: ConversationState, tool: MessageRecord): Messa
 }
 
 /** The section and all its descendants (or the unassigned pseudo-section). */
-function sectionScope(state: ConversationState, section: string): Set<string> {
-  if (section === UNASSIGNED) return new Set([UNASSIGNED]);
+function sectionScope(state: ConversationState, requested: string): Set<string> {
+  if (requested === UNASSIGNED) return new Set([UNASSIGNED]);
+  // A merged section's messages are in the one it went into.
+  const section = state.liveSection(requested);
   if (!state.sections.has(section)) throw new SectionOperationError(`Unknown section ${section}`);
   const scope = new Set([section]);
   let grew = true;
@@ -425,7 +439,8 @@ export function fetchSection(state: ConversationState, section: string, options:
   }
   const pages = pagesList.length;
   const page = Math.max(1, Math.min(options.page ?? 1, pages));
-  const title = section === UNASSIGNED ? 'Unassigned messages' : `[${section}] ${state.sections.get(section)!.title}`;
+  const live = section === UNASSIGNED ? section : state.liveSection(section);
+  const title = section === UNASSIGNED ? 'Unassigned messages' : `[${live}] ${state.sections.get(live)!.title}${live !== section ? ` (${section} was merged into it)` : ''}`;
   const body = pagesList[page - 1]!.join('\n\n');
   return {
     text: [

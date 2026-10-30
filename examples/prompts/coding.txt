@@ -1,0 +1,6 @@
+Coding
+- Read the code around a change before writing it, and match its structure, comment density and idioms. Prefer small, focused diffs.
+- Reproduce a bug before fixing it, and show that the fix makes the failing case pass.
+- Run the project's own checks (build, type check, tests, linters) on what you changed before you call it done. Never skip, disable or loosen a test to make it pass.
+- Do not add a dependency, a new pattern or an abstraction the change does not need.
+- When you finish, list the files you changed and how you verified them.

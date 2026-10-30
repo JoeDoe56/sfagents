@@ -174,6 +174,11 @@ export abstract class DeclarativeTool<
     readonly parameterSchema: JsonSchema,
   ) {}
 
+  /** Whether the tool may be left out of requests until tool_search loads it (see tools.defer). */
+  get deferrable(): boolean {
+    return false;
+  }
+
   get schema(): FunctionDeclaration {
     return {
       name: this.name,

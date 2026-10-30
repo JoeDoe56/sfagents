@@ -72,9 +72,10 @@ import type { LhmReader } from './lhm.js';
 import type { Privileges } from './privileges.js';
 import { runningVersion } from './version.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
-import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
+import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, messageUserText, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
 import { isEmoji, ReactionStore } from './reactions.js';
 import { LogBook } from './logs.js';
+import { changedRepos, repoDiff, type RepoChanges } from './diffs.js';
 import { SharedViewStore } from './shared-view.js';
 
 export const DEFAULT_PORT = 8093;
@@ -153,6 +154,8 @@ interface LiveSegment {
   thread?: string;
   /** The artifact a call created or updated (set when it finishes). */
   artifact?: string;
+  /** A step the pages show as something else: a message to the person is its text segment. */
+  hidden?: boolean;
 }
 
 interface LiveRun {
@@ -281,12 +284,18 @@ export class WebServer {
   private readonly server: http.Server;
   private readonly up2k: Up2kStore;
   private readonly clients = new Set<ServerResponse>();
+  /** Repositories with uncommitted changes (the pills above the composer). */
+  private diffs: RepoChanges[] = [];
+  private diffsTimer: NodeJS.Timeout | undefined;
+  private diffsPoll: NodeJS.Timeout | undefined;
+  private diffsBusy: Promise<void> | undefined;
   /** In-process clients (the terminal interface): every event the pages get, as it is sent. */
   private readonly listeners = new Set<(event: string, data: unknown) => void>();
   /** When the agent picked up the last message (the "Read" receipt), the same on every page. */
   private read: { id: string; time: string } | null = null;
   /** Messages sent while the agent worked, oldest first. */
   private pending: PendingInput[] = [];
+  private inputWaiters: Array<() => void> = [];
   /** When the person last used a page or the terminal, and the agent message they have seen. */
   private lastActivity = 0;
   private seen: { id: string; time: string } | null = null;
@@ -503,6 +512,12 @@ export class WebServer {
       if (this.clients.size) this.publishArtifacts();
     }, 2000);
     this.fileWatch.unref?.();
+    // Uncommitted changes: checked now, after the agent's steps, and now and then while a page is open.
+    this.refreshDiffs(0);
+    this.diffsPoll = setInterval(() => {
+      if (this.clients.size) this.refreshDiffs(0);
+    }, 10_000);
+    this.diffsPoll.unref?.();
     if (options_watch(this.options)) this.projectWatcher = watchProject({ configDir: this.runtime.tree.configDir, mcpFile: this.mcpFile, onChange: () => this.reloadAgents() });
     const shown = this.host === '0.0.0.0' || this.host === '::' ? 'localhost' : this.host.includes(':') ? `[${this.host}]` : this.host;
     return `http://${shown}:${this.port}/`;
@@ -541,6 +556,8 @@ export class WebServer {
     this.pending = [];
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.fileWatch) clearInterval(this.fileWatch);
+    if (this.diffsPoll) clearInterval(this.diffsPoll);
+    clearTimeout(this.diffsTimer);
     await this.system.close();
     this.processes.close();
     this.live?.controller.abort(new Error('server stopping'));
@@ -954,6 +971,14 @@ export class WebServer {
         case 'GET agents':
           this.checkFetchSite(req);
           return sendJson(res, 200, this.agentsInfo());
+        case 'GET diffs': {
+          this.checkFetchSite(req);
+          // Asked for directly, the list is checked now rather than served from the last poll.
+          if (!parts[1]) return sendJson(res, 200, { repos: await this.checkDiffs() });
+          const repo = this.diffs.find((r) => r.id === parts[1]) ?? (await this.checkDiffs()).find((r) => r.id === parts[1]);
+          if (!repo) throw new HttpError(404, 'That repository has no uncommitted changes.');
+          return sendJson(res, 200, await repoDiff(repo.path));
+        }
         case 'GET threads': {
           this.checkFetchSite(req);
           if (!parts[1]) return sendJson(res, 200, { threads: this.runtime.threads.list() });
@@ -1425,6 +1450,7 @@ export class WebServer {
       configuredReasoning: d.reasoning ?? null,
       file: node.file,
       grants: [...node.grants].map(([agent, max]) => ({ agent, max })),
+      prompts: d.prompts ?? [],
     };
   }
 
@@ -1532,6 +1558,7 @@ export class WebServer {
       items,
       more,
       artifacts: this.displayArtifacts(),
+      diffs: this.diffs,
       sections: displaySections(this.conversation.state),
       live: this.live ? { id: this.live.id, segments: this.live.segments, ...(this.live.replyTo ? { replyTo: this.live.replyTo } : {}) } : null,
       reactions: this.reactions.all(),
@@ -1796,6 +1823,38 @@ export class WebServer {
   }
 
   /** The threads between agents (the chat links to them; the sheet shows them). */
+  /** The folders whose repositories are checked: the project and every agent's workspace roots. */
+  private diffDirs(): string[] {
+    const dirs = new Set<string>([this.runtime.tree.configDir]);
+    for (const node of this.runtime.tree.byId.values()) for (const root of node.roots) dirs.add(root);
+    return [...dirs];
+  }
+
+  /** Checks the repositories again (after `delayMs`, coalescing calls) and tells the pages when something changed. */
+  private refreshDiffs(delayMs = 600): void {
+    clearTimeout(this.diffsTimer);
+    this.diffsTimer = setTimeout(() => {
+      if (!this.diffsBusy && !this.closing) void this.checkDiffs();
+    }, delayMs);
+    this.diffsTimer.unref?.();
+  }
+
+  /** Checks the repositories now (joining a check already running) and tells the pages when something changed. */
+  private async checkDiffs(): Promise<RepoChanges[]> {
+    this.diffsBusy ??= changedRepos(this.diffDirs())
+      .then((repos) => {
+        if (JSON.stringify(repos) === JSON.stringify(this.diffs)) return;
+        this.diffs = repos;
+        this.broadcast('diffs', { repos });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.diffsBusy = undefined;
+      });
+    await this.diffsBusy;
+    return this.diffs;
+  }
+
   private publishThreads(): void {
     this.broadcast('threads', { threads: this.runtime.threads.list() });
   }
@@ -1853,7 +1912,27 @@ export class WebServer {
     if (!this.live) return this.startRun(p);
     this.pending.push(p);
     this.publishPending();
+    const wake = this.inputWaiters.splice(0);
+    wake.forEach((w) => w());
     return p.id;
+  }
+
+  /** Resolves when a message is waiting for the running agent (it asked the person something). */
+  private waitForInput(signal: AbortSignal): Promise<void> {
+    if (this.pending.length) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const done = () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        this.inputWaiters = this.inputWaiters.filter((w) => w !== done);
+        reject(Object.assign(new Error('Cancelled.'), { name: 'AbortError' }));
+      };
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.inputWaiters.push(done);
+    });
   }
 
   /** Messages waiting for the agent, as the pages show them (Delivered). */
@@ -1946,6 +2025,7 @@ export class WebServer {
         }
       },
       note: () => this.receiptNote(),
+      waitForInput: (signal) => this.waitForInput(signal),
     });
     // The generator records the user message synchronously on the first next().
     const first = it.next();
@@ -1984,6 +2064,7 @@ export class WebServer {
         agentReactions: chatEffects(this.conversation.state).reactions,
       });
       this.sectionSignature = this.sectionsKey();
+      this.refreshDiffs(0);
       // What arrived after the agent's last step starts the next reply.
       const next = this.pending.shift();
       if (next && !this.closing) {
@@ -2026,6 +2107,21 @@ export class WebServer {
       case 'tool_request': {
         // keep_section only confirms the topic; it is not worth a line in the chat.
         if (event.name === 'keep_section') return;
+        // A message to the person mid-turn: a finished bubble now (the hidden step after it ends the text, so later text starts a new one).
+        const said = root && event.name === 'message_user' ? messageUserText(JSON.stringify(event.args)) : undefined;
+        if (said !== undefined) {
+          // Hidden steps on both sides keep it apart from text streamed before or after.
+          const id = `${event.agentPath.join('/')}:${event.callId}`;
+          const before: LiveSegment = { kind: 'activity', id: `${id}:before`, text: '', status: 'ok', hidden: true };
+          live.segments.push(before);
+          this.broadcast('activity', { run: live.id, segment: before });
+          live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said });
+          this.broadcast('delta', { run: live.id, text: said });
+          const step: LiveSegment = { kind: 'activity', id, text: 'Sent a message', status: 'running', hidden: true };
+          live.segments.push(step);
+          this.broadcast('activity', { run: live.id, segment: step });
+          return;
+        }
         const prefix = root ? '' : `${event.agentPath.slice(1).join(' › ')}: `;
         const seg: LiveSegment = { kind: 'activity', id: `${event.agentPath.join('/')}:${event.callId}`, text: prefix + describeCall(event.name, JSON.stringify(event.args)), status: 'running' };
         if (event.name === 'message_agent' && typeof event.args['agent'] === 'string') {
@@ -2063,11 +2159,22 @@ export class WebServer {
           if (artifact) seg.artifact = artifact;
         }
         this.broadcast('activity_end', { run: live.id, id, status, ...(artifact ? { artifact } : {}) });
+        this.refreshDiffs();
         this.publishArtifacts();
         this.publishSections();
         if (event.name === 'message_agent') this.publishThreads();
         // The agent's 👍 shows on the message at once (the result is recorded just after this event).
         if (event.name === 'react_to_message') setTimeout(() => this.broadcast('agent_reactions', { reactions: chatEffects(this.conversation.state).reactions }), 20);
+        return;
+      }
+      case 'agent_message': {
+        // Another agent's message reached the agent replying to the person.
+        if (!root) return;
+        const text = event.text.replace(/^\[from [^\]]*\]\s*/, '');
+        const instance = Number(/^\[from [^,\]]*, thread (\d+)/.exec(event.text)?.[1] ?? 1);
+        const seg: LiveSegment = { kind: 'activity', id: `mail:${live.segments.length}`, text: `${event.from}: ${text.replace(/\s+/g, ' ').slice(0, 80)}`, status: 'ok', agent: event.from, thread: threadKey(event.agentPath[0]!, event.from, instance) };
+        live.segments.push(seg);
+        this.broadcast('activity', { run: live.id, segment: seg });
         return;
       }
       case 'warning':

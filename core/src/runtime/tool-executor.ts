@@ -72,6 +72,8 @@ function failure(callId: string, name: string, message: string, type: ToolErrorT
   return { callId, name, result: { llmContent: message, returnDisplay: message, error: { message, type } } };
 }
 
+const UNTIMED_TOOLS = new Set<string>([ToolNames.MESSAGE_AGENT, ToolNames.WAIT_FOR_MESSAGES, ToolNames.MESSAGE_USER]);
+
 async function runWithTimeout(
   invocation: AnyToolInvocation,
   parentSignal: AbortSignal,
@@ -196,7 +198,8 @@ async function executeInner(
       return failure(call.id, call.name, 'Tool call cancelled before execution.', ToolErrorType.EXECUTION_CANCELLED);
     }
     // Child agents have their own turn budget and timeout.
-    const timeout = call.name === ToolNames.MESSAGE_AGENT ? undefined : ctx.toolTimeoutMs;
+    // Waiting for agents or the person has its own timeout.
+    const timeout = UNTIMED_TOOLS.has(call.name) ? undefined : ctx.toolTimeoutMs;
     ctx.beforeExecute?.(call.id, call.name);
     const result = await runWithTimeout(invocation, signal, timeout, call.id);
     return { callId: call.id, name: call.name, result };

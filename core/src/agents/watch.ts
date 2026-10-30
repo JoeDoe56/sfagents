@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { AGENTS_DIR_NAME } from './loader.js';
+import { PROMPTS_DIR_NAME } from './prompts.js';
 
 export interface ProjectWatcher {
   close(): void;
@@ -20,11 +21,12 @@ export function watchProject(options: { configDir: string; mcpFile?: string; onC
     timer = setTimeout(options.onChange, delay);
   };
   const agentsDir = path.join(options.configDir, AGENTS_DIR_NAME);
+  const promptsDir = path.join(options.configDir, PROMPTS_DIR_NAME);
   const watchers: fs.FSWatcher[] = [];
-  const watchDir = () => {
+  const watchDir = (dir: string, relevant: (name: string) => boolean) => {
     try {
-      const w = fs.watch(agentsDir, { persistent: false }, (_event, name) => {
-        if (!name || String(name).toLowerCase().endsWith('.json')) fire();
+      const w = fs.watch(dir, { persistent: false }, (_event, name) => {
+        if (!name || relevant(String(name).toLowerCase())) fire();
       });
       w.on('error', () => undefined);
       watchers.push(w);
@@ -33,12 +35,19 @@ export function watchProject(options: { configDir: string; mcpFile?: string; onC
       return false;
     }
   };
-  let dirWatched = watchDir();
+  const agentFile = (name: string) => name.endsWith('.json');
+  // Prompt files agents reference ("@name.txt").
+  const promptFile = (name: string) => name.endsWith('.txt') || name.endsWith('.md');
+  let dirWatched = watchDir(agentsDir, agentFile);
+  let promptsWatched = watchDir(promptsDir, promptFile);
   // The project folder, for the agents folder appearing or being replaced.
   try {
     const w = fs.watch(options.configDir, { persistent: false }, (_event, name) => {
       if (name === AGENTS_DIR_NAME) {
-        if (!dirWatched) dirWatched = watchDir();
+        if (!dirWatched) dirWatched = watchDir(agentsDir, agentFile);
+        fire();
+      } else if (name === PROMPTS_DIR_NAME) {
+        if (!promptsWatched) promptsWatched = watchDir(promptsDir, promptFile);
         fire();
       }
     });

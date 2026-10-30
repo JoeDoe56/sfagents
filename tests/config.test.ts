@@ -10,6 +10,7 @@ function setup(files: Record<string, unknown>, mcp?: unknown): string {
   const dir = makeTempDir();
   fs.mkdirSync(path.join(dir, 'work', 'sub'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'agents'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'prompts'), { recursive: true });
   for (const [name, value] of Object.entries(files)) {
     if (typeof value === 'string') fs.writeFileSync(path.join(dir, name), value);
     else writeJson(path.join(dir, name), value);
@@ -174,7 +175,7 @@ describe('agents folder', () => {
   test('a new project gets the agents folder and a default agent with no provider', () => {
     const dir = makeTempDir();
     const created = ensureProject(dir);
-    assert.deepEqual(created, [path.join(dir, 'agents'), path.join(dir, 'agents', 'main.json')]);
+    assert.deepEqual(created.filter((f) => !f.includes(`${path.sep}prompts`)), [path.join(dir, 'agents'), path.join(dir, 'agents', 'main.json')]);
     const tree = loadAgentTree(dir);
     assert.equal(tree.root.id, 'main');
     assert.equal(tree.root.definition.provider, '');
@@ -209,5 +210,46 @@ describe('agents folder', () => {
     const tree = loadAgentTree(dir);
     assert.equal(tree.byId.get('m')!.definition.model, 'test/model');
     assert.ok(tree.skipped.some((s) => /p\.json/.test(s.file) && /\[model\]/.test(s.error)));
+  });
+});
+
+describe('prompts folder', () => {
+  test('systemPrompt lines and list entries reference prompt files, filled in in order', () => {
+    const dir = setup({
+      'prompts/rules.txt': 'Rule one.\n@style\n',
+      'prompts/style.md': 'Be brief.',
+      'prompts/Code Review.txt': 'Review carefully.',
+      'agents/a.json': { ...baseAgent('a'), systemPrompt: ['@rules.txt', 'You are a.', '@Code Review.txt'] },
+      'agents/b.json': { ...baseAgent('b'), systemPrompt: 'You are b.\n@rules\nMail @someone if stuck.\n@nobody' },
+    });
+    const tree = loadAgentTree(dir);
+    assert.equal(tree.byId.get('a')!.definition.systemPrompt, 'Rule one.\nBe brief.\n\nYou are a.\n\nReview carefully.');
+    assert.deepEqual(tree.byId.get('a')!.definition.prompts, ['prompts/rules.txt', 'prompts/style.md', 'prompts/Code Review.txt']);
+    // A bare "@name" that names no file is ordinary text.
+    assert.equal(tree.byId.get('b')!.definition.systemPrompt, 'You are b.\nRule one.\nBe brief.\nMail @someone if stuck.\n@nobody');
+    // Prompt files are protected from agents, like agent files.
+    assert.ok(tree.protectedFiles.some((f) => f.endsWith('style.md')));
+    assert.match(describeTree(tree), /prompts: prompts\/rules\.txt, prompts\/style\.md, prompts\/Code Review\.txt/);
+  });
+
+  test('a missing, escaping or circular reference skips the agent with the reason', () => {
+    const dir = setup({ 'prompts/loop.txt': '@loop.txt' });
+    skippedError(dir, /x\.json.*\[systemPrompt\].*"@gone\.txt" was not found/, { 'agents/x.json': { ...baseAgent('x'), systemPrompt: '@gone.txt' }, 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /y\.json.*inside the prompts folder/, { 'agents/y.json': { ...baseAgent('y'), systemPrompt: ['@../agents/ok.json.txt'] }, 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /z\.json.*references itself/, { 'agents/z.json': { ...baseAgent('z'), systemPrompt: '@loop.txt' }, 'agents/ok.json': baseAgent('ok') });
+  });
+
+  test('a new project gets the default prompt files, and its default agent uses them', () => {
+    const dir = makeTempDir();
+    ensureProject(dir);
+    for (const name of ['main-agent.txt', 'worker-agent.txt', 'working-rules.txt', 'coding.txt']) assert.ok(fs.existsSync(path.join(dir, 'prompts', name)), name);
+    const main = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'main.json'), 'utf8')) as { systemPrompt: unknown };
+    assert.deepEqual(main.systemPrompt, ['@main-agent.txt', '@working-rules.txt']);
+    const tree = loadAgentTree(dir);
+    assert.match(tree.root.definition.systemPrompt, /^You are the main agent in SF Agents[\s\S]*Verify before you report/);
+    // An existing prompts folder is left alone.
+    fs.writeFileSync(path.join(dir, 'prompts', 'coding.txt'), 'mine');
+    ensureProject(dir);
+    assert.equal(fs.readFileSync(path.join(dir, 'prompts', 'coding.txt'), 'utf8'), 'mine');
   });
 });

@@ -81,6 +81,49 @@ describe('sections: operations', () => {
     conversation.close();
   });
 
+  test('merging folds sections into one; it survives reopening and IDs are never reused', () => {
+    const dir = project();
+    let { tree, conversation } = open(dir);
+    seed(conversation, tree, [
+      ['Uploader retries', 'Use backoff.'],
+      ['Upload chunk size', '8 MB.'],
+      ['Sourdough', '72%.'],
+    ]);
+    const ids = conversation.state.messages.map((m) => m.id);
+    const a = addSection(conversation.main, { title: 'Uploader', messages: [ids[0]!, ids[1]!] });
+    const b = addSection(conversation.main, { title: 'Uploads', messages: [ids[2]!, ids[3]!] });
+    const sub = addSection(conversation.main, { title: 'Chunking', parent: b.section });
+    const c = addSection(conversation.main, { title: 'Baking', messages: [ids[4]!, ids[5]!] });
+    addSection(conversation.main, { title: 'Back to uploads', parent: undefined });
+    editSection(conversation.main, { section: b.section, current: true });
+    const before = conversation.state.messages.map((m) => [m.id, m.content]);
+
+    assert.throws(() => editSection(conversation.main, { section: a.section, merge: [b.section] }), /expected_revision is required/);
+    assert.throws(() => editSection(conversation.main, { section: sub.section, merge: [b.section], expectedRevision: 6 }), /is inside s2; merge s3 into s2 instead/);
+    assert.throws(() => editSection(conversation.main, { section: a.section, merge: [a.section], expectedRevision: 6 }), /into itself/);
+    const r = editSection(conversation.main, { section: a.section, title: 'Uploader project', merge: [b.section, 's5'], expectedRevision: 6 });
+    assert.deepEqual(r.merge, [b.section, 's5']);
+    assert.throws(() => editSection(conversation.main, { section: a.section, merge: [b.section], expectedRevision: 7 }), /already merged into s1/);
+    conversation.close();
+
+    ({ tree, conversation } = open(dir));
+    const state = conversation.state;
+    assert.deepEqual(listSections(state).entries.map((e) => [e.id, e.title, e.parent, e.messages]), [
+      [a.section, 'Uploader project', null, 4],
+      [sub.section, 'Chunking', a.section, 0],
+      [c.section, 'Baking', null, 2],
+    ]);
+    // Every message stays filed; the merged section's current status moved with it.
+    assert.equal(state.sectionOf(ids[2]!), a.section);
+    assert.equal(state.currentSection, a.section);
+    assert.deepEqual(state.messages.map((m) => [m.id, m.content]), before);
+    // Fetching a merged section's ID reads the section it went into.
+    assert.match(fetchSection(state, b.section).text, /Upload chunk size/);
+    // New IDs continue after the highest ever used.
+    assert.equal(addSection(conversation.main, { title: 'Next' }).section, 's6');
+    conversation.close();
+  });
+
   test('invalid references, stale edits and cycles fail without writing anything', () => {
     const dir = project();
     const { tree, conversation } = open(dir);
@@ -172,11 +215,35 @@ describe('sections: model tools and grants', () => {
     // Tools and guidance were offered to the persistent root.
     const first = providers.get('main')!.requests[0]!;
     const names = (first.request.tools as FunctionDeclaration[]).map((t) => t.name);
-    for (const n of ['list_sections', 'add_section', 'edit_section', 'keep_section', 'search_sections', 'search_conversation', 'fetch_section']) assert.ok(names.includes(n), n);
+    assert.ok(!names.includes('edit_section'), 'renaming and merging go through add_section');
+    for (const n of ['list_sections', 'add_section', 'keep_section', 'search_sections', 'search_conversation', 'fetch_section']) assert.ok(names.includes(n), n);
     assert.match((first.messages[0] as { content: string }).content, /<conversation_memory>/);
     // After /clear, the old exchange is not in the request; it was retrieved on demand.
     const afterClear = providers.get('main')!.requests.find((r) => (r.messages as ChatMessage[]).some((m) => m.role === 'user' && String(m.content).startsWith('What retry limit')))!;
     assert.doesNotMatch(JSON.stringify(afterClear.messages), /retry limit is 5/);
+    await runtime.dispose();
+    conversation.close();
+  });
+
+  test('add_section with a section ID renames, files the turn and merges', async () => {
+    const dir = project();
+    const { tree, conversation } = open(dir);
+    seed(conversation, tree, [['retries', 'backoff'], ['upload size', '8 MB']]);
+    const ids = conversation.state.messages.map((m) => m.id);
+    addSection(conversation.main, { title: 'Retries', messages: [ids[0]!, ids[1]!] });
+    addSection(conversation.main, { title: 'Upload size', messages: [ids[2]!, ids[3]!] });
+    const script: Script = (req, n) => {
+      if (n === 0) return { toolCalls: [{ name: 'add_section', args: { section: 's1', title: 'Uploader', merge: ['s2'], messages: ['current_exchange'], make_current: true, expected_revision: 2 } }] };
+      if (n === 1) return { toolCalls: [{ name: 'add_section', args: { merge: ['s1'] } }] };
+      return { text: lastToolContent(req)! };
+    };
+    const { factory } = scriptedFactory(script);
+    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
+    const result = await runtime.createSession().run('these are one topic really');
+    assert.match(result.text, /"merge" needs "section"/);
+    const state = conversation.state;
+    assert.deepEqual([...state.sections.values()].map((s) => [s.id, s.title]), [['s1', 'Uploader']]);
+    for (const m of state.messages.filter((m) => m.role !== 'tool')) assert.equal(state.sectionOf(m.id), 's1', m.id);
     await runtime.dispose();
     conversation.close();
   });
@@ -190,7 +257,7 @@ describe('sections: model tools and grants', () => {
     seed(conversation, tree, [['the secret project codename is OSPREY', 'ok']]);
     const script: Script = (req, n, agent) => {
       if (agent === 'main') {
-        if (n === 0) return { toolCalls: [{ name: 'message_agent', args: { agent: 'reader', message: 'find the codename' } }, { name: 'message_agent', args: { agent: 'blind', message: 'find the codename' } }] };
+        if (n === 0) return { toolCalls: [{ name: 'message_agent', args: { agent: 'reader', message: 'find the codename', wait: true } }, { name: 'message_agent', args: { agent: 'blind', message: 'find the codename', wait: true } }] };
         return { text: 'done' };
       }
       if (agent === 'reader') {
@@ -204,8 +271,9 @@ describe('sections: model tools and grants', () => {
     const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
     await runtime.createSession().run('delegate');
     const readerTools = (providers.get('reader')!.requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name).sort();
-    assert.deepEqual(readerTools, ['fetch_section', 'list_sections', 'search_conversation', 'search_sections']);
-    assert.deepEqual(providers.get('blind')!.requests[0]!.request.tools, []);
+    // Besides talking back to main (which every agent in a thread can), only read access.
+    assert.deepEqual(readerTools, ['fetch_section', 'list_sections', 'message_agent', 'search_conversation', 'search_sections', 'wait_for_messages']);
+    assert.deepEqual((providers.get('blind')!.requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name).sort(), ['message_agent', 'wait_for_messages']);
     const readerReq = providers.get('reader')!.requests[1]!.messages as ChatMessage[];
     const toolOut = readerReq.filter((m) => m.role === 'tool').map((m) => (m as { content: string }).content);
     assert.match(toolOut[0]!, /OSPREY/);

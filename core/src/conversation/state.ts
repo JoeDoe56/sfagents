@@ -69,6 +69,10 @@ export class ConversationState {
   readonly assignment = new Map<string, string | null>();
   currentSection: string | null = null;
   structureRevision = 0;
+  /** Sections merged into another: merged ID → the section it went into. */
+  readonly merged = new Map<string, string>();
+  /** Sections ever added (IDs are never reused, even after a merge). */
+  private sectionsAdded = 0;
   readonly runs = new Map<string, RunState>();
   readonly artifacts: ArtifactRecord[] = [];
   readonly artifactById = new Map<string, ArtifactRecord>();
@@ -83,12 +87,19 @@ export class ConversationState {
 
   /** The section a message belongs to, or undefined when unassigned. */
   sectionOf(messageId: string): string | undefined {
-    if (this.assignment.has(messageId)) return this.assignment.get(messageId) ?? undefined;
-    return this.messageById.get(messageId)?.section;
+    const filed = this.assignment.has(messageId) ? (this.assignment.get(messageId) ?? undefined) : this.messageById.get(messageId)?.section;
+    return filed === undefined ? undefined : this.liveSection(filed);
+  }
+
+  /** A section ID, followed through merges to the section that holds it now. */
+  liveSection(id: string): string {
+    let cur = id;
+    for (let i = 0; i < 10_000 && this.merged.has(cur); i++) cur = this.merged.get(cur)!;
+    return cur;
   }
 
   nextSectionId(): string {
-    return `s${this.sections.size + 1}`;
+    return `s${this.sectionsAdded + 1}`;
   }
 
   /** Ancestors from the root down to (not including) the section. */
@@ -203,6 +214,20 @@ export class ConversationState {
         cur = this.sections.get(cur)?.parent ?? null;
       }
     }
+    if (record.merge?.length) {
+      if (record.op !== 'edit') fail('only an edit can merge sections');
+      for (const id of record.merge) {
+        if (id === record.section) fail(`section ${id} cannot be merged into itself`);
+        if (!this.sections.has(id)) fail(`cannot merge unknown section ${id}`);
+        // The target must not sit inside a section merged into it.
+        let cur: string | null = record.parent !== undefined ? record.parent : (this.sections.get(record.section)?.parent ?? null);
+        for (let c: string | null = record.section; c; c = this.sections.get(c)?.parent ?? null) if (c === id) fail(`${record.section} is inside ${id}; merge ${record.section} into ${id} instead`);
+        while (cur) {
+          if (cur === id) fail(`${record.section} would end up inside ${id}, which is merged into it`);
+          cur = this.sections.get(cur)?.parent ?? null;
+        }
+      }
+    }
     for (const id of [...(record.assign ?? []), ...(record.unassign ?? [])]) {
       const m = this.messageById.get(id);
       if (!m) fail(`unknown message ${id}`);
@@ -252,7 +277,15 @@ export class ConversationState {
           const s = this.sections.get(record.section)!;
           if (record.title !== undefined) s.title = record.title;
           if (record.parent !== undefined) s.parent = record.parent;
+          // Merged sections hand their messages and subsections to this one.
+          for (const id of record.merge ?? []) {
+            for (const child of this.sections.values()) if (child.parent === id) child.parent = record.section;
+            this.sections.delete(id);
+            this.merged.set(id, record.section);
+            if (this.currentSection === id) this.currentSection = record.section;
+          }
         }
+        if (record.op === 'add') this.sectionsAdded++;
         for (const id of record.assign ?? []) this.assignment.set(id, record.section);
         for (const id of record.unassign ?? []) {
           if (this.sectionOf(id) === record.section) this.assignment.set(id, null);

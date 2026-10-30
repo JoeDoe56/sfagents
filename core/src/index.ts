@@ -4,9 +4,11 @@
 
 export * from './agents/definition.js';
 export * from './agents/loader.js';
-export { MessageAgentTool, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE } from './agents/message-agent.js';
+export { MessageAgentTool, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText } from './agents/message-agent.js';
 export type { AgentReplyPayload, MessageAgentParams, AgentMessenger } from './agents/message-agent.js';
 export { watchProject } from './agents/watch.js';
+export { PROMPTS_DIR_NAME, PromptReferenceError, defaultPromptsDir, ensurePrompts, expandPrompt, isPromptReference } from './agents/prompts.js';
+export { Mailbox, type MailItem } from './agents/mailbox.js';
 export type { ProjectWatcher } from './agents/watch.js';
 export { ThreadService, ThreadRecorder, ThreadBusyError, threadKey, threadPair, threadMessages, THREADS_DIR_NAME } from './agents/threads.js';
 export type { ThreadInfo, ThreadLease } from './agents/threads.js';
@@ -68,6 +70,7 @@ export { WorkspaceContext } from './permissions/workspace.js';
 export * from './tools/tools.js';
 export { ToolErrorType } from './tools/tool-error.js';
 export { ToolNames, BUILTIN_TOOL_IDS } from './tools/tool-names.js';
+export { TOOL_SEARCH, AUTO_DEFER_MIN, ToolSearchTool, deferredToolNames, matchesToolPattern } from './tools/tool-search.js';
 export { stripAnsiAndControl } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
 export { openInBrowser } from './utils/open-url.js';

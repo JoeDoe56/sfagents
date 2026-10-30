@@ -75,13 +75,16 @@ export interface CreateArtifactInput {
 }
 
 /** An artifact that is a user's file, or an application on this computer. */
+/** The media type recorded for a folder artifact. */
+export const FOLDER_MIME = 'inode/directory';
+
 export interface LinkArtifactInput {
   title: string;
   /** Absolute path of the file (file artifacts). */
   file?: string;
   /** The application's address (application artifacts). */
   url?: string;
-  /** Defaults from the file (document, code, image, …; "genui" in the GenUI folder) or "app". */
+  /** Defaults from the file (document, code, image, …; "genui" in the GenUI folder) or "app"; "folder" for a folder. */
   type?: string;
   run?: string;
   callId?: string;
@@ -410,7 +413,7 @@ export class ConversationService {
       id,
       type: input.type ?? (input.file ? this.fileArtifactType(input.file) : 'app'),
       title,
-      ...(input.file ? { file: this.recordedPath(input.file), mime: mimeForFilename(input.file) } : { url: input.url }),
+      ...(input.file ? { file: this.recordedPath(input.file), mime: input.type === 'folder' ? FOLDER_MIME : mimeForFilename(input.file) } : { url: input.url }),
       ...(run ? { run } : {}),
       ...(message ? { message } : {}),
       ...(input.callId ? { callId: input.callId } : {}),
@@ -430,7 +433,7 @@ export class ConversationService {
       artifact: id,
       rev: view.rev + 1,
       ...(title ? { title } : {}),
-      ...(file ? { file, mime: mimeForFilename(input.file!) } : {}),
+      ...(file ? { file, mime: view.type === 'folder' ? FOLDER_MIME : mimeForFilename(input.file!) } : {}),
       ...(input.url ? { url: input.url } : {}),
       ...(input.run ? { run: input.run } : {}),
       ...(input.callId ? { callId: input.callId } : {}),
@@ -488,6 +491,7 @@ export class ConversationService {
   artifactContent(id: string, rev?: number): ArtifactContent {
     const view = this.requireArtifact(id);
     if (view.url && !view.file) throw new ArtifactError(`Artifact ${id} is an application (${view.url}), not a file.`);
+    if (view.type === 'folder') throw new ArtifactError(`Artifact ${id} is a folder (${view.file ? this.resolveArtifactFile(view.file) : ''}); list it with the shell.`);
     if (view.file) {
       const abs = this.resolveArtifactFile(view.file);
       let data: Buffer;
@@ -616,7 +620,7 @@ class StoreRunRecorder implements RunRecorder {
     private readonly parentCallId: string | undefined,
   ) {}
 
-  private message(fields: Omit<MessageRecord, 'kind' | 'seq' | 'time' | 'id' | 'run' | 'agent' | 'section'>): MessageRecord {
+  private message(fields: Omit<MessageRecord, 'kind' | 'seq' | 'time' | 'id' | 'run' | 'agent' | 'section'> & { agent?: string }): MessageRecord {
     const state = this.store.state;
     const section = this.store === this.service.main && fields.role !== 'tool' ? (state.currentSection ?? undefined) : undefined;
     return this.store.append({
@@ -631,6 +635,10 @@ class StoreRunRecorder implements RunRecorder {
 
   user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction'): string {
     return this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}), ...(replyTo ? { replyTo } : {}), ...(event ? { event } : {}) }).id;
+  }
+
+  note(from: string, content: string): void {
+    this.message({ role: 'user', content, event: 'agent', agent: from });
   }
 
   start(node: AgentNode): void {

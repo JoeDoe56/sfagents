@@ -40,7 +40,7 @@ const KNOWN_FIELDS: Record<string, readonly string[]> = {
   run_start: ['seq', 'time', 'run', 'agent', 'parentRun', 'callId', 'provider', 'model', 'reasoning', 'config', 'configHash'],
   tool_start: ['seq', 'time', 'run', 'callId', 'tool'],
   run_end: ['seq', 'time', 'run', 'status', 'error', 'turns', 'usage'],
-  section: ['seq', 'time', 'op', 'section', 'rev', 'expected', 'title', 'parent', 'assign', 'unassign', 'current'],
+  section: ['seq', 'time', 'op', 'section', 'rev', 'expected', 'title', 'parent', 'assign', 'unassign', 'merge', 'current'],
   artifact: ['seq', 'time', 'id', 'type', 'title', 'path', 'run', 'message', 'callId', 'mime', 'file', 'url'],
   artifact_update: ['seq', 'time', 'artifact', 'rev', 'path', 'title', 'mime', 'run', 'callId', 'file', 'url'],
   artifact_pin: ['seq', 'time', 'artifact', 'pinned'],
@@ -93,6 +93,7 @@ export function decorationFor(record: ConversationRecord): string {
     }
     case 'section':
       if (record.op === 'add') return `<sub>New section: <b>${escapeHtml(record.title ?? '')}</b></sub>`;
+      if (record.merge?.length) return `<sub>Merged ${escapeHtml(record.merge.join(', '))} into section ${escapeHtml(record.section)}${record.title ? `: <b>${escapeHtml(record.title)}</b>` : ''}</sub>`;
       return `<sub>Section ${escapeHtml(record.section)} updated${record.title ? `: <b>${escapeHtml(record.title)}</b>` : ''}</sub>`;
     case 'artifact':
       if (record.file || record.url) return `<sub>Artifact (${escapeHtml(record.type)}): <a href="${escapeHtml(record.url ?? record.file!)}">${escapeHtml(record.title)}</a></sub>`;
@@ -306,7 +307,7 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         status: status as MessageRecord['status'],
         attachments: attachments(meta, p),
         replyTo: str(meta, 'replyTo', false, p),
-        event: str(meta, 'event', false, p) === 'reaction' ? 'reaction' : undefined,
+        event: ((e) => (e === 'reaction' || e === 'agent' ? e : undefined))(str(meta, 'event', false, p)),
       };
       if (record.role === 'tool' && (!record.callId || !record.tool)) p.push('tool messages need "callId" and "tool"');
       break;
@@ -362,6 +363,7 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         parent: parent as string | null | undefined,
         assign: strArray(meta, 'assign', p),
         unassign: strArray(meta, 'unassign', p),
+        merge: strArray(meta, 'merge', p),
         current: current as boolean | undefined,
       };
       if (record.op === 'add' && !record.title) p.push('section add needs a "title"');

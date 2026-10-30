@@ -80,10 +80,16 @@ export class EventRenderer {
       }
       case 'tool_request':
         if (event.name === 'message_agent') return; // shown by agent_start
+        if (event.name === 'message_user' && depth === 0 && typeof event.args['text'] === 'string') {
+          // A message to the person mid-turn: printed like the reply.
+          if (this.midLine) this.breakLine();
+          this.options.out.write(`${stripAnsiAndControl(event.args['text'])}\n`);
+          return;
+        }
         this.activityLine(depth, `${who}${s.cyan('⚙')} ${s.bold(event.name)} ${s.dim(oneLine(event.description))}`);
         return;
       case 'tool_result':
-        if (event.name === 'message_agent') return; // shown by agent_end
+        if (event.name === 'message_agent' || (event.name === 'message_user' && depth === 0)) return; // shown by agent_end, or printed
         this.activityLine(
           depth,
           `${who}${event.ok ? s.green('  ✓') : s.red('  ✗')} ${s.dim(oneLine(event.display || (event.ok ? 'done' : 'failed')))}`,
@@ -101,6 +107,9 @@ export class EventRenderer {
         this.activityLine(depth - 1, `${s.magenta('↳')} ${s.bold(event.agentPath[depth]!)} ${ok ? s.green(summary) : s.red(summary)}${r.error ? s.dim(` (${oneLine(r.error, 120)})`) : ''}`);
         return;
       }
+      case 'agent_message':
+        this.activityLine(depth, `${who}${s.magenta('✉')} ${s.dim(oneLine(event.text, 160))}`);
+        return;
       case 'context':
         if (!this.options.showContext || depth > 0) return;
         this.activityLine(
