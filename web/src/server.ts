@@ -53,7 +53,7 @@ import {
 import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
 import { AuthError, WebAuth } from './auth.js';
-import { Dictation } from './dictation.js';
+import { Dictation, SPEECH_RATE } from './dictation.js';
 import { PushToTalk } from './push-to-talk.js';
 import { DISPLAY_SCALES, ScreenMirror } from './screen.js';
 import { getDisplayScale, setDisplayScale } from './remote-dpi.js';
@@ -824,11 +824,32 @@ export class WebServer {
           this.dictation.setReference(null);
           return sendJson(res, 200, this.dictation.status());
         case 'POST speak': {
-          // Text to speech with VibeVoice: the whole reply as one WAV file.
+          // Text to speech with VibeVoice: with stream, 16-bit mono PCM as it is
+          // made (the page plays it as it comes); without, the whole reply as one WAV file.
           const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
           const text = typeof body['text'] === 'string' ? body['text'] : '';
           if (!text.trim()) throw new HttpError(400, 'Nothing to say.');
           if (text.length > 20_000) throw new HttpError(413, 'That is too long to speak at once.');
+          if (body['stream'] === true) {
+            // The page stopping (or going away) stops the generation.
+            const stop = new AbortController();
+            res.on('close', () => stop.abort());
+            let pcm: AsyncIterable<Buffer>;
+            try {
+              pcm = await this.dictation.speakStream(text, stop.signal);
+            } catch (error) {
+              if (stop.signal.aborted) return;
+              throw new HttpError(this.dictation.status().voice.state === 'missing' ? 409 : 503, getErrorMessage(error));
+            }
+            res.writeHead(200, { 'Content-Type': `audio/L16; rate=${SPEECH_RATE}; channels=1`, 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+            res.flushHeaders();
+            try {
+              for await (const chunk of pcm) if (!res.write(chunk)) await new Promise((r) => res.once('drain', r));
+            } catch (error) {
+              if (!stop.signal.aborted) this.log(`speak: ${getErrorMessage(error)}`);
+            }
+            return void res.end();
+          }
           let wav: Buffer;
           try {
             wav = await this.dictation.speak(text);

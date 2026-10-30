@@ -155,6 +155,24 @@ http.createServer((req, res) => {
     }
     if (req.url === '/v1/audio/speech') {
       calls.push('tts ' + resident + ' ' + JSON.stringify(j));
+      if (j.stream_format === 'audio') {
+        // Ten pieces, 50 ms apart; a client that goes away stops it.
+        if (!config.models.some((m) => m.id === j.model && m.mode === 'streaming')) return json(res, 500, { error: { message: 'speech streaming requires a model configured with mode=streaming' } });
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+        let n = 0;
+        const timer = setInterval(() => {
+          res.write('pcm' + n + ';');
+          if (++n === 10) {
+            clearInterval(timer);
+            res.end();
+          }
+        }, 50);
+        res.on('close', () => {
+          if (n < 10) calls.push('tts stopped after ' + n);
+          clearInterval(timer);
+        });
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'audio/wav' });
       return res.end('RIFF....WAVE' + j.input);
     }
@@ -468,6 +486,36 @@ describe('text to speech', { skip: process.platform !== 'linux' && 'the stand-in
       assert.match(log[0]!, /^asr qwen3-asr\+vibevoice$/, 'both loaded before the first request');
       const tts = log.at(-1)!;
       assert.equal(JSON.parse(tts.slice(tts.indexOf('{'))).options.guidance_scale, 3, 'clamped to 3');
+    } finally {
+      d.close();
+    }
+  });
+});
+
+describe('speaking as it is made', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
+  test('the audio comes in pieces as it is made; stopping stops the generation, and the next reply goes ahead', async () => {
+    const dir = makeTempDir();
+    standIn(dir);
+    fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL });
+    try {
+      await d.start();
+      const pieces: string[] = [];
+      for await (const c of await d.speakStream('Hello.')) pieces.push(c.toString());
+      assert.equal(pieces.join(''), 'pcm0;pcm1;pcm2;pcm3;pcm4;pcm5;pcm6;pcm7;pcm8;pcm9;');
+      assert.ok(pieces.length > 1, 'more than one piece');
+      const req = JSON.parse((await calls(d)).at(-1)!.replace(/^tts \S+ /, ''));
+      assert.equal(req.response_format, 'pcm');
+      assert.equal(d.status().voice.state, 'loaded');
+
+      const stop = new AbortController();
+      let got = 0;
+      await assert.rejects(async () => {
+        for await (const _ of await d.speakStream('Long.', stop.signal)) if (++got === 2) stop.abort();
+      });
+      for (let i = 0; i < 50 && !(await calls(d)).some((c) => c.startsWith('tts stopped')); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.ok((await calls(d)).some((c) => /^tts stopped after [23]$/.test(c)), 'the generation stopped');
+      assert.equal((await d.speak('Next.')).toString(), 'RIFF....WAVESpeaker 1: Next.', 'not stuck behind the stopped one');
     } finally {
       d.close();
     }

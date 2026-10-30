@@ -82,6 +82,8 @@ const START_TIMEOUT_MS = 300_000;
  * peaks at about 3.9 GB while it speaks), for the desktop and other apps.
  */
 const GPU_HEADROOM_MB = 512;
+/** VibeVoice's output: 16-bit mono PCM at this rate. */
+export const SPEECH_RATE = 24_000;
 /**
  * What each model takes on an NVIDIA GPU at its peak, measured (GTX 1660
  * SUPER, CUDA build): Qwen3-ASR 2.4 GB loaded, 2.5 GB after use; VibeVoice
@@ -872,7 +874,8 @@ export class Dictation {
   private writeConfig(backend: Backend, port: number, ids: string[], threads: number, role: 'gpu' | 'cpu'): string {
     const spec: Record<string, object> = {
       [ASR_ID]: { id: ASR_ID, family: 'qwen3_asr', path: this.modelPath(this.asrModel), task: 'asr', mode: 'offline', lazy: false },
-      [TTS_ID]: { id: TTS_ID, family: 'vibevoice', path: this.modelPath(this.ttsModel), task: 'tts', mode: 'offline', lazy: false },
+      // Streaming: it can send its audio as it makes it (whole-WAV requests still work).
+      [TTS_ID]: { id: TTS_ID, family: 'vibevoice', path: this.modelPath(this.ttsModel), task: 'tts', mode: 'streaming', lazy: false },
     };
     const config = {
       host: '127.0.0.1',
@@ -1044,27 +1047,73 @@ export class Dictation {
     }
   }
 
+  /**
+   * Text to speech as it is made: 16-bit mono PCM at SPEECH_RATE, a piece
+   * (0.13 s) at a time, the first one about a second after the request on a
+   * GPU. One reply at a time, after any before it. Aborting the signal stops
+   * the generation in audio.cpp too.
+   */
+  async speakStream(text: string, signal?: AbortSignal): Promise<AsyncIterable<Buffer>> {
+    if (!text.trim()) throw new Error('There is nothing to say.');
+    if (!this.have(this.ttsModel)) throw new Error('Text to speech is not set up yet.');
+    const before = this.speaking;
+    let release = () => {};
+    this.speaking = before.then(() => new Promise<void>((r) => (release = r)));
+    await before;
+    try {
+      if (signal?.aborted) throw new Error('Stopped.');
+      await this.start();
+      if (!this.serverHasVoice) {
+        this.stop();
+        await this.start();
+      }
+      this.refreshVoice('speaking');
+      const res = await this.request(this.voiceUrl!, text, true, signal);
+      const body = res.body!;
+      const done = () => {
+        release();
+        this.refreshVoice();
+      };
+      return (async function* () {
+        try {
+          for await (const chunk of body) yield Buffer.from(chunk);
+        } finally {
+          done();
+        }
+      })();
+    } catch (error) {
+      release();
+      this.refreshVoice();
+      throw error;
+    }
+  }
+
   private async synthesize(url: string, text: string): Promise<Buffer> {
+    return Buffer.from(await (await this.request(url, text, false)).arrayBuffer());
+  }
+
+  private async request(url: string, text: string, stream: boolean, signal?: AbortSignal): Promise<Response> {
     const s = this.settings();
     const voice = fs.existsSync(this.voicePath);
     const res = await this.fetch(`${url}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal,
       body: JSON.stringify({
         model: TTS_ID,
         input: speakerScript(text),
-        response_format: 'wav',
+        ...(stream ? { response_format: 'pcm', stream_format: 'audio', stream: true } : { response_format: 'wav' }),
         options: {
           guidance_scale: Math.min(3, Math.max(0.5, s.guidanceScale)),
           ...(voice ? { voice_samples: this.voicePath } : {}),
         },
       }),
     });
-    if (!res.ok) {
+    if (!res.ok || !res.body) {
       const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } | string };
       throw new Error((typeof data.error === 'string' ? data.error : data.error?.message) ?? `audiocpp_server answered HTTP ${res.status}.`);
     }
-    return Buffer.from(await res.arrayBuffer());
+    return res;
   }
 
   /** Sets (or with null, removes) the reference voice clip, a WAV file. */

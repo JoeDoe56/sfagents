@@ -158,6 +158,9 @@ describe('speech settings and the voice', () => {
       const spoken = await req(app.base, '/api/speak', { body: { text: 'Hello.' } });
       assert.equal(spoken.status, 409, 'the voice model is not downloaded');
       assert.match(spoken.json.error, /not set up/);
+      const streamed = await req(app.base, '/api/speak', { body: { text: 'Hello.', stream: true } });
+      assert.equal(streamed.status, 409, 'streaming says so too');
+      assert.match(streamed.json.error, /not set up/);
       assert.equal((await req(app.base, '/api/speak', { body: { text: ' ' } })).status, 400);
     } finally {
       await app.stop();
