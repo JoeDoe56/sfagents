@@ -177,6 +177,7 @@ export function artifactIndex(service: ConversationService, limit = 20): string 
 
 export const ARTIFACT_GUIDANCE = `<artifacts_guidance>
 Artifacts are outputs the user keeps and opens outside the chat: documents (.md), code, web pages (.html), drawings (.svg), data (.json, .csv), PDFs, images, and running web apps. An artifact is a file in your workspace, not a copy: it appears in the chat with a preview where you created it, and always shows the file as it is now.
+- A folder can be an artifact too (a generated project, a set of results): create_artifact with the folder's path; it opens in the file manager.
 - To make one, write the file (create_artifact can write it for you with "content"), then create_artifact with its path. Keep your reply short and refer to the artifact by title.
 - To change an artifact, change its file (with the shell, or create_artifact with its "id" and new "content"). Do not create a second artifact for the same file. create_artifact with "id" also retitles an artifact or points it at another file.
 - To read an artifact, read its file (the index below gives each file).
@@ -184,7 +185,7 @@ Artifacts are outputs the user keeps and opens outside the chat: documents (.md)
 - Short answers and small snippets belong in the chat reply, not in an artifact.
 </artifacts_guidance>`;
 
-/** An existing file the agent may read, as an absolute canonical path. */
+/** An existing file or folder the agent may read, as an absolute canonical path. */
 function existingFile(workspace: WorkspaceContext | undefined, p: string): string {
   if (!workspace) throw new ArtifactError('This agent has no workspace folders, so it has no files to show as artifacts.');
   const check = workspace.check(p, 'read');
@@ -195,7 +196,7 @@ function existingFile(workspace: WorkspaceContext | undefined, p: string): strin
   } catch {
     throw new ArtifactError(`There is no file at ${p}. Write it first (or give "content").`);
   }
-  if (!st.isFile()) throw new ArtifactError(`${p} is a folder, not a file.`);
+  if (!st.isFile() && !st.isDirectory()) throw new ArtifactError(`${p} is neither a file nor a folder.`);
   return check.resolvedPath;
 }
 
@@ -268,8 +269,10 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
         fs.writeFileSync(check.resolvedPath, p.content.replace(/\r\n/g, '\n'), 'utf8');
         file = check.resolvedPath;
       } else if (p.path !== undefined) file = existingFile(this.workspace, p.path);
+      const folder = file !== undefined && fs.statSync(file).isDirectory();
       if (view) {
         const repoint = p.path !== undefined && file !== undefined;
+        if (repoint && folder !== (view.type === 'folder')) throw new ArtifactError(`Artifact ${view.id} shows a ${view.type === 'folder' ? 'folder' : 'file'}; create a new artifact for ${p.path}.`);
         if (!repoint && p.title === undefined) return ok(`Wrote the file of artifact ${view.id} "${view.title}"; the artifact shows it as it is now.`, `updated ${view.id}`);
         const v = this.service.relinkArtifact(view.id, { title: p.title, file: repoint ? file : undefined, run: this.runId, callId: context?.callId });
         return ok(`Updated artifact ${v.id} "${v.title}".`, `updated ${v.id}`);
@@ -278,8 +281,9 @@ class CreateArtifactInvocation extends BaseToolInvocation<CreateParams, ToolResu
       const recorded = [...this.service.state.artifactViews.values()].find((v) => v.file && this.service.resolveArtifactFile(v.file) === file);
       const v = recorded
         ? this.service.relinkArtifact(recorded.id, { title: p.title, run: this.runId, callId: context?.callId })
-        : this.service.linkArtifact({ title: p.title!, file: file!, run: this.runId, callId: context?.callId });
-      return ok(`${recorded ? 'Artifact' : 'Created artifact'} ${v.id} "${v.title}" shows ${p.path}. It follows the file: edit the file to change it.`, `${recorded ? 'updated' : 'created'} ${v.id}`);
+        : this.service.linkArtifact({ title: p.title!, file: file!, run: this.runId, callId: context?.callId, ...(folder ? { type: 'folder' } : {}) });
+      const follows = folder ? 'It opens the folder in the file manager.' : 'It follows the file: edit the file to change it.';
+      return ok(`${recorded ? 'Artifact' : 'Created artifact'} ${v.id} "${v.title}" shows ${p.path}. ${follows}`, `${recorded ? 'updated' : 'created'} ${v.id}`);
     } catch (error) {
       return fail(error);
     }
@@ -295,14 +299,14 @@ class CreateArtifactTool extends BaseDeclarativeTool<CreateParams, ToolResult> {
     super(
       ArtifactToolNames.CREATE,
       ArtifactToolNames.CREATE,
-      'Shows a file from your workspace as an artifact the user keeps: a document, code, a web page (.html), an SVG drawing, data, a PDF or an image. Give "content" to write the file at the same time. The artifact follows the file from then on. With "id", changes an existing artifact instead: a new title, another file ("path"), or new "content" for its file.',
+      'Shows a file or folder from your workspace as an artifact the user keeps: a document, code, a web page (.html), an SVG drawing, data, a PDF or an image; a folder (a project, a set of results) opens in the file manager. Give "content" to write a file at the same time. The artifact follows the file from then on. With "id", changes an existing artifact instead: a new title, another file ("path"), or new "content" for its file.',
       Kind.Edit,
       {
         type: 'object',
         properties: {
           id: { type: 'string', description: 'Optional: an existing artifact to change (e.g. "a12"). Omit to create one.' },
           title: { type: 'string', maxLength: 120, description: 'Short title shown on the artifact. Required when creating.' },
-          path: { type: 'string', description: 'The file, relative to your workspace (e.g. "docs/plan.md") or absolute. Required when creating.' },
+          path: { type: 'string', description: 'The file or folder, relative to your workspace (e.g. "docs/plan.md", "site/") or absolute. Required when creating.' },
           content: { type: 'string', description: 'Optional: the complete content to write to the file first.' },
         },
       },

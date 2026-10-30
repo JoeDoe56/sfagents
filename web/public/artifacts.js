@@ -7,6 +7,7 @@ import { applySymbol } from './vendor/sfgl/src/symbols.js';
 
 const ICONS = {
   app: 'macwindow',
+  folder: 'folder',
   pdf: 'doc.richtext',
   video: 'film',
   audio: 'waveform',
@@ -173,7 +174,7 @@ export function chatCard(a, onOpen) {
   const title = document.createElement('strong');
   title.textContent = a.title;
   const meta = document.createElement('span');
-  meta.textContent = a.missing ? `${a.filename} · file missing` : a.type === 'app' ? `App · ${a.filename}` : a.filename;
+  meta.textContent = a.missing ? `${a.filename} · ${a.type === 'folder' ? 'folder' : 'file'} missing` : a.type === 'app' ? `App · ${a.filename}` : a.type === 'folder' ? `Folder · ${a.filename}` : a.filename;
   text.append(title, meta);
   foot.append(small, text);
   card.append(preview, foot);

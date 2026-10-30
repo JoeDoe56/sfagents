@@ -1234,9 +1234,10 @@ function setArtifacts(list) {
   render(); // the chat's artifact cards
 }
 
-/** A file artifact opens in the file manager's Quick Look; without a file on disk, in the artifact viewer. */
+/** A file artifact opens in the file manager's Quick Look, a folder in the file manager itself; without a file on disk, in the artifact viewer. */
 function openArtifact(a) {
   if (a.type === 'app') return openApp(a);
+  if (a.type === 'folder' && a.file && !a.missing) return openFiles(a.file);
   if (!a.file || a.missing) return viewer.show(a);
   fileManager.quickLookFile(a.file).catch(() => viewer.show(a));
 }

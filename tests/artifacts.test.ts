@@ -170,6 +170,32 @@ describe('artifacts: model tools and grants', () => {
     conversation.close();
   });
 
+  test('a folder is an artifact too: it opens in the file manager and has no content to read', async () => {
+    const dir = project({ tools: { allow: [] } });
+    fs.mkdirSync(path.join(dir, 'site', 'css'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'site', 'index.html'), '<h1>hi</h1>');
+    const { tree, conversation } = open(dir);
+    const script: Script = (req, call) => {
+      const id = conversation.artifacts().find((v) => v.title === 'Site')?.id;
+      if (call === 0) return { toolCalls: [{ name: 'create_artifact', args: { title: 'Site', path: 'site' } }] };
+      if (call === 1) return { toolCalls: [{ name: 'create_artifact', args: { id, path: 'site/index.html' } }, { name: 'create_artifact', args: { title: 'Bad', path: 'site/css', content: 'x' } }] };
+      return { text: JSON.stringify((req.messages.filter((m) => m.role === 'tool') as Array<{ content: string }>).map((m) => m.content)) };
+    };
+    const { factory } = scriptedFactory(script);
+    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
+    const r = await runtime.createSession().run('show the site folder');
+    const site = conversation.artifacts().find((v) => v.title === 'Site')!;
+    assert.deepEqual([site.type, site.file, site.mime], ['folder', 'site', 'inode/directory']);
+    assert.match(r.text, /opens the folder in the file manager/);
+    // A folder artifact cannot become a file one, and content cannot be written to a folder.
+    assert.match(r.text, /shows a folder; create a new artifact/);
+    assert.match(r.text, /EISDIR|is a directory|folder/i);
+    assert.equal(conversation.artifacts().filter((v) => v.title === 'Bad').length, 0);
+    assert.throws(() => conversation.artifactContent(site.id), /is a folder/);
+    await runtime.dispose();
+    conversation.close();
+  });
+
   test('create_artifact writes without asking, inside the workspace rules; app artifacts record the address', async () => {
     const dir = project({ tools: { allow: [] } });
     const { tree, conversation } = open(dir);
