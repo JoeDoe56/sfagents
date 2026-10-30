@@ -6,7 +6,7 @@
  */
 
 import path from 'node:path';
-import { threadKey, type ArtifactView, type AttachmentRef, type ConfirmationRequest, type ConversationState, type MessageRecord } from '@sfagents/core';
+import { ChatToolNames, chatEffects, threadKey, type ArtifactView, type AttachmentRef, type ConfirmationRequest, type ConversationState, type MessageRecord } from '@sfagents/core';
 
 export interface DisplayAttachment {
   id: string;
@@ -164,10 +164,14 @@ export function replyRoots(state: ConversationState): { messages: Map<string, st
   const messages = new Map<string, string>(); // message id → thread root
   const runs = new Map<string, string>(); // run id → thread root
   for (const m of state.messages) {
+    if (m.role === 'user' && m.event) continue;
     if (m.role === 'user' && m.replyTo) {
       const root = messages.get(m.replyTo) ?? m.replyTo;
       messages.set(m.id, root);
       runs.set(m.run, root);
+    } else if (m.role === 'user') {
+      // A message that joined a run while it worked: what follows answers it, in the main chat.
+      runs.delete(m.run);
     } else if (m.role === 'assistant') {
       const root = runs.get(m.run);
       if (root) messages.set(m.id, root);
@@ -190,18 +194,27 @@ export function displayItems(
     else if (r.kind === 'artifact_update' && r.run && r.callId) created.set(`${r.run}:${r.callId}`, r.artifact);
   }
   const roots = replyRoots(state);
+  const chat = chatEffects(state);
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
       const m = record as MessageRecord;
-      if (m.role === 'user') {
+      if (m.role === 'user' && m.event) {
+        // A note SF Agents wrote for the person (a reaction): the badge shows it.
+      } else if (m.role === 'user') {
         const replyTo = roots.messages.get(m.id);
         items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment), ...(options.thread ? { agent: m.agent } : {}), ...(replyTo ? { replyTo } : {}) });
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {
         const replyTo = roots.runs.get(m.run);
         if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
         for (const c of m.toolCalls ?? []) {
-          if (c.name === 'keep_section') continue; // only confirms the topic
+          if (c.name === 'keep_section' || c.name === ChatToolNames.REACT) continue; // the topic; a reaction shows as its badge
+          const inline = chat.replies.get(`${m.id}:${c.id}`);
+          if (inline) {
+            items.push({ kind: 'assistant', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: inline.text, agent: m.agent, replyTo: roots.messages.get(inline.messageId) ?? inline.messageId });
+            continue;
+          }
+          if (c.name === ChatToolNames.REPLY_INLINE) continue;
           items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
         }
       }

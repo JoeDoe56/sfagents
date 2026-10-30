@@ -357,8 +357,11 @@ describe('web server', () => {
       await ev.wait((e) => e.event === 'state');
       const sent = await postJson(s.base, '/api/messages', { text: 'make a page' });
       assert.equal(sent.status, 202);
+      // Sent while the agent works: it waits (Delivered) and the agent takes it at its next step.
       const busy = await postJson(s.base, '/api/messages', { text: 'again' });
-      assert.equal(busy.status, 409);
+      assert.equal(busy.status, 202);
+      const waiting = await ev.wait((e) => e.event === 'pending' && (e.data['pending'] as unknown[]).length === 1);
+      assert.equal((waiting.data['pending'] as Array<{ text: string }>)[0]!.text, 'again');
       await ev.wait((e) => e.event === 'user');
       await ev.wait((e) => e.event === 'delta');
       await ev.wait((e) => e.event === 'activity');
@@ -369,7 +372,10 @@ describe('web server', () => {
       const end = await ev.wait((e) => e.event === 'run_end');
       assert.equal(end.data['status'], 'GOAL');
       const items = end.data['items'] as Array<{ kind: string; text: string }>;
-      assert.deepEqual(items.map((i) => i.kind), ['user', 'assistant', 'activity', 'assistant']);
+      assert.deepEqual(items.map((i) => i.kind), ['user', 'assistant', 'activity', 'user', 'assistant']);
+      assert.equal(items[3]!.text, 'again');
+      await ev.wait((e) => e.event === 'user' && (e.data['item'] as { text: string }).text === 'again' && e.data['pending'] === (busy.json['run'] as string));
+      await ev.wait((e) => e.event === 'read' && e.data['id'] === (items[3] as unknown as { id: string }).id);
       assert.equal(items[2]!.text, 'Created “Page”');
 
       const raw = await request(s.base, list[0]!.url);
@@ -437,6 +443,49 @@ describe('web server', () => {
       assert.deepEqual((await postJson(s.base, '/api/reactions', { id: root, emoji: null })).json['reactions'], {});
       assert.equal((await postJson(s.base, '/api/reactions', { id: answer, emoji: '1️⃣' })).status, 200);
       assert.equal((await postJson(s.base, '/api/reactions', { id: answer, emoji: '🏳️‍🌈' })).status, 200);
+    } finally {
+      ev.close();
+      await s.stop();
+    }
+  });
+
+  test('the agent hears reactions and read receipts, and can react and reply inline', async () => {
+    const requests: Array<{ system: string; last: string; ids: string }> = [];
+    const s = await startServer((req, call) => {
+      const msgs = req.messages as Array<{ role: string; content: unknown }>;
+      const last = msgs[msgs.length - 1]!;
+      requests.push({ system: String(msgs[0]!.content), last: typeof last.content === 'string' ? last.content : '', ids: '' });
+      if (call === 0) return { text: 'Here is the plan.' };
+      if (call === 1) return { toolCalls: [{ name: 'react_to_message', args: { message_id: 'm2', emoji: '👍' } }, { name: 'reply_inline', args: { message_id: 'm2', text: 'Noted, aside.' } }] };
+      return {};
+    });
+    const ev = events(s.base);
+    try {
+      await ev.wait((e) => e.event === 'state');
+      assert.equal((await postJson(s.base, '/api/messages', { text: 'make a plan' })).status, 202);
+      const end1 = await ev.wait((e) => e.event === 'run_end');
+      const items1 = end1.data['items'] as Array<{ kind: string; id: string }>;
+      const answer = items1.find((i) => i.kind === 'assistant')!.id;
+      assert.match(requests[0]!.system, /<chat>/);
+      // Activity on a page: the agent's reply counts as read.
+      assert.equal((await postJson(s.base, '/api/presence', {})).status, 200);
+      const seen = await ev.wait((e) => e.event === 'seen');
+      assert.equal(seen.data['id'], answer);
+      ev.received.length = 0;
+      // A reaction to the agent's message is input for it: it reacts and replies inline.
+      assert.equal((await postJson(s.base, '/api/reactions', { id: answer, emoji: '👍' })).status, 200);
+      const end2 = await ev.wait((e) => e.event === 'run_end');
+      assert.match(requests[1]!.last, /^\[SF Agents\] The person reacted 👍 to your message m\d+: "Here is the plan\."$/);
+      assert.match(requests[1]!.system, new RegExp(`<receipts>The person read your last message \\(${answer}\\)`));
+      assert.deepEqual(end2.data['agentReactions'], { m2: '👍' });
+      const items2 = end2.data['items'] as Array<{ kind: string; text: string; replyTo?: string }>;
+      // The note is not a bubble; the inline reply is one, in m2's thread.
+      assert.equal(items2.filter((i) => i.kind === 'user').length, 1);
+      const inline = items2.find((i) => i.kind === 'assistant' && i.text === 'Noted, aside.')!;
+      assert.equal(inline.replyTo, 'm2');
+      assert.ok(!items2.some((i) => i.kind === 'activity' && /react|Reply/.test(i.text)));
+      const state = JSON.parse((await request(s.base, '/api/state')).body.toString()) as { agentReactions: Record<string, string> };
+      assert.deepEqual(state.agentReactions, { m2: '👍' });
     } finally {
       ev.close();
       await s.stop();

@@ -570,7 +570,13 @@ export function toChatMessages(
   for (const m of list) {
     if (m.role === 'user') {
       const quoted = m.replyTo ? state.messages.find((q) => q.id === m.replyTo)?.content : undefined;
-      out.push(userMessageFor(m, resolveAttachment, quoted));
+      const msg = userMessageFor(m, resolveAttachment, quoted);
+      // In the main conversation the model sees each message's id, for react_to_message and reply_inline.
+      if (state.header?.conversationKind === 'main' && !m.event) {
+        if (typeof msg.content === 'string') msg.content = `[${m.id}] ${msg.content}`;
+        else if (msg.content[0]?.type === 'text') msg.content[0] = { type: 'text', text: `[${m.id}] ${msg.content[0].text}` };
+      }
+      out.push(msg);
     } else if (m.role === 'assistant') {
       const run = state.runs.get(m.run);
       const sameModel = run?.start?.provider === target.provider && run?.start?.model === target.model;
@@ -623,8 +629,8 @@ class StoreRunRecorder implements RunRecorder {
     }) as MessageRecord;
   }
 
-  user(content: string, attachments?: AttachmentRef[], replyTo?: string): void {
-    this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}), ...(replyTo ? { replyTo } : {}) });
+  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction'): string {
+    return this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}), ...(replyTo ? { replyTo } : {}), ...(event ? { event } : {}) }).id;
   }
 
   start(node: AgentNode): void {

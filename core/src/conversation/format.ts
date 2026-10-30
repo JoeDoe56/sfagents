@@ -36,7 +36,7 @@ const KINDS: ReadonlySet<string> = new Set([
 /** Fields each kind maps explicitly; anything else round-trips via `extra`. */
 const KNOWN_FIELDS: Record<string, readonly string[]> = {
   conversation: ['seq', 'time', 'v', 'id', 'kind', 'run', 'parentRun', 'agent'],
-  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'attachments', 'replyTo', 'b', 'fence'],
+  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'attachments', 'replyTo', 'event', 'b', 'fence'],
   run_start: ['seq', 'time', 'run', 'agent', 'parentRun', 'callId', 'provider', 'model', 'reasoning', 'config', 'configHash'],
   tool_start: ['seq', 'time', 'run', 'callId', 'tool'],
   run_end: ['seq', 'time', 'run', 'status', 'error', 'turns', 'usage'],
@@ -306,6 +306,7 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         status: status as MessageRecord['status'],
         attachments: attachments(meta, p),
         replyTo: str(meta, 'replyTo', false, p),
+        event: str(meta, 'event', false, p) === 'reaction' ? 'reaction' : undefined,
       };
       if (record.role === 'tool' && (!record.callId || !record.tool)) p.push('tool messages need "callId" and "tool"');
       break;

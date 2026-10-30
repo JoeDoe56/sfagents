@@ -150,7 +150,10 @@ export class Tui {
   private read: { id: string; time: string } | null = null;
   private notices: Array<{ id: number; text: string; level: string }> = [];
   private noticeSeq = 0;
-  private queued: string | null = null;
+  /** Messages waiting for the agent (Delivered), the same on every page. */
+  private pending: Array<Extract<Item, { kind: 'user' }>> = [];
+  private agentReactions: Record<string, string> = {};
+  private lastPresence = 0;
 
   // The composer.
   private text = '';
@@ -278,11 +281,20 @@ export class Tui {
         this.approvals = s.approvals;
         this.reactions = s.reactions ?? {};
         this.read = s.read ?? null;
+        this.pending = (s as { pending?: Tui['pending'] }).pending ?? [];
+        this.agentReactions = (s as { agentReactions?: Record<string, string> }).agentReactions ?? {};
         for (const n of s.notices ?? []) typeof n === 'string' ? this.notice(n) : this.notice(n.text, n.level);
         break;
       }
+      case 'pending':
+        this.pending = (data.pending as Tui['pending']) ?? [];
+        break;
+      case 'agent_reactions':
+        this.agentReactions = (data.reactions as Record<string, string>) ?? {};
+        break;
       case 'user': {
         const item = data.item as Item;
+        if (typeof data.pending === 'string') this.pending = this.pending.filter((p) => p.id !== data.pending);
         if (!this.items.some((i) => i.id === item.id)) this.items.push(item);
         this.scroll.Chat = 0;
         break;
@@ -342,11 +354,7 @@ export class Tui {
         this.more = data.more === true;
         this.approvals = [];
         if (typeof data.error === 'string' && data.error && data.status !== 'ERROR') this.notice(data.error);
-        if (this.queued) {
-          const next = this.queued;
-          this.queued = null;
-          setImmediate(() => this.submit(next));
-        }
+        if (data.agentReactions) this.agentReactions = data.agentReactions as Record<string, string>;
         break;
       }
       default:
@@ -378,6 +386,11 @@ export class Tui {
 
   private onKey(str: string | undefined, key: readline.Key): void {
     if (this.closed) return;
+    // Someone is at the terminal: the agent's latest message counts as read.
+    if (Date.now() - this.lastPresence > 10_000) {
+      this.lastPresence = Date.now();
+      this.options.server.presence();
+    }
     // Mouse reports (SGR: ESC [ < button ; column ; row M) arrive as separate keys: collect them.
     if (key.sequence === '\u001b[<') {
       this.mouse = '';
@@ -445,7 +458,6 @@ export class Tui {
     }
     if (name === 'escape') {
       if (this.live) this.options.server.cancel();
-      else if (this.queued) this.queued = null;
       this.schedule();
       return;
     }
@@ -583,11 +595,7 @@ export class Tui {
     if (!text.trim()) return this.schedule();
     if (this.history[this.history.length - 1] !== text) this.history.push(text);
     if (text.startsWith('/') && !text.includes('\n')) return this.command(text.trim());
-    if (this.live) {
-      this.queued = text;
-      this.notice('Queued: it is sent when the current reply finishes (Esc removes it).');
-      return;
-    }
+    // While the agent works the message waits, Delivered, and the agent reads it at its next step.
     try {
       this.options.server.sendMessage(text);
       this.scroll.Chat = 0;
@@ -721,7 +729,7 @@ export class Tui {
     const curCol = textWidth(before[curRow] ?? '');
     const first = Math.max(0, Math.min(curRow - 4, lines.length - 5));
     const visible = lines.slice(first, first + 5);
-    const placeholder = this.live ? 'Type to queue a message · Esc stops the reply' : `Message ${this.agent?.id ?? 'the agent'} · /help for commands`;
+    const placeholder = this.live ? 'The agent reads what you send at its next step · Esc stops the reply' : `Message ${this.agent?.id ?? 'the agent'} · /help for commands`;
     const rendered = this.text
       ? visible.map((l, i) => `${i === 0 && first === 0 ? color.cyan(prompt) : '  '}${l}`)
       : [`${color.cyan(prompt)}${color.dim(truncate(placeholder, avail))}`];
@@ -736,7 +744,11 @@ export class Tui {
     if (this.more) out.push(color.dim('  … earlier messages are in the web interface and `sfagents conversation`'), '');
     let lastTime = 0;
     let lastUser: string | undefined;
-    for (const it of this.items) if (it.kind === 'user') lastUser = it.id;
+    for (const it of [...this.items, ...this.pending]) if (it.kind === 'user') lastUser = it.id;
+    const badge = (id: string) => {
+      const r = [this.reactions[id], this.agentReactions[id]].filter(Boolean).join('');
+      return r ? ` ${r}` : '';
+    };
     for (const it of this.items) {
       const t = new Date(it.time).getTime();
       if ((it.kind === 'user' || it.kind === 'assistant') && Number.isFinite(t)) {
@@ -745,7 +757,7 @@ export class Tui {
       }
       const thread = root(it);
       if (it.kind === 'user') {
-        out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(it.time))}${this.reactions[it.id] ? ` ${this.reactions[it.id]}` : ''}`);
+        out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(it.time))}${badge(it.id)}`);
         out.push(...indent(wrap(clean(it.text), w - textWidth(thread)), `${thread}  `));
         for (const a of it.attachments ?? []) out.push(`${thread}  ${color.dim(`📎 ${clean(a.name)} (${bytesText(a.size)})`)}`);
         if (it.id === lastUser) {
@@ -754,13 +766,20 @@ export class Tui {
           if (receipt) out.push(`${thread}  ${color.dim(receipt)}`);
         }
       } else if (it.kind === 'assistant') {
-        out.push('', `${thread}${color.magenta(color.bold(it.agent))} ${color.dim(timeText(it.time))}${this.reactions[it.id] ? ` ${this.reactions[it.id]}` : ''}`);
+        out.push('', `${thread}${color.magenta(color.bold(it.agent))} ${color.dim(timeText(it.time))}${badge(it.id)}`);
         out.push(...indent(wrap(clean(it.text), w - textWidth(thread)), `${thread}  `));
       } else if (it.kind === 'activity') {
         out.push(this.activityLine(it, w));
       } else {
         out.push(...indent(wrap(clean(it.text), w).map((l) => (/^Error/.test(it.text) ? color.red(l) : color.yellow(l)))));
       }
+    }
+    for (const p of this.pending) {
+      const thread = root(p);
+      out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(p.time))}`);
+      out.push(...indent(wrap(clean(p.text), w - textWidth(thread)), `${thread}  `));
+      for (const a of p.attachments ?? []) out.push(`${thread}  ${color.dim(`📎 ${clean(a.name)} (${bytesText(a.size)})`)}`);
+      if (p.id === lastUser) out.push(`${thread}  ${color.dim('Delivered')}`);
     }
     if (this.live) {
       const segs = this.live.segments;
@@ -783,7 +802,6 @@ export class Tui {
           : `    ${color.bold('[y]')} Allow once   ${color.bold('[a]')} Always allow   ${color.bold('[n]')} Deny`,
       );
     }
-    if (this.queued) out.push('', color.dim(`  Queued: ${truncate(clean(this.queued).replace(/\s+/g, ' '), w - 10)}`));
     if (this.infoLines.length) out.push('', ...this.infoLines.flatMap((l) => indent(wrap(l, w))).map(color.dim));
     for (const n of this.notices) out.push('', ...indent(wrap(clean(n.text), w)).map(n.level === 'error' ? color.red : color.yellow));
     if (!this.items.length && !this.live) out.push('', color.dim(`  No messages yet. Type below, or open ${this.options.url}`));

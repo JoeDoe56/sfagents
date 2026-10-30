@@ -67,6 +67,8 @@ const state = {
   notices: [],
   reactions: {}, // message id → emoji
   outbox: [], // sent, not yet confirmed by the server: shown at once
+  pending: [], // delivered, waiting for the agent to take them (the same on every page)
+  agentReactions: {}, // message id → the agent's 👍 or 👎
   reply: null, // the reply view: { root, to } (the thread's first message, the message replied to)
   read: null, // { id, time }: when the agent picked up the last message
 
@@ -74,7 +76,6 @@ const state = {
   connected: false,
 };
 const answered = new Map(); // approval id → decision (kept briefly so the card shows the answer)
-let queued = null; // a message typed while the agent was working
 
 // ------------------------------------------------------------------ scrolling
 
@@ -264,7 +265,7 @@ const msgEntry = (it, side) => ({
   attachments: it.attachments,
   rich: side === 'in',
   root: it.replyTo,
-  reaction: state.reactions[it.id],
+  reaction: state.reactions[it.id] ?? state.agentReactions[it.id],
 });
 
 /** Flattens items, the live run and approvals into keyed render entries. */
@@ -284,6 +285,7 @@ function entries() {
     else if (it.kind === 'activity') pushActivity(push, it.id, it);
     else push({ key: it.id, type: 'notice', text: it.text, level: /^Error/.test(it.text) ? 'error' : '' });
   }
+  for (const p of state.pending) push({ ...msgEntry(p, 'out'), key: p.id });
   for (const o of state.outbox) push({ key: o.key, type: 'msg', side: 'out', text: o.text, root: o.root, pending: true });
   if (state.live) {
     const root = state.live.replyTo;
@@ -308,6 +310,7 @@ function threadEntries(root) {
     if (it.kind === 'user') out.push(msgEntry(it, 'out'));
     else if (it.kind === 'assistant') out.push(msgEntry(it, 'in'));
   }
+  for (const p of state.pending) if (p.replyTo === root) out.push({ ...msgEntry(p, 'out'), key: p.id });
   for (const o of state.outbox) if (o.root === root) out.push({ key: o.key, type: 'msg', side: 'out', text: o.text, root, pending: true });
   if (state.live?.replyTo === root) {
     for (const seg of liveTexts()) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
@@ -934,6 +937,8 @@ function applySnapshot(s) {
   state.agent = s.agent;
   state.reactions = s.reactions ?? {};
   state.outbox = [];
+  state.pending = s.pending ?? [];
+  state.agentReactions = s.agentReactions ?? {};
   setGradientSeed(s.agent?.model);
   state.items = s.items;
   state.more = s.more;
@@ -955,28 +960,152 @@ function applySnapshot(s) {
   });
 }
 
-function connect() {
+// The live stream. A browser opens at most six connections to one server, and
+// each open page used to hold one stream: with six pages open, the next one
+// never heard anything. So the pages of a browser share one stream: one page
+// (the holder of a Web Lock) opens it and passes each event on to the others
+// over a BroadcastChannel. When that page closes, another takes over; a page
+// that comes back to a silent stream takes the lock from a page the browser
+// has frozen. Without those APIs (an insecure origin) each page has its own.
+//
+// A browser also gives up on an EventSource for good when the server answers
+// with an error (SF Agents restarting behind a proxy), and a sleeping device
+// can keep a dead one open: so the stream reopens itself when it closes, when
+// the server's ping (every 20 seconds) stops, and when the page comes back.
+const stream = new EventTarget();
+const streamNames = new Set();
+{
+  const add = stream.addEventListener.bind(stream);
+  stream.addEventListener = (name, fn, options) => {
+    streamNames.add(name);
+    events?.addEventListener(name, forward);
+    add(name, fn, options);
+  };
+}
+const shared = 'locks' in navigator && 'BroadcastChannel' in window;
+const channel = shared ? new BroadcastChannel('sfagents-stream') : null;
+let events = null;
+let leading = !shared;
+let lastEvent = 0;
+let reopenTimer = null;
+function emit(name, data) {
+  lastEvent = Date.now();
+  stream.dispatchEvent(new MessageEvent(name, { data }));
+}
+function forward(e) {
+  emit(e.type, e.data);
+  channel?.postMessage({ name: e.type, data: e.data });
+}
+channel?.addEventListener('message', ({ data: m }) => {
+  // A page that just opened needs the whole state: the stream sends it on
+  // opening, so the holder reopens it, and every page gets the fresh state.
+  if (m.hello) return leading && reconnect();
+  if (!leading) emit(m.name, m.data);
+});
+function reconnect(delay = 0) {
+  if (!leading) return;
+  clearTimeout(reopenTimer);
+  reopenTimer = setTimeout(() => {
+    events?.close();
+    open();
+  }, delay);
+}
+function open() {
   const es = new EventSource('/api/events');
-  es.addEventListener('state', (e) => {
+  events = es;
+  lastEvent = Date.now();
+  for (const name of streamNames) es.addEventListener(name, forward);
+  es.onerror = () => {
+    forward(new MessageEvent('down'));
+    if (es.readyState === EventSource.CLOSED && events === es) reconnect(2000);
+  };
+}
+function lead(steal = false) {
+  navigator.locks
+    .request('sfagents-stream', { steal }, () => {
+      leading = true;
+      open();
+      return new Promise(() => {}); // held while the page is open
+    })
+    .catch(() => {
+      // Another page took the stream (this one was frozen): follow it.
+      leading = false;
+      clearTimeout(reopenTimer);
+      events?.close();
+      events = null;
+      lead();
+    });
+}
+function connect() {
+  if (!shared) return open();
+  lead();
+  channel.postMessage({ hello: true });
+  lastEvent = Date.now();
+}
+setInterval(() => {
+  if (Date.now() - lastEvent < 50_000) return;
+  if (leading) reconnect();
+  else if (!document.hidden) lead(true);
+}, 10_000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  const stale = Date.now() - lastEvent > 30_000;
+  if (leading && (stale || !events || events.readyState === EventSource.CLOSED)) reconnect();
+  else if (!leading && stale) lead(true);
+});
+addEventListener('online', () => reconnect());
+addEventListener('pageshow', (e) => e.persisted && reconnect());
+
+// Someone is here: the agent's latest message counts as read (the agent is told).
+let lastPresence = 0;
+function presence() {
+  if (document.hidden || Date.now() - lastPresence < 10_000) return;
+  lastPresence = Date.now();
+  postJson('/api/presence').catch(() => {});
+}
+for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart', 'focus']) addEventListener(type, presence, { passive: true, capture: true });
+document.addEventListener('visibilitychange', presence);
+
+function listen() {
+  stream.addEventListener('state', (e) => {
     state.connected = true;
     applySnapshot(JSON.parse(e.data));
   });
-  es.addEventListener('user', (e) => {
-    const { item } = JSON.parse(e.data);
+  stream.addEventListener('user', (e) => {
+    const { item, pending: waited } = JSON.parse(e.data);
     // The bubble shown when it was sent becomes the stored message, in place.
-    const sent = state.outbox.findIndex((o) => o.text === item.text);
-    if (sent >= 0) sentAs.set(item.id, state.outbox.splice(sent, 1)[0].key);
+    const was = waited && state.pending.findIndex((p) => p.id === waited);
+    if (waited && was >= 0) {
+      state.pending.splice(was, 1);
+      sentAs.set(item.id, sentAs.get(waited) ?? waited);
+    } else {
+      const sent = state.outbox.findIndex((o) => o.text === item.text);
+      if (sent >= 0) sentAs.set(item.id, state.outbox.splice(sent, 1)[0].key);
+    }
     if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
     render();
     requestAnimationFrame(scrollToBottom);
   });
-  es.addEventListener('run_start', (e) => {
+  stream.addEventListener('agent_reactions', (e) => {
+    state.agentReactions = JSON.parse(e.data).reactions ?? {};
+    render();
+  });
+  stream.addEventListener('pending', (e) => {
+    state.pending = JSON.parse(e.data).pending ?? [];
+    // A message this page sent that now waits for the agent: its bubble stays where it is.
+    for (const p of state.pending) {
+      const sent = state.outbox.findIndex((o) => o.text === p.text);
+      if (sent >= 0) sentAs.set(p.id, state.outbox.splice(sent, 1)[0].key);
+    }
+    render();
+  });
+  stream.addEventListener('run_start', (e) => {
     const { run, replyTo } = JSON.parse(e.data);
     state.live = { id: run, segments: [], ...(replyTo ? { replyTo } : {}) };
     render();
     updateComposer();
   });
-  es.addEventListener('delta', (e) => {
+  stream.addEventListener('delta', (e) => {
     const { run, text } = JSON.parse(e.data);
     if (!state.live || state.live.id !== run) return;
     const segs = state.live.segments;
@@ -986,26 +1115,26 @@ function connect() {
     // Nothing to draw: a reply is shown once it is finished, not as it streams.
     markRead();
   });
-  es.addEventListener('activity', (e) => {
+  stream.addEventListener('activity', (e) => {
     const { run, segment } = JSON.parse(e.data);
     if (!state.live || state.live.id !== run) return;
     state.live.segments.push(segment);
     markRead();
     render();
   });
-  es.addEventListener('activity_end', (e) => {
+  stream.addEventListener('activity_end', (e) => {
     const { run, id, status, artifact } = JSON.parse(e.data);
     const seg = state.live?.id === run ? state.live.segments.find((s) => s.id === id) : null;
     if (seg) seg.status = status;
     if (seg && artifact) seg.artifact = artifact;
     render();
   });
-  es.addEventListener('approval', (e) => {
+  stream.addEventListener('approval', (e) => {
     const { approval } = JSON.parse(e.data);
     if (!state.approvals.some((a) => a.id === approval.id)) state.approvals.push(approval);
     render();
   });
-  es.addEventListener('approval_done', (e) => {
+  stream.addEventListener('approval_done', (e) => {
     const { id, decision } = JSON.parse(e.data);
     answered.set(id, decision);
     render();
@@ -1015,56 +1144,53 @@ function connect() {
       render();
     }, 1200);
   });
-  es.addEventListener('agent', (e) => {
+  stream.addEventListener('agent', (e) => {
     const info = JSON.parse(e.data);
     state.agent = { ...(state.agent ?? {}), ...info };
     setGradientSeed(info.model);
     agentSheet?.setAgent?.(info);
   });
   // The receipt and the context are the same on every page.
-  es.addEventListener('read', (e) => {
+  stream.addEventListener('read', (e) => {
     state.read = JSON.parse(e.data);
     render();
   });
-  es.addEventListener('context', () => {
+  stream.addEventListener('context', () => {
     if (agentSheetOpen()) agentSheet?.refresh();
   });
-  es.addEventListener('files', () => fileManager.filesChanged());
-  es.addEventListener('view', (e) => fileManager.applyView(JSON.parse(e.data).files));
-  es.addEventListener('usage', (e) => agentSheet?.setUsage?.(JSON.parse(e.data)));
-  es.addEventListener('dictation', (e) => dictationEvent(JSON.parse(e.data)));
-  es.addEventListener('screen', (e) => remoteEvent(JSON.parse(e.data)));
-  es.addEventListener('notice', (e) => {
+  stream.addEventListener('files', () => fileManager.filesChanged());
+  stream.addEventListener('view', (e) => fileManager.applyView(JSON.parse(e.data).files));
+  stream.addEventListener('usage', (e) => agentSheet?.setUsage?.(JSON.parse(e.data)));
+  stream.addEventListener('dictation', (e) => dictationEvent(JSON.parse(e.data)));
+  stream.addEventListener('screen', (e) => remoteEvent(JSON.parse(e.data)));
+  stream.addEventListener('notice', (e) => {
     const { text, level } = JSON.parse(e.data);
     notice(text, level === 'error' ? 'error' : '');
   });
-  es.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
-  es.addEventListener('reactions', (e) => {
+  stream.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
+  stream.addEventListener('reactions', (e) => {
     state.reactions = JSON.parse(e.data).reactions ?? {};
     render();
   });
-  es.addEventListener('threads', () => refreshTranscript());
-  for (const name of ['signin', 'providers', 'settings']) es.addEventListener(name, (e) => settingsEvent(name, JSON.parse(e.data)));
-  es.addEventListener('terminals', () => terminalsChanged());
-  es.addEventListener('sections', (e) => setSections(JSON.parse(e.data).sections));
-  es.addEventListener('run_end', (e) => {
+  stream.addEventListener('threads', () => refreshTranscript());
+  for (const name of ['signin', 'providers', 'settings']) stream.addEventListener(name, (e) => settingsEvent(name, JSON.parse(e.data)));
+  stream.addEventListener('terminals', () => terminalsChanged());
+  stream.addEventListener('sections', (e) => setSections(JSON.parse(e.data).sections));
+  stream.addEventListener('run_end', (e) => {
     const data = JSON.parse(e.data);
     state.live = null;
     state.items = data.items;
     state.more = data.more;
     state.approvals = [];
     if (data.sections) setSections(data.sections);
+    if (data.agentReactions) state.agentReactions = data.agentReactions;
     if (data.error && data.status !== 'ERROR') notice(data.error);
     render();
     updateComposer();
     if (agentSheetOpen()) agentSheet?.refresh();
-    if (queued) {
-      const next = queued;
-      queued = null;
-      submit(next);
-    }
   });
-  es.onerror = () => {
+  stream.addEventListener('ping', () => {});
+  stream.addEventListener('down', () => {
     state.connected = false;
     // A dropped stream may mean this device was signed out.
     fetch('/api/auth/status', { cache: 'no-store' })
@@ -1073,7 +1199,7 @@ function connect() {
         if (s && s.signedIn === false) goToSignIn();
       })
       .catch(() => {});
-  };
+  });
 }
 
 // ------------------------------------------------------------------ artifacts
@@ -1212,7 +1338,7 @@ function updateComposer() {
   send.classList.toggle('can-send', sendable);
   send.classList.toggle('can-stop', running && !sendable);
   send.disabled = false;
-  send.setAttribute('aria-label', sendable ? (running ? 'Send when the agent finishes' : 'Send') : running ? 'Stop' : 'Agent and context');
+  send.setAttribute('aria-label', sendable ? 'Send' : running ? 'Stop' : 'Agent and context');
   composer.showAttachments(pending.length > 0);
 }
 
@@ -1259,13 +1385,8 @@ function submitFromComposer() {
   }
   autosize();
   updateComposer();
-  const message = { text, jobs, replyTo: state.reply?.to ?? null };
-  if (state.live) {
-    queued = message;
-    notice('Your message will be sent when the agent finishes.');
-    return;
-  }
-  submit(message);
+  // While the agent works the message waits, Delivered, and the agent reads it at its next step.
+  submit({ text, jobs, replyTo: state.reply?.to ?? null });
 }
 
 let outboxSeq = 0;
@@ -1573,6 +1694,7 @@ if (vv) {
 }
 autosize();
 updateComposer();
+listen();
 connect();
 
 // ------------------------------------------------------------------ file manager

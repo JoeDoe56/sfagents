@@ -68,6 +68,8 @@ export interface MessageRecord extends RecordBase {
   attachments?: AttachmentRef[];
   /** User messages: an inline reply to this message (by id). */
   replyTo?: string;
+  /** User messages SF Agents wrote for the person, not typed by them: "reaction" (they reacted to a message). */
+  event?: 'reaction';
 }
 
 export interface RunStartRecord extends RecordBase {

@@ -48,6 +48,10 @@ import {
   DEFAULT_MODELS,
   BrightDataWeb,
   parseOrigin,
+  chatEffects,
+  readJsonFile,
+  writeFileAtomic,
+  type MessageRecord,
   type PlanUsage,
 } from '@sfagents/core';
 import { ApiError, ProvidersApi } from './providers-api.js';
@@ -159,6 +163,22 @@ interface LiveRun {
   replyTo?: string;
   /** The agent has started on the message (its receipt says Read). */
   read?: boolean;
+  /** The message that started the run. */
+  userId?: string;
+  /** Messages handed to the agent mid-run, waiting to be recorded. */
+  taken: PendingInput[];
+}
+
+/** A message waiting for the agent (sent while it worked), or a note for it (a reaction). */
+interface PendingInput {
+  id: string;
+  time: string;
+  text: string;
+  attachments: AttachmentRef[];
+  replyTo?: string;
+  event?: 'reaction';
+  /** A reaction's message. */
+  target?: string;
 }
 
 interface PendingApproval {
@@ -265,6 +285,12 @@ export class WebServer {
   private readonly listeners = new Set<(event: string, data: unknown) => void>();
   /** When the agent picked up the last message (the "Read" receipt), the same on every page. */
   private read: { id: string; time: string } | null = null;
+  /** Messages sent while the agent worked, oldest first. */
+  private pending: PendingInput[] = [];
+  /** When the person last used a page or the terminal, and the agent message they have seen. */
+  private lastActivity = 0;
+  private seen: { id: string; time: string } | null = null;
+  private closing = false;
   readonly logs: LogBook;
   private readonly approvals = new Map<string, PendingApproval>();
   private live: LiveRun | undefined;
@@ -396,6 +422,8 @@ export class WebServer {
     this.agentSettings = new AgentSettingsStore(options.conversation.dir);
     this.reactions = new ReactionStore(options.conversation.dir);
     this.sharedView = new SharedViewStore(options.conversation.dir);
+    const seen = readJsonFile<{ id?: unknown; time?: unknown }>(path.join(options.conversation.dir, 'web-seen.json'), {});
+    if (typeof seen.id === 'string' && typeof seen.time === 'string') this.seen = { id: seen.id, time: seen.time };
     for (const [agent, provider] of Object.entries(this.agentSettings.get().accounts ?? {})) this.accounts.set(agent, provider);
     this.accounts.onChange((agent, provider) => {
       const settings = this.agentSettings.get();
@@ -458,7 +486,8 @@ export class WebServer {
     });
     const address = this.server.address();
     if (address && typeof address === 'object') this.port = address.port;
-    this.heartbeat = setInterval(() => this.broadcastRaw(': keep-alive\n\n'), 25_000);
+    // A ping the pages watch for: when it stops, they reconnect.
+    this.heartbeat = setInterval(() => this.broadcastRaw(`event: ping\ndata: ${Date.now()}\n\n`), 20_000);
     // The sensors start with the server, not when the monitor first opens.
     this.system.warm();
     // Artifacts are the files themselves: when one changes on disk, the page updates.
@@ -500,6 +529,8 @@ export class WebServer {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    this.pending = [];
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.fileWatch) clearInterval(this.fileWatch);
     await this.system.close();
@@ -935,6 +966,10 @@ export class WebServer {
           this.broadcast('view', view);
           return sendJson(res, 200, view);
         }
+        case 'POST presence':
+          await readJson(req);
+          this.presence();
+          return sendJson(res, 200, { ok: true });
         case 'GET status':
           this.checkFetchSite(req);
           return sendJson(res, 200, await this.status());
@@ -947,10 +982,13 @@ export class WebServer {
           return this.postMessage(req, res);
         case 'POST reactions': {
           const body = (await readJson(req)) as { id?: unknown; emoji?: unknown };
-          if (typeof body.id !== 'string' || !this.conversation.state.messages.some((m) => m.id === body.id && m.role !== 'tool')) throw new HttpError(400, 'Unknown message.');
+          const known = typeof body.id === 'string' && (this.conversation.state.messages.some((m) => m.id === body.id && m.role !== 'tool' && !m.event) || chatEffects(this.conversation.state).replies.has(body.id));
+          if (!known) throw new HttpError(400, 'Unknown message.');
           if (body.emoji !== null && (typeof body.emoji !== 'string' || !isEmoji(body.emoji))) throw new HttpError(400, '"emoji" must be one emoji, or null to remove it.');
-          const reactions = this.reactions.set(body.id, body.emoji);
+          const before = this.reactions.all()[body.id as string] ?? null;
+          const reactions = this.reactions.set(body.id as string, body.emoji);
           this.broadcast('reactions', { reactions });
+          if (before !== body.emoji) this.reactionInput(body.id as string, body.emoji);
           return sendJson(res, 200, { reactions });
         }
         case 'POST cancel':
@@ -1483,6 +1521,9 @@ export class WebServer {
       live: this.live ? { id: this.live.id, segments: this.live.segments, ...(this.live.replyTo ? { replyTo: this.live.replyTo } : {}) } : null,
       reactions: this.reactions.all(),
       read: this.read,
+      pending: this.displayPending(),
+      seen: this.seen,
+      agentReactions: chatEffects(this.conversation.state).reactions,
       view: this.sharedView.get(),
       approvals: [...this.approvals.values()].map((a) => a.display),
       notices: [
@@ -1640,7 +1681,8 @@ export class WebServer {
     return {
       at: Date.now(),
       self: { ...self, cpu: ownCpu ?? self.cpu },
-      web: { url: self.url, host: this.host, port: this.port, publicOrigins: [...this.publicOrigins.values()], pages: this.clients.size, terminals: this.listeners.size, signIn: this.auth ? 'on' : 'off' },
+      web: { url: self.url, host: this.host, port: this.port, publicOrigins: [...this.publicOrigins.values()], pages: this.clients.size, terminals: this.listeners.size, signIn: this.auth ? 'on' : 'off', lastActivity: this.lastActivity || null },
+      pending: this.pending.length,
       run: this.live ? { id: this.live.id, segments: this.live.segments.length } : null,
       approvals: this.approvals.size,
       account: this.agentInfo().account ?? null,
@@ -1770,28 +1812,135 @@ export class WebServer {
     sendJson(res, 202, { run: this.send(text, attachments, replyTo) });
   }
 
-  private send(text: string, attachments: AttachmentRef[], replyTo?: string): string {
-    if (text.length > MAX_MESSAGE_CHARS) throw new HttpError(413, `Messages are limited to ${MAX_MESSAGE_CHARS} characters.`);
-    if (replyTo && !this.conversation.state.messages.some((m) => m.id === replyTo && (m.role === 'user' || (m.role === 'assistant' && m.content.trim())))) throw new HttpError(400, 'The message being replied to is not in the conversation.');
-    if (!text.trim() && attachments.length === 0) throw new HttpError(400, 'The message is empty.');
-    if (this.live) throw new HttpError(409, 'The agent is still working on the previous message.');
-    return this.startRun(text, attachments, replyTo);
+  /** Where a reply goes: the message's thread (an inline reply of the agent's answers its own target). */
+  private replyTarget(replyTo: string | undefined): string | undefined {
+    if (!replyTo) return undefined;
+    const inline = chatEffects(this.conversation.state).replies.get(replyTo);
+    const id = inline ? inline.messageId : replyTo;
+    if (!this.conversation.state.messages.some((m) => m.id === id && !m.event && (m.role === 'user' || (m.role === 'assistant' && m.content.trim())))) {
+      throw new HttpError(400, 'The message being replied to is not in the conversation.');
+    }
+    return id;
   }
 
-  private startRun(text: string, attachments: AttachmentRef[], replyTo?: string): string {
+  /**
+   * Sends a message. With no reply running it starts one; otherwise it waits,
+   * Delivered, and the agent takes it at its next step (or right after).
+   */
+  private send(text: string, attachments: AttachmentRef[], replyTo?: string): string {
+    if (text.length > MAX_MESSAGE_CHARS) throw new HttpError(413, `Messages are limited to ${MAX_MESSAGE_CHARS} characters.`);
+    const target = this.replyTarget(replyTo);
+    if (!text.trim() && attachments.length === 0) throw new HttpError(400, 'The message is empty.');
+    return this.deliver({ id: `q${randomBytes(6).toString('hex')}`, time: new Date().toISOString(), text, attachments, ...(target ? { replyTo: target } : {}) });
+  }
+
+  private deliver(p: PendingInput): string {
+    if (!this.live) return this.startRun(p);
+    this.pending.push(p);
+    this.publishPending();
+    return p.id;
+  }
+
+  /** Messages waiting for the agent, as the pages show them (Delivered). */
+  private displayPending() {
+    const roots = replyRoots(this.conversation.state).messages;
+    return this.pending
+      .filter((p) => !p.event)
+      .map((p) => ({ kind: 'user' as const, id: p.id, pending: true, time: p.time, text: p.text, attachments: p.attachments.map(displayAttachment), ...(p.replyTo ? { replyTo: roots.get(p.replyTo) ?? p.replyTo } : {}) }));
+  }
+
+  private publishPending(): void {
+    this.broadcast('pending', { pending: this.displayPending() });
+  }
+
+  /** The person reacted to one of the agent's messages: the agent hears of it (it may answer, react or say nothing). */
+  private reactionInput(id: string, emoji: string | null): void {
+    const state = this.conversation.state;
+    const inline = chatEffects(state).replies.get(id);
+    const message = inline ? undefined : state.messages.find((m) => m.id === id);
+    if (!inline && (!message || message.role !== 'assistant')) return;
+    const text = (inline?.text ?? message?.content ?? '').replace(/\s+/g, ' ').trim();
+    const quote = text.length > 120 ? `${text.slice(0, 119)}…` : text;
+    const shown = inline ? `your inline reply to ${inline.messageId}` : `your message ${id}`;
+    const content = emoji ? `[SF Agents] The person reacted ${emoji} to ${shown}: "${quote}"` : `[SF Agents] The person removed their reaction from ${shown}: "${quote}"`;
+    // A reaction changed before the agent saw it replaces the earlier one.
+    this.pending = this.pending.filter((p) => !(p.event === 'reaction' && p.target === id));
+    this.deliver({ id: `q${randomBytes(6).toString('hex')}`, time: new Date().toISOString(), text: content, attachments: [], event: 'reaction', target: id });
+  }
+
+  /** Activity on a page or in the terminal: the person has seen the agent's latest message. */
+  presence(): void {
+    const now = new Date();
+    this.lastActivity = now.getTime();
+    const last = this.lastAgentMessage();
+    if (!last || this.seen?.id === last.id || new Date(last.time).getTime() > now.getTime()) return;
+    this.seen = { id: last.id, time: now.toISOString() };
+    try {
+      writeFileAtomic(path.join(this.conversation.dir!, 'web-seen.json'), `${JSON.stringify(this.seen)}\n`);
+    } catch {
+      // kept in memory for this run
+    }
+    this.broadcast('seen', this.seen);
+  }
+
+  /** The agent's latest message to the person (a reply, or an inline reply). */
+  private lastAgentMessage(): { id: string; time: string } | undefined {
+    const state = this.conversation.state;
+    const inline = [...chatEffects(state).replies.keys()].pop();
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i]!;
+      if (m.role !== 'assistant' || state.runs.get(m.run)?.start?.parentRun) continue;
+      if (inline && inline.startsWith(`${m.id}:`)) return { id: inline, time: m.time };
+      if (m.content.trim()) return { id: m.id, time: m.time };
+    }
+    return undefined;
+  }
+
+  /** What the agent is told about its last reply: read, or only delivered. */
+  private receiptNote(): string | undefined {
+    const last = this.lastAgentMessage();
+    if (!last) return undefined;
+    const at = (iso: string) => new Date(iso).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' });
+    return this.seen?.id === last.id
+      ? `<receipts>The person read your last message (${last.id}) at ${at(this.seen.time)}.</receipts>`
+      : `<receipts>Your last message (${last.id}) was delivered; the person has not read it yet.</receipts>`;
+  }
+
+  private startRun(p: PendingInput): string {
     const id = `w${randomBytes(6).toString('hex')}`;
-    const live: LiveRun = { id, controller: new AbortController(), segments: [] };
+    const live: LiveRun = { id, controller: new AbortController(), segments: [], taken: [] };
     this.live = live;
-    const it = this.session.send(text, { signal: live.controller.signal, attachments, ...(replyTo ? { replyTo } : {}) });
+    const it = this.session.send(p.text, {
+      signal: live.controller.signal,
+      attachments: p.attachments,
+      ...(p.replyTo ? { replyTo: p.replyTo } : {}),
+      ...(p.event ? { event: p.event } : {}),
+      // Messages sent meanwhile: the agent takes them between its steps.
+      inbox: () => {
+        const taken = this.pending.splice(0);
+        if (!taken.length) return [];
+        live.taken.push(...taken);
+        this.publishPending();
+        return taken.map((t) => ({ content: t.text, attachments: t.attachments, ...(t.replyTo ? { replyTo: t.replyTo } : {}), ...(t.event ? { event: t.event } : {}) }));
+      },
+      onInput: (record) => {
+        const from = live.taken.shift();
+        if (!record.event) {
+          this.broadcastUser(live.id, record, from?.id);
+          this.markRead(record.id);
+        }
+      },
+      note: () => this.receiptNote(),
+    });
     // The generator records the user message synchronously on the first next().
     const first = it.next();
     const stored = [...this.conversation.state.messages].reverse().find((m) => m.role === 'user');
-    if (stored) {
-      const root = replyTo ? replyRoots(this.conversation.state).messages.get(stored.id) : undefined;
+    if (stored && !stored.event) {
+      live.userId = stored.id;
+      const root = p.replyTo ? replyRoots(this.conversation.state).messages.get(stored.id) : undefined;
       if (root) live.replyTo = root;
-      const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment), ...(root ? { replyTo: root } : {}) };
-      this.broadcast('user', { run: id, item });
-    }
+      this.broadcastUser(id, stored, p.id);
+    } else live.read = true;
     this.broadcast('run_start', { run: id, ...(live.replyTo ? { replyTo: live.replyTo } : {}) });
     this.runPromise = (async () => {
       let result: AgentRunResult | undefined;
@@ -1817,22 +1966,38 @@ export class WebServer {
         items,
         more,
         sections: displaySections(this.conversation.state),
+        agentReactions: chatEffects(this.conversation.state).reactions,
       });
       this.sectionSignature = this.sectionsKey();
+      // What arrived after the agent's last step starts the next reply.
+      const next = this.pending.shift();
+      if (next && !this.closing) {
+        this.publishPending();
+        this.startRun(next);
+        await this.runPromise;
+      }
     })();
     return id;
+  }
+
+  private broadcastUser(run: string, stored: MessageRecord, pendingId?: string): void {
+    const root = stored.replyTo ? replyRoots(this.conversation.state).messages.get(stored.id) : undefined;
+    const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment), ...(root ? { replyTo: root } : {}) };
+    this.broadcast('user', { run, item, ...(pendingId ? { pending: pendingId } : {}) });
+  }
+
+  /** The agent has the message: every page's receipt turns to Read at the same time. */
+  private markRead(id: string): void {
+    if (this.read?.id === id) return;
+    this.read = { id, time: new Date().toISOString() };
+    this.broadcast('read', this.read);
   }
 
   private onEvent(live: LiveRun, event: RuntimeEvent): void {
     const root = event.agentPath.length === 1;
     if ((event.type === 'text' || event.type === 'tool_request') && !live.read) {
-      // The agent has picked up the message: every page's receipt turns to Read at the same time.
       live.read = true;
-      const last = [...this.conversation.state.messages].reverse().find((m) => m.role === 'user');
-      if (last && this.read?.id !== last.id) {
-        this.read = { id: last.id, time: new Date().toISOString() };
-        this.broadcast('read', this.read);
-      }
+      if (live.userId) this.markRead(live.userId);
     }
     switch (event.type) {
       case 'text': {
@@ -1886,6 +2051,8 @@ export class WebServer {
         this.publishArtifacts();
         this.publishSections();
         if (event.name === 'message_agent') this.publishThreads();
+        // The agent's 👍 shows on the message at once (the result is recorded just after this event).
+        if (event.name === 'react_to_message') setTimeout(() => this.broadcast('agent_reactions', { reactions: chatEffects(this.conversation.state).reactions }), 20);
         return;
       }
       case 'warning':

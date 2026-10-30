@@ -12,6 +12,7 @@ export { ThreadService, ThreadRecorder, ThreadBusyError, threadKey, threadPair, 
 export type { ThreadInfo, ThreadLease } from './agents/threads.js';
 export * from './runtime/events.js';
 export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS } from './runtime/runtime.js';
+export type { InboxItem, SendOptions } from './runtime/runtime.js';
 export type { RuntimeOptions } from './runtime/runtime.js';
 export * from './providers/types.js';
 export { OpenAICompatibleProvider, OPENROUTER_BASE_URL, isOpenRouterHostname, mergeReasoningDetails } from './providers/openai-compatible.js';
@@ -126,6 +127,7 @@ export {
 export type { SectionEntry, SectionPage, SearchHit, SearchResult, FetchResult } from './conversation/sections.js';
 export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER, MAX_SECTION_REMINDERS } from './conversation/tools.js';
 export type { ConversationAccess } from './conversation/tools.js';
+export { AGENT_REACTIONS, CHAT_GUIDANCE, ChatToolNames, chatEffects, createChatTools } from './conversation/chat-tools.js';
 export {
   buildWorkingContext,
   contextBreakdown,

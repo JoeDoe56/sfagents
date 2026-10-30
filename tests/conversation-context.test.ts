@@ -48,7 +48,8 @@ describe('working context', () => {
     const byWindow = buildWorkingContext(conv.state, TARGET, { recentExchanges: 5, maxInputTokens: 100_000 }, '', { retrievable: true });
     assert.equal(byWindow.report.includedExchanges, 5);
     assert.equal(byWindow.report.omittedExchanges, 25);
-    assert.equal((byWindow.messages[0] as { content: string }).content, 'question 25');
+    // The model sees each of the person's messages with its id.
+    assert.match((byWindow.messages[0] as { content: string }).content, /^\[m\d+\] question 25$/);
     // Every assistant tool call is followed by its result: no split groups.
     const m = byWindow.messages;
     m.forEach((msg, i) => {

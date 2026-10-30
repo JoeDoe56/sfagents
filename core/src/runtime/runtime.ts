@@ -12,13 +12,14 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
+import { CHAT_GUIDANCE, ChatToolNames, createChatTools } from '../conversation/chat-tools.js';
 import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
 import { ARTIFACT_GUIDANCE, ArtifactToolNames, artifactIndex, createArtifactTools } from '../conversation/artifacts.js';
-import type { AttachmentRef } from '../conversation/types.js';
+import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import { AGENT_MESSAGING_GUIDANCE, MessageAgentTool, type AgentMessenger } from '../agents/message-agent.js';
 import { ThreadRecorder, ThreadService, threadMessages } from '../agents/threads.js';
-import { newRunId } from '../conversation/service.js';
+import { newRunId, toChatMessages } from '../conversation/service.js';
 import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -93,6 +94,12 @@ interface RunParams {
   role?: 'main' | 'thread';
   /** For a thread: the agent it is talking to. */
   threadWith?: string;
+  /**
+   * Messages the person sent since the run started, already recorded and
+   * converted (root sessions). Read between model requests, so the model
+   * sees them at its next step, and before the run would end.
+   */
+  inbox?: () => ChatMessage[];
 }
 
 /** Identity of the provider/model an agent uses, as recorded in run_start. */
@@ -133,6 +140,7 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
   let guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
   if (toolNames.includes(ToolNames.MESSAGE_AGENT)) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
   if (toolNames.includes(ArtifactToolNames.CREATE)) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
+  if (toolNames.includes(ChatToolNames.REACT)) guidance += `\n\n${CHAT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
 }
 
@@ -254,6 +262,8 @@ export class AgentRuntime implements AgentMessenger {
         ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules)
         : undefined;
       for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, artifactWorkspace)) tools.set(tool.name, tool);
+      // Reactions and inline replies: the agent talking with the person.
+      if (role === 'main' && conversation === this.conversation) for (const tool of createChatTools(conversation)) tools.set(tool.name, tool);
     }
     return tools;
   }
@@ -432,8 +442,18 @@ export class AgentRuntime implements AgentMessenger {
     const recordTurn: typeof record = (fn) => {
       if (sectionReminders === 0) record(fn);
     };
+    // Messages the person sent meanwhile join the run before the next request.
+    const takeInbox = (): boolean => {
+      if (!params.inbox || sectionReminders > 0) return false;
+      const arrived = params.inbox();
+      if (!arrived.length) return false;
+      messages.push(...arrived);
+      sectionChosen = false;
+      return true;
+    };
     while (turns < maxTurns) {
       if (signal.aborted) return finish(...stopReason());
+      takeInbox();
       turns++;
       let done: Extract<ModelStreamEvent, { type: 'done' }> | undefined;
       let turnText = '';
@@ -480,6 +500,8 @@ export class AgentRuntime implements AgentMessenger {
       if (done.message.content && sectionReminders === 0) lastText = done.message.content;
 
       if (done.toolCalls.length === 0) {
+        // A message that arrived while the model answered gets its own answer in this run.
+        if (done.finishReason !== 'length' && (!mustChooseSection || sectionChosen) && takeInbox()) continue;
         if (done.finishReason === 'length') {
           return finish(AgentTerminateMode.GOAL, 'The model hit its output token limit; the answer may be incomplete.');
         }
@@ -618,6 +640,28 @@ export class AgentRuntime implements AgentMessenger {
   }
 }
 
+/** A message for the replying agent (the person's, or a note SF Agents writes for them). */
+export interface InboxItem {
+  content: string;
+  attachments?: AttachmentRef[];
+  replyTo?: string;
+  event?: 'reaction';
+}
+
+export interface SendOptions {
+  signal?: AbortSignal;
+  attachments?: AttachmentRef[];
+  replyTo?: string;
+  /** The input is a note SF Agents wrote (a reaction), not the person's typing. */
+  event?: 'reaction';
+  /** Messages that arrived since; the model takes them between its steps. */
+  inbox?: () => InboxItem[];
+  /** Called when a message from the inbox is recorded (the model is about to read it). */
+  onInput?: (record: MessageRecord) => void;
+  /** Extra system text for this run (read receipts), read when the context is built. */
+  note?: () => string | undefined;
+}
+
 /**
  * A conversation with the root agent, backed by a ConversationService
  * (persistent or in-memory). Each turn's provider context is rebuilt from
@@ -708,24 +752,38 @@ export class AgentSession {
    * starts. Yields events as they happen and returns the structured result
    * of the root agent's turn.
    */
-  async *send(input: string, options: { signal?: AbortSignal; attachments?: AttachmentRef[]; replyTo?: string } = {}): AsyncGenerator<RuntimeEvent, AgentRunResult> {
+  async *send(input: string, options: SendOptions = {}): AsyncGenerator<RuntimeEvent, AgentRunResult> {
     if (this.busy) throw new Error('A turn is already running in this session');
     this.busy = true;
     try {
       // One definition for the whole turn, even if the agent's file changes meanwhile.
       const node = this.node;
       const recorder = this.conversation.beginRootRun(node);
-      recorder.user(input, options.attachments, options.replyTo);
+      recorder.user(input, options.attachments, options.replyTo, options.event);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;
       const definition = node.definition;
       const conversation = this.conversation;
       const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
-      const prepareContext = (fixedText: string) =>
-        buildWorkingContext(conversation.state, replayTarget(definition), definition.context ?? {}, fixedText, {
+      const prepareContext = (fixedText: string) => {
+        const prepared = buildWorkingContext(conversation.state, replayTarget(definition), definition.context ?? {}, fixedText, {
           retrievable,
           resolveAttachment: (ref) => conversation.readAttachment(ref),
         });
+        const note = options.note?.();
+        return note ? { ...prepared, systemExtra: prepared.systemExtra ? `${prepared.systemExtra}\n\n${note}` : note } : prepared;
+      };
+      // Messages sent while the run works: recorded when the model takes them, then shown to it.
+      const inbox = options.inbox
+        ? () =>
+            options.inbox!().flatMap((item) => {
+              const id = recorder.user(item.content, item.attachments, item.replyTo, item.event);
+              const record = id ? conversation.state.messages.find((m) => m.id === id) : undefined;
+              if (!record) return [];
+              options.onInput?.(record);
+              return toChatMessages(conversation.state, replayTarget(definition), 0, [record], (ref) => conversation.readAttachment(ref));
+            })
+        : undefined;
       const queue: RuntimeEvent[] = [];
       let wake: (() => void) | undefined;
       const emit = (event: RuntimeEvent) => {
@@ -747,6 +805,7 @@ export class AgentSession {
           conversation: this.conversation,
           prepareContext,
           role: 'main',
+          ...(inbox ? { inbox } : {}),
           ...(this.reasoning ? { reasoning: this.reasoning } : {}),
         })
         .then(

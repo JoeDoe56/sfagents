@@ -67,6 +67,17 @@ function answersSectionReminder(request: ModelRequest): boolean {
   return request.messages[n - 1]?.role === 'tool' && prev?.role === 'assistant' && prev.tool_calls?.[0]?.function.name === 'keep_section' && request.messages[n - 3]?.role === 'user' && (request.messages[n - 3] as { content: string }).content === SECTION_REMINDER;
 }
 
+/** Message ids the main conversation shows the model ("[m12] "), removed so scripts see the text as typed. */
+export const MESSAGE_ID_PREFIX = /^\[m\d+\] /;
+function withoutIds<T extends { role: string; content?: unknown }>(messages: readonly T[]): T[] {
+  return messages.map((m) => {
+    if (m.role !== 'user') return m;
+    if (typeof m.content === 'string') return { ...m, content: m.content.replace(MESSAGE_ID_PREFIX, '') };
+    if (Array.isArray(m.content) && m.content[0]?.type === 'text') return { ...m, content: [{ ...m.content[0], text: m.content[0].text.replace(MESSAGE_ID_PREFIX, '') }, ...m.content.slice(1)] };
+    return m;
+  });
+}
+
 /** A ModelProvider that answers from a script and records every request. */
 export class ScriptedProvider implements ModelProvider {
   readonly id = 'scripted';
@@ -80,7 +91,8 @@ export class ScriptedProvider implements ModelProvider {
     private readonly options: ScriptOptions = {},
   ) {}
 
-  async *stream(request: ModelRequest): AsyncIterable<ModelStreamEvent> {
+  async *stream(original: ModelRequest): AsyncIterable<ModelStreamEvent> {
+    const request: ModelRequest = { ...original, messages: withoutIds(original.messages) };
     if (!this.options.scriptSectionReminders && (lastIsSectionReminder(request) || answersSectionReminder(request))) {
       // Not a script call: answer the reminder with keep_section, then end the turn.
       const keep = lastIsSectionReminder(request);
@@ -249,6 +261,7 @@ export async function startMockOpenAI(handler: MockChatHandler): Promise<{ baseU
         return;
       }
       const body = JSON.parse(raw);
+      body.messages = withoutIds(body.messages);
       // Section reminders are answered here (keep_section, then an empty reply) and not counted as requests.
       const msgs = body.messages as Array<{ role: string; content?: string; tool_calls?: Array<{ function: { name: string } }> }>;
       const n = msgs.length;
