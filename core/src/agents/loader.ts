@@ -21,6 +21,7 @@ import { ConfigError, artifactAccess, conversationAccess, mcpGrants, parseAgentD
 import { WorkspaceContext, resolveWorkspacePath } from '../permissions/workspace.js';
 import type { SandboxRule } from '../sandbox/sandbox.js';
 import { loadMcpConfig, type McpConfigFile } from '../mcp/config.js';
+import { PROMPTS_DIR_NAME, PromptReferenceError, ensurePrompts, expandPrompt } from './prompts.js';
 
 export const AGENTS_DIR_NAME = 'agents';
 /** The agent the project starts with when none is chosen: "main", else the first by name. */
@@ -50,6 +51,8 @@ export interface AgentTree {
   /** The project directory (holding the agents folder, mcp.json, .env and .sfagents). */
   readonly configDir: string;
   readonly agentsDir: string;
+  /** The shared prompt files agents reference ("@name.txt"); may not exist. */
+  readonly promptsDir: string;
   /** The agent chosen at load time (the default for the main conversation). */
   readonly root: AgentNode;
   readonly byId: ReadonlyMap<string, AgentNode>;
@@ -85,12 +88,17 @@ export const DEFAULT_AGENT = Object.freeze({
   tools: Object.freeze({ allow: Object.freeze(['shell']) }),
 });
 
+/** The prompt files a new project's default agent references. */
+const DEFAULT_AGENT_PROMPTS = ['main-agent.txt', 'working-rules.txt'];
+
 /**
  * Creates what a project needs to start: the agents folder, and in it the
  * default agent when the folder has no agent files. Returns the paths it created.
  */
 export function ensureProject(projectDir: string): string[] {
   const created: string[] = [];
+  // The shared prompt files (default ones the first time).
+  if (fs.existsSync(path.join(projectDir, AGENTS_DIR_NAME)) || !fs.existsSync(path.join(projectDir, 'agent.json'))) created.push(...ensurePrompts(projectDir));
   const agentsDir = path.join(projectDir, AGENTS_DIR_NAME);
   if (!fs.existsSync(agentsDir)) {
     // An old single-file project is moved by hand (loadAgentTree says how).
@@ -101,7 +109,10 @@ export function ensureProject(projectDir: string): string[] {
   if (!fs.statSync(agentsDir).isDirectory()) return created;
   if (fs.readdirSync(agentsDir).some((n) => n.toLowerCase().endsWith('.json'))) return created;
   const file = path.join(agentsDir, `${DEFAULT_AGENT_NAME}.json`);
-  fs.writeFileSync(file, `${JSON.stringify(DEFAULT_AGENT, null, 2)}\n`, { flag: 'wx' });
+  // With the default prompt files at hand, the new agent uses them.
+  const shared = DEFAULT_AGENT_PROMPTS.every((name) => fs.existsSync(path.join(projectDir, PROMPTS_DIR_NAME, name)));
+  const agent = shared ? { ...DEFAULT_AGENT, systemPrompt: DEFAULT_AGENT_PROMPTS.map((name) => `@${name}`) } : DEFAULT_AGENT;
+  fs.writeFileSync(file, `${JSON.stringify(agent, null, 2)}\n`, { flag: 'wx' });
   created.push(file);
   return created;
 }
@@ -164,6 +175,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
   const located = locateProject(target);
   const configDir = fs.realpathSync(located.projectDir);
   const agentsDir = path.join(configDir, AGENTS_DIR_NAME);
+  const promptsDir = path.join(configDir, PROMPTS_DIR_NAME);
   if (!fs.existsSync(agentsDir) || !fs.statSync(agentsDir).isDirectory()) {
     const legacy = path.join(configDir, 'agent.json');
     if (fs.existsSync(legacy)) locateProject(legacy); // throws the migration message
@@ -193,6 +205,15 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
     const agentName = name.replace(/\.json$/i, '');
     try {
       let def = parseAgentDefinition(readJson(file), shown, agentName);
+      // "@name.txt" lines come from the prompts folder.
+      try {
+        const expanded = expandPrompt(def.systemPrompt, promptsDir);
+        for (const f of expanded.files) protectedFiles.add(f);
+        def = { ...def, systemPrompt: expanded.text, ...(expanded.files.length ? { prompts: expanded.files.map((f) => rel(configDir, f)) } : {}) };
+      } catch (error) {
+        if (error instanceof PromptReferenceError) throw new ConfigError(shown, 'systemPrompt', error.message);
+        throw error;
+      }
       for (const [server] of mcpGrants(def)) {
         if (!mcp.servers[server] && (mcp.error || mcp.skipped?.some((s) => s.server === server))) {
           // The server is in a broken mcp.json: the agent loads without it.
@@ -278,6 +299,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
   const tree: AgentTree = {
     configDir,
     agentsDir,
+    promptsDir,
     root: byId.get(rootName)!,
     byId,
     mcp,
@@ -311,6 +333,7 @@ export function describeTree(tree: AgentTree): string {
     lines.push(`${node === tree.root ? '* ' : '  '}${node.id}${d.name ? ` "${d.name}"` : ''}  (${d.provider ? `${d.provider}:${d.model}` : `no provider${d.model ? `, ${d.model}` : ''}`}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
     lines.push(`      tools: ${tools.length ? tools.join(', ') : '(none)'}`);
     if (d.tools?.autoApprove?.length) lines.push(`      auto-approve: ${d.tools.autoApprove.join(', ')}`);
+    if (d.prompts?.length) lines.push(`      prompts: ${d.prompts.join(', ')}`);
     lines.push(`      roots: ${node.roots.length ? node.roots.join(', ') : '(no filesystem access)'}`);
   }
   for (const s of tree.skipped) lines.push(`  skipped ${s.file}: ${s.error}`);

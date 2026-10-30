@@ -22,6 +22,8 @@ export interface SandboxPolicyInput {
   protectedFiles?: readonly string[];
   /** The agents folder: read-only, so no command can add or change an agent. */
   agentsDir?: string;
+  /** The prompts folder (shared instructions): read-only for the same reason. */
+  promptsDir?: string;
   /** Extra rules (workspace.access), applied last. */
   access?: readonly SandboxRule[];
   network?: boolean;
@@ -52,10 +54,13 @@ export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
     }
   }
   if (input.agentsDir) guards.push({ path: canonical(input.agentsDir), access: 'read', ensure: { kind: 'dir' } });
+  // The shared prompt files are instructions too.
+  if (input.promptsDir) guards.push({ path: canonical(input.promptsDir), access: 'read', ensure: { kind: 'dir' } });
   for (const file of input.protectedFiles ?? []) {
     const p = canonical(file);
     // Agent files are covered by the agents folder; mcp.json may not exist yet.
     if (input.agentsDir && p.startsWith(canonical(input.agentsDir) + path.sep)) continue;
+    if (input.promptsDir && p.startsWith(canonical(input.promptsDir) + path.sep)) continue;
     guards.push({ path: p, access: 'read', ensure: { kind: 'file', content: path.basename(p).toLowerCase() === 'mcp.json' ? '{ "mcpServers": {} }\n' : '' } });
   }
   for (const file of [...(input.secretFiles ?? []), ...(input.stateFiles ?? [])]) {

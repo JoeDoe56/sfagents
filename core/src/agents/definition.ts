@@ -66,7 +66,14 @@ export interface AgentDefinition {
     apiKeyEnv: string;
   };
   model: string;
+  /**
+   * The instructions, with references to the prompts folder ("@name.txt"
+   * lines) already filled in by the loader. In the file it may also be a
+   * list of texts and references, joined in order.
+   */
   systemPrompt: string;
+  /** Prompt files the systemPrompt references (filled in by the loader), relative to the project. */
+  prompts?: string[];
   reasoning?: ReasoningEffort;
   temperature?: number;
   maxOutputTokens?: number;
@@ -318,7 +325,11 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     c.fail('providerOptions', 'is required for provider "openai-compatible" (baseUrl and apiKeyEnv)');
   }
 
-  const systemPrompt = c.string(raw['systemPrompt'], 'systemPrompt', { nonEmpty: true, maxLength: 200_000 });
+  // A list is joined in order; lines like "@working-rules.txt" are filled in from the prompts folder by the loader.
+  const systemPrompt = Array.isArray(raw['systemPrompt'])
+    ? (c.stringArray(raw['systemPrompt'], 'systemPrompt', { nonEmptyItems: true }) ?? []).join('\n\n')
+    : c.string(raw['systemPrompt'], 'systemPrompt', { nonEmpty: true, maxLength: 200_000 });
+  if (!systemPrompt.trim()) c.fail('systemPrompt', 'must not be empty');
 
   let reasoning: ReasoningEffort | undefined;
   if (raw['reasoning'] !== undefined) {

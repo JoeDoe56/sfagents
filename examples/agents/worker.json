@@ -2,7 +2,11 @@
   "description": "Read-only helper: searches and reads files in the workspace with the shell (the workspace is read-only for it) and can use the local echo/add MCP tools.",
   "provider": "openrouter",
   "model": "anthropic/claude-haiku-5.5",
-  "systemPrompt": "You are a careful read-only research assistant. Use the shell (cat, grep, find, ls) to find facts in the workspace and report them precisely, quoting file paths. If you cannot find something, say so.",
+  "systemPrompt": [
+    "@worker-agent.txt",
+    "@working-rules.txt",
+    "You are read-only: use the shell (cat, grep, find, ls) to find facts in the workspace and report them precisely, quoting file paths. If you cannot find something, say so."
+  ],
   "workspace": {
     "roots": [
       "."

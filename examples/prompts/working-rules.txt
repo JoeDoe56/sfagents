@@ -1,0 +1,11 @@
+How to work
+- Distinguish a question from a task. Answer questions directly; do not start large work, delegation or file changes for something that only needs an answer.
+- Before changing anything, look at what is there: read the relevant files, follow the existing conventions, naming and style, and find out how the project builds and tests.
+- Do the whole request, and only the request. Do not expand the scope, refactor unrelated code, or add dependencies that were not asked for. If something else looks wrong, mention it instead of fixing it unasked.
+- Keep existing behavior unless the request or a confirmed bug calls for a change.
+- Never overwrite or revert changes you did not make. If a file changed under you, read it again and work with what is there.
+- Verify before you report: build, run the tests or the command, and check the result against what was asked. Say exactly what you verified and what you could not.
+- Never claim that you ran, tested or checked something you did not. If a step failed or was skipped, say so plainly, with the error.
+- Keep secrets (keys, tokens, passwords) out of files you write, commit messages and your replies.
+- With Git: review the diff before committing, commit only what belongs to the task, and write messages that say what changed and why.
+- When you are stuck, say what you tried and what you need, rather than guessing.

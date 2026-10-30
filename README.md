@@ -18,6 +18,7 @@ git clone https://github.com/JoeDoe56/sfagents
 cd sfagents
 npm install        # installs dependencies and builds (via the prepare script)
 cp -R examples/agents agents
+cp -R examples/prompts prompts
 cp examples/mcp.json mcp.json
 npx sfagents --help
 npm link           # optional, once: makes the plain `sfagents` command work (see below)
@@ -80,6 +81,11 @@ examples/                     tracked starting configurations to copy into a new
 agents/                       local, untracked; one JSON file per agent (main.json replies by default)
   main.json
   worker.json
+prompts/                      local, untracked; shared instructions agents reference ("@working-rules.txt")
+  main-agent.txt              the defaults: how the main agent works with you and with other agents,
+  worker-agent.txt            how a worker reports back, working rules for any agent,
+  working-rules.txt           and coding rules
+  coding.txt
 mcp.json                      local, untracked named MCP servers (optional)
 .env                          secrets (optional, untracked)
 .sfagents/                    local conversation state (created by start; never committed)
@@ -125,6 +131,7 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 
 | Field | Notes |
 | --- | --- |
+| `systemPrompt` | The agent's instructions: text, or a list of texts joined in order. A line that is only `@name.txt` (or `@name.md`, or `@name`) is replaced by that file from the `prompts` folder, so agents share instructions without copying them: `["@main-agent.txt", "@working-rules.txt", "You also review pull requests."]`. Prompt files may reference each other the same way. A missing file skips the agent with the reason; a bare `@word` that names no file stays as text. Editing a prompt file reloads every agent that uses it. |
 | `name` | Optional display name. The file name is the agent's identity (an older `id` field that differs from it is shown as the name). |
 | `provider` | The name of a provider you added ("Claude 1"), or a list of them in failover order (entries may be `{ "provider": "…", "model": "…" }` with their own model). Also `openrouter` (key from `OPENROUTER_API_KEY`) or `openai-compatible` with `"providerOptions": { "baseUrl": "...", "apiKeyEnv": "MY_KEY_VAR" }`. Optional: without it the agent replies with the provider picked for it in the web interface, else the first one added. |
 | `model` | Any model ID the provider accepts. Optional only when `provider` is left out: then the provider's default is used (Claude Sonnet 5.5 for Claude and OpenRouter, the plan's default for ChatGPT; a custom endpoint needs `model`). |
@@ -143,18 +150,31 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 
 Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. Each agent's permissions are its own. An agent it may message can have wider permissions, or entirely different tools, roots and MCP servers; grants may form any graph, including two agents that may message each other.
 
+## Shared prompts
+
+The `prompts` folder next to `agents` holds plain-text instructions that agent files reference (see `systemPrompt` above). `sfagents` creates it the first time with four defaults, written from the working principles of earlier SF Agents setups: `main-agent.txt` (talking with you, keeping you posted, asking when a choice is yours, delegating bounded tasks and checking the results), `worker-agent.txt` (staying in scope, asking the agent it works for when blocked, reporting tersely with evidence), `working-rules.txt` (look before changing, do the whole request and only it, keep behavior, never overwrite others' changes, verify and never claim unrun checks, keep secrets out, review diffs before committing) and `coding.txt`. Edit them, or add your own. Agents can read the folder but not change it.
+
 ## Agents talking to each other
 
-The conversation is one thread for the user; which agent replies to it is a separate choice (`--agent`, `/agent` in `start`, or the agent menu on the web). An agent with grants gets the `message_agent` tool: `agent` (one it was granted), `message`, and optionally `thread` (which of its N threads to that agent). Its system prompt asks it to use agents freely and to write to them in terse, structured messages meant for an agent, not a person.
+The conversation is one thread for the user; which agent replies to it is a separate choice (`--agent`, `/agent` in `start`, or the agent menu on the web). An agent with grants gets the `message_agent` tool: `agent` (one it was granted), `message`, optionally `thread` (which of its N threads to that agent) and `wait`. Its system prompt asks it to use agents freely and to write to them in terse, structured messages meant for an agent, not a person.
 
-Each pair of agents shares **one persistent thread**, stored in `.sfagents/threads/<a>--<b>.md`. It is the same thread whoever writes first and whichever agent the user selected: when `main` writes to `worker` today and the user later selects `worker`, which writes to `main`, both see everything said before. The agent that replies does so in that thread, with its own system prompt, model, tools and roots; it sees the thread, never the user's conversation. The writer gets a structured result:
+Messages don't block. `message_agent` returns at once (`"status": "started"`) and the other agent works alongside the writer; its reply, and anything it sends on the way, arrives in the writer's context as a message between its steps (`[from worker, replied] …`). Both keep working and talk back and forth while they do:
+
+- A message to an agent that is still working for the writer (same thread) reaches it at its next step (`"status": "delivered"`): corrections, extra context, answers to its questions.
+- An agent answering in a thread can always message the agent it works for, even without a grant: a question as soon as it has one, a finding the writer needs now. With `"wait": true` it waits for the answer.
+- `"wait": true` on a new message returns the agent's reply, or the first message it sends back, whichever comes first.
+- `wait_for_messages` waits (with a timeout) when an agent has nothing else to do. A turn doesn't end while agents it started are still working: it waits for what they send and continues.
+
+The agent replying to you can also message you mid-turn with `message_user`: a short update on a long task, a finding, or a question. With `"wait_for_reply": true` it waits for your answer (what you type while it works reaches it at its next step anyway). Its messages show as ordinary chat bubbles, on the pages and in the terminal.
+
+Each pair of agents shares **one persistent thread**, stored in `.sfagents/threads/<a>--<b>.md`. It is the same thread whoever writes first and whichever agent the user selected: when `main` writes to `worker` today and the user later selects `worker`, which writes to `main`, both see everything said before. The agent that replies does so in that thread, with its own system prompt, model, tools and roots; it sees the thread, never the user's conversation. A reply the writer waited for comes back as a structured result:
 
 ```json
 { "agent": "worker", "thread": 1, "status": "replied", "reply": "…", "turns": 3,
   "toolCalls": { "shell": { "ok": 2, "failed": 0 } }, "durationMs": 5210 }
 ```
 
-`status` is `replied`, `error`, `max_turns`, `timeout` or `cancelled`. Several `message_agent` calls in one turn run **in parallel**, to different agents or to the same agent in separate threads (`threads/<a>--<b>--2.md` and so on, up to the grant's N). An agent replying in a thread can itself message other agents, also in parallel. A reply may not wait on the agent that is waiting for it (that would deadlock); it gets an error saying so instead. Cancelling the reply in the conversation cancels everything under it.
+`status` is `replied`, `error`, `max_turns`, `timeout` or `cancelled`. Several `message_agent` calls in one turn run **in parallel**, to different agents or to the same agent in separate threads (`threads/<a>--<b>--2.md` and so on, up to the grant's N). An agent replying in a thread can itself message other agents, also in parallel. Cancelling the reply in the conversation cancels everything under it.
 
 Threads are listed as artifacts of the conversation (`type: "agent_transcript"`). The web interface shows them as conversations.
 

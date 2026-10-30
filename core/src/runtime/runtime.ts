@@ -315,6 +315,7 @@ export class AgentRuntime implements AgentMessenger {
       stateFiles: state.filter((p) => p !== stateDir && !!path.extname(p)),
       protectedFiles: this.tree.protectedFiles,
       agentsDir: this.tree.agentsDir,
+      promptsDir: this.tree.promptsDir,
       access: node.access,
       network: node.definition.workspace?.network === true,
     });
