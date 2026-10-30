@@ -72,6 +72,7 @@ export { stripAnsiAndControl } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
 export { openInBrowser } from './utils/open-url.js';
 export { removeDir } from './utils/remove-dir.js';
+export { descendantsOf, killProcessTree, parseProcessList, type ProcessEntry } from './utils/process-tree.js';
 export * from './conversation/types.js';
 export { parseConversation, serializeConversation, serializeRecord, decorationFor } from './conversation/format.js';
 export { ConversationState, SemanticError } from './conversation/state.js';

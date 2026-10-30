@@ -63,7 +63,7 @@ const HELP = [
   '  /clear             reset the working context (the history is kept)',
   '  /tree              the agents and what each may use',
   '  /exit              quit SF Agents (the web interface stops too)',
-  'Keys: Tab or F1–F3 switch tabs · the mouse wheel, PgUp/PgDn or Shift+↑↓ scroll (Shift+drag selects text) · Esc stops the reply · y/a/n answer an approval (with an empty composer) · Ctrl+C twice quits',
+  'Keys: Tab or F1–F3 switch tabs · the mouse wheel, PgUp/PgDn or Shift+↑↓ scroll (Shift+drag selects text) · Esc stops the reply · y/a/n answer an approval (with an empty composer) · Ctrl+K quits SF Agents (and the web interface) · Ctrl+C twice also quits',
 ];
 
 const esc = (code: string) => `\u001b[${code}`;
@@ -427,6 +427,9 @@ export class Tui {
       this.insert(name === 'return' || name === 'enter' ? '\n' : (str ?? ''));
       return;
     }
+    // Ctrl+K: one press quits SF Agents, the web interface and everything it started
+    // (after the paste check, so a pasted vertical tab does not).
+    if (key.ctrl && name === 'k') return this.quit();
     // Tabs.
     const number = key.meta && /^[1-3]$/.test(name) ? Number(name) : /^f[1-3]$/.test(name) ? Number(name.slice(1)) : 0;
     if (number) return this.setTab(TABS[number - 1]!);
@@ -508,10 +511,6 @@ export class Tui {
       this.cursor = 0;
       return this.schedule();
     }
-    if (key.ctrl && name === 'k') {
-      this.text = this.text.slice(0, this.cursor);
-      return this.schedule();
-    }
     if (key.ctrl && name === 'w') return this.deleteWord();
     if (key.ctrl && name === 'l') return this.draw();
     if (name === 'up' || name === 'down') {
@@ -549,12 +548,12 @@ export class Tui {
     this.lastCtrlC = now;
     if (this.live) {
       this.options.server.cancel();
-      this.notice('Stopping the reply. Press Ctrl+C again to quit SF Agents.');
+      this.notice('Stopping the reply. Press Ctrl+C again, or Ctrl+K, to quit SF Agents.');
     } else if (this.text) {
       this.text = '';
       this.cursor = 0;
       this.schedule();
-    } else this.notice('Press Ctrl+C again to quit SF Agents (the web interface stops too).');
+    } else this.notice('Press Ctrl+C again, or Ctrl+K, to quit SF Agents (the web interface stops too).');
   }
 
   private setTab(tab: Tab): void {
@@ -716,7 +715,7 @@ export class Tui {
   private footer(width: number): { lines: string[]; cursor?: { row: number; col: number } } {
     const rule = color.dim('─'.repeat(width));
     if (this.tab !== 'Chat') {
-      const hint = this.tab === 'Logs' ? `${this.logLines.length} lines · ↑↓ PgUp PgDn scroll · End follows · Tab switches tabs` : `${this.options.url} · refreshes every 2 seconds · Tab switches tabs`;
+      const hint = this.tab === 'Logs' ? `${this.logLines.length} lines · ↑↓ PgUp PgDn scroll · End follows · Tab switches tabs · Ctrl+K quits` : `${this.options.url} · refreshes every 2 seconds · Tab switches tabs · Ctrl+K quits`;
       return { lines: [rule, color.dim(truncate(` ${hint}`, width))] };
     }
     const prompt = '› ';

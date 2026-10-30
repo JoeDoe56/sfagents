@@ -27,6 +27,7 @@ import {
   ensureProject,
   getErrorMessage,
   KeyringUnavailableError,
+  killProcessTree,
   mcpGrants,
   MissingCredentialError,
   stripAnsiAndControl,
@@ -540,8 +541,7 @@ async function serveWeb(
     printing = false;
     const code = await startTui({ server, logs, url });
     streams.stderr.write('Stopping…\n');
-    await runExitCleanup();
-    return code;
+    return stopEverything(code, streams);
   }
   streams.stderr.write(style.dim('Press Ctrl+C to stop.\n'));
   await new Promise<void>((resolve) => {
@@ -554,8 +554,31 @@ async function serveWeb(
     process.on('SIGTERM', stop);
   });
   streams.stderr.write('\nStopping…\n');
+  return stopEverything(EXIT_OK, streams);
+}
+
+/**
+ * Quitting `sfagents` stops all of it: the web server and the agent (the
+ * cleanups), then anything they started that is still running (speech
+ * servers, helpers, workers, terminals, tools), then Node itself, even if
+ * something still holds the event loop open.
+ */
+async function stopEverything(code: number, streams: Streams): Promise<never> {
+  // A last resort if a step hangs: the cleanups are capped at 5 s and the listing at 8 s.
+  setTimeout(() => process.exit(code), 20_000).unref();
   await runExitCleanup();
-  return EXIT_OK;
+  try {
+    // Turning off screen mirroring's virtual display is left to finish on its own.
+    const stopped = await killProcessTree({ graceMs: 2_000, keep: (command) => command.includes('--vdisplay-off') });
+    if (stopped.length) {
+      streams.stderr.write(`Stopped ${stopped.length} process${stopped.length === 1 ? '' : 'es'} left running.\n`);
+      // Lets exit handlers that were waiting on them run (the virtual display's).
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  } catch (error) {
+    streams.stderr.write(`Could not check for processes left running: ${getErrorMessage(error)}\n`);
+  }
+  process.exit(code);
 }
 
 function waitForEnter(): Promise<void> {
