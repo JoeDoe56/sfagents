@@ -1,7 +1,8 @@
 /**
  * Speech on this computer, run by audio.cpp's audiocpp_server: speech to
  * text with Qwen3-ASR 1.7B (dictation and push-to-talk), and text to speech
- * with VibeVoice 1.5B (Speak Response). Both are audio.cpp's official Q8_0
+ * with Qwen3-TTS 1.7B Base (Speak Response, in the reference voice). Both are
+ * audio.cpp's official Q8_0
  * GGUFs (huggingface.co/audio-cpp/audio.cpp-gguf).
  *
  * The runtime and the models come with the install: npm install and npm run
@@ -11,23 +12,23 @@
  *     present; else Vulkan when a Vulkan loader is; else the CPU build. When
  *     a GPU build cannot start or load the model, the next one is tried,
  *     down to the CPU build.
- *   - the Qwen3-ASR model (about 2.5 GB) and the VibeVoice model (about
- *     3.2 GB).
+ *   - the Qwen3-ASR model (about 2.5 GB) and the Qwen3-TTS model (about
+ *     2.7 GB).
  * Everything is checked against its SHA-256. What the install could not get
  * downloads when SF Agents starts (Qwen3-ASR) or is first asked to speak
- * (VibeVoice).
+ * (Qwen3-TTS).
  *
  * audiocpp_server then runs on loopback ports with both models loaded when it
  * starts, so neither dictation nor Speak Response waits for a model. Where
  * each model runs is decided at each start, by what fits on the GPU with
  * room to spare (on NVIDIA, nvidia-smi's free memory against the models'
  * measured peaks; on other GPUs, audio.cpp's own estimate, --min-free-memory-mb,
- * which runs about 0.7 GB above VibeVoice's real peak):
+ * which runs above the real peak):
  *   1. both on the GPU;
- *   2. else VibeVoice on the GPU and Qwen3-ASR on the CPU: Qwen3-ASR still
- *      runs at about three times real time on six cores, VibeVoice is about
- *      ten times slower on the CPU than on a GPU;
- *   3. else Qwen3-ASR on the GPU and VibeVoice on the CPU;
+ *   2. else Qwen3-TTS on the GPU and Qwen3-ASR on the CPU: Qwen3-ASR still
+ *      runs at about three times real time on six cores, Qwen3-TTS is several
+ *      times slower than real time on the CPU;
+ *   3. else Qwen3-ASR on the GPU and Qwen3-TTS on the CPU;
  *   4. else both on the CPU.
  * One audiocpp_server runs one backend, so a split runs two: the GPU build's
  * own binary with --backend cpu is the CPU one. The CPU gets a thread per
@@ -35,6 +36,12 @@
  * server's choice) the servers start with SF Agents and stay up, and they are
  * started again if one stops; otherwise they start on demand and stop after
  * ten idle minutes to give the memory back.
+ *
+ * Qwen3-TTS (the Base model) copies a voice from a clip and its transcript:
+ * the reference clip (Settings → STT & TTS, voice.wav) is cut to at most
+ * 15 seconds, at a pause, and transcribed by Qwen3-ASR, once per clip
+ * (voice-ref.wav and voice-ref.json). It has no voice of its own: without a
+ * clip it does not speak.
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -56,7 +63,7 @@ export interface ModelFile {
   sha256: string;
 }
 export const ASR_MODEL: ModelFile = { name: 'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf', size: 2_473_017_600, sha256: '3bc2462eca3a3a8f56abcd860d0943ffdc0546547dde55a9d08589607d6f3936' };
-export const TTS_MODEL: ModelFile = { name: 'VibeVoice-1.5B-GGUF/vibevoice-1.5b-q8_0.gguf', size: 3_224_706_114, sha256: 'e9ca80a31ffe7e4726fcad9798ba10ba1e514d89174fd48ea548d21022e0e6f8' };
+export const TTS_MODEL: ModelFile = { name: 'Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf', size: 2_695_186_240, sha256: '92641a8022d521efd79a5db45e952589b3f2b781680f9abfcf26f075d37b86c6' };
 /**
  * The audio.cpp release SF Agents runs, pinned with its files' SHA-256 (from
  * the release page), so every install runs the same build. Moving to another
@@ -79,32 +86,36 @@ const IDLE_MS = 10 * 60_000;
 const START_TIMEOUT_MS = 300_000;
 /**
  * What a model on the GPU must leave free, on top of audio.cpp's estimate for
- * it (which already counts its working memory: 4.6 GiB for VibeVoice, which
- * peaks at about 3.9 GB while it speaks), for the desktop and other apps.
+ * it (which already counts its working memory), for the desktop and other
+ * apps.
  */
 const GPU_HEADROOM_MB = 512;
-/** VibeVoice's output: 16-bit mono PCM at this rate. */
+/** Qwen3-TTS's output: 16-bit mono PCM at this rate. */
 export const SPEECH_RATE = 24_000;
 /**
  * What each model takes on an NVIDIA GPU at its peak, measured (GTX 1660
- * SUPER, CUDA build): Qwen3-ASR 2.4 GB loaded, 2.5 GB after use; VibeVoice
- * 3.1 GB loaded, 3.9 GB while it speaks. Checked against nvidia-smi's free
+ * SUPER, CUDA build): Qwen3-ASR 2.4 GB loaded, 2.5 GB after use. Qwen3-TTS:
+ * 1.9 GB of weights; 3 GB is an estimate with its working memory. Checked
+ * against nvidia-smi's free
  * memory first, because on Windows the free memory audio.cpp sees leaves out
  * other programs' (it saw 5 GiB free on a card with 2.6 GB free).
  */
-const GPU_PEAK_MB: Record<string, number> = { 'qwen3-asr': 2600, vibevoice: 4000 };
+const GPU_PEAK_MB: Record<string, number> = { 'qwen3-asr': 2600, 'qwen3-tts': 3000 };
 /** The ids the models have in the server's config. */
 const ASR_ID = 'qwen3-asr';
-const TTS_ID = 'vibevoice';
-/** What the old llama.cpp setup left in the folder, removed once audio.cpp runs. */
-const LLAMA_LEFTOVERS = ['runtime', 'runtime.json', 'llama-server.log', 'models/Qwen3-ASR-1.7B-Q8_0.gguf', 'models/Qwen3-ASR-1.7B-Q8_0.gguf.part', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf.part'];
+const TTS_ID = 'qwen3-tts';
+/** The longest reference clip Qwen3-TTS gets; a longer one is cut at a pause after MIN_REFERENCE_SECONDS. */
+const MAX_REFERENCE_SECONDS = 15;
+const MIN_REFERENCE_SECONDS = 8;
+/** What earlier versions left in the folder (the llama.cpp setup; VibeVoice, 3.2 GB), removed once audio.cpp runs. */
+const LLAMA_LEFTOVERS = ['runtime', 'runtime.json', 'llama-server.log', 'models/Qwen3-ASR-1.7B-Q8_0.gguf', 'models/Qwen3-ASR-1.7B-Q8_0.gguf.part', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf.part', 'models/vibevoice-1.5b-q8_0.gguf', 'models/vibevoice-1.5b-q8_0.gguf.part', 'models/vibevoice-1.5b-q8_0.gguf.lock'];
 
 export type Backend = 'metal' | 'cuda' | 'vulkan' | 'cpu';
 
 /** Where the models run. */
 export interface Placement {
   asr: 'gpu' | 'cpu';
-  /** Absent while VibeVoice is not downloaded. */
+  /** Absent while Qwen3-TTS is not downloaded. */
   tts?: 'gpu' | 'cpu';
   /** The CPU threads audio.cpp uses. */
   threads: number;
@@ -133,6 +144,10 @@ export interface VoiceStatus {
   error?: string;
   /** A reference voice clip is set. */
   reference: boolean;
+  /** What is said in the clip, as Qwen3-TTS gets it (once it has been transcribed). */
+  transcript?: string;
+  /** Qwen3-ASR is transcribing the clip. */
+  transcribing?: boolean;
 }
 
 export interface DictationStatus {
@@ -146,18 +161,18 @@ export interface DictationStatus {
   /** Where each model runs, while running. */
   placement?: Placement;
   error?: string;
-  /** Text to speech (VibeVoice). */
+  /** Text to speech (Qwen3-TTS). */
   voice: VoiceStatus;
 }
 
 export interface SpeechSettings {
-  /** VibeVoice's classifier-free guidance scale (0.5 to 3). */
-  guidanceScale: number;
   /** Words Qwen3-ASR should know, separated by commas. */
   glossary: string;
+  /** What is said in the reference voice clip; filled in by Qwen3-ASR, corrected by the user. */
+  referenceText: string;
 }
 
-export const DEFAULT_SPEECH_SETTINGS: SpeechSettings = { guidanceScale: 1.3, glossary: '' };
+export const DEFAULT_SPEECH_SETTINGS: SpeechSettings = { glossary: '', referenceText: '' };
 
 export interface Hardware {
   platform: NodeJS.Platform;
@@ -349,9 +364,9 @@ export function glossaryContext(glossary: string): string {
   return [...new Set(terms)].join(', ');
 }
 
-/** A reply as VibeVoice's one-speaker script ("Speaker 1: …"). */
-export function speakerScript(text: string): string {
-  return `Speaker 1: ${text.replace(/\s+/g, ' ').trim()}`;
+/** A reply as Qwen3-TTS reads it: one paragraph. */
+export function speechText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 export interface DictationOptions {
@@ -372,7 +387,9 @@ export interface DictationOptions {
   /** Keep audiocpp_server running (no idle stop), and start it again when it exits. */
   keepLoaded?: boolean;
   /** Settings → STT & TTS, read at each use. */
-  settings?: () => SpeechSettings;
+  settings?: () => Partial<SpeechSettings>;
+  /** Qwen3-ASR transcribed a new reference clip: the Reference Transcript setting becomes this. */
+  onReferenceText?: (text: string) => void;
   /** Milliseconds between download attempts (tests). */
   retryDelay?: number;
 }
@@ -416,7 +433,7 @@ export class Dictation {
   private starting: Promise<string> | null = null;
   /** The running audiocpp_servers: one, or a GPU one and a CPU one. */
   private servers: Server[] = [];
-  /** Qwen3-ASR's server, and VibeVoice's. */
+  /** Qwen3-ASR's server, and Qwen3-TTS's. */
   private url: string | null = null;
   private voiceUrl: string | null = null;
   private idle: NodeJS.Timeout | null = null;
@@ -424,12 +441,14 @@ export class Dictation {
   private closed = false;
   private restart: NodeJS.Timeout | null = null;
   private quickExits = 0;
-  /** Whether the running servers have VibeVoice. */
+  /** Whether the running servers have Qwen3-TTS. */
   private serverHasVoice = false;
   /** Downloads, one at a time in each lane. */
   private downloads: Record<'speech' | 'voice', Promise<unknown>> = { speech: Promise.resolve(), voice: Promise.resolve() };
   /** Speaking, one reply at a time. */
   private speaking: Promise<unknown> = Promise.resolve();
+  /** Preparing the reference clip, one at a time. */
+  private referencing: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: DictationOptions = {}) {
     this.dir = options.dir ?? path.join(sfagentsHome(), 'dictation');
@@ -474,7 +493,7 @@ export class Dictation {
     }
   }
 
-  /** The reference voice clip VibeVoice copies (Settings → STT & TTS). */
+  /** The reference voice clip Qwen3-TTS copies (Settings → STT & TTS). */
   get voicePath(): string {
     return path.join(this.dir, 'voice.wav');
   }
@@ -508,6 +527,8 @@ export class Dictation {
       state: state ?? (have ? (this.voiceUrl ? 'loaded' : 'ready') : 'missing'),
       downloadSize: have ? 0 : this.ttsModel.size,
       reference: fs.existsSync(this.voicePath),
+      ...(this.voice_?.transcript ? { transcript: this.voice_.transcript } : {}),
+      ...(this.voice_?.transcribing ? { transcribing: true } : {}),
     });
   }
 
@@ -552,8 +573,8 @@ export class Dictation {
   }
 
   /**
-   * Downloads VibeVoice (resuming). A running server is started again with
-   * VibeVoice in its config.
+   * Downloads Qwen3-TTS (resuming). A running server is started again with
+   * Qwen3-TTS in its config.
    */
   installVoice(): Promise<void> {
     if (this.installingVoice) return this.installingVoice;
@@ -624,7 +645,7 @@ export class Dictation {
 
   /**
    * Downloads in two lanes, each one file at a time: dictation's (the runtime
-   * and Qwen3-ASR) and the voice's (VibeVoice), so dictation never waits
+   * and Qwen3-ASR) and the voice's (Qwen3-TTS), so dictation never waits
    * behind the 3 GB voice model. A dropped or refused connection is retried,
    * resuming where it stopped.
    */
@@ -855,10 +876,17 @@ export class Dictation {
     this.set({ state: 'running', downloadSize: 0, backend, device, placement });
     this.refreshVoice();
     this.options.log?.(`dictation: ${placementText(placement, device)}.`);
-    // VibeVoice's first reply is about a second slower than the next ones: that second is spent now.
-    if (voice && placement.tts === 'gpu') {
+    // The reference clip's transcript is made now, and on the GPU the first
+    // reply (slower than the next ones) is spent on one word.
+    if (voice) {
       const url = this.voiceUrl!;
-      this.speaking = this.speaking.then(() => this.synthesize(url, 'Hello.').catch(() => {}));
+      const gpu = placement.tts === 'gpu';
+      this.speaking = this.speaking.then(() =>
+        this.reference().then(
+          (ref) => (ref && gpu ? this.synthesize(url, 'Hello.') : undefined),
+          (error) => this.options.log?.(`dictation: the reference voice could not be prepared: ${getErrorMessage(error)}`),
+        ).catch(() => {}),
+      );
     }
     this.touch();
     return this.url;
@@ -876,7 +904,7 @@ export class Dictation {
     const spec: Record<string, object> = {
       [ASR_ID]: { id: ASR_ID, family: 'qwen3_asr', path: this.modelPath(this.asrModel), task: 'asr', mode: 'offline', lazy: false },
       // Streaming: it can send its audio as it makes it (whole-WAV requests still work).
-      [TTS_ID]: { id: TTS_ID, family: 'vibevoice', path: this.modelPath(this.ttsModel), task: 'tts', mode: 'streaming', lazy: false },
+      [TTS_ID]: { id: TTS_ID, family: 'qwen3_tts', path: this.modelPath(this.ttsModel), task: 'tts', mode: 'streaming', lazy: false },
     };
     const config = {
       host: '127.0.0.1',
@@ -1094,20 +1122,18 @@ export class Dictation {
   }
 
   private async request(url: string, text: string, stream: boolean, signal?: AbortSignal): Promise<Response> {
-    const s = this.settings();
-    const voice = fs.existsSync(this.voicePath);
+    const ref = await this.reference();
+    if (!ref) throw new Error('Qwen3-TTS reads in a voice it copies: set a reference voice in Settings → STT & TTS.');
     const res = await this.fetch(`${url}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal,
       body: JSON.stringify({
         model: TTS_ID,
-        input: speakerScript(text),
+        input: speechText(text),
+        voice_ref: ref.audio,
         ...(stream ? { response_format: 'pcm', stream_format: 'audio', stream: true } : { response_format: 'wav' }),
-        options: {
-          guidance_scale: Math.min(3, Math.max(0.5, s.guidanceScale)),
-          ...(voice ? { voice_samples: this.voicePath } : {}),
-        },
+        options: { reference_text: ref.text },
       }),
     });
     if (!res.ok || !res.body) {
@@ -1125,10 +1151,65 @@ export class Dictation {
       fs.writeFileSync(`${this.voicePath}.tmp`, wav);
       fs.renameSync(`${this.voicePath}.tmp`, this.voicePath);
     } else fs.rmSync(this.voicePath, { force: true });
-    this.setVoice({ ...this.voice_, reference: !!wav });
+    for (const f of ['voice-ref.wav', 'voice-ref.json']) fs.rmSync(path.join(this.dir, f), { force: true });
+    this.setVoice({ ...this.voice_, reference: !!wav, transcript: undefined });
+    // A new clip is transcribed now, so its transcript is there to check before it speaks.
+    if (wav && this.servers.length) void this.reference().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`));
   }
 
-  /** What the llama.cpp version of dictation downloaded (about 2.5 GB), now unused. */
+  /** Transcribes the reference clip again (Settings → STT & TTS); resolves with the transcript. */
+  async transcribeReference(): Promise<string> {
+    const ref = await this.reference(true);
+    if (!ref) throw new Error('There is no reference voice clip.');
+    return ref.text;
+  }
+
+  /**
+   * The reference clip as Qwen3-TTS takes it: at most 15 seconds of
+   * voice.wav, cut at a pause, and what is said in it. Qwen3-ASR transcribes
+   * each new clip once (or again when asked) and the transcript becomes the
+   * Reference Transcript setting (onReferenceText); the setting, which the
+   * user may correct, is what is used. Null without a clip.
+   */
+  private reference(again = false): Promise<{ audio: string; text: string } | null> {
+    // One at a time: a speak request that comes while a new clip is transcribed waits for that transcript.
+    const run = this.referencing.then(() => this.referenceNow(again));
+    this.referencing = run.catch(() => {});
+    return run;
+  }
+
+  private async referenceNow(again: boolean): Promise<{ audio: string; text: string } | null> {
+    if (!fs.existsSync(this.voicePath)) return null;
+    const wav = fs.readFileSync(this.voicePath);
+    const hash = crypto.createHash('sha256').update(wav).digest('hex');
+    const audio = path.join(this.dir, 'voice-ref.wav');
+    const meta = path.join(this.dir, 'voice-ref.json');
+    let heard = '';
+    try {
+      const m = JSON.parse(fs.readFileSync(meta, 'utf8')) as { hash?: string; text?: string };
+      if (!again && m.hash === hash && m.text && fs.existsSync(audio)) heard = m.text;
+    } catch {
+      // not made yet, or for another clip
+    }
+    let text = heard && this.settings().referenceText.trim() ? this.settings().referenceText.trim() : heard;
+    if (!heard) {
+      const clip = trimReference(wav, MAX_REFERENCE_SECONDS, MIN_REFERENCE_SECONDS);
+      fs.writeFileSync(audio, clip);
+      this.setVoice({ ...this.voice_, transcribing: true });
+      try {
+        text = await this.recognize(await this.start(), clip);
+      } finally {
+        this.setVoice({ ...this.voice_, transcribing: false });
+      }
+      if (!text || isQuiet(text)) throw new Error('Qwen3-ASR heard no speech in the reference voice clip; choose a clip with one person speaking clearly.');
+      fs.writeFileSync(meta, `${JSON.stringify({ hash, text }, null, 2)}\n`);
+      this.options.onReferenceText?.(text);
+    }
+    if (this.voice_.transcript !== text) this.setVoice({ ...this.voice_, transcript: text });
+    return { audio, text };
+  }
+
+  /** What earlier versions downloaded (the llama.cpp setup, VibeVoice), now unused. */
   private removeLlamaCpp(): void {
     for (const f of llamaLeftovers(this.dir)) {
       try {
@@ -1147,12 +1228,68 @@ export class Dictation {
 
 // -------------------------------------------------------------------- helpers
 
+/** Punctuation alone: nothing was said. */
+function isQuiet(text: string): boolean {
+  return !text.replace(/[\p{P}\p{S}\s]/gu, '');
+}
+
+/**
+ * A 16-bit mono PCM WAV cut to at most max seconds, at its quietest 30 ms
+ * after min seconds (between two words, so the transcript matches it). A
+ * shorter clip comes back as it is.
+ */
+export function trimReference(wav: Buffer, max: number, min: number): Buffer {
+  let rate = 0;
+  let at = 12;
+  let data = -1;
+  let size = 0;
+  while (at + 8 <= wav.length) {
+    const id = wav.toString('ascii', at, at + 4);
+    const n = wav.readUInt32LE(at + 4);
+    if (id === 'fmt ') rate = wav.readUInt32LE(at + 12);
+    if (id === 'data') {
+      data = at + 8;
+      size = Math.min(n, wav.length - data) & ~1;
+      break;
+    }
+    at += 8 + n + (n % 2);
+  }
+  if (!rate || data < 0 || size / 2 <= rate * max) return wav;
+  const sample = (i: number) => wav.readInt16LE(data + i * 2);
+  const frame = Math.round(rate * 0.03);
+  let cut = rate * max;
+  let low = Infinity;
+  for (let f = rate * min; f + frame <= rate * max; f += frame) {
+    let sum = 0;
+    for (let i = f; i < f + frame; i++) sum += sample(i) ** 2;
+    if (sum < low) {
+      low = sum;
+      cut = f + Math.floor(frame / 2);
+    }
+  }
+  const out = Buffer.alloc(44 + cut * 2);
+  out.write('RIFF', 0, 'ascii');
+  out.writeUInt32LE(36 + cut * 2, 4);
+  out.write('WAVEfmt ', 8, 'ascii');
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20);
+  out.writeUInt16LE(1, 22);
+  out.writeUInt32LE(rate, 24);
+  out.writeUInt32LE(rate * 2, 28);
+  out.writeUInt16LE(2, 32);
+  out.writeUInt16LE(16, 34);
+  out.write('data', 36, 'ascii');
+  out.writeUInt32LE(cut * 2, 40);
+  wav.copy(out, 44, data, data + cut * 2);
+  return out;
+}
+
 function serverExe(bin: string): string {
   return path.join(bin, process.platform === 'win32' ? 'audiocpp_server.exe' : 'audiocpp_server');
 }
 
 function modelName(id: string): string {
-  return id === ASR_ID ? 'Qwen3-ASR' : 'VibeVoice';
+  return id === ASR_ID ? 'Qwen3-ASR' : 'Qwen3-TTS';
 }
 
 /** "Speech to text: CPU (6 threads) · Text to speech: GPU (NVIDIA GeForce GTX 1660 SUPER)". */

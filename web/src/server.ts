@@ -124,7 +124,7 @@ export interface WebServerOptions {
    * the OS keyring. `false` turns it off (tests and embedding only).
    */
   auth?: WebAuth | false;
-  /** Speech to text and text to speech (default: audio.cpp with Qwen3-ASR and VibeVoice, downloaded on first use). */
+  /** Speech to text and text to speech (default: audio.cpp with Qwen3-ASR and Qwen3-TTS, downloaded on first use). */
   dictation?: Dictation;
   /** Hold-to-dictate into any app (default: the system-wide hotkey; started by setupFeatures). */
   pushToTalk?: PushToTalk;
@@ -380,9 +380,17 @@ export class WebServer {
         // Loaded with SF Agents and kept loaded, so dictating never waits for the model.
         keepLoaded: true,
         settings: () => ({
-          guidanceScale: this.appSettings.get<number>('speech.guidanceScale'),
           glossary: this.appSettings.get<string>('dictation.glossary'),
+          referenceText: this.appSettings.get<string>('speech.referenceText'),
         }),
+        // A new reference clip's transcript becomes the setting (shown, and correctable, in Settings → STT & TTS).
+        onReferenceText: (text) => {
+          try {
+            this.appSettings.set({ 'speech.referenceText': text.slice(0, 4000) });
+          } catch (error) {
+            this.log(`dictation: the reference transcript was not saved: ${getErrorMessage(error)}`);
+          }
+        },
       });
     this.pushToTalk =
       options.pushToTalk ??
@@ -823,13 +831,20 @@ export class WebServer {
           } else if (body['action'] === 'stop') {
             this.dictation.stop();
           } else if (body['action'] === 'install-voice') {
-            // VibeVoice, for Speak Response; progress arrives as "dictation" events too.
+            // Qwen3-TTS, for Speak Response; progress arrives as "dictation" events too.
             this.dictation.installVoice().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
+          } else if (body['action'] === 'transcribe-voice') {
+            // The reference clip transcribed again by Qwen3-ASR; the transcript replaces the setting.
+            try {
+              await this.dictation.transcribeReference();
+            } catch (error) {
+              throw new HttpError(409, getErrorMessage(error));
+            }
           } else throw new HttpError(400, 'Unknown action.');
           return sendJson(res, 200, this.dictation.status());
         }
         case 'GET voice': {
-          // The reference voice clip VibeVoice copies.
+          // The reference voice clip Qwen3-TTS copies.
           this.checkFetchSite(req);
           let clip: Buffer;
           try {
@@ -855,7 +870,7 @@ export class WebServer {
           this.dictation.setReference(null);
           return sendJson(res, 200, this.dictation.status());
         case 'POST speak': {
-          // Text to speech with VibeVoice: with stream, 16-bit mono PCM as it is
+          // Text to speech with Qwen3-TTS: with stream, 16-bit mono PCM as it is
           // made (the page plays it as it comes); without, the whole reply as one WAV file.
           const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
           const text = typeof body['text'] === 'string' ? body['text'] : '';

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The speech runtime and models come with the install: npm install and
 // npm run build download the pinned audio.cpp build for this computer and the
-// Qwen3-ASR and VibeVoice GGUFs (about 6.7 GB with the CUDA build) into the
+// Qwen3-ASR and Qwen3-TTS GGUFs (about 6.2 GB with the CUDA build) into the
 // SF Agents folder, checked against their SHA-256. Files already there are
 // kept, so later builds download nothing. Runs after the TypeScript build
 // (it uses web/dist/dictation.js).

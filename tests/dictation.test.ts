@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { Dictation, RUNTIME_RELEASE, coresFromCpuinfo, deviceFromList, isNoRoom, physicalCores, placementText, llamaLeftovers, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus } from '@sfagents/web';
+import { Dictation, RUNTIME_RELEASE, coresFromCpuinfo, deviceFromList, isNoRoom, physicalCores, placementText, llamaLeftovers, glossaryContext, runtimeChoices, speechText, transcriptFromAnswer, trimReference, wavSeconds, type DictationStatus } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('dictation helpers', () => {
@@ -65,9 +65,8 @@ describe('dictation helpers', () => {
   });
 
   test('the glossary becomes Qwen3-ASR context, and a reply a one-speaker script', () => {
-    assert.equal(glossaryContext(' SF Agents, Qwen3 ,, VibeVoice,Qwen3 '), 'SF Agents, Qwen3, VibeVoice');
+    assert.equal(glossaryContext(' SF Agents, Qwen3 ,, Qwen3-TTS,Qwen3 '), 'SF Agents, Qwen3, Qwen3-TTS');
     assert.equal(glossaryContext(''), '');
-    assert.equal(speakerScript('Hello.\n\nHow are   you?'), 'Speaker 1: Hello. How are you?');
   });
 
   test('the GPU is read from the device list', () => {
@@ -247,7 +246,7 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
       dir,
       hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: true }),
       asrModel: { name: 'Qwen3-ASR/asr.gguf', size: model.length, sha256: sha(model) },
-      ttsModel: { name: 'VibeVoice/tts.gguf', size: 10, sha256: '' },
+      ttsModel: { name: 'Qwen3-TTS/tts.gguf', size: 10, sha256: '' },
       modelBaseUrl: `${base}/models`,
       runtimeRelease: { tag: 'v9.0.0', assets: [
         { name: 'audio-v9.0.0-bin-ubuntu-x64-vulkan-portable.tar.gz', url: `${base}/dl/vulkan`, sha256: sha(vulkan) },
@@ -398,7 +397,7 @@ describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the s
       keepLoaded: true,
       hardware: () => ({ platform: 'linux', arch: process.arch, nvidia: false, vulkan: false }),
       ...SMALL,
-      settings: () => ({ guidanceScale: 1.3, glossary: 'SF Agents, Caleb' }),
+      settings: () => ({ glossary: 'SF Agents, Caleb' }),
       log: (l) => logs.push(l),
     });
     try {
@@ -442,50 +441,80 @@ describe('dictation that was not set up', { skip: process.platform !== 'linux' &
 });
 
 describe('text to speech', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
-  test('VibeVoice speaks next to Qwen3-ASR, in the reference voice, with the guidance scale', async () => {
+  test('Qwen3-TTS speaks next to Qwen3-ASR, in the reference voice, with its transcript', async () => {
     const dir = makeTempDir();
     standIn(dir);
-    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ guidanceScale: 2.4, glossary: '' }) });
+    let referenceText = '';
+    const saved: string[] = [];
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ referenceText }), onReferenceText: (t) => saved.push((referenceText = t)) });
     try {
       await d.start();
       await assert.rejects(() => d.speak('Hi.'), /not set up/);
-      // Downloaded while the server runs: it is started again with VibeVoice in its config.
+      // Downloaded while the server runs: it is started again with Qwen3-TTS in its config.
       fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
+      await assert.rejects(() => d.speak('Hi.'), /set a reference voice/, 'the Base model has no voice of its own');
       d.setReference(wav(8000));
       assert.equal(d.status().voice.reference, true);
       assert.throws(() => d.setReference(Buffer.from('not a wav file')), /WAV/);
       const out = await d.speak('Hello\nthere.');
-      assert.equal(out.toString(), 'RIFF....WAVESpeaker 1: Hello there.');
+      assert.equal(out.toString(), 'RIFF....WAVEHello there.');
       const log = await calls(d);
       const tts = log.find((c) => c.startsWith('tts'))!;
-      assert.match(tts, /^tts qwen3-asr\+vibevoice /, 'both loaded');
+      assert.match(tts, /^tts qwen3-asr\+qwen3-tts /, 'both loaded');
       const req = JSON.parse(tts.slice(tts.indexOf('{')));
-      assert.equal(req.options.guidance_scale, 2.4);
-      assert.equal(req.options.voice_samples, d.voicePath);
-      assert.ok(!log.some((c) => c.startsWith('unload')), 'nothing unloaded');
+      assert.equal(req.voice_ref, path.join(dir, 'voice-ref.wav'));
+      assert.equal(req.options.reference_text, 'hello from cpu, max 36', 'the clip, as Qwen3-ASR heard it');
+      assert.equal(req.options.guidance_scale, undefined);
       assert.equal(d.status().voice.state, 'loaded');
-      d.setReference(null);
+      // The transcript is made once per clip.
+      const asr = () => calls(d).then((c) => c.filter((x) => x.startsWith('asr')).length);
+      const before = await asr();
       await d.speak('Again.');
-      const last = (await calls(d)).at(-1)!;
-      assert.equal(JSON.parse(last.slice(last.indexOf('{'))).options.voice_samples, undefined, 'no clip, no voice_samples');
+      assert.equal(await asr(), before, 'not transcribed again');
+      d.setReference(wav(16000));
+      await d.speak('New clip.');
+      assert.equal(await asr(), before + 1, 'a new clip is transcribed');
+      assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'voice-ref.json'), 'utf8')).text, 'hello from cpu, max 40');
+      assert.deepEqual(saved, ['hello from cpu, max 36', 'hello from cpu, max 40'], 'each new transcript becomes the setting');
+      // The user's correction wins, until the clip changes or it is transcribed again.
+      referenceText = 'What I really said.';
+      await d.speak('Corrected.');
+      const tts2 = (await calls(d)).filter((c) => c.startsWith('tts')).at(-1)!;
+      assert.equal(JSON.parse(tts2.slice(tts2.indexOf('{'))).options.reference_text, 'What I really said.');
+      assert.equal(d.status().voice.transcript, 'What I really said.');
+      assert.equal(await d.transcribeReference(), 'hello from cpu, max 40');
+      assert.equal(referenceText, 'hello from cpu, max 40', 'transcribed again: the setting is the new transcript');
+      d.setReference(null);
+      await assert.rejects(() => d.speak('Gone.'), /set a reference voice/);
+      assert.equal(fs.existsSync(path.join(dir, 'voice-ref.wav')), false);
     } finally {
       d.close();
     }
   });
 
-  test('the guidance scale is kept between 0.5 and 3', async () => {
+  test('a long reference clip is cut to 15 seconds at a pause; VibeVoice is removed', async () => {
+    // 20 s of tone with a pause from 10 s to 10.2 s.
+    const rate = 24000;
+    const samples = Int16Array.from({ length: rate * 20 }, (_, i) => (i >= rate * 10 && i < rate * 10.2 ? 0 : Math.round(Math.sin(i / 7) * 6000)));
+    const long = Buffer.concat([wav(0).subarray(0, 44), Buffer.from(samples.buffer)]);
+    long.writeUInt32LE(rate, 24);
+    long.writeUInt32LE(rate * 2, 28);
+    long.writeUInt32LE(samples.length * 2, 40);
+    const cut = trimReference(long, 15, 8);
+    const seconds = (cut.length - 44) / 2 / rate;
+    assert.ok(seconds >= 10 && seconds <= 10.2, `cut in the pause, at ${seconds} s`);
+    assert.equal(cut.readUInt32LE(24), rate);
+    assert.equal(trimReference(wav(16000 * 5), 15, 8).length, wav(16000 * 5).length, 'a short clip stays as it is');
+    assert.equal(speechText('Hello.\n\nHow are   you?'), 'Hello. How are you?');
+
     const dir = makeTempDir();
     standIn(dir);
-    fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
-    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ guidanceScale: 9, glossary: '' }) });
+    fs.writeFileSync(path.join(dir, 'models', 'vibevoice-1.5b-q8_0.gguf'), 'old');
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL });
     try {
       await d.start();
-      assert.equal(d.status().voice.state, 'loaded', 'loaded at the start');
-      await d.speak('One.');
-      const log = await calls(d);
-      assert.match(log[0]!, /^asr qwen3-asr\+vibevoice$/, 'both loaded before the first request');
-      const tts = log.at(-1)!;
-      assert.equal(JSON.parse(tts.slice(tts.indexOf('{'))).options.guidance_scale, 3, 'clamped to 3');
+      assert.equal(fs.existsSync(path.join(dir, 'models', 'vibevoice-1.5b-q8_0.gguf')), false, 'VibeVoice (3.2 GB) is gone');
+      assert.equal(fs.existsSync(path.join(dir, 'models', 'asr.gguf')), true);
     } finally {
       d.close();
     }
@@ -499,6 +528,7 @@ describe('speaking as it is made', { skip: process.platform !== 'linux' && 'the 
     fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
     const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL });
     try {
+      d.setReference(wav(8000));
       await d.start();
       const pieces: string[] = [];
       for await (const c of await d.speakStream('Hello.')) pieces.push(c.toString());
@@ -515,7 +545,7 @@ describe('speaking as it is made', { skip: process.platform !== 'linux' && 'the 
       });
       for (let i = 0; i < 50 && !(await calls(d)).some((c) => c.startsWith('tts stopped')); i++) await new Promise((r) => setTimeout(r, 20));
       assert.ok((await calls(d)).some((c) => /^tts stopped after [23]$/.test(c)), 'the generation stopped');
-      assert.equal((await d.speak('Next.')).toString(), 'RIFF....WAVESpeaker 1: Next.', 'not stuck behind the stopped one');
+      assert.equal((await d.speak('Next.')).toString(), 'RIFF....WAVENext.', 'not stuck behind the stopped one');
     } finally {
       d.close();
     }
@@ -528,7 +558,8 @@ describe('where the models run', { skip: process.platform !== 'linux' && 'the st
     const dir = makeTempDir();
     standIn(dir);
     fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
-    fs.writeFileSync(path.join(dir, 'audiocpp', 'cpu', 'room.json'), JSON.stringify({ free, sizes: { 'qwen3-asr': 2.8, vibevoice: 4.6 } }));
+    fs.writeFileSync(path.join(dir, 'voice.wav'), wav(8000));
+    fs.writeFileSync(path.join(dir, 'audiocpp', 'cpu', 'room.json'), JSON.stringify({ free, sizes: { 'qwen3-asr': 2.8, 'qwen3-tts': 4.6 } }));
     fs.writeFileSync(path.join(dir, 'audiocpp.json'), JSON.stringify({ runtimes: { vulkan: { dir: 'audiocpp/cpu', tag: RUNTIME_RELEASE.tag } }, working: 'vulkan' }));
     const logs: string[] = [];
     const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: true }), ...SMALL, log: (l) => logs.push(l) });
@@ -542,7 +573,7 @@ describe('where the models run', { skip: process.platform !== 'linux' && 'the st
       await d.start();
       const threads = await physicalCores();
       assert.deepEqual(d.status().placement, { asr: 'gpu', tts: 'gpu', threads });
-      assert.deepEqual(started(), [`vulkan vibevoice+qwen3-asr threads ${threads} ${threads}`], 'one server, a thread per physical core');
+      assert.deepEqual(started(), [`vulkan qwen3-tts+qwen3-asr threads ${threads} ${threads}`], 'one server, a thread per physical core');
       assert.equal(await d.transcribe(wav(16000)), 'hello from vulkan, max 40');
       assert.equal(d.status().voice.state, 'loaded');
     } finally {
@@ -550,17 +581,17 @@ describe('where the models run', { skip: process.platform !== 'linux' && 'the st
     }
   });
 
-  test('else VibeVoice on the GPU and Qwen3-ASR on the CPU, in a second server', async () => {
+  test('else Qwen3-TTS on the GPU and Qwen3-ASR on the CPU, in a second server', async () => {
     const { d, logs, started } = gpu(6);
     try {
       await d.start();
       assert.equal(d.status().placement?.asr, 'cpu');
       assert.equal(d.status().placement?.tts, 'gpu');
-      assert.deepEqual(started().map((l) => l.split(' threads')[0]), ['vulkan vibevoice', 'cpu qwen3-asr']);
-      assert.ok(logs.some((l) => /VibeVoice and Qwen3-ASR do not fit on the GPU/.test(l)), logs.join(' | '));
+      assert.deepEqual(started().map((l) => l.split(' threads')[0]), ['vulkan qwen3-tts', 'cpu qwen3-asr']);
+      assert.ok(logs.some((l) => /Qwen3-TTS and Qwen3-ASR do not fit on the GPU/.test(l)), logs.join(' | '));
       assert.ok(logs.some((l) => /Speech to text: CPU \(\d+ threads?\) · Text to speech: GPU/.test(l)), logs.join(' | '));
       assert.equal(await d.transcribe(wav(16000)), 'hello from cpu, max 40');
-      assert.equal((await d.speak('Hi.')).toString(), 'RIFF....WAVESpeaker 1: Hi.');
+      assert.equal((await d.speak('Hi.')).toString(), 'RIFF....WAVEHi.');
       // One stops: both start again together.
       (d as unknown as { servers: Array<{ child: { kill(): void } }> }).servers[1]!.child.kill();
       for (let i = 0; i < 100 && started().length < 4; i++) await new Promise((r) => setTimeout(r, 100));
@@ -586,7 +617,7 @@ describe('where the models run', { skip: process.platform !== 'linux' && 'the st
       await none.d.start();
       assert.equal(none.d.status().placement?.asr, 'cpu');
       assert.equal(none.d.status().placement?.tts, 'cpu');
-      assert.match(none.started().at(-1)!, /^cpu vibevoice\+qwen3-asr /, 'one CPU server with both');
+      assert.match(none.started().at(-1)!, /^cpu qwen3-tts\+qwen3-asr /, 'one CPU server with both');
       assert.equal(await none.d.transcribe(wav(16000)), 'hello from cpu, max 40');
       const st = JSON.parse(fs.readFileSync(path.join(none.d.dir, 'audiocpp.json'), 'utf8'));
       assert.equal(st.working, 'vulkan', 'a GPU without room is not a broken build');

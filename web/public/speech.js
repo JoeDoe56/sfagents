@@ -1,9 +1,9 @@
 /**
- * Text to speech: the computer reads text aloud with VibeVoice, in the
+ * Text to speech: the computer reads text aloud with Qwen3-TTS, in the
  * reference voice set in Settings → STT & TTS (web/src/dictation.ts). It
- * plays as it is made: the server sends 16-bit PCM as VibeVoice makes it, and
+ * plays as it is made: the server sends 16-bit PCM as Qwen3-TTS makes it, and
  * each piece is scheduled with Web Audio right after the one before, without
- * gaps. A little is buffered first; where VibeVoice is slower than real time
+ * gaps. A little is buffered first; where Qwen3-TTS is slower than real time
  * (on a CPU), enough that the rest plays without stopping. Stopping aborts the
  * request, which stops the generation on the server. The first use asks
  * before downloading the model.
@@ -25,14 +25,14 @@ export function speaking() {
   return !!playing;
 }
 
-/** Downloads VibeVoice after asking; resolves false when it is not wanted or fails. */
+/** Downloads Qwen3-TTS after asking; resolves false when it is not wanted or fails. */
 export async function ensureVoice() {
   let s = dictationStatus() ?? (await getJson('/api/dictation'));
   dictationEvent(s);
   if (s.voice.state !== 'missing' && s.voice.state !== 'error' && s.voice.state !== 'installing') return true;
   if (s.voice.state !== 'installing') {
     const gb = (s.voice.downloadSize / 1e9).toFixed(1);
-    if (!(await confirmDialog('Download the voice model?', `VibeVoice reads replies aloud on this computer. It downloads once (${gb} GB).`, 'Download'))) return false;
+    if (!(await confirmDialog('Download the voice model?', `Qwen3-TTS reads replies aloud on this computer. It downloads once (${gb} GB).`, 'Download'))) return false;
     s = await postJson('/api/dictation', { action: 'install-voice' });
     dictationEvent(s);
   }
@@ -48,7 +48,7 @@ export async function ensureVoice() {
   return true;
 }
 
-/** VibeVoice's rate (web/src/dictation.ts SPEECH_RATE). */
+/** Qwen3-TTS's rate (web/src/dictation.ts SPEECH_RATE). */
 const RATE = 24000;
 /** Buffered before playing starts, in seconds, when the audio comes faster than real time; at most MAX_LEAD otherwise. */
 const LEAD = 0.3;
