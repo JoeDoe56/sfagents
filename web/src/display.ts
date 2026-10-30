@@ -119,6 +119,8 @@ export function describeCall(name: string, argsJson: string): string {
     case 'list_artifacts':
       return 'Looked at the artifacts';
     case 'add_section':
+      if (Array.isArray(args['merge']) && args['merge'].length) return `Merged topics${str(args['title']) ? ` into “${clip(String(args['title']), 50)}”` : ''}`;
+      if (str(args['section'])) return str(args['title']) ? `Renamed a topic to “${clip(String(args['title']), 50)}”` : 'Reorganized topics';
       return `Started topic ${str(args['title']) ? `“${clip(String(args['title']), 50)}”` : ''}`.trim();
     case 'edit_section':
       return 'Reorganized topics';

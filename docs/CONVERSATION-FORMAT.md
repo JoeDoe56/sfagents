@@ -90,13 +90,14 @@ Only complete assistant messages are written. Streaming text is not persisted un
 Sections form a tree that the model maintains with tools; the CLI can inspect it.
 
 - `add`: `section` (new ID `s<n>`), `title`, optional `parent`, optional `assign` (message IDs), optional `current` (boolean).
-- `edit`: `section`, optional `title`, optional `parent` (`null` moves it to the top level), optional `assign`, optional `unassign`, optional `current`.
+- `edit`: `section`, optional `title`, optional `parent` (`null` moves it to the top level), optional `assign`, optional `unassign`, optional `merge` (section IDs), optional `current`.
+- `merge` folds the named sections into this one: their subsections move under it, a message filed under a merged section (by its `section` field or an `assign`) belongs to this one, and if a merged section was current, this one is. Merged sections are gone; their IDs are never reused (a new section takes the number after the highest ever added). A section cannot be merged into itself or into one of its own subsections.
 - `rev` is the resulting **structure revision**, which increases by 1 with each section record. `expected` is the revision the caller based the change on. The service rejects a stale `expected` before writing anything, so a section record in the file is always a change that was accepted.
-- A message's section is the last `assign` or `unassign` that names it. Without one, it is the message's own `section` field. Without that, it is unassigned.
+- A message's section is the last `assign` or `unassign` that names it. Without one, it is the message's own `section` field. Without that, it is unassigned. A merged section's ID stands for the section it was merged into.
 - New messages are written with `section` set to the **current section**: the last section an operation marked `current: true`, or the one most recently added. This keeps a running discussion grouped without a classification call for every message.
 - `tool` messages belong with the `assistant` message that requested them; only `user` and `assistant` messages are assigned.
-- Invariants checked on load: unique section IDs, parents exist, no cycles, assigned messages exist and are `user` or `assistant`.
-- Renaming or moving a section never changes message IDs, bodies or order. Deleting and merging sections are not part of version 1.
+- Invariants checked on load: unique section IDs, parents exist, no cycles, merged sections exist and are not the target or above it, assigned messages exist and are `user` or `assistant`.
+- Renaming or moving a section never changes message IDs, bodies or order. Sections are never deleted: every message stays filed, and merging is how topics are combined.
 
 ## Runs and threads between agents
 

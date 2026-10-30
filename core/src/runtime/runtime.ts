@@ -148,7 +148,7 @@ function addUsage(total: TokenUsage, add?: TokenUsage): void {
 
 /** A call other than a section choice, made after a section reminder: refused without running. */
 function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
-  const content = `Not run: only keep_section, add_section or edit_section can be called now. Your reply was already delivered.`;
+  const content = `Not run: only keep_section or add_section can be called now. Your reply was already delivered.`;
   return { message: { role: 'tool', tool_call_id: call.id, content }, activity: { name: call.name, ok: false }, status: 'error' };
 }
 
@@ -570,7 +570,7 @@ export class AgentRuntime implements AgentMessenger {
             messages.push({ role: 'user', content: SECTION_REMINDER });
             continue;
           }
-          emit({ type: 'warning', agentPath, message: 'The model ended its turn without keep_section, add_section or edit_section; this turn stays in the current section.' });
+          emit({ type: 'warning', agentPath, message: 'The model ended its turn without keep_section or add_section; this turn stays in the current section.' });
         }
         // Agents it started are still working: the turn waits for what they send, then goes on.
         if (link.children.size > 0) {

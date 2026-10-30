@@ -117,6 +117,11 @@ export interface SectionRecord extends RecordBase {
   parent?: string | null;
   assign?: string[];
   unassign?: string[];
+  /**
+   * For edit: sections merged into this one. Their messages and subsections
+   * move here and they are gone; messages filed under them read as this one.
+   */
+  merge?: string[];
   current?: boolean;
 }
 
