@@ -63,7 +63,7 @@ const HELP = [
   '  /clear             reset the working context (the history is kept)',
   '  /tree              the agents and what each may use',
   '  /exit              quit SF Agents (the web interface stops too)',
-  'Keys: Tab or F1–F3 switch tabs · PgUp/PgDn scroll · Esc stops the reply · y/a/n answer an approval (with an empty composer) · Ctrl+C twice quits',
+  'Keys: Tab or F1–F3 switch tabs · the mouse wheel, PgUp/PgDn or Shift+↑↓ scroll (Shift+drag selects text) · Esc stops the reply · y/a/n answer an approval (with an empty composer) · Ctrl+C twice quits',
 ];
 
 const esc = (code: string) => `\u001b[${code}`;
@@ -226,7 +226,8 @@ export class Tui {
       process.off('SIGINT', onSignal);
     });
     // The alternate screen (the shell's scrollback comes back on quit), bracketed paste.
-    this.rawWrite(`${esc('?1049h')}${esc('?2004h')}${esc('?25l')}`);
+    // and mouse reports for the wheel (hold Shift to select text, in most terminals).
+    this.rawWrite(`${esc('?1049h')}${esc('?2004h')}${esc('?1000h')}${esc('?1006h')}${esc('?25l')}`);
     this.draw();
   }
 
@@ -259,7 +260,7 @@ export class Tui {
     for (const c of this.cleanups.reverse()) c();
     if (this.input.isTTY) this.input.setRawMode(false);
     this.input.pause();
-    this.rawWrite(`${esc('?2004l')}${esc('?25h')}${esc('?1049l')}`);
+    this.rawWrite(`${esc('?1006l')}${esc('?1000l')}${esc('?2004l')}${esc('?25h')}${esc('?1049l')}`);
     this.resolveDone?.(code);
   }
 
@@ -377,6 +378,27 @@ export class Tui {
 
   private onKey(str: string | undefined, key: readline.Key): void {
     if (this.closed) return;
+    // Mouse reports (SGR: ESC [ < button ; column ; row M) arrive as separate keys: collect them.
+    if (key.sequence === '\u001b[<') {
+      this.mouse = '';
+      return;
+    }
+    if (this.mouse !== null) {
+      const ch = key.sequence ?? str ?? '';
+      if (ch === 'M' || ch === 'm') {
+        const button = Number(this.mouse.split(';')[0]);
+        this.mouse = null;
+        // The wheel (64 up, 65 down, with Shift, Alt or Ctrl bits): three lines a notch.
+        if (ch === 'M' && (button & ~28) === 64) this.scrollBy(3);
+        else if (ch === 'M' && (button & ~28) === 65) this.scrollBy(-3);
+        return;
+      }
+      if (/^[\d;]$/.test(ch) && this.mouse.length < 32) {
+        this.mouse += ch;
+        return;
+      }
+      this.mouse = null;
+    }
     const name = key.name ?? '';
     if (key.ctrl && name === 'c') return this.ctrlC();
     if (key.ctrl && name === 'd' && !this.text) return this.quit();
@@ -492,6 +514,8 @@ export class Tui {
   }
 
   private pasting = false;
+  /** A mouse report being read, or null. */
+  private mouse: string | null = null;
 
   private insert(s: string): void {
     const text = s.replace(/\r\n?/g, '\n');
