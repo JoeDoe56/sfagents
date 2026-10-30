@@ -1450,6 +1450,7 @@ export class WebServer {
       configuredReasoning: d.reasoning ?? null,
       file: node.file,
       grants: [...node.grants].map(([agent, max]) => ({ agent, max })),
+      prompts: d.prompts ?? [],
     };
   }
 

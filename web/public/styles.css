@@ -975,3 +975,103 @@ button { -webkit-tap-highlight-color: transparent; }
 .diff-line.del { background: rgba(255, 69, 58, 0.14); color: #ffd0cc; }
 .diff-line.hunk { color: #64d2ff; background: rgba(100, 210, 255, 0.08); }
 .diff-line.note { color: var(--ink-3); }
+
+/* The agent tree */
+.tree { padding: 4px 4px 40px; --tree-line: rgba(235, 235, 245, 0.2); --tree-indent: 34px; }
+.tree-root, .tree-children { list-style: none; margin: 0; padding: 0; }
+.tree-root + .tree-heading { margin-top: 22px; }
+.tree-heading { margin: 8px 4px 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); text-transform: none; }
+.tree-children { position: relative; margin-left: 27px; padding-left: calc(var(--tree-indent) - 9px); }
+.tree-node { position: relative; }
+.tree-children > .tree-node::before {
+  /* the elbow from the parent's line into this card */
+  content: '';
+  position: absolute;
+  left: calc(9px - var(--tree-indent));
+  top: 0;
+  width: calc(var(--tree-indent) - 12px);
+  height: 31px;
+  border-left: 1.5px solid var(--tree-line);
+  border-bottom: 1.5px solid var(--tree-line);
+  border-bottom-left-radius: 12px;
+}
+.tree-children > .tree-node:not(:last-child)::after {
+  /* the parent's line continuing past this card to its later children */
+  content: '';
+  position: absolute;
+  left: calc(9px - var(--tree-indent));
+  top: 0;
+  bottom: 0;
+  border-left: 1.5px solid var(--tree-line);
+}
+.tree-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 50px;
+  margin: 6px 0;
+  padding: 8px 14px 8px 9px;
+  border: 0;
+  border-radius: 25px;
+  background: #2c2c2e;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+button.tree-card:active { transform: scale(0.97); background: #3a3a3c; }
+.tree-card.root { background: #3a3a3c; }
+.tree-card.ref, .tree-card.missing { min-height: 40px; padding-top: 5px; padding-bottom: 5px; background: transparent; box-shadow: inset 0 0 0 1px var(--tree-line); cursor: default; }
+.tree-card.ref .tree-avatar, .tree-card.missing .tree-avatar { width: 26px; height: 26px; font-size: 13px; opacity: 0.7; }
+.tree-card.missing .tree-avatar { background: #48484a; }
+.tree-avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: hsl(var(--hue) 62% 46%);
+  color: #fff;
+  font-weight: 600;
+  font-size: 16px;
+}
+.tree-card.working .tree-avatar { animation: tree-pulse 1.6s ease-in-out infinite; }
+@keyframes tree-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.55); }
+  50% { box-shadow: 0 0 0 5px rgba(48, 209, 88, 0); }
+}
+.tree-text { display: flex; flex-direction: column; min-width: 0; }
+.tree-name { display: flex; align-items: center; gap: 6px; font-size: 16px; font-weight: 600; line-height: 21px; overflow-wrap: anywhere; }
+.tree-tag { padding: 1px 7px; border-radius: 9px; background: rgba(10, 132, 255, 0.22); color: #64d2ff; font-size: 11px; font-weight: 600; line-height: 16px; }
+.tree-sub { color: var(--ink-2); font-size: 13px; line-height: 17px; overflow-wrap: anywhere; }
+.tree-live { color: #30d158; font-size: 12px; font-weight: 600; line-height: 16px; }
+.tree-live:empty { display: none; }
+.tree-ref { flex: none; color: var(--ink-2); }
+.tree-edge {
+  position: absolute;
+  left: calc(-1 * var(--tree-indent) + 18px);
+  top: 50%;
+  transform: translate(-50%, -100%);
+  padding: 0 4px;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.tree-edge:empty { display: none; }
+.tree-note { margin: 18px 6px 0; color: var(--ink-2); font-size: 13px; line-height: 18px; }
+@media (prefers-reduced-motion: reduce) {
+  .tree-card.working .tree-avatar { animation: none; box-shadow: 0 0 0 2px #30d158; }
+}
+.tree-card.flash { animation: tree-flash 1.1s ease; }
+@keyframes tree-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0); }
+  25% { box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.8); }
+}
