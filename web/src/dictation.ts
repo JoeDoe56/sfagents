@@ -245,6 +245,18 @@ export interface DictationOptions {
   keepLoaded?: boolean;
   /** Settings → STT & TTS, read at each use. */
   settings?: () => SpeechSettings;
+  /** Milliseconds between download attempts (tests). */
+  retryDelay?: number;
+}
+
+/** A download that failed on the way (no connection, dropped, a server error): worth another try. */
+class NetworkError extends Error {}
+const DOWNLOAD_ATTEMPTS = 6;
+
+/** fetch's "fetch failed" with the reason it wraps (a connect timeout, a reset). */
+function networkMessage(error: unknown): string {
+  const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : '';
+  return cause ? `${getErrorMessage(error)} (${cause})` : getErrorMessage(error);
 }
 
 /** How long audiocpp_server must have run for its exit not to count as one of the quick failures. */
@@ -276,6 +288,8 @@ export class Dictation {
   private quickExits = 0;
   /** Whether the running server's config has VibeVoice. */
   private serverHasVoice = false;
+  /** Downloads, one at a time. */
+  private downloads: Promise<unknown> = Promise.resolve();
   /** Speaking, one reply at a time. */
   private speaking: Promise<unknown> = Promise.resolve();
   /** While the models are swapped: settles when Qwen3-ASR is back. */
@@ -402,6 +416,8 @@ export class Dictation {
   installVoice(): Promise<void> {
     if (this.installingVoice) return this.installingVoice;
     if (this.have(this.ttsModel)) return Promise.resolve();
+    // Installing at once, also while it waits for the speech model's download.
+    this.setVoice({ ...this.voice_, state: 'installing', progress: undefined, error: undefined });
     this.installingVoice = (async () => {
       try {
         await this.downloadModel(this.ttsModel, 'Voice model', (progress) => this.setVoice({ ...this.voice_, state: 'installing', progress }));
@@ -496,8 +512,30 @@ export class Dictation {
     this.writeState(st);
   }
 
+  /**
+   * One download at a time (Qwen3-ASR and VibeVoice in parallel saturate the
+   * line, and the second connection timed out). A dropped or refused
+   * connection is retried, resuming where it stopped.
+   */
+  private download(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string, report: (p: Progress) => void): Promise<void> {
+    const run = this.downloads.then(async () => {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await this.downloadOnce(url, file, size, sha256, label, report);
+        } catch (error) {
+          if (!(error instanceof NetworkError) || attempt >= DOWNLOAD_ATTEMPTS) throw error;
+          const wait = Math.min(30_000, 2000 * 2 ** (attempt - 1));
+          this.options.log?.(`dictation: downloading ${path.basename(file)}: ${getErrorMessage(error)}; trying again in ${wait / 1000} s`);
+          await new Promise((r) => setTimeout(r, this.options.retryDelay ?? wait));
+        }
+      }
+    });
+    this.downloads = run.catch(() => {});
+    return run;
+  }
+
   /** Downloads to a .part file (resuming one that exists), checks it, and renames it. */
-  private async download(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string, report: (p: Progress) => void): Promise<void> {
+  private async downloadOnce(url: string, file: string, size: number | undefined, sha256: string | undefined, label: string, report: (p: Progress) => void): Promise<void> {
     if (size !== undefined && fs.existsSync(file) && fs.statSync(file).size === size) return;
     const part = `${file}.part`;
     let have = fs.existsSync(part) ? fs.statSync(part).size : 0;
@@ -505,7 +543,13 @@ export class Dictation {
       fs.rmSync(part);
       have = 0;
     }
-    const res = await this.fetch(url, { headers: { 'User-Agent': 'SF-Agents', ...(have > 0 ? { Range: `bytes=${have}-` } : {}) }, redirect: 'follow' });
+    let res: Response;
+    try {
+      res = await this.fetch(url, { headers: { 'User-Agent': 'SF-Agents', ...(have > 0 ? { Range: `bytes=${have}-` } : {}) }, redirect: 'follow' });
+    } catch (error) {
+      throw new NetworkError(networkMessage(error));
+    }
+    if (res.status >= 500 || res.status === 429) throw new NetworkError(`HTTP ${res.status}`);
     if (!res.ok || !res.body) throw new Error(`Downloading ${path.basename(file)} failed: HTTP ${res.status}.`);
     if (have > 0 && res.status !== 206) have = 0; // the server ignored the range: start over
     const total = size ?? have + Number(res.headers.get('content-length') ?? 0);
@@ -523,7 +567,12 @@ export class Dictation {
       done += c.length;
       progress();
     });
-    await pipeline(body, fs.createWriteStream(part, { flags: have > 0 ? 'a' : 'w' }));
+    try {
+      await pipeline(body, fs.createWriteStream(part, { flags: have > 0 ? 'a' : 'w' }));
+    } catch (error) {
+      // What arrived stays in the .part file for the next attempt.
+      throw new NetworkError(networkMessage(error));
+    }
     progress(true);
     if (sha256) {
       const got = await hashFile(part);

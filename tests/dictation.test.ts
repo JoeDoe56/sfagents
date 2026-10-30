@@ -236,6 +236,57 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
     }
   });
 
+  test('a dropped download is tried again from where it stopped, and the two models download one after the other', async () => {
+    const work = makeTempDir();
+    const model = crypto.randomBytes(200_000);
+    const voice = crypto.randomBytes(50_000);
+    const sha = (b: Buffer) => crypto.createHash('sha256').update(b).digest('hex');
+    const seen: string[] = [];
+    let open = 0;
+    let most = 0;
+    let dropped = false;
+    const server = http.createServer((req, res) => {
+      const b = req.url === '/asr.gguf' ? model : voice;
+      const from = Number(/bytes=(\d+)-/.exec(String(req.headers.range ?? ''))?.[1] ?? 0);
+      seen.push(`${req.url} ${from}`);
+      open++;
+      most = Math.max(most, open);
+      res.on('close', () => open--);
+      if (req.url === '/asr.gguf' && !dropped) {
+        // Half of it, then the connection drops.
+        dropped = true;
+        res.writeHead(200, { 'Content-Length': b.length });
+        res.write(b.subarray(0, 100_000), () => setTimeout(() => res.destroy(), 20));
+        return;
+      }
+      res.writeHead(from ? 206 : 200, { 'Content-Length': b.length - from });
+      setTimeout(() => res.end(b.subarray(from)), 30);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const d = new Dictation({
+      dir: work,
+      hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }),
+      asrModel: { name: 'asr.gguf', size: model.length, sha256: sha(model) },
+      ttsModel: { name: 'tts.gguf', size: voice.length, sha256: sha(voice) },
+      modelBaseUrl: base,
+      retryDelay: 10,
+    });
+    try {
+      fs.writeFileSync(path.join(work, 'audiocpp.json'), JSON.stringify({ runtimes: { cpu: { dir: 'x', tag: 'v1' } } }));
+      const both = Promise.all([d.install(), d.installVoice()]);
+      assert.equal(d.status().voice.state, 'installing', 'shown as installing while it waits its turn');
+      await both;
+      assert.ok(fs.readFileSync(path.join(work, 'models', 'asr.gguf')).equals(model));
+      assert.equal(d.status().voice.state, 'ready');
+      assert.deepEqual(seen, ['/asr.gguf 0', '/asr.gguf 100000', '/tts.gguf 0']);
+      assert.equal(most, 1, 'one at a time');
+    } finally {
+      d.close();
+      server.close();
+    }
+  });
+
   test('a download that does not match its checksum is thrown away', async () => {
     const work = makeTempDir();
     const server = http.createServer((_req, res) => res.end('not the model'));
