@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { Dictation, deviceFromList, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus, type SpeechSettings } from '@sfagents/web';
+import { Dictation, RUNTIME_RELEASE, deviceFromList, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus, type SpeechSettings } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('dictation helpers', () => {
@@ -29,6 +29,22 @@ describe('dictation helpers', () => {
     assert.ok(linux[0]!.asset.test(`audio-${t}-bin-ubuntu-x64-vulkan-portable.tar.gz`));
     assert.ok(linux[1]!.asset.test(`audio-${t}-bin-ubuntu-x64-cpu-portable.tar.gz`));
     assert.ok(runtimeChoices({ platform: 'darwin', arch: 'arm64', nvidia: false, vulkan: false })[0]!.asset.test(`audio-${t}-bin-macos-arm64-metal.tar.gz`));
+  });
+
+  test('the pinned release has every build the choices can pick, each with its SHA-256', () => {
+    const hws = [
+      { platform: 'darwin', arch: 'arm64' }, { platform: 'darwin', arch: 'x64' },
+      { platform: 'win32', arch: 'x64' }, { platform: 'linux', arch: 'x64' },
+    ] as const;
+    for (const hw of hws) {
+      for (const c of runtimeChoices({ ...hw, nvidia: true, vulkan: true })) {
+        for (const re of [c.asset, ...(c.extra ? [c.extra] : [])]) {
+          const a = RUNTIME_RELEASE.assets.filter((x) => re.test(x.name));
+          assert.equal(a.length, 1, `${hw.platform} ${c.backend} ${re}`);
+          assert.match(a[0]!.sha256, /^[0-9a-f]{64}$/);
+        }
+      }
+    }
   });
 
   test('the transcript is taken out of Qwen3-ASR answers that still have their markers', () => {
@@ -132,7 +148,7 @@ function standIn(dir: string, script = ''): void {
   fs.writeFileSync(path.join(bin, 'audiocpp_server'), script || `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/fake.mjs" "$@"\n`, { mode: 0o755 });
   fs.mkdirSync(path.join(dir, 'models'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'models', 'asr.gguf'), 'a');
-  fs.writeFileSync(path.join(dir, 'audiocpp.json'), JSON.stringify({ runtimes: { cpu: { dir: 'audiocpp/cpu', tag: 'v1' } } }));
+  fs.writeFileSync(path.join(dir, 'audiocpp.json'), JSON.stringify({ runtimes: { cpu: { dir: 'audiocpp/cpu', tag: RUNTIME_RELEASE.tag } } }));
 }
 
 const SMALL = { asrModel: { name: 'asr.gguf', size: 1, sha256: '' }, ttsModel: { name: 'tts.gguf', size: 1, sha256: '' } };
@@ -172,18 +188,6 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
         res.writeHead(200, { 'Content-Length': b.length });
         res.end(b);
       };
-      if (u === '/releases') {
-        const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-        res.setHeader('Content-Type', 'application/json');
-        return res.end(
-          JSON.stringify([
-            { tag_name: 'v9.0.0', assets: [
-              { name: 'audio-v9.0.0-bin-ubuntu-x64-vulkan-portable.tar.gz', browser_download_url: `${base}/dl/vulkan`, size: vulkan.length, digest: `sha256:${sha(vulkan)}` },
-              { name: 'audio-v9.0.0-bin-ubuntu-x64-cpu-portable.tar.gz', browser_download_url: `${base}/dl/cpu`, size: cpu.length, digest: `sha256:${sha(cpu)}` },
-            ] },
-          ]),
-        );
-      }
       if (u === '/dl/vulkan') return send(vulkan);
       if (u === '/dl/cpu') return send(cpu);
       if (u === '/models/Qwen3-ASR/asr.gguf') return send(model);
@@ -204,7 +208,10 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
       asrModel: { name: 'Qwen3-ASR/asr.gguf', size: model.length, sha256: sha(model) },
       ttsModel: { name: 'VibeVoice/tts.gguf', size: 10, sha256: '' },
       modelBaseUrl: `${base}/models`,
-      releasesUrl: `${base}/releases`,
+      runtimeRelease: { tag: 'v9.0.0', assets: [
+        { name: 'audio-v9.0.0-bin-ubuntu-x64-vulkan-portable.tar.gz', url: `${base}/dl/vulkan`, sha256: sha(vulkan) },
+        { name: 'audio-v9.0.0-bin-ubuntu-x64-cpu-portable.tar.gz', url: `${base}/dl/cpu`, sha256: sha(cpu) },
+      ] },
       onChange: (s) => states.push(s),
     });
     try {
@@ -320,7 +327,6 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
       asrModel: { name: 'asr.gguf', size: 13, sha256: '0'.repeat(64) },
       ttsModel: { name: 'tts.gguf', size: 13, sha256: '0'.repeat(64) },
       modelBaseUrl: base,
-      releasesUrl: `${base}/nothing`,
     });
     try {
       // Write a runtime record so only the model downloads.

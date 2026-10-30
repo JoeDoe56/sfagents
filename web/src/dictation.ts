@@ -4,14 +4,18 @@
  * with VibeVoice 1.5B (Speak Response). Both are audio.cpp's official Q8_0
  * GGUFs (huggingface.co/audio-cpp/audio.cpp-gguf).
  *
- * Nothing is bundled. The first use downloads, into <SF Agents home>/dictation:
- *   - an audio.cpp release build for this platform, GPU first: Metal on
- *     macOS; CUDA on Windows when an NVIDIA driver is present; else Vulkan
- *     when a Vulkan loader is; else the CPU build. When a GPU build cannot
- *     start or load the model, the next one is tried, down to the CPU build.
- *   - the Qwen3-ASR model (about 2.5 GB), checked against its SHA-256.
- * The VibeVoice model (about 3.2 GB) downloads only when it is asked for
- * (Settings → STT & TTS, or the first Speak Response).
+ * The runtime and the models come with the install: npm install and npm run
+ * build (scripts/prepare-speech.mjs) download, into <SF Agents home>/dictation:
+ *   - the pinned audio.cpp release's build for this platform (RUNTIME_RELEASE),
+ *     GPU first: Metal on macOS; CUDA on Windows when an NVIDIA driver is
+ *     present; else Vulkan when a Vulkan loader is; else the CPU build. When
+ *     a GPU build cannot start or load the model, the next one is tried,
+ *     down to the CPU build.
+ *   - the Qwen3-ASR model (about 2.5 GB) and the VibeVoice model (about
+ *     3.2 GB).
+ * Everything is checked against its SHA-256. What the install could not get
+ * downloads when SF Agents starts (Qwen3-ASR) or is first asked to speak
+ * (VibeVoice).
  *
  * audiocpp_server then runs on a loopback port with both models in its
  * config. Qwen3-ASR loads when the server starts. With keepLoaded (the web
@@ -45,9 +49,24 @@ export interface ModelFile {
 }
 export const ASR_MODEL: ModelFile = { name: 'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf', size: 2_473_010_048, sha256: 'da4fc2ac7f24dee784d1684eb1f35836cdbf559519452ae11777670734c0a4f8' };
 export const TTS_MODEL: ModelFile = { name: 'VibeVoice-1.5B-GGUF/vibevoice-1.5b-q8_0.gguf', size: 3_224_706_114, sha256: 'e9ca80a31ffe7e4726fcad9798ba10ba1e514d89174fd48ea548d21022e0e6f8' };
-const RELEASES = 'https://api.github.com/repos/0xShug0/audio.cpp/releases?per_page=10';
-/** A release known to run both models, used when the GitHub API cannot be reached. */
-const FALLBACK_TAG = 'v0.9.2-drama3-base-small';
+/**
+ * The audio.cpp release SF Agents runs, pinned with its files' SHA-256 (from
+ * the release page), so every install runs the same build. Moving to another
+ * release is a change here.
+ */
+export const RUNTIME_RELEASE: RuntimeRelease = {
+  tag: 'v0.9.3',
+  assets: [
+    ['audio-v0.9.3-bin-macos-arm64-metal.tar.gz', '70a84c2b61ce5ef99547a12affab9b0d40daf08666baf7da4f940d5c7b722819'],
+    ['audio-v0.9.3-bin-macos-x64-metal.tar.gz', '81238e3957bbf840d15094c34262fa93609caa0233c3dccc1e0f64fb47f5e51b'],
+    ['audio-v0.9.3-bin-ubuntu-x64-cpu-portable.tar.gz', '02156f7a7bd9924902cec26be35087d3806c7e348be344b1ec28cac0c1af3929'],
+    ['audio-v0.9.3-bin-ubuntu-x64-vulkan-portable.tar.gz', '10ac6b5cb72bc9266e5a600407dbcc2a3eaf87139a3e01c064bf3035d11f81b8'],
+    ['audio-v0.9.3-bin-windows-x64-cpu-portable.zip', 'f5fa4662b7ec323dbe31d37e224e46159b064836a9005da384551a5248771eeb'],
+    ['audio-v0.9.3-bin-windows-x64-vulkan-portable.zip', '51f8d8ce6cc7789bc9dc3d15f35e05f143aaf2ce1cbecc525a4104bcdde82a42'],
+    ['audio-v0.9.3-bin-windows-x64-cuda12.4.zip', '976b1fe4329407be45b272fc656d91006f081d22706f453f8879bc69dbb4a9b3'],
+    ['audio-v0.9.3-cudart-windows-x64-cuda12.4.zip', '866a2bc12c4d887eb3b1b62f82f7a8fdd93391cb77ea02b63b0f360cfb3bb4d8'],
+  ].map(([name, sha256]) => ({ name: name!, url: `https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/${name}`, sha256 })),
+};
 const IDLE_MS = 10 * 60_000;
 const START_TIMEOUT_MS = 300_000;
 /** The ids the models have in the server's config. */
@@ -163,11 +182,16 @@ export function runtimeChoices(hw: Hardware): RuntimeChoice[] {
   return out;
 }
 
-interface ReleaseAsset {
+export interface ReleaseAsset {
   name: string;
   url: string;
-  size: number;
-  sha256?: string;
+  size?: number;
+  sha256: string;
+}
+
+export interface RuntimeRelease {
+  tag: string;
+  assets: ReleaseAsset[];
 }
 
 /**
@@ -240,7 +264,8 @@ export interface DictationOptions {
   ttsModel?: ModelFile;
   /** Where the files come from (tests). */
   modelBaseUrl?: string;
-  releasesUrl?: string;
+  /** The audio.cpp release (tests use small stand-ins). */
+  runtimeRelease?: RuntimeRelease;
   /** Keep audiocpp_server running (no idle stop), and start it again when it exits. */
   keepLoaded?: boolean;
   /** Settings → STT & TTS, read at each use. */
@@ -449,42 +474,10 @@ export class Dictation {
     return ok.length ? ok : all.slice(-1);
   }
 
-  /** Recent audio.cpp releases, newest first. */
-  private async releases(): Promise<Array<{ tag: string; assets: ReleaseAsset[] }>> {
-    try {
-      const res = await this.fetch(this.options.releasesUrl ?? RELEASES, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'SF-Agents' } });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as Array<{ tag_name: string; draft?: boolean; assets: Array<{ name: string; browser_download_url: string; size: number; digest?: string | null }> }>;
-      if (!Array.isArray(data)) throw new Error('unexpected answer');
-      const list = data
-        .filter((r) => !r.draft && /^v\d/.test(r.tag_name))
-        .map((r) => ({
-          tag: r.tag_name,
-          assets: r.assets.map((a) => ({ name: a.name, url: a.browser_download_url, size: a.size, sha256: a.digest?.startsWith('sha256:') ? a.digest.slice(7) : undefined })),
-        }));
-      if (!list.length) throw new Error('no builds listed');
-      return list;
-    } catch (error) {
-      this.options.log?.(`dictation: the audio.cpp release list is unavailable (${getErrorMessage(error)}); using ${FALLBACK_TAG}`);
-      // Without the list, the names the release workflow gives its files.
-      const t = FALLBACK_TAG;
-      const base = `https://github.com/0xShug0/audio.cpp/releases/download/${t}`;
-      const names = [
-        `audio-${t}-bin-macos-arm64-metal.tar.gz`, `audio-${t}-bin-macos-x64-metal.tar.gz`,
-        `audio-${t}-bin-ubuntu-x64-cpu-portable.tar.gz`, `audio-${t}-bin-ubuntu-x64-vulkan-portable.tar.gz`,
-        `audio-${t}-bin-windows-x64-cpu-portable.zip`, `audio-${t}-bin-windows-x64-vulkan-portable.zip`,
-        `audio-${t}-bin-windows-x64-cuda12.4.zip`, `audio-${t}-cudart-windows-x64-cuda12.4.zip`,
-      ];
-      return [{ tag: t, assets: names.map((name) => ({ name, url: `${base}/${name}`, size: 0 })) }];
-    }
-  }
-
   private async installRuntime(choice: RuntimeChoice): Promise<void> {
-    // The newest release that has this build.
-    const all = await this.releases();
-    const rel = all.find((r) => r.assets.some((a) => choice.asset.test(a.name)) && (!choice.extra || r.assets.some((a) => choice.extra!.test(a.name))));
-    const asset = rel?.assets.find((a) => choice.asset.test(a.name));
-    if (!rel || !asset) throw new Error(`No recent audio.cpp release has a ${choice.backend} build for this computer.`);
+    const rel = this.options.runtimeRelease ?? RUNTIME_RELEASE;
+    const asset = rel.assets.find((a) => choice.asset.test(a.name));
+    if (!asset) throw new Error(`audio.cpp ${rel.tag} has no ${choice.backend} build for this computer.`);
     const extra = choice.extra ? rel.assets.find((a) => choice.extra!.test(a.name)) : undefined;
     const target = path.join(this.dir, 'audiocpp', choice.backend);
     fs.rmSync(target, { recursive: true, force: true });
@@ -492,7 +485,7 @@ export class Dictation {
     const label = `audio.cpp (${choice.backend === 'cpu' ? 'CPU' : choice.backend === 'cuda' ? 'CUDA' : choice.backend === 'metal' ? 'Metal' : 'Vulkan'})`;
     for (const a of [asset, ...(extra ? [extra] : [])]) {
       const file = path.join(this.dir, 'audiocpp', a.name);
-      await this.download(a.url, file, a.size || undefined, a.sha256, label, (progress) => this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress }));
+      await this.download(a.url, file, a.size, a.sha256, label, (progress) => this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress }));
       await extract(file, target);
       fs.rmSync(file, { force: true });
     }
@@ -630,7 +623,8 @@ export class Dictation {
           const st = this.readState();
           const choice = st.working ? this.choices(st).find((c) => c.backend === st.working) ?? this.choices(st)[0]! : this.choices(st)[0]!;
           try {
-            if (!st.runtimes[choice.backend]) {
+            // Not installed, or from a release other than the pinned one.
+            if (st.runtimes[choice.backend]?.tag !== (this.options.runtimeRelease ?? RUNTIME_RELEASE).tag) {
               this.set({ ...this.status_, state: 'installing' });
               await this.installRuntime(choice);
             }
