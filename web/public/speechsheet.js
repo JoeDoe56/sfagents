@@ -2,8 +2,8 @@
  * Settings → STT & TTS: the two speech models on the computer (Qwen3-ASR for
  * dictation, VibeVoice for reading replies aloud) and their settings: the
  * glossary Qwen3-ASR should know, the reference voice VibeVoice copies, its
- * guidance scale, and the automatic model swap for graphics cards without
- * room for both. The check button saves the settings; the voice clip and the
+ * guidance scale, and where each model runs (chosen at each start:
+ * dictation.ts). The check button saves the settings; the voice clip and the
  * model download happen at once, like adding a provider.
  */
 
@@ -15,7 +15,7 @@ import { dictationEvent, dictationStatus, onDictation, toWav } from './dictation
 import { ensureVoice, speak, stopSpeaking } from './speech.js';
 import { createRow, createSection } from './vendor/sfgl/src/ui/index.js';
 
-const KEYS = ['dictation.glossary', 'speech.guidanceScale', 'speech.autoSwap'];
+const KEYS = ['dictation.glossary', 'speech.guidanceScale'];
 /** VibeVoice's rate; longer clips do not make a better copy. */
 const CLIP_RATE = 24000;
 const CLIP_SECONDS = 60;
@@ -30,11 +30,19 @@ function el(tag, className, text) {
 
 const gb = (n) => `${(n / 1e9).toFixed(1)} GB`;
 
+/** Where a model runs: "GPU (NVIDIA GeForce GTX 1660 SUPER)", "CPU (6 threads)". */
+function where(s, on) {
+  const p = s?.placement;
+  if (!p || !on) return s?.device ?? s?.backend ?? 'this computer';
+  if (on === 'cpu') return `CPU (${p.threads} thread${p.threads === 1 ? '' : 's'})`;
+  return s.device && s.device !== 'CPU' ? `GPU (${s.device})` : 'GPU';
+}
+
 /** One line on what a model is doing. */
 function asrLine(s) {
   if (!s) return '';
   if (s.state === 'installing') return s.progress ? `Downloading… ${Math.round((100 * s.progress.done) / Math.max(1, s.progress.total))}%` : 'Setting up…';
-  if (s.state === 'running') return `Loaded on ${s.device ?? s.backend ?? 'this computer'}`;
+  if (s.state === 'running') return `Loaded on ${where(s, s.placement?.asr)}`;
   if (s.state === 'starting') return 'Loading…';
   if (s.state === 'ready') return 'Downloaded, not loaded';
   if (s.state === 'error') return `Not working: ${s.error ?? 'unknown error'}`;
@@ -46,10 +54,17 @@ function voiceLine(s) {
   if (!v) return '';
   if (v.state === 'installing') return v.progress ? `Downloading… ${Math.round((100 * v.progress.done) / Math.max(1, v.progress.total))}%` : 'Downloading…';
   if (v.state === 'speaking') return 'Speaking…';
-  if (v.state === 'loaded') return `Loaded on ${s.device ?? s.backend ?? 'this computer'}`;
-  if (v.state === 'ready') return 'Downloaded; loads when it first speaks';
+  if (v.state === 'loaded') return `Loaded on ${where(s, s.placement?.tts)}`;
+  if (v.state === 'ready') return s.state === 'starting' ? 'Loading…' : 'Downloaded, not loaded';
   if (v.state === 'error') return `Not working: ${v.error ?? 'unknown error'}`;
   return `Not downloaded yet (${gb(v.downloadSize)})`;
+}
+
+/** "Speech to text: CPU (6 threads) · Text to speech: GPU (…)" */
+function placeLine(s) {
+  const p = s?.placement;
+  if (!p || s.state !== 'running') return s?.state === 'starting' ? 'Loading…' : 'Not loaded';
+  return [`Speech to text: ${where(s, p.asr)}`, ...(p.tts ? [`Text to speech: ${where(s, p.tts)}`] : [])].join(' · ');
 }
 
 /**
@@ -60,7 +75,7 @@ export function openSpeechSheet(o) {
   const saved = Object.fromEntries(KEYS.map((k) => [k, spec[k]?.value]));
   const draft = { ...saved };
   let status = dictationStatus();
-  let asrRow, voiceRow, clipRow, sampleRow;
+  let asrRow, voiceRow, clipRow, sampleRow, placeRow;
   let stop = () => {};
 
   const ctx = openSheet({
@@ -81,12 +96,12 @@ export function openSpeechSheet(o) {
       clipRow = createRow({ title: 'Reference Voice', subtitle: '', wrap: true, accessory: 'ellipsis', onTap: () => clipMenu() });
       sampleRow = createRow({ title: 'Play a Sample', tintTitle: true, onTap: () => playSample() });
       const scale = rangeRow(spec['speech.guidanceScale'], Number(draft['speech.guidanceScale']), (v) => set('speech.guidanceScale', v));
-      // Memory.
-      const swap = createRow({ title: 'Automatic Model Swap', wrap: true, toggle: { checked: draft['speech.autoSwap'] === true, onChange: (v) => set('speech.autoSwap', v) } });
+      // Where they run.
+      placeRow = createRow({ icon: 'gauge', iconTint: '#8e8e93', title: 'Placement', subtitle: placeLine(status), wrap: true });
       sheet.body.append(
         createSection({ title: 'Speech to Text', rows: [asrRow, glossary], note: spec['dictation.glossary']?.hint }).el,
         createSection({ title: 'Text to Speech', rows: [voiceRow, clipRow, scale, sampleRow], note: 'The reference voice is a clean recording of one speaker, 10 to 60 seconds long; VibeVoice copies its voice. Without one, it uses a voice of its own. ' + (spec['speech.guidanceScale']?.hint ?? '') }).el,
-        createSection({ title: 'Memory', rows: [swap], note: `${spec['speech.autoSwap']?.hint ?? ''} Dictating while it speaks waits for it.` }).el,
+        createSection({ title: 'Where They Run', rows: [placeRow], note: 'Both models load when SF Agents starts and stay loaded. Each start puts them where they fit with room to spare: both on the graphics card; else VibeVoice on the graphics card and Qwen3-ASR on the processor, where it is still faster than real time; else both on the processor.' }).el,
       );
     },
     onConfirm: async () => {
@@ -114,6 +129,7 @@ export function openSpeechSheet(o) {
 
   function render() {
     asrRow?.setSubtitle(asrLine(status));
+    placeRow?.setSubtitle(placeLine(status));
     voiceRow?.update({ subtitle: voiceLine(status), accessory: status?.voice && (status.voice.state === 'missing' || status.voice.state === 'error') ? 'chevron' : 'none' });
     clipRow?.setSubtitle(status?.voice?.reference ? 'Set: VibeVoice copies this voice' : 'None: VibeVoice’s own voice');
     sampleRow?.setDisabled(!status?.voice || status.voice.state === 'installing' || status.voice.state === 'speaking');
@@ -179,7 +195,7 @@ export function openSpeechSheet(o) {
   }
 
   async function playSample() {
-    if (String(draft['speech.guidanceScale']) !== String(saved['speech.guidanceScale']) || draft['speech.autoSwap'] !== saved['speech.autoSwap']) {
+    if (String(draft['speech.guidanceScale']) !== String(saved['speech.guidanceScale'])) {
       toast('The sample uses the saved settings: save first to hear a change', { symbol: 'info.circle', timeout: 3200 });
     }
     try {

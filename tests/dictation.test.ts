@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { Dictation, RUNTIME_RELEASE, deviceFromList, llamaLeftovers, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus, type SpeechSettings } from '@sfagents/web';
+import { Dictation, RUNTIME_RELEASE, coresFromCpuinfo, deviceFromList, isNoRoom, physicalCores, placementText, llamaLeftovers, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('dictation helpers', () => {
@@ -118,6 +118,19 @@ const backend = args[args.indexOf('--backend') + 1];
 const ids = config.models.map((m) => m.id);
 const loaded = new Set(config.models.filter((m) => m.lazy === false).map((m) => m.id));
 const calls = [];
+// A GPU with this much room (GB) for the models audio.cpp estimates, as --min-free-memory-mb checks.
+const room = fs.existsSync(new URL('./room.json', import.meta.url)) ? JSON.parse(fs.readFileSync(new URL('./room.json', import.meta.url), 'utf8')) : null;
+if (room && backend !== 'cpu' && args.includes('--min-free-memory-mb')) {
+  let used = 0;
+  for (const id of loaded) {
+    used += room.sizes[id];
+    if (used + 0.5 > room.free) {
+      console.error("audiocpp_server failed: cannot load model '" + id + "': estimated " + room.sizes[id] + ' GiB + 512 MiB headroom exceeds available ' + backend + ' memory (' + (room.free - used + room.sizes[id]) + ' GiB)');
+      process.exit(1);
+    }
+  }
+}
+fs.appendFileSync(new URL('./started.txt', import.meta.url), backend + ' ' + [...loaded].join('+') + ' threads ' + config.threads + ' ' + args[args.indexOf('--threads') + 1] + '\\n');
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
 http.createServer((req, res) => {
   let body = '';
@@ -367,7 +380,7 @@ describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the s
       keepLoaded: true,
       hardware: () => ({ platform: 'linux', arch: process.arch, nvidia: false, vulkan: false }),
       ...SMALL,
-      settings: () => ({ autoSwap: false, guidanceScale: 1.3, glossary: 'SF Agents, Caleb' }),
+      settings: () => ({ guidanceScale: 1.3, glossary: 'SF Agents, Caleb' }),
       log: (l) => logs.push(l),
     });
     try {
@@ -375,7 +388,7 @@ describe('dictation kept loaded', { skip: process.platform !== 'linux' && 'the s
       const first = await d.start();
       assert.equal(d.status().state, 'running');
       assert.equal((d as unknown as { idle: unknown }).idle, null, 'no idle timer');
-      (d as unknown as { child: { kill(): void } }).child.kill();
+      (d as unknown as { servers: Array<{ child: { kill(): void } }> }).servers[0]!.child.kill();
       let again = '';
       for (let i = 0; i < 100 && !again; i++) {
         await new Promise((r) => setTimeout(r, 100));
@@ -414,7 +427,7 @@ describe('text to speech', { skip: process.platform !== 'linux' && 'the stand-in
   test('VibeVoice speaks next to Qwen3-ASR, in the reference voice, with the guidance scale', async () => {
     const dir = makeTempDir();
     standIn(dir);
-    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ autoSwap: false, guidanceScale: 2.4, glossary: '' }) });
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ guidanceScale: 2.4, glossary: '' }) });
     try {
       await d.start();
       await assert.rejects(() => d.speak('Hi.'), /not set up/);
@@ -431,7 +444,7 @@ describe('text to speech', { skip: process.platform !== 'linux' && 'the stand-in
       const req = JSON.parse(tts.slice(tts.indexOf('{')));
       assert.equal(req.options.guidance_scale, 2.4);
       assert.equal(req.options.voice_samples, d.voicePath);
-      assert.ok(!log.some((c) => c.startsWith('unload')), 'nothing unloaded without the swap');
+      assert.ok(!log.some((c) => c.startsWith('unload')), 'nothing unloaded');
       assert.equal(d.status().voice.state, 'loaded');
       d.setReference(null);
       await d.speak('Again.');
@@ -442,39 +455,106 @@ describe('text to speech', { skip: process.platform !== 'linux' && 'the stand-in
     }
   });
 
-  test('with the automatic swap, Qwen3-ASR leaves while VibeVoice speaks, comes back after, and dictation waits for it', async () => {
+  test('the guidance scale is kept between 0.5 and 3', async () => {
     const dir = makeTempDir();
     standIn(dir);
     fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
-    let settings: SpeechSettings = { autoSwap: true, guidanceScale: 9, glossary: '' };
-    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => settings });
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ guidanceScale: 9, glossary: '' }) });
     try {
       await d.start();
-      const speaking = d.speak('One.');
-      // Dictation that comes in while VibeVoice speaks.
-      while (d.status().voice.state !== 'speaking') await new Promise((r) => setTimeout(r, 1));
-      const dictated = d.transcribe(wav(16000));
-      await speaking;
-      assert.equal(await dictated, 'hello from cpu, max 40');
-      const log = (await calls(d)).slice(1); // after the load at start
-      const tts = log.findIndex((c) => c.startsWith('tts'));
-      assert.deepEqual(log.slice(0, tts), ['unload qwen3-asr']);
-      assert.match(log[tts]!, /^tts vibevoice /, 'VibeVoice alone');
-      assert.equal(JSON.parse(log[tts]!.slice(log[tts]!.indexOf('{'))).options.guidance_scale, 3, 'clamped to 3');
-      assert.deepEqual(log.slice(tts + 1), ['unload vibevoice', 'asr qwen3-asr', 'asr qwen3-asr'], 'Qwen3-ASR back at once, then the dictation');
-      assert.equal(d.status().voice.state, 'ready');
-
-      // Turning the swap on unloads a VibeVoice left loaded.
-      settings = { ...settings, autoSwap: false };
-      await d.speak('Two.');
-      assert.equal(d.status().voice.state, 'loaded');
-      settings = { ...settings, autoSwap: true };
-      d.applySettings();
-      for (let i = 0; i < 50 && d.status().voice.state === 'loaded'; i++) await new Promise((r) => setTimeout(r, 20));
-      assert.equal(d.status().voice.state, 'ready');
-      assert.equal((await calls(d)).at(-1), 'unload vibevoice');
+      assert.equal(d.status().voice.state, 'loaded', 'loaded at the start');
+      await d.speak('One.');
+      const log = await calls(d);
+      assert.match(log[0]!, /^asr qwen3-asr\+vibevoice$/, 'both loaded before the first request');
+      const tts = log.at(-1)!;
+      assert.equal(JSON.parse(tts.slice(tts.indexOf('{'))).options.guidance_scale, 3, 'clamped to 3');
     } finally {
       d.close();
     }
+  });
+});
+
+describe('where the models run', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
+  /** A GPU build (the stand-in) on a GPU with this much room, and both models downloaded. */
+  function gpu(free: number) {
+    const dir = makeTempDir();
+    standIn(dir);
+    fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
+    fs.writeFileSync(path.join(dir, 'audiocpp', 'cpu', 'room.json'), JSON.stringify({ free, sizes: { 'qwen3-asr': 2.8, vibevoice: 4.6 } }));
+    fs.writeFileSync(path.join(dir, 'audiocpp.json'), JSON.stringify({ runtimes: { vulkan: { dir: 'audiocpp/cpu', tag: RUNTIME_RELEASE.tag } }, working: 'vulkan' }));
+    const logs: string[] = [];
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: true }), ...SMALL, log: (l) => logs.push(l) });
+    const started = () => fs.readFileSync(path.join(dir, 'audiocpp', 'cpu', 'started.txt'), 'utf8').trim().split('\n');
+    return { d, logs, started };
+  }
+
+  test('both on the GPU when they fit with room to spare', async () => {
+    const { d, started } = gpu(9);
+    try {
+      await d.start();
+      const threads = await physicalCores();
+      assert.deepEqual(d.status().placement, { asr: 'gpu', tts: 'gpu', threads });
+      assert.deepEqual(started(), [`vulkan vibevoice+qwen3-asr threads ${threads} ${threads}`], 'one server, a thread per physical core');
+      assert.equal(await d.transcribe(wav(16000)), 'hello from vulkan, max 40');
+      assert.equal(d.status().voice.state, 'loaded');
+    } finally {
+      d.close();
+    }
+  });
+
+  test('else VibeVoice on the GPU and Qwen3-ASR on the CPU, in a second server', async () => {
+    const { d, logs, started } = gpu(6);
+    try {
+      await d.start();
+      assert.equal(d.status().placement?.asr, 'cpu');
+      assert.equal(d.status().placement?.tts, 'gpu');
+      assert.deepEqual(started().map((l) => l.split(' threads')[0]), ['vulkan vibevoice', 'cpu qwen3-asr']);
+      assert.ok(logs.some((l) => /VibeVoice and Qwen3-ASR do not fit on the GPU/.test(l)), logs.join(' | '));
+      assert.ok(logs.some((l) => /Speech to text: CPU \(\d+ threads?\) · Text to speech: GPU/.test(l)), logs.join(' | '));
+      assert.equal(await d.transcribe(wav(16000)), 'hello from cpu, max 40');
+      assert.equal((await d.speak('Hi.')).toString(), 'RIFF....WAVESpeaker 1: Hi.');
+      // One stops: both start again together.
+      (d as unknown as { servers: Array<{ child: { kill(): void } }> }).servers[1]!.child.kill();
+      for (let i = 0; i < 100 && started().length < 4; i++) await new Promise((r) => setTimeout(r, 100));
+      for (let i = 0; i < 100 && d.status().state !== 'running'; i++) await new Promise((r) => setTimeout(r, 100));
+      assert.equal(d.status().placement?.asr, 'cpu');
+      assert.equal(await d.transcribe(wav(16000)), 'hello from cpu, max 40');
+    } finally {
+      d.close();
+    }
+  });
+
+  test('else Qwen3-ASR on the GPU, and with no room for either, both on the CPU', async () => {
+    const small = gpu(3.5);
+    try {
+      await small.d.start();
+      assert.equal(small.d.status().placement?.asr, 'gpu');
+      assert.equal(small.d.status().placement?.tts, 'cpu');
+    } finally {
+      small.d.close();
+    }
+    const none = gpu(1);
+    try {
+      await none.d.start();
+      assert.equal(none.d.status().placement?.asr, 'cpu');
+      assert.equal(none.d.status().placement?.tts, 'cpu');
+      assert.match(none.started().at(-1)!, /^cpu vibevoice\+qwen3-asr /, 'one CPU server with both');
+      assert.equal(await none.d.transcribe(wav(16000)), 'hello from cpu, max 40');
+      const st = JSON.parse(fs.readFileSync(path.join(none.d.dir, 'audiocpp.json'), 'utf8'));
+      assert.equal(st.working, 'vulkan', 'a GPU without room is not a broken build');
+      assert.equal(st.failed, undefined);
+    } finally {
+      none.d.close();
+    }
+  });
+
+  test('physical cores come from /proc/cpuinfo', () => {
+    const block = (p: number, c: number) => `processor\t: 0\nphysical id\t: ${p}\ncore id\t\t: ${c}\n`;
+    assert.equal(coresFromCpuinfo([block(0, 0), block(0, 0), block(0, 1), block(0, 1)].join('\n')), 2, 'hyperthreads are one core');
+    assert.equal(coresFromCpuinfo([block(0, 0), block(1, 0)].join('\n')), 2, 'two sockets');
+    assert.equal(coresFromCpuinfo('processor\t: 0\n'), null);
+    assert.ok(isNoRoom("audiocpp_server failed: cannot load model 'vibevoice': estimated 4.63 GiB + 1024 MiB headroom exceeds available cuda memory (5.02 GiB)"));
+    assert.ok(!isNoRoom('no Vulkan device'));
+    assert.equal(placementText({ asr: 'cpu', tts: 'gpu', threads: 6 }, 'NVIDIA GeForce GTX 1660 SUPER'), 'Speech to text: CPU (6 threads) · Text to speech: GPU (NVIDIA GeForce GTX 1660 SUPER)');
   });
 });

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { AppSettings, HOTKEY_KEYS, formatHotkey, parseHotkey, type Hotkey } from '@sfagents/core';
-import { PushToTalk, SOUNDS_DIR, hasSpeech, isFiller, KeyboardProcess, KEYBOARD_WORKER, namedHotkeyLine, windowsHotkeyLine, modifierMask, pcmToWav, readWav, windowsVirtualKey, type Chimes, type Keyboard, type KeyboardEvents, type Microphone } from '@sfagents/web';
+import { PushToTalk, Segmenter, joinPiece, SOUNDS_DIR, hasSpeech, isFiller, KeyboardProcess, KEYBOARD_WORKER, namedHotkeyLine, windowsHotkeyLine, modifierMask, pcmToWav, readWav, windowsVirtualKey, type Chimes, type Keyboard, type KeyboardEvents, type Microphone } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('push-to-talk hotkeys', () => {
@@ -311,5 +311,113 @@ describe('the keyboard worker on X11', { skip: !xdotool && 'needs an X display a
     } finally {
       kb.close();
     }
+  });
+});
+
+/** Quiet room noise and loud tones (speech) of the given lengths, alternating, starting quiet. */
+function talk(...seconds: number[]): Int16Array {
+  const out: number[] = [];
+  seconds.forEach((s, k) => {
+    for (let i = 0; i < Math.round(16000 * s); i++) out.push(Math.round((Math.random() - 0.5) * 60 + (k % 2 ? Math.sin(i / 7) * 6000 : 0)));
+  });
+  return Int16Array.from(out);
+}
+
+function frames(pcm: Int16Array, size = 512): Int16Array[] {
+  const out: Int16Array[] = [];
+  for (let at = 0; at < pcm.length; at += size) out.push(pcm.subarray(at, at + size));
+  return out;
+}
+
+describe('push-to-talk as you speak', () => {
+  test('the recording is cut at each half-second pause, and a long one without a pause at twelve seconds', () => {
+    const seg = new Segmenter(16000);
+    const pieces = frames(talk(1, 1.5, 0.8, 1, 0.3, 0.5)).flatMap((f) => seg.push(f));
+    assert.equal(pieces.length, 1, 'cut at the 0.8 s pause, not at the 0.3 s one');
+    assert.equal(pieces[0]!.start, 0);
+    assert.ok(Math.abs(pieces[0]!.pcm.length / 16000 - 3) < 0.1, `first piece: ${pieces[0]!.pcm.length / 16000} s`);
+    const rest = seg.flush();
+    assert.equal(rest.length, 1, 'the rest at the end');
+    assert.ok(Math.abs(rest[0]!.start - pieces[0]!.pcm.length / 16000) < 0.001, 'it starts where the first ends');
+    assert.ok(hasSpeech(rest[0]!.pcm, 16000, 0));
+    const long = new Segmenter(16000);
+    const cut = frames(talk(0.8, 20)).flatMap((f) => long.push(f));
+    assert.equal(cut.length, 1);
+    assert.ok(cut[0]!.pcm.length / 16000 <= 12.01 && cut[0]!.pcm.length / 16000 > 8.9);
+    // Quiet before anything is said is not kept.
+    const quiet = new Segmenter(16000);
+    assert.deepEqual(frames(talk(6)).flatMap((f) => quiet.push(f)), []);
+    assert.ok(quiet.flush()[0]!.pcm.length / 16000 < 2.1);
+  });
+
+  test('pieces follow each other with a space where the writing has spaces', () => {
+    assert.equal(joinPiece('', 'Hello.'), 'Hello.');
+    assert.equal(joinPiece('Hello.', 'How are you?'), ' How are you?');
+    assert.equal(joinPiece('Hello ', 'there'), 'there');
+    assert.equal(joinPiece('Hello', ', there'), ', there');
+    assert.equal(joinPiece('你好。', '我很好'), '我很好');
+  });
+
+  /** A microphone that hands push-to-talk its frames as a test feeds them. */
+  function liveMic(log: string[]) {
+    let onFrame: ((f: Int16Array) => void) | undefined;
+    const mic = (): Microphone => ({
+      start: (f) => {
+        onFrame = f;
+        log.push('mic start');
+      },
+      stop: async () => {
+        log.push('mic stop');
+        return new Int16Array(0);
+      },
+      close: () => {},
+    });
+    return { mic, feed: (pcm: Int16Array) => frames(pcm).forEach((f) => onFrame!(f)) };
+  }
+
+  test('each phrase is typed while the key is still held, the last one when it is let go', async () => {
+    const f = fakes();
+    const live = liveMic(f.log);
+    const heard: Array<string | undefined> = [];
+    const answers = ['First phrase.', 'Second phrase.'];
+    const ptt = new PushToTalk({
+      transcribe: async (_wav, previous) => {
+        heard.push(previous);
+        return answers.shift() ?? '';
+      },
+      keyboard: f.keyboard,
+      microphone: live.mic,
+      chimes: f.chimes,
+    });
+    ptt.setHotkey('F13');
+    f.press();
+    live.feed(talk(1, 1.5, 0.8));
+    await settle();
+    assert.ok(f.log.includes('type First phrase.'), 'typed before the key is let go');
+    assert.ok(!f.log.includes('mic stop'));
+    assert.equal(ptt.status().state, 'recording');
+    live.feed(talk(0, 1.2, 0.2));
+    f.release();
+    await settle();
+    assert.deepEqual(f.log.filter((l) => l.startsWith('type')), ['type First phrase.', 'type  Second phrase.']);
+    assert.deepEqual(heard, [undefined, 'First phrase.'], 'the phrase before as context');
+    assert.equal(ptt.status().state, 'idle');
+    ptt.close();
+  });
+
+  test('with a modifier in the hotkey, the phrases are typed when it is let go', async () => {
+    const f = fakes();
+    const live = liveMic(f.log);
+    const answers = ['One.', 'Two.'];
+    const ptt = new PushToTalk({ transcribe: async () => answers.shift() ?? '', keyboard: f.keyboard, microphone: live.mic, chimes: f.chimes });
+    ptt.setHotkey('Ctrl+Space');
+    f.press();
+    live.feed(talk(1, 1.5, 0.8, 1, 0.2));
+    await settle();
+    assert.ok(!f.log.some((l) => l.startsWith('type')), 'nothing typed while Ctrl is held');
+    f.release();
+    await settle();
+    assert.deepEqual(f.log.filter((l) => l.startsWith('type')), ['type One. Two.']);
+    ptt.close();
   });
 });

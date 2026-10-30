@@ -1,8 +1,13 @@
 /**
  * Push-to-talk: hold the hotkey (Settings → Push to Talk, F13 by default)
- * anywhere on this computer to dictate, let go to have what you said typed
- * into the window that has the focus. The speech to text is dictation's
- * (Qwen3-ASR through audio.cpp, kept loaded: dictation.ts); the rest is here:
+ * anywhere on this computer to dictate into the window that has the focus.
+ * The text comes as you speak: the recording is cut at each pause (Segmenter),
+ * and each piece is transcribed and typed while the key is still held, the
+ * last one when it is let go. Only finished text is typed; nothing typed is
+ * taken back. With a hotkey that has a modifier (Ctrl+Shift+Space) the pieces
+ * are typed when it is let go: letters typed while Ctrl is held would be
+ * shortcuts. The speech to text is dictation's (Qwen3-ASR through audio.cpp,
+ * kept loaded: dictation.ts); the rest is here:
  *
  *   - the hotkey and the typing, in a process of their own (KeyboardProcess).
  *     On Windows, SfAgents.Input.exe (web/native/windows-input), which the
@@ -36,6 +41,10 @@ const SAMPLE_RATE = 16_000;
 const MIN_SECONDS = 0.3;
 /** The longest recording kept (Qwen3-ASR handles a few minutes well). */
 const MAX_SECONDS = 5 * 60;
+/** A pause this long ends a piece of the recording. */
+const PAUSE_SECONDS = 0.5;
+/** A piece without a pause is cut (at its quietest moment) at this length. */
+const MAX_PIECE_SECONDS = 12;
 
 export interface PushToTalkStatus {
   state: 'off' | 'unavailable' | 'idle' | 'recording' | 'transcribing';
@@ -63,7 +72,8 @@ export interface KeyboardEvents {
 }
 
 export interface Microphone {
-  start(): void;
+  /** Starts recording; onFrame gets the samples as they come. */
+  start(onFrame?: (frame: Int16Array) => void): void;
   /** Stops and returns what was recorded: 16 kHz mono PCM. */
   stop(): Promise<Int16Array>;
   close(): void;
@@ -75,7 +85,8 @@ export interface Chimes {
 }
 
 export interface PushToTalkOptions {
-  transcribe: (wav: Buffer) => Promise<string>;
+  /** previous: the text of the piece before it in the same recording, as context. */
+  transcribe: (wav: Buffer, previous?: string) => Promise<string>;
   keyboard?: (events: KeyboardEvents) => Keyboard;
   microphone?: () => Microphone;
   chimes?: () => Chimes;
@@ -92,6 +103,7 @@ export class PushToTalk {
   private microphone: Microphone | null = null;
   private chimes: Chimes | null = null;
   private recording = false;
+  private take: Take | null = null;
   private session: Promise<void> = Promise.resolve();
   private closed = false;
 
@@ -151,9 +163,15 @@ export class PushToTalk {
 
   private pressed(): void {
     if (this.recording || this.closed || !this.hotkey) return;
+    const take: Take = { segmenter: new Segmenter(SAMPLE_RATE), samples: 0, frames: 0, sent: 0, previous: '', typed: '', held: [], live: !hasModifier(this.hotkey) };
     try {
       this.microphone ??= (this.options.microphone ?? defaultMicrophone)();
-      this.microphone.start();
+      this.microphone.start((frame) => {
+        if (take.samples >= SAMPLE_RATE * MAX_SECONDS) return;
+        take.frames++;
+        take.samples += frame.length;
+        for (const piece of take.segmenter.push(frame)) this.piece(take, piece);
+      });
     } catch (error) {
       this.microphone?.close();
       this.microphone = null;
@@ -161,6 +179,7 @@ export class PushToTalk {
       this.log(this.status_.error!);
       return;
     }
+    this.take = take;
     this.recording = true;
     // The chime once the microphone is recording, so it means "speak now".
     this.chime('start');
@@ -171,38 +190,72 @@ export class PushToTalk {
     if (!this.recording) return;
     this.recording = false;
     const mic = this.microphone!;
+    const take = this.take!;
+    this.take = null;
     const stopped = mic.stop().finally(() => this.chime('stop'));
-    stopped.catch(() => {});
-    // The recordings are transcribed and typed one at a time, in order.
-    this.session = this.session.then(async () => {
-      let pcm: Int16Array;
-      try {
-        pcm = await stopped;
-      } catch (error) {
+    stopped.then(
+      (pcm) => {
+        // A microphone that gives the recording only at the end: it is cut now.
+        if (take.frames === 0) {
+          const all = pcm.subarray(0, SAMPLE_RATE * MAX_SECONDS);
+          take.samples = all.length;
+          for (const piece of take.segmenter.push(all)) this.piece(take, piece);
+        }
+        for (const piece of take.segmenter.flush()) this.piece(take, piece);
+        this.queue(async () => {
+          if (!take.sent && take.samples >= SAMPLE_RATE * MIN_SECONDS) this.log('nothing was said.');
+          // Held back while the hotkey's modifiers were down: typed now.
+          take.live = true;
+          try {
+            if (take.held.length) await this.type(take, take.held.splice(0).join(''));
+          } catch (error) {
+            take.error = getErrorMessage(error);
+            this.log(take.error);
+          }
+          this.set({ state: this.recording ? 'recording' : 'idle', ...(take.error ? { error: take.error } : {}) });
+        });
+      },
+      (error) => {
         if (this.microphone === mic) {
           mic.close();
           this.microphone = null;
         }
-        this.set({ state: this.recording ? 'recording' : 'idle', error: `Recording failed: ${getErrorMessage(error)}` });
-        return;
-      }
-      // Given silence (and the start chime, which the microphone hears), the
-      // model makes something up: what has no speech in it is not sent.
-      if (pcm.length < SAMPLE_RATE * MIN_SECONDS || !hasSpeech(pcm, SAMPLE_RATE)) {
-        if (pcm.length >= SAMPLE_RATE * MIN_SECONDS) this.log('nothing was said.');
-        this.set({ state: 'idle' });
-        return;
-      }
-      this.set({ state: 'transcribing' });
+        this.queue(async () => this.set({ state: this.recording ? 'recording' : 'idle', error: `Recording failed: ${getErrorMessage(error)}` }));
+      },
+    );
+  }
+
+  /** A piece of a recording: transcribed and typed after the ones before it, in order. */
+  private piece(take: Take, piece: Piece): void {
+    // Given silence (and the start chime, which the microphone hears), the
+    // model makes something up: what has no speech in it is not sent.
+    if (piece.pcm.length < SAMPLE_RATE * MIN_SECONDS || !hasSpeech(piece.pcm, SAMPLE_RATE, Math.max(0, CHIME_SECONDS - piece.start))) return;
+    take.sent++;
+    this.queue(async () => {
+      if (!this.recording) this.set({ state: 'transcribing' });
       try {
-        const text = (await this.options.transcribe(pcmToWav(pcm.subarray(0, SAMPLE_RATE * MAX_SECONDS), SAMPLE_RATE))).trim();
-        if (text && !isFiller(text) && this.keyboard) await this.keyboard.type(text);
-        this.set({ state: this.recording ? 'recording' : 'idle' });
+        const text = (await this.options.transcribe(pcmToWav(piece.pcm, SAMPLE_RATE), take.previous || undefined)).trim();
+        if (!text || isFiller(text)) return;
+        take.previous = text;
+        const spaced = joinPiece(take.typed + take.held.join(''), text);
+        if (take.live) await this.type(take, spaced);
+        else take.held.push(spaced);
       } catch (error) {
-        this.set({ state: this.recording ? 'recording' : 'idle', error: getErrorMessage(error) });
-        this.log(getErrorMessage(error));
+        take.error = getErrorMessage(error);
+        this.log(take.error);
       }
     });
+  }
+
+  private async type(take: Take, text: string): Promise<void> {
+    if (!this.keyboard) return;
+    await this.keyboard.type(text);
+    take.typed += text;
+  }
+
+  /** Pieces and recordings are transcribed and typed one at a time, in order. */
+  private queue(step: () => Promise<void>): void {
+    this.session = this.session.then(step).catch((error) => this.log(getErrorMessage(error)));
   }
 
   private chime(which: 'start' | 'stop'): void {
@@ -240,10 +293,11 @@ const CHIME_SECONDS = 0.7;
 
 /**
  * Whether a recording has speech in it: at least a quarter of a second, after
- * the start chime, clearly louder (10 dB) than the recording's own quiet
- * parts and than a floor that room noise stays under.
+ * the start chime (skip: how much of the chime is in it), clearly louder
+ * (10 dB) than the recording's own quiet parts and than a floor that room
+ * noise stays under.
  */
-export function hasSpeech(pcm: Int16Array, rate: number): boolean {
+export function hasSpeech(pcm: Int16Array, rate: number, skip = CHIME_SECONDS): boolean {
   const frame = Math.round(rate * 0.03);
   const levels: number[] = [];
   for (let at = 0; at + frame <= pcm.length; at += frame) {
@@ -251,11 +305,156 @@ export function hasSpeech(pcm: Int16Array, rate: number): boolean {
     for (let i = at; i < at + frame; i++) sum += pcm[i]! * pcm[i]!;
     levels.push(Math.sqrt(sum / frame));
   }
-  const after = levels.slice(Math.ceil(CHIME_SECONDS / 0.03));
+  const after = levels.slice(Math.ceil(skip / 0.03));
   if (!after.length) return false;
   const floor = [...levels].sort((a, b) => a - b)[Math.floor(levels.length * 0.1)]!;
   const threshold = Math.max(floor * Math.sqrt(10), 150);
   return after.filter((l) => l > threshold).length * 0.03 >= 0.25;
+}
+
+interface Take {
+  segmenter: Segmenter;
+  /** Samples recorded. */
+  samples: number;
+  /** Frames the microphone gave as they came (none: the recording comes at the end). */
+  frames: number;
+  /** Pieces sent to the model. */
+  sent: number;
+  /** The last piece's text: context for the next. */
+  previous: string;
+  /** What has been typed of this recording. */
+  typed: string;
+  /** Pieces waiting for the hotkey (and its modifiers) to be let go. */
+  held: string[];
+  /** Whether pieces are typed as they come. */
+  live: boolean;
+  error?: string;
+}
+
+/** Letters typed while a modifier is held would be shortcuts: such hotkeys type when let go. */
+function hasModifier(hotkey: Hotkey): boolean {
+  return hotkey.modifiers.length > 0 || /^(?:Ctrl|Alt|Shift|Meta)Right$/.test(hotkey.key);
+}
+
+/** Writing without spaces between words. */
+const NO_SPACES = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}]/u;
+
+/** A piece as it follows the text typed before it: after a space, where the writing has spaces. */
+export function joinPiece(before: string, text: string): string {
+  if (!before || /\s$/.test(before) || /^[\s,.;:!?)\]}、。，！？]/.test(text)) return text;
+  if (NO_SPACES.test(before.slice(-1)) || NO_SPACES.test(text[0]!)) return text;
+  return ` ${text}`;
+}
+
+export interface Piece {
+  pcm: Int16Array;
+  /** Where it starts in the recording, in seconds. */
+  start: number;
+}
+
+/**
+ * Cuts a recording into pieces at its pauses, as it comes in: once a piece
+ * has speech (a quarter of a second louder than the room by 10 dB, as in
+ * hasSpeech), half a second of quiet ends it. A piece without a pause is cut
+ * at its quietest moment at twelve seconds. Quiet before any speech (the
+ * start chime with it) is dropped as it grows.
+ */
+export class Segmenter {
+  private readonly frame: number;
+  private buf = new Int16Array(0);
+  private len = 0;
+  /** How much of the piece has been measured, in samples. */
+  private measured = 0;
+  /** The piece's frame levels. */
+  private levels: number[] = [];
+  /** The mean frame level of each 0.3 s of the last 30 s, and the 0.3 s being measured: for the room's own level. */
+  private blocks: number[] = [];
+  private block: number[] = [];
+  /** How far into the recording has been measured, in samples. */
+  private seen = 0;
+  /** Where the piece starts in the recording, in samples. */
+  private offset = 0;
+  private speech = 0;
+  private quiet = 0;
+
+  constructor(private readonly rate: number) {
+    this.frame = Math.round(rate * 0.03);
+  }
+
+  /** Adds samples; returns the pieces they end. */
+  push(samples: Int16Array): Piece[] {
+    if (this.len + samples.length > this.buf.length) {
+      const next = new Int16Array(Math.max(this.buf.length * 2, this.len + samples.length, this.rate));
+      next.set(this.buf.subarray(0, this.len));
+      this.buf = next;
+    }
+    this.buf.set(samples, this.len);
+    this.len += samples.length;
+    const out: Piece[] = [];
+    while (this.measured + this.frame <= this.len) {
+      let sum = 0;
+      for (let i = this.measured; i < this.measured + this.frame; i++) sum += this.buf[i]! * this.buf[i]!;
+      const level = Math.sqrt(sum / this.frame);
+      this.measured += this.frame;
+      this.levels.push(level);
+      const chime = (this.offset + this.measured) / this.rate <= CHIME_SECONDS;
+      // The room's level: the quietest 0.3 s of the last 30 s (after the chime;
+      // frames measured again after a cut are not counted twice).
+      if (!chime && this.offset + this.measured > this.seen) {
+        this.seen = this.offset + this.measured;
+        this.block.push(level);
+        if (this.block.length === 10) {
+          this.blocks.push(this.block.reduce((a, b) => a + b, 0) / 10);
+          if (this.blocks.length > 100) this.blocks.shift();
+          this.block = [];
+        }
+      }
+      const floor = this.blocks.length ? Math.min(...this.blocks) : 0;
+      if (!chime && level > Math.max(floor * Math.sqrt(10), 150)) {
+        this.speech++;
+        this.quiet = 0;
+      } else this.quiet++;
+      if (this.speech * 0.03 >= 0.25 && this.quiet * 0.03 >= PAUSE_SECONDS) out.push(this.cut(this.measured));
+      else if (this.measured >= this.rate * MAX_PIECE_SECONDS) {
+        // No pause: cut after the quietest frame of the last three seconds.
+        const from = Math.max(0, this.levels.length - Math.round(3 / 0.03));
+        let at = from;
+        for (let i = from; i < this.levels.length; i++) if (this.levels[i]! <= this.levels[at]!) at = i;
+        out.push(this.cut((at + 1) * this.frame));
+      } else if (this.speech === 0 && this.measured >= this.rate * 2) {
+        // Nothing said yet: only the last half second is kept.
+        this.drop(this.measured - Math.round(this.rate * 0.5));
+      }
+    }
+    return out;
+  }
+
+  /** The rest, at the end of the recording. */
+  flush(): Piece[] {
+    return this.len ? [this.cut(this.len)] : [];
+  }
+
+  private cut(at: number): Piece {
+    const piece = { pcm: this.buf.slice(0, at), start: this.offset / this.rate };
+    this.drop(at);
+    // What is left over is measured again, as the start of the next piece.
+    this.measured = 0;
+    this.levels = [];
+    this.speech = 0;
+    this.quiet = 0;
+    return piece;
+  }
+
+  /** Drops the piece's first samples (whole frames). */
+  private drop(at: number): void {
+    const frames = Math.min(this.levels.length, Math.floor(at / this.frame));
+    const n = at === this.len ? at : frames * this.frame;
+    this.buf.copyWithin(0, n, this.len);
+    this.len -= n;
+    this.offset += n;
+    this.measured = Math.max(0, this.measured - n);
+    this.levels.splice(0, frames);
+  }
 }
 
 /** 16-bit mono PCM as a WAV file. */
@@ -323,7 +522,7 @@ export function defaultMicrophone(): Microphone {
   let chain: Promise<void> = Promise.resolve();
   let current: { frames: Int16Array[]; on: boolean; error?: unknown } | null = null;
   return {
-    start() {
+    start(onFrame) {
       const s: { frames: Int16Array[]; on: boolean; error?: unknown } = { frames: [], on: true };
       current = s;
       chain = chain.then(async () => {
@@ -333,6 +532,7 @@ export function defaultMicrophone(): Microphone {
           while (s.on) {
             const frame = await rec.read();
             if (s.frames.length * 512 < SAMPLE_RATE * MAX_SECONDS) s.frames.push(frame);
+            onFrame?.(frame);
           }
         } catch (error) {
           s.error = error;

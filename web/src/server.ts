@@ -354,7 +354,6 @@ export class WebServer {
         // Loaded with SF Agents and kept loaded, so dictating never waits for the model.
         keepLoaded: true,
         settings: () => ({
-          autoSwap: this.appSettings.get<boolean>('speech.autoSwap'),
           guidanceScale: this.appSettings.get<number>('speech.guidanceScale'),
           glossary: this.appSettings.get<string>('dictation.glossary'),
         }),
@@ -362,7 +361,7 @@ export class WebServer {
     this.pushToTalk =
       options.pushToTalk ??
       new PushToTalk({
-        transcribe: (wav) => this.dictation.transcribe(wav),
+        transcribe: (wav, previous) => this.dictation.transcribe(wav, undefined, previous),
         elevated: options.privileges?.windowsInput,
         log: (line) => this.log(line),
         onChange: (status) => this.broadcast('push-to-talk', status),
@@ -411,7 +410,6 @@ export class WebServer {
       broadcast: (event, data) => {
         this.broadcast(event, data);
         if (event === 'settings' && this.pushToTalkStarted) this.pushToTalk.setHotkey(this.appSettings.get<string>('dictation.hotkey'));
-        if (event === 'settings') this.dictation.applySettings();
         if (event === 'providers') this.broadcast('agent', this.agentInfo());
       },
       log: this.log,

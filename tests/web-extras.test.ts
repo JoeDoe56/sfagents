@@ -134,11 +134,11 @@ describe('speech settings and the voice', () => {
     const dictation = new Dictation({ dir: makeTempDir() });
     const app = await start({ dictation });
     try {
-      const saved = await req(app.base, '/api/settings', { body: { values: { 'speech.guidanceScale': '2.35', 'speech.autoSwap': true, 'dictation.glossary': ' SF Agents, Caleb ' } } });
+      const saved = await req(app.base, '/api/settings', { body: { values: { 'speech.guidanceScale': '2.35', 'dictation.glossary': ' SF Agents, Caleb ' } } });
       assert.equal(saved.status, 200, saved.text);
       const value = (k: string) => saved.json.settings.find((s: { key: string }) => s.key === k).value;
       assert.equal(value('speech.guidanceScale'), 2.4, 'to the slider step');
-      assert.equal(value('speech.autoSwap'), true);
+      assert.equal(saved.json.settings.some((s: { key: string }) => s.key === 'speech.autoSwap'), false, 'the model swap is gone');
       assert.equal(value('dictation.glossary'), 'SF Agents, Caleb');
       assert.equal((await req(app.base, '/api/settings', { body: { values: { 'speech.guidanceScale': 3.5 } } })).status, 400, 'above 3');
       assert.equal((await req(app.base, '/api/settings', { body: { values: { 'speech.guidanceScale': 0.4 } } })).status, 400, 'below 0.5');

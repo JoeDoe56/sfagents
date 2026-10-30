@@ -17,17 +17,23 @@
  * downloads when SF Agents starts (Qwen3-ASR) or is first asked to speak
  * (VibeVoice).
  *
- * audiocpp_server then runs on a loopback port with both models in its
- * config. Qwen3-ASR loads when the server starts. With keepLoaded (the web
- * server's choice) the server starts with SF Agents and stays up, so neither
- * the mic button nor push-to-talk waits for the model, and it is started
- * again if it stops; otherwise it starts on demand and stops after ten idle
- * minutes to give the memory back. VibeVoice loads on its first use.
- *
- * Automatic model swap (Settings → STT & TTS), for GPUs without room for
- * both: Qwen3-ASR is unloaded while VibeVoice speaks, VibeVoice is unloaded
- * when it is done, and Qwen3-ASR is loaded again at once. Dictation that
- * comes in meanwhile waits for it. Without the swap both stay loaded.
+ * audiocpp_server then runs on loopback ports with both models loaded when it
+ * starts, so neither dictation nor Speak Response waits for a model. Where
+ * each model runs is decided at each start, by what fits on the GPU with
+ * room to spare (on NVIDIA, nvidia-smi's free memory against the models'
+ * measured peaks; on every GPU, audio.cpp's own estimate, --min-free-memory-mb):
+ *   1. both on the GPU;
+ *   2. else VibeVoice on the GPU and Qwen3-ASR on the CPU: Qwen3-ASR still
+ *      runs at about three times real time on six cores, VibeVoice is about
+ *      ten times slower on the CPU than on a GPU;
+ *   3. else Qwen3-ASR on the GPU and VibeVoice on the CPU;
+ *   4. else both on the CPU.
+ * One audiocpp_server runs one backend, so a split runs two: the GPU build's
+ * own binary with --backend cpu is the CPU one. The CPU gets a thread per
+ * physical core (hyperthreads make it slower). With keepLoaded (the web
+ * server's choice) the servers start with SF Agents and stay up, and they are
+ * started again if one stops; otherwise they start on demand and stop after
+ * ten idle minutes to give the memory back.
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -70,6 +76,20 @@ export const RUNTIME_RELEASE: RuntimeRelease = {
 };
 const IDLE_MS = 10 * 60_000;
 const START_TIMEOUT_MS = 300_000;
+/**
+ * What a model on the GPU must leave free, on top of audio.cpp's estimate for
+ * it (which already counts its working memory: 4.6 GiB for VibeVoice, which
+ * peaks at about 3.9 GB while it speaks), for the desktop and other apps.
+ */
+const GPU_HEADROOM_MB = 512;
+/**
+ * What each model takes on an NVIDIA GPU at its peak, measured (GTX 1660
+ * SUPER, CUDA build): Qwen3-ASR 2.4 GB loaded, 2.5 GB after use; VibeVoice
+ * 3.1 GB loaded, 3.9 GB while it speaks. Checked against nvidia-smi's free
+ * memory first, because on Windows the free memory audio.cpp sees leaves out
+ * other programs' (it saw 5 GiB free on a card with 2.6 GB free).
+ */
+const GPU_PEAK_MB: Record<string, number> = { 'qwen3-asr': 2600, vibevoice: 4000 };
 /** The ids the models have in the server's config. */
 const ASR_ID = 'qwen3-asr';
 const TTS_ID = 'vibevoice';
@@ -77,6 +97,15 @@ const TTS_ID = 'vibevoice';
 const LLAMA_LEFTOVERS = ['runtime', 'runtime.json', 'llama-server.log', 'models/Qwen3-ASR-1.7B-Q8_0.gguf', 'models/Qwen3-ASR-1.7B-Q8_0.gguf.part', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf', 'models/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf.part'];
 
 export type Backend = 'metal' | 'cuda' | 'vulkan' | 'cpu';
+
+/** Where the models run. */
+export interface Placement {
+  asr: 'gpu' | 'cpu';
+  /** Absent while VibeVoice is not downloaded. */
+  tts?: 'gpu' | 'cpu';
+  /** The CPU threads audio.cpp uses. */
+  threads: number;
+}
 
 export interface RuntimeChoice {
   backend: Backend;
@@ -109,22 +138,23 @@ export interface DictationStatus {
   downloadSize: number;
   progress?: Progress;
   backend?: Backend;
+  /** The GPU (or CPU) the build runs on. */
   device?: string;
+  /** Where each model runs, while running. */
+  placement?: Placement;
   error?: string;
   /** Text to speech (VibeVoice). */
   voice: VoiceStatus;
 }
 
 export interface SpeechSettings {
-  /** Unload Qwen3-ASR while VibeVoice speaks, and VibeVoice afterwards. */
-  autoSwap: boolean;
   /** VibeVoice's classifier-free guidance scale (0.5 to 3). */
   guidanceScale: number;
   /** Words Qwen3-ASR should know, separated by commas. */
   glossary: string;
 }
 
-export const DEFAULT_SPEECH_SETTINGS: SpeechSettings = { autoSwap: false, guidanceScale: 1.3, glossary: '' };
+export const DEFAULT_SPEECH_SETTINGS: SpeechSettings = { guidanceScale: 1.3, glossary: '' };
 
 export interface Hardware {
   platform: NodeJS.Platform;
@@ -155,6 +185,75 @@ export function detectHardware(): Hardware {
     vulkan = /libvulkan\.so\.1/.test(ld.stdout ?? '') || ['/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu', '/usr/lib64', '/usr/lib'].some((d) => fs.existsSync(path.join(d, 'libvulkan.so.1')));
   }
   return { platform, arch, nvidia, vulkan };
+}
+
+let cores: Promise<number> | null = null;
+
+/**
+ * The CPU's physical cores (hyperthreads make audio.cpp slower: Qwen3-ASR on
+ * a 6-core, 12-thread CPU is 1.8 times slower with 12 threads than with 6).
+ * When they cannot be read, half the logical processors.
+ */
+export function physicalCores(): Promise<number> {
+  cores ??= (async () => {
+    const fallback = Math.max(1, Math.floor(os.availableParallelism() / 2));
+    try {
+      if (process.platform === 'linux') return coresFromCpuinfo(fs.readFileSync('/proc/cpuinfo', 'utf8')) ?? fallback;
+      const [cmd, args] = process.platform === 'darwin'
+        ? ['sysctl', ['-n', 'hw.physicalcpu']]
+        : ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum']];
+      const n = Number((await output(cmd, args as string[])).trim());
+      return Number.isInteger(n) && n > 0 ? n : fallback;
+    } catch {
+      return fallback;
+    }
+  })();
+  return cores;
+}
+
+/** The physical cores in /proc/cpuinfo: its distinct (physical id, core id) pairs. */
+export function coresFromCpuinfo(text: string): number | null {
+  const seen = new Set<string>();
+  for (const block of text.split(/\n\s*\n/)) {
+    const core = /^core id\s*:\s*(\d+)/m.exec(block)?.[1];
+    if (core !== undefined) seen.add(`${/^physical id\s*:\s*(\d+)/m.exec(block)?.[1] ?? 0}:${core}`);
+  }
+  return seen.size || null;
+}
+
+function output(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    let out = '';
+    child.stdout?.on('data', (d: Buffer) => (out += d.toString()));
+    const timer = setTimeout(() => child.kill(), 15_000);
+    child.once('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve(out);
+    });
+  });
+}
+
+/** The free memory of the NVIDIA GPU (the first), from nvidia-smi; null without one. */
+export async function nvidiaFreeMb(hw: Hardware): Promise<number | null> {
+  if (!hw.nvidia) return null;
+  const sys = path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'nvidia-smi.exe');
+  const exe = process.platform === 'win32' && fs.existsSync(sys) ? sys : 'nvidia-smi';
+  try {
+    const n = Number((await output(exe, ['--query-gpu=memory.free', '--format=csv,noheader,nounits'])).trim().split(/\r?\n/)[0]);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A start refused by --min-free-memory-mb: the model does not fit on the GPU. */
+export function isNoRoom(message: string): boolean {
+  return /cannot load model .*(?:exceeds available|headroom)/i.test(message);
 }
 
 /**
@@ -289,6 +388,13 @@ function networkMessage(error: unknown): string {
 const STEADY_MS = 60_000;
 const RESTARTS = 3;
 
+interface Server {
+  child: ChildProcess;
+  url: string;
+  /** The model ids it has. */
+  models: string[];
+}
+
 interface State {
   runtimes: Record<string, { dir: string; tag: string }>;
   working?: Backend;
@@ -305,21 +411,22 @@ export class Dictation {
   private installing: Promise<void> | null = null;
   private installingVoice: Promise<void> | null = null;
   private starting: Promise<string> | null = null;
-  private child: ChildProcess | null = null;
+  /** The running audiocpp_servers: one, or a GPU one and a CPU one. */
+  private servers: Server[] = [];
+  /** Qwen3-ASR's server, and VibeVoice's. */
   private url: string | null = null;
+  private voiceUrl: string | null = null;
   private idle: NodeJS.Timeout | null = null;
   private busy = 0;
   private closed = false;
   private restart: NodeJS.Timeout | null = null;
   private quickExits = 0;
-  /** Whether the running server's config has VibeVoice. */
+  /** Whether the running servers have VibeVoice. */
   private serverHasVoice = false;
   /** Downloads, one at a time in each lane. */
   private downloads: Record<'speech' | 'voice', Promise<unknown>> = { speech: Promise.resolve(), voice: Promise.resolve() };
   /** Speaking, one reply at a time. */
   private speaking: Promise<unknown> = Promise.resolve();
-  /** While the models are swapped: settles when Qwen3-ASR is back. */
-  private swapped: Promise<void> | null = null;
 
   constructor(private readonly options: DictationOptions = {}) {
     this.dir = options.dir ?? path.join(sfagentsHome(), 'dictation');
@@ -382,18 +489,20 @@ export class Dictation {
   private refreshInstalled(): void {
     const st = this.readState();
     const ready = this.have(this.asrModel) && Object.keys(st.runtimes).length > 0;
+    const running = this.servers.length > 0;
     this.set({
-      state: ready ? (this.child ? 'running' : 'ready') : 'missing',
+      state: ready ? (running ? 'running' : 'ready') : 'missing',
       downloadSize: ready ? 0 : (this.have(this.asrModel) ? 0 : this.asrModel.size) + this.runtimeBytes(),
       backend: st.working,
-      device: this.child ? this.status_.device : undefined,
+      device: running ? this.status_.device : undefined,
+      placement: running ? this.status_.placement : undefined,
     });
   }
 
   private refreshVoice(state?: VoiceStatus['state']): void {
     const have = this.have(this.ttsModel);
     this.setVoice({
-      state: state ?? (have ? 'ready' : 'missing'),
+      state: state ?? (have ? (this.voiceUrl ? 'loaded' : 'ready') : 'missing'),
       downloadSize: have ? 0 : this.ttsModel.size,
       reference: fs.existsSync(this.voicePath),
     });
@@ -428,7 +537,7 @@ export class Dictation {
         await this.downloadModel(this.asrModel, 'Speech model', (progress) => this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress }));
         this.refreshInstalled();
         // Kept loaded: loaded as soon as it is there, whoever asked for the download.
-        if (this.options.keepLoaded && !this.child && !this.starting) setImmediate(() => void this.start().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`)));
+        if (this.options.keepLoaded && !this.servers.length && !this.starting) setImmediate(() => void this.start().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`)));
       } catch (error) {
         this.set({ state: 'error', downloadSize: this.status_.downloadSize, error: getErrorMessage(error) });
         throw error;
@@ -452,7 +561,7 @@ export class Dictation {
       try {
         await this.downloadModel(this.ttsModel, 'Voice model', (progress) => this.setVoice({ ...this.voice_, state: 'installing', progress }));
         this.refreshVoice();
-        if (this.child && !this.serverHasVoice) {
+        if (this.servers.length && !this.serverHasVoice) {
           this.stop();
           await this.start();
         }
@@ -616,9 +725,9 @@ export class Dictation {
 
   // ---------------------------------------------------------------- running
 
-  /** Starts audiocpp_server with Qwen3-ASR loaded (if it is not running) and resolves with its address. */
+  /** Starts audiocpp_server with the models loaded (if it is not running) and resolves with Qwen3-ASR's address. */
   start(): Promise<string> {
-    if (this.url && this.child) {
+    if (this.url && this.servers.length) {
       this.touch();
       return Promise.resolve(this.url);
     }
@@ -640,7 +749,7 @@ export class Dictation {
               this.set({ ...this.status_, state: 'installing' });
               await this.installRuntime(choice);
             }
-            const url = await this.launch(choice.backend);
+            const url = await this.launchAll(choice.backend);
             const now = this.readState();
             now.working = choice.backend;
             this.writeState(now);
@@ -666,41 +775,133 @@ export class Dictation {
     return this.starting;
   }
 
-  /** The server's config: Qwen3-ASR loaded at start, VibeVoice (when downloaded) on its first use. */
-  private writeConfig(backend: Backend, port: number): string {
-    const models: unknown[] = [{ id: ASR_ID, family: 'qwen3_asr', path: this.modelPath(this.asrModel), task: 'asr', mode: 'offline', lazy: false }];
-    this.serverHasVoice = this.have(this.ttsModel);
-    if (this.serverHasVoice) models.push({ id: TTS_ID, family: 'vibevoice', path: this.modelPath(this.ttsModel), task: 'tts', mode: 'offline', lazy: true });
+  /**
+   * Starts the servers, each model where it fits (see the top of the file),
+   * and resolves with Qwen3-ASR's address. A GPU build that cannot start or
+   * run Qwen3-ASR fails here, and the next build is tried.
+   */
+  private async launchAll(backend: Backend): Promise<string> {
+    const threads = await physicalCores();
+    const voice = this.have(this.ttsModel);
+    this.set({ state: 'starting', downloadSize: 0, backend });
+    this.refreshVoice();
+    // What goes on the GPU, best first; the rest goes on the CPU.
+    const plans: string[][] = backend === 'cpu' ? [[]] : voice ? [[TTS_ID, ASR_ID], [TTS_ID], [ASR_ID], []] : [[ASR_ID], []];
+    const all = voice ? [TTS_ID, ASR_ID] : [ASR_ID];
+    const free = backend === 'cpu' ? null : await nvidiaFreeMb(this.options.hardware?.() ?? detectHardware());
+    for (const gpu of plans) {
+      const cpu = all.filter((id) => !gpu.includes(id));
+      const need = gpu.reduce((n, id) => n + GPU_PEAK_MB[id]!, 0) + GPU_HEADROOM_MB;
+      if (gpu.length && free !== null && need > free) {
+        this.options.log?.(`dictation: ${gpu.map(modelName).join(' and ')} ${gpu.length > 1 ? 'do' : 'does'} not fit on the GPU with room to spare (${need} MB needed, ${free} MB free).`);
+        continue;
+      }
+      const started: Server[] = [];
+      try {
+        if (gpu.length) started.push(await this.launch(backend, gpu, threads, 'gpu'));
+      } catch (error) {
+        if (!isNoRoom(getErrorMessage(error))) throw error;
+        this.options.log?.(`dictation: ${gpu.map(modelName).join(' and ')} ${gpu.length > 1 ? 'do' : 'does'} not fit on the GPU with room to spare (${getErrorMessage(error).replace(/^audiocpp_server exited \([^)]*\)\.\s*/, '').slice(0, 300)})`);
+        continue;
+      }
+      try {
+        if (cpu.length) started.push(await this.launch(backend, cpu, threads, 'cpu'));
+      } catch (error) {
+        for (const s of started) s.child.kill();
+        throw error;
+      }
+      const placement: Placement = { asr: gpu.includes(ASR_ID) ? 'gpu' : 'cpu', ...(voice ? { tts: gpu.includes(TTS_ID) ? 'gpu' as const : 'cpu' as const } : {}), threads };
+      return this.running(backend, started, placement, voice);
+    }
+    throw new Error('audiocpp_server did not start.');
+  }
+
+  /** The servers are up: they are watched, and the status says where the models run. */
+  private async running(backend: Backend, started: Server[], placement: Placement, voice: boolean): Promise<string> {
+    const st = this.readState();
+    const bin = path.join(this.dir, st.runtimes[backend]!.dir);
+    const device = backend === 'cpu' || (placement.asr === 'cpu' && placement.tts !== 'gpu') ? 'CPU' : (await listedDevice(serverExe(bin), bin, this.env(bin), backend)) ?? backend.toUpperCase();
+    this.servers = started;
+    this.serverHasVoice = voice;
+    this.url = started.find((s) => s.models.includes(ASR_ID))!.url;
+    this.voiceUrl = voice ? started.find((s) => s.models.includes(TTS_ID))!.url : null;
+    const begun = Date.now();
+    for (const s of started) {
+      s.child.once('exit', (code) => {
+        if (!this.servers.includes(s)) return;
+        // One of them stopped: all of them start again together.
+        this.stopServers();
+        if (this.closed) return;
+        this.refreshInstalled();
+        this.refreshVoice();
+        if (!this.options.keepLoaded) return;
+        // Kept loaded: start it again, unless it keeps exiting soon after it starts.
+        this.quickExits = Date.now() - begun < STEADY_MS ? this.quickExits + 1 : 0;
+        if (this.quickExits >= RESTARTS) {
+          this.options.log?.(`dictation: audiocpp_server exited (${code ?? 'signal'}) ${RESTARTS} times soon after starting; it starts again when dictation is next used.`);
+          return;
+        }
+        this.options.log?.(`dictation: audiocpp_server exited (${code ?? 'signal'}); starting it again.`);
+        this.restart = setTimeout(() => {
+          this.restart = null;
+          this.start().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`));
+        }, 3000);
+        this.restart.unref?.();
+      });
+    }
+    this.set({ state: 'running', downloadSize: 0, backend, device, placement });
+    this.refreshVoice();
+    this.options.log?.(`dictation: ${placementText(placement, device)}.`);
+    // VibeVoice's first reply is about a second slower than the next ones: that second is spent now.
+    if (voice && placement.tts === 'gpu') {
+      const url = this.voiceUrl!;
+      this.speaking = this.speaking.then(() => this.synthesize(url, 'Hello.').catch(() => {}));
+    }
+    this.touch();
+    return this.url;
+  }
+
+  private env(bin: string): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !this.options.hideEnv?.includes(k)) env[k] = v;
+    if (process.platform === 'linux') env['LD_LIBRARY_PATH'] = [bin, process.env['LD_LIBRARY_PATH']].filter(Boolean).join(':');
+    return env;
+  }
+
+  /** The config of a server with these models, all loaded when it starts. */
+  private writeConfig(backend: Backend, port: number, ids: string[], threads: number, role: 'gpu' | 'cpu'): string {
+    const spec: Record<string, object> = {
+      [ASR_ID]: { id: ASR_ID, family: 'qwen3_asr', path: this.modelPath(this.asrModel), task: 'asr', mode: 'offline', lazy: false },
+      [TTS_ID]: { id: TTS_ID, family: 'vibevoice', path: this.modelPath(this.ttsModel), task: 'tts', mode: 'offline', lazy: false },
+    };
     const config = {
       host: '127.0.0.1',
       port,
       backend,
       device: 0,
       // The server's default is one thread, which leaves the CPU build (and the CPU parts of the others) slow.
-      threads: Math.min(16, os.availableParallelism()),
+      threads,
       lazy_load: true,
-      // The swap is done here, not by a residency limit.
       max_loaded_models: 0,
       // Requests are queued here; speaking a long reply can take minutes.
       busy_timeout_ms: 0,
-      models,
+      models: ids.map((id) => spec[id]),
     };
-    const file = path.join(this.dir, 'server.json');
+    const file = path.join(this.dir, `server-${role}.json`);
     fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
     return file;
   }
 
-  private async launch(backend: Backend): Promise<string> {
+  /** Starts one audiocpp_server with these models loaded; on the GPU, only with room to spare. */
+  private async launch(build: Backend, ids: string[], threads: number, role: 'gpu' | 'cpu'): Promise<Server> {
+    const backend: Backend = role === 'cpu' ? 'cpu' : build;
     const st = this.readState();
-    const bin = path.join(this.dir, st.runtimes[backend]!.dir);
-    const exe = path.join(bin, process.platform === 'win32' ? 'audiocpp_server.exe' : 'audiocpp_server');
+    const bin = path.join(this.dir, st.runtimes[build]!.dir);
+    const exe = serverExe(bin);
     const port = await freePort();
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !this.options.hideEnv?.includes(k)) env[k] = v;
-    if (process.platform === 'linux') env['LD_LIBRARY_PATH'] = [bin, process.env['LD_LIBRARY_PATH']].filter(Boolean).join(':');
-    const args = ['--config', this.writeConfig(backend, port), '--no-ui', '--backend', backend, '--host', '127.0.0.1', '--port', String(port), '--log'];
-    this.set({ state: 'starting', downloadSize: 0, backend });
-    this.refreshVoice();
+    const env = this.env(bin);
+    const args = ['--config', this.writeConfig(backend, port, ids, threads, role), '--no-ui', '--backend', backend, '--threads', String(threads), '--host', '127.0.0.1', '--port', String(port), '--log'];
+    if (role === 'gpu') args.push('--min-free-memory-mb', String(GPU_HEADROOM_MB));
     const child = spawn(exe, args, { cwd: bin, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let log = '';
     let head = '';
@@ -727,46 +928,20 @@ export class Dictation {
         if (ok) break;
         await Promise.race([new Promise((r) => setTimeout(r, 400)), exited]);
       }
-      // Qwen3-ASR is loaded and runs: a GPU build that cannot load it fails here, and the next build is tried.
-      await Promise.race([this.recognize(url, silence(0.5)), exited]);
+      // Qwen3-ASR is loaded and runs (its first run is slower; it is done now).
+      if (ids.includes(ASR_ID)) await Promise.race([this.recognize(url, silence(0.5)), exited]);
     } catch (error) {
       child.kill();
       throw error;
-    }
-    const device = backend === 'cpu' ? 'CPU' : (await listedDevice(exe, bin, env, backend)) ?? backend.toUpperCase();
-    // What it said while starting, for when that is not what was expected.
-    try {
-      fs.writeFileSync(path.join(this.dir, 'audiocpp-server.log'), head.length < 256_000 ? head : `${head}\n…\n${log}`);
-    } catch {
-      // not worth failing over
-    }
-    this.child = child;
-    this.url = url;
-    const started = Date.now();
-    child.once('exit', (code) => {
-      if (this.child !== child) return;
-      this.child = null;
-      this.url = null;
-      if (this.closed) return;
-      this.refreshInstalled();
-      this.refreshVoice();
-      if (!this.options.keepLoaded) return;
-      // Kept loaded: start it again, unless it keeps exiting soon after it starts.
-      this.quickExits = Date.now() - started < STEADY_MS ? this.quickExits + 1 : 0;
-      if (this.quickExits >= RESTARTS) {
-        this.options.log?.(`dictation: audiocpp_server exited (${code ?? 'signal'}) ${RESTARTS} times soon after starting; it starts again when dictation is next used. ${lastLines(log)}`);
-        return;
+    } finally {
+      // What it said while starting, for when that is not what was expected.
+      try {
+        fs.writeFileSync(path.join(this.dir, `audiocpp-server-${role}.log`), head.length < 256_000 ? head : `${head}\n…\n${log}`);
+      } catch {
+        // not worth failing over
       }
-      this.options.log?.(`dictation: audiocpp_server exited (${code ?? 'signal'}); starting it again.`);
-      this.restart = setTimeout(() => {
-        this.restart = null;
-        this.start().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`));
-      }, 3000);
-      this.restart.unref?.();
-    });
-    this.set({ state: 'running', downloadSize: 0, backend, device });
-    this.touch();
-    return url;
+    }
+    return { child, url, models: ids };
   }
 
   private touch(): void {
@@ -779,29 +954,36 @@ export class Dictation {
     this.idle.unref?.();
   }
 
+  private stopServers(): void {
+    const servers = this.servers;
+    this.servers = [];
+    this.url = null;
+    this.voiceUrl = null;
+    for (const s of servers) s.child.kill();
+  }
+
   stop(): void {
     if (this.idle) clearTimeout(this.idle);
     this.idle = null;
     if (this.restart) clearTimeout(this.restart);
     this.restart = null;
-    const c = this.child;
-    this.child = null;
-    this.url = null;
-    c?.kill();
+    this.stopServers();
     if (!this.closed) {
       this.refreshInstalled();
       this.refreshVoice();
     }
   }
 
-  /** Speech (a WAV file) to text. While the models are swapped, it waits for Qwen3-ASR to be back. */
-  async transcribe(wav: Buffer, language?: string): Promise<string> {
-    // Counted as busy before anything is awaited, so a swap that starts now waits for it.
-    while (this.swapped) await this.swapped;
+  /**
+   * Speech (a WAV file) to text. previous: what was said just before (the
+   * last piece of the same push-to-talk recording), given to Qwen3-ASR as
+   * context with the glossary.
+   */
+  async transcribe(wav: Buffer, language?: string, previous?: string): Promise<string> {
     this.busy++;
     try {
       const url = await this.start();
-      return await this.recognize(url, wav, language, glossaryContext(this.settings().glossary));
+      return await this.recognize(url, wav, language, [glossaryContext(this.settings().glossary), previous?.trim()].filter(Boolean).join('\n'));
     } finally {
       this.busy--;
       this.touch();
@@ -848,67 +1030,41 @@ export class Dictation {
   }
 
   private async speakNow(text: string): Promise<Buffer> {
-    const s = this.settings();
-    let url = await this.start();
+    await this.start();
     if (!this.serverHasVoice) {
       // Downloaded after the server started.
       this.stop();
-      url = await this.start();
-    }
-    let back: (() => void) | null = null;
-    if (s.autoSwap) {
-      this.swapped = new Promise((resolve) => (back = resolve));
-      while (this.busy > 0) await new Promise((r) => setTimeout(r, 50));
-      await this.unload(url, [ASR_ID]);
+      await this.start();
     }
     this.refreshVoice('speaking');
     try {
-      const reference = fs.existsSync(this.voicePath);
-      const res = await this.fetch(`${url}/v1/audio/speech`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: TTS_ID,
-          input: speakerScript(text),
-          response_format: 'wav',
-          options: {
-            guidance_scale: Math.min(3, Math.max(0.5, s.guidanceScale)),
-            ...(reference ? { voice_samples: this.voicePath } : {}),
-          },
-        }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } | string };
-        throw new Error((typeof data.error === 'string' ? data.error : data.error?.message) ?? `audiocpp_server answered HTTP ${res.status}.`);
-      }
-      return Buffer.from(await res.arrayBuffer());
+      return await this.synthesize(this.voiceUrl!, text);
     } finally {
-      if (s.autoSwap) {
-        await this.unload(url, [TTS_ID]).catch((error) => this.options.log?.(`dictation: unloading VibeVoice failed: ${getErrorMessage(error)}`));
-        // Qwen3-ASR straight back into memory, before anyone dictates.
-        await this.recognize(url, silence(0.5)).catch((error) => this.options.log?.(`dictation: reloading Qwen3-ASR failed: ${getErrorMessage(error)}`));
-        this.swapped = null;
-        (back as (() => void) | null)?.();
-      }
-      this.refreshVoice(this.child ? (s.autoSwap ? 'ready' : 'loaded') : undefined);
+      this.refreshVoice();
     }
   }
 
-  /** After the settings change: with the swap on, VibeVoice does not stay in memory. */
-  applySettings(): void {
-    if (this.voice_.state !== 'loaded' || !this.url || !this.settings().autoSwap) return;
-    const url = this.url;
-    this.speaking = this.speaking.then(() =>
-      this.unload(url, [TTS_ID]).then(
-        () => this.refreshVoice(),
-        (error) => this.options.log?.(`dictation: unloading VibeVoice failed: ${getErrorMessage(error)}`),
-      ),
-    );
-  }
-
-  private async unload(url: string, ids: string[]): Promise<void> {
-    const res = await this.fetch(`${url}/v1/tasks/unload_models`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model_ids: ids }) });
-    if (!res.ok) throw new Error(`audiocpp_server answered HTTP ${res.status}.`);
+  private async synthesize(url: string, text: string): Promise<Buffer> {
+    const s = this.settings();
+    const voice = fs.existsSync(this.voicePath);
+    const res = await this.fetch(`${url}/v1/audio/speech`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: TTS_ID,
+        input: speakerScript(text),
+        response_format: 'wav',
+        options: {
+          guidance_scale: Math.min(3, Math.max(0.5, s.guidanceScale)),
+          ...(voice ? { voice_samples: this.voicePath } : {}),
+        },
+      }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } | string };
+      throw new Error((typeof data.error === 'string' ? data.error : data.error?.message) ?? `audiocpp_server answered HTTP ${res.status}.`);
+    }
+    return Buffer.from(await res.arrayBuffer());
   }
 
   /** Sets (or with null, removes) the reference voice clip, a WAV file. */
@@ -940,6 +1096,20 @@ export class Dictation {
 }
 
 // -------------------------------------------------------------------- helpers
+
+function serverExe(bin: string): string {
+  return path.join(bin, process.platform === 'win32' ? 'audiocpp_server.exe' : 'audiocpp_server');
+}
+
+function modelName(id: string): string {
+  return id === ASR_ID ? 'Qwen3-ASR' : 'VibeVoice';
+}
+
+/** "Speech to text: CPU (6 threads) · Text to speech: GPU (NVIDIA GeForce GTX 1660 SUPER)". */
+export function placementText(p: Placement, device?: string): string {
+  const on = (where: 'gpu' | 'cpu') => (where === 'cpu' ? `CPU (${p.threads} thread${p.threads === 1 ? '' : 's'})` : `GPU${device && device !== 'CPU' ? ` (${device})` : ''}`);
+  return [`Speech to text: ${on(p.asr)}`, ...(p.tts ? [`Text to speech: ${on(p.tts)}`] : [])].join(' · ');
+}
 
 /** Length of a PCM WAV file in seconds (from its header; 16 kHz mono when unreadable). */
 export function wavSeconds(wav: Buffer): number {

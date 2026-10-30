@@ -59,15 +59,6 @@ export const SETTINGS: readonly SettingSpec[] = [
     restart: false,
   },
   {
-    key: 'speech.autoSwap',
-    label: 'Automatic Model Swap',
-    hint: 'For graphics cards without room for both models: Qwen3-ASR leaves memory while VibeVoice speaks, and comes back when it is done.',
-    group: 'STT & TTS',
-    type: 'boolean',
-    default: false,
-    restart: false,
-  },
-  {
     key: 'speech.guidanceScale',
     label: 'Guidance Scale',
     hint: 'How closely VibeVoice follows the text and the reference voice. Higher is more exact, lower more natural.',
