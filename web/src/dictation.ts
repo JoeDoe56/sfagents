@@ -21,7 +21,8 @@
  * starts, so neither dictation nor Speak Response waits for a model. Where
  * each model runs is decided at each start, by what fits on the GPU with
  * room to spare (on NVIDIA, nvidia-smi's free memory against the models'
- * measured peaks; on every GPU, audio.cpp's own estimate, --min-free-memory-mb):
+ * measured peaks; on other GPUs, audio.cpp's own estimate, --min-free-memory-mb,
+ * which runs about 0.7 GB above VibeVoice's real peak):
  *   1. both on the GPU;
  *   2. else VibeVoice on the GPU and Qwen3-ASR on the CPU: Qwen3-ASR still
  *      runs at about three times real time on six cores, VibeVoice is about
@@ -800,7 +801,7 @@ export class Dictation {
       }
       const started: Server[] = [];
       try {
-        if (gpu.length) started.push(await this.launch(backend, gpu, threads, 'gpu'));
+        if (gpu.length) started.push(await this.launch(backend, gpu, threads, 'gpu', free === null));
       } catch (error) {
         if (!isNoRoom(getErrorMessage(error))) throw error;
         this.options.log?.(`dictation: ${gpu.map(modelName).join(' and ')} ${gpu.length > 1 ? 'do' : 'does'} not fit on the GPU with room to spare (${getErrorMessage(error).replace(/^audiocpp_server exited \([^)]*\)\.\s*/, '').slice(0, 300)})`);
@@ -896,7 +897,7 @@ export class Dictation {
   }
 
   /** Starts one audiocpp_server with these models loaded; on the GPU, only with room to spare. */
-  private async launch(build: Backend, ids: string[], threads: number, role: 'gpu' | 'cpu'): Promise<Server> {
+  private async launch(build: Backend, ids: string[], threads: number, role: 'gpu' | 'cpu', guard = false): Promise<Server> {
     const backend: Backend = role === 'cpu' ? 'cpu' : build;
     const st = this.readState();
     const bin = path.join(this.dir, st.runtimes[build]!.dir);
@@ -904,7 +905,7 @@ export class Dictation {
     const port = await freePort();
     const env = this.env(bin);
     const args = ['--config', this.writeConfig(backend, port, ids, threads, role), '--no-ui', '--backend', backend, '--threads', String(threads), '--host', '127.0.0.1', '--port', String(port), '--log'];
-    if (role === 'gpu') args.push('--min-free-memory-mb', String(GPU_HEADROOM_MB));
+    if (guard) args.push('--min-free-memory-mb', String(GPU_HEADROOM_MB));
     const child = spawn(exe, args, { cwd: bin, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let log = '';
     let head = '';
@@ -917,7 +918,7 @@ export class Dictation {
     const url = `http://127.0.0.1:${port}`;
     const exited = new Promise<never>((_, reject) => {
       child.once('error', (e) => reject(e));
-      child.once('exit', (code) => reject(new Error(`audiocpp_server exited (${code ?? 'signal'}). ${lastLines(log)}`)));
+      child.once('exit', (code) => reject(new Error(`audiocpp_server exited (${code ?? 'signal'}). ${/audiocpp_server failed: .*/.exec(log)?.[0] ?? lastLines(log)}`)));
     });
     exited.catch(() => {});
     const deadline = Date.now() + START_TIMEOUT_MS;
