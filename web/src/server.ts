@@ -47,6 +47,7 @@ import {
   createDefaultProviderFactory,
   DEFAULT_MODELS,
   BrightDataWeb,
+  parseOrigin,
   type PlanUsage,
 } from '@sfagents/core';
 import { ApiError, ProvidersApi } from './providers-api.js';
@@ -69,20 +70,17 @@ import { runningVersion } from './version.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
 import { isEmoji, ReactionStore } from './reactions.js';
+import { LogBook } from './logs.js';
+import { SharedViewStore } from './shared-view.js';
 
 export const DEFAULT_PORT = 8093;
 export const DEFAULT_HOST = '127.0.0.1';
 
 /** Explicit browser origin accepted when a reverse proxy preserves Host. */
 export function parsePublicOrigin(value: string): string {
-  try {
-    const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
-        url.pathname !== '/' || url.search || url.hash) throw new Error('Invalid origin');
-    return url.origin;
-  } catch {
-    throw new Error('--public-origin must be an HTTP(S) origin without credentials, a path, query or fragment.');
-  }
+  const origin = parseOrigin(value);
+  if (!origin) throw new Error('--public-origin must be an HTTP(S) origin without credentials, a path, query or fragment.');
+  return origin;
 }
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_CHARS = 400_000;
@@ -103,6 +101,8 @@ export interface WebServerOptions {
   host?: string;
   /** Exact external origin; the listening address remains independently configured. */
   publicOrigin?: string;
+  /** More of them (Settings → Web server → Public Origins, and repeated --public-origin). */
+  publicOrigins?: string[];
   /** Approve every tool call that would ask (sfagents web --yes). */
   approveAll?: boolean;
   /** Tests inject a scripted provider. */
@@ -128,6 +128,10 @@ export interface WebServerOptions {
   screen?: ScreenMirror;
   publicDir?: string;
   maxUploadBytes?: number;
+  /** The agent that replies (sfagents --agent); otherwise the one picked last time. */
+  agent?: string;
+  /** Every log line, kept for the terminal's Logs tab and GET /api/logs (default: a new one). */
+  logs?: LogBook;
   log?: (line: string) => void;
   /** Tests replace what the resource monitor reads from the machine. */
   systemSource?: SystemSource;
@@ -153,6 +157,8 @@ interface LiveRun {
   segments: LiveSegment[];
   /** An inline reply's run: the first message of its reply thread. */
   replyTo?: string;
+  /** The agent has started on the message (its receipt says Read). */
+  read?: boolean;
 }
 
 interface PendingApproval {
@@ -255,6 +261,11 @@ export class WebServer {
   private readonly server: http.Server;
   private readonly up2k: Up2kStore;
   private readonly clients = new Set<ServerResponse>();
+  /** In-process clients (the terminal interface): every event the pages get, as it is sent. */
+  private readonly listeners = new Set<(event: string, data: unknown) => void>();
+  /** When the agent picked up the last message (the "Read" receipt), the same on every page. */
+  private read: { id: string; time: string } | null = null;
+  readonly logs: LogBook;
   private readonly approvals = new Map<string, PendingApproval>();
   private live: LiveRun | undefined;
   private artifactSignature = '';
@@ -263,8 +274,8 @@ export class WebServer {
   private heartbeat: NodeJS.Timeout | undefined;
   private port: number;
   private readonly host: string;
-  private readonly publicOrigin?: string;
-  private readonly publicHost?: string;
+  /** The public origins, by the Host header a proxy passes for each. */
+  private readonly publicOrigins = new Map<string, string>();
   private runPromise: Promise<void> | undefined;
   private readonly system: SystemMonitor;
   private readonly files: FileService;
@@ -274,6 +285,7 @@ export class WebServer {
   private cpuMark = { at: Date.now(), usage: process.cpuUsage() };
   private readonly agentSettings: AgentSettingsStore;
   private readonly reactions: ReactionStore;
+  private readonly sharedView: SharedViewStore;
   private readonly windows = new ModelWindows();
   readonly registry: ProviderRegistry;
   private projectWatcher: ProjectWatcher | undefined;
@@ -302,8 +314,10 @@ export class WebServer {
     this.conversation = options.conversation;
     this.port = options.port ?? DEFAULT_PORT;
     this.host = options.host ?? DEFAULT_HOST;
-    this.publicOrigin = options.publicOrigin === undefined ? undefined : parsePublicOrigin(options.publicOrigin);
-    this.publicHost = this.publicOrigin === undefined ? undefined : new URL(this.publicOrigin).host;
+    for (const o of [...(options.publicOrigin === undefined ? [] : [options.publicOrigin]), ...(options.publicOrigins ?? [])]) {
+      const origin = parsePublicOrigin(o);
+      this.publicOrigins.set(new URL(origin).host, origin);
+    }
     this.publicDir = options.publicDir ?? PUBLIC_DIR;
     // The first path segments SF Agents serves itself; everything else may belong to an open app.
     this.ownNames = new Set(['', 'api', 'apps', ...(() => {
@@ -320,7 +334,14 @@ export class WebServer {
       },
       (pathname) => this.ownNames.has(decodeURIComponent(pathname.split('/')[1] ?? '')),
     );
-    this.log = options.log ?? (() => {});
+    this.logs = options.logs ?? new LogBook();
+    const external = options.log;
+    this.log = (line) => {
+      this.logs.add(line);
+      external?.(line);
+    };
+    // Pages get each line as a "log" event (GET /api/logs has the earlier ones).
+    this.logs.onLine((line) => this.broadcastRaw(`event: log\ndata: ${JSON.stringify(line)}\n\n`));
     this.registry = options.registry ?? new ProviderRegistry();
     this.auth = options.auth === false ? null : (options.auth ?? new WebAuth());
     this.mcpFile = options.tree.mcp.file ?? path.join(options.tree.configDir, 'mcp.json');
@@ -375,6 +396,7 @@ export class WebServer {
     this.session = this.runtime.createSession();
     this.agentSettings = new AgentSettingsStore(options.conversation.dir);
     this.reactions = new ReactionStore(options.conversation.dir);
+    this.sharedView = new SharedViewStore(options.conversation.dir);
     for (const [agent, provider] of Object.entries(this.agentSettings.get().accounts ?? {})) this.accounts.set(agent, provider);
     this.accounts.onChange((agent, provider) => {
       const settings = this.agentSettings.get();
@@ -385,7 +407,7 @@ export class WebServer {
     this.providersApi = new ProvidersApi({
       registry: this.registry,
       settings: this.appSettings,
-      running: { 'web.port': this.port, 'web.host': this.host },
+      running: { 'web.port': this.port, 'web.host': this.host, 'web.publicOrigins': [...this.publicOrigins.values()] },
       broadcast: (event, data) => {
         this.broadcast(event, data);
         if (event === 'settings' && this.pushToTalkStarted) this.pushToTalk.setHotkey(this.appSettings.get<string>('dictation.hotkey'));
@@ -395,15 +417,15 @@ export class WebServer {
       log: this.log,
     });
     // The agent picked last time keeps replying (when it still exists).
-    const saved = this.agentSettings.get().agent;
-    this.selectAgent(saved && options.tree.byId.has(saved) ? saved : this.session.node.id, false);
+    const saved = options.agent ?? this.agentSettings.get().agent;
+    this.selectAgent(saved && options.tree.byId.has(saved) ? saved : this.session.node.id, options.agent !== undefined);
     this.system = new SystemMonitor(options.systemSource, {
       ...(options.sensors === undefined ? {} : { lhm: options.sensors }),
       privileges: options.privileges,
       log: this.log,
     });
     this.up2k = new Up2kStore(options.conversation.dir, options.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES);
-    this.files = new FileService({ stateDir: options.conversation.dir, projectDir: options.tree.configDir });
+    this.files = new FileService({ stateDir: options.conversation.dir, projectDir: options.tree.configDir, onJobEnd: () => this.broadcast('files', {}) });
     this.performance = new PerformanceMonitor(this.system);
     this.processes = new ProcessMonitor(this.system.systemSource);
     this.artifactSignature = this.signature();
@@ -510,7 +532,7 @@ export class WebServer {
   private allowedHost(req: IncomingMessage): boolean {
     const host = String(req.headers.host ?? '').toLowerCase();
     if (!host) return false;
-    if (host === this.publicHost) return true;
+    if (this.publicOrigins.has(host)) return true;
     if (this.host === '0.0.0.0' || this.host === '::') return true;
     const names = new Set(['localhost', '127.0.0.1', '[::1]', this.host.includes(':') ? `[${this.host}]` : this.host]);
     return [...names].some((n) => host === `${n}:${this.port}`);
@@ -519,8 +541,9 @@ export class WebServer {
   private checkWrite(req: IncomingMessage): void {
     const origin = req.headers.origin;
     if (origin === undefined) return;
-    if (String(req.headers.host ?? '').toLowerCase() === this.publicHost) {
-      if (origin !== this.publicOrigin) throw new HttpError(403, 'Cross-origin requests are not allowed.');
+    const publicOrigin = this.publicOrigins.get(String(req.headers.host ?? '').toLowerCase());
+    if (publicOrigin) {
+      if (origin !== publicOrigin) throw new HttpError(403, 'Cross-origin requests are not allowed.');
       return;
     }
     let originHost = '';
@@ -665,8 +688,9 @@ export class WebServer {
   /** How the browser sees this server: the public origin behind a proxy, else the Host. */
   private browserOrigin(req: IncomingMessage): { origin: string; rpId: string; secure: boolean } {
     const host = String(req.headers.host ?? '').toLowerCase();
-    if (this.publicOrigin && host === this.publicHost) {
-      const u = new URL(this.publicOrigin);
+    const publicOrigin = this.publicOrigins.get(host);
+    if (publicOrigin) {
+      const u = new URL(publicOrigin);
       return { origin: u.origin, rpId: u.hostname, secure: u.protocol === 'https:' };
     }
     const u = new URL(`http://${host || 'localhost'}`);
@@ -738,7 +762,10 @@ export class WebServer {
           this.checkFetchSite(req);
           return this.getFiles(parts[1] ?? '', url, req, res);
         case 'POST files':
-          return this.postFiles(parts[1] ?? '', parts[2], req, res);
+          await this.postFiles(parts[1] ?? '', parts[2], req, res);
+          // Every page's Files window shows the change (jobs say so again when they end).
+          if (!['attach', 'jobs'].includes(parts[1] ?? '')) this.broadcast('files', {});
+          return;
         case 'GET system':
           this.checkFetchSite(req);
           return this.getSystem(parts[1], res);
@@ -878,41 +905,23 @@ export class WebServer {
           return sendJson(res, 200, this.agentInfo());
         case 'POST agent': {
           const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-          if (body.action === 'reset-context') {
-            // Later requests start from a fresh working context; the history stays stored.
-            if (this.session.running || this.live) throw new HttpError(409, 'Wait for the current reply to finish.');
-            this.session.resetContext();
-            return sendJson(res, 200, await this.contextInfo());
-          }
-          // A new agent first, so a reasoning effort in the same request is that agent's.
-          if (body.agent !== undefined) {
-            if (typeof body.agent !== 'string' || !this.runtime.tree.byId.has(body.agent)) throw new HttpError(400, `No agent named "${String(body.agent)}".`);
-            if (body.agent !== this.session.node.id && (this.session.running || this.live)) throw new HttpError(409, 'Wait for the current reply to finish before changing the agent.');
-            this.selectAgent(body.agent);
-          }
-          if (body.account !== undefined) {
-            const choice = this.accountChoices(this.session.node).find((a) => typeof body.account === 'string' && a.name.toLowerCase() === body.account.toLowerCase());
-            if (!choice) throw new HttpError(400, `"${String(body.account)}" is not a provider this agent can use.`);
-            this.accounts.set(this.session.node.id, choice.name);
-          }
-          if ('reasoning' in body) {
-            let effort;
-            try {
-              effort = parseEffort(body.reasoning);
-            } catch (error) {
-              throw new HttpError(400, getErrorMessage(error));
-            }
-            const settings = this.agentSettings.get();
-            const efforts = { ...(settings.efforts ?? {}) };
-            if (effort) efforts[this.session.node.id] = effort;
-            else delete efforts[this.session.node.id];
-            this.agentSettings.set({ ...settings, efforts });
-            this.session.reasoning = effort ?? undefined;
-          }
-          const info = this.agentInfo();
-          this.broadcast('agent', info);
-          return sendJson(res, 200, info);
+          if (body.action === 'reset-context') return sendJson(res, 200, await this.resetContext());
+          return sendJson(res, 200, this.configureAgent(body));
         }
+        case 'GET view':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, this.sharedView.get());
+        case 'POST view': {
+          const view = this.sharedView.update(await readJson(req));
+          this.broadcast('view', view);
+          return sendJson(res, 200, view);
+        }
+        case 'GET status':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, await this.status());
+        case 'GET logs':
+          this.checkFetchSite(req);
+          return sendJson(res, 200, { lines: this.logs.lines() });
         case 'GET events':
           return this.openEvents(req, res);
         case 'POST messages':
@@ -927,7 +936,7 @@ export class WebServer {
         }
         case 'POST cancel':
           await readJson(req);
-          this.live?.controller.abort(new Error('cancelled by user'));
+          this.cancel();
           return sendJson(res, 200, { ok: true });
         case 'POST approvals':
           return this.answerApproval(parts[1] ?? '', req, res);
@@ -1035,7 +1044,8 @@ export class WebServer {
       platform: process.platform,
       arch: process.arch,
       url: `http://${this.host.includes(':') ? `[${this.host}]` : this.host}:${this.port}`,
-      publicOrigin: this.publicOrigin ?? null,
+      publicOrigin: this.publicOrigins.values().next().value ?? null,
+      publicOrigins: [...this.publicOrigins.values()],
       agent: { id: this.session.node.id, model: root.model, provider: root.provider, agents: this.runtime.tree.byId.size },
       conversation: {
         file: this.conversation.file,
@@ -1453,6 +1463,8 @@ export class WebServer {
       sections: displaySections(this.conversation.state),
       live: this.live ? { id: this.live.id, segments: this.live.segments, ...(this.live.replyTo ? { replyTo: this.live.replyTo } : {}) } : null,
       reactions: this.reactions.all(),
+      read: this.read,
+      view: this.sharedView.get(),
       approvals: [...this.approvals.values()].map((a) => a.display),
       notices: [
         ...this.conversation.notices.filter((n) => n.kind === 'interrupted' || n.kind === 'recovered').map((n) => n.message),
@@ -1482,6 +1494,145 @@ export class WebServer {
 
   private broadcast(event: string, data: unknown): void {
     this.broadcastRaw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    for (const l of this.listeners) {
+      try {
+        l(event, data);
+      } catch (error) {
+        this.log(`web: ${getErrorMessage(error)}`);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // In-process clients: the terminal interface uses the server the way a page
+  // does, so both always show the same conversation, runs and approvals.
+
+  /** Sends the current state as a "state" event, then every event as it happens. */
+  subscribe(listener: (event: string, data: unknown) => void): () => void {
+    listener('state', this.snapshot());
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** The conversation as a page loads it. */
+  state() {
+    return this.snapshot();
+  }
+
+  /** Sends a message, as the composer does. Throws when it cannot be sent (a reply is running, it is empty). */
+  sendMessage(text: string, options: { replyTo?: string } = {}): string {
+    return this.send(text, [], options.replyTo);
+  }
+
+  /** Stops the running reply. */
+  cancel(): void {
+    this.live?.controller.abort(new Error('cancelled by user'));
+  }
+
+  /** Answers a pending approval. */
+  answer(id: string, decision: ConfirmationDecision): void {
+    const pending = this.approvals.get(id);
+    if (!pending) throw new HttpError(404, 'That approval is no longer pending.');
+    pending.resolve(decision);
+  }
+
+  /** Changes the replying agent, its account or reasoning effort, as the agent sheet does. */
+  configureAgent(body: { agent?: unknown; account?: unknown; reasoning?: unknown }) {
+    // A new agent first, so a reasoning effort in the same request is that agent's.
+    if (body.agent !== undefined) {
+      if (typeof body.agent !== 'string' || !this.runtime.tree.byId.has(body.agent)) throw new HttpError(400, `No agent named "${String(body.agent)}".`);
+      if (body.agent !== this.session.node.id && (this.session.running || this.live)) throw new HttpError(409, 'Wait for the current reply to finish before changing the agent.');
+      this.selectAgent(body.agent);
+    }
+    if (body.account !== undefined) {
+      const choice = this.accountChoices(this.session.node).find((a) => typeof body.account === 'string' && a.name.toLowerCase() === body.account.toLowerCase());
+      if (!choice) throw new HttpError(400, `"${String(body.account)}" is not a provider this agent can use.`);
+      this.accounts.set(this.session.node.id, choice.name);
+    }
+    if ('reasoning' in body) {
+      let effort;
+      try {
+        effort = parseEffort(body.reasoning);
+      } catch (error) {
+        throw new HttpError(400, getErrorMessage(error));
+      }
+      const settings = this.agentSettings.get();
+      const efforts = { ...(settings.efforts ?? {}) };
+      if (effort) efforts[this.session.node.id] = effort;
+      else delete efforts[this.session.node.id];
+      this.agentSettings.set({ ...settings, efforts });
+      this.session.reasoning = effort ?? undefined;
+    }
+    const info = this.agentInfo();
+    this.broadcast('agent', info);
+    return info;
+  }
+
+  /** Later requests start from a fresh working context; the history stays stored. */
+  async resetContext() {
+    if (this.session.running || this.live) throw new HttpError(409, 'Wait for the current reply to finish.');
+    this.session.resetContext();
+    const info = await this.contextInfo();
+    this.broadcast('context', info);
+    return info;
+  }
+
+  /** The agents, as the agent sheet lists them. */
+  agents() {
+    return this.agentsInfo();
+  }
+
+  /** The agent tree (for /tree in the terminal). */
+  get tree(): AgentTree {
+    return this.runtime.tree;
+  }
+
+  /**
+   * What each part of SF Agents is doing and what it uses: the terminal's
+   * Status tab and GET /api/status. Reads the machine (a moment's work).
+   */
+  async status() {
+    const self = this.selfInfo();
+    const [system, processes] = await Promise.all([
+      this.system.read().catch(() => null),
+      this.processes.list().catch(() => null),
+    ]);
+    // SF Agents' own child processes (the speech server, the screen helper, terminals, MCP servers…), with what they use.
+    const children: Array<{ pid: number; ppid: number | null; name: string; cpu: number | null; memory: number | null; depth: number }> = [];
+    if (processes) {
+      const byParent = new Map<number, typeof processes.processes>();
+      for (const p of processes.processes) {
+        if (p.ppid === null) continue;
+        const list = byParent.get(p.ppid) ?? [];
+        list.push(p);
+        byParent.set(p.ppid, list);
+      }
+      const walk = (pid: number, depth: number) => {
+        for (const c of byParent.get(pid) ?? []) {
+          if (children.length >= 200) return;
+          children.push({ pid: c.pid, ppid: c.ppid, name: c.name, cpu: c.cpu, memory: c.memory, depth });
+          walk(c.pid, depth + 1);
+        }
+      };
+      walk(process.pid, 0);
+    }
+    const ownCpu = processes?.processes.find((p) => p.pid === process.pid)?.cpu ?? null;
+    const mcp = this.runtime.mcp;
+    return {
+      at: Date.now(),
+      self: { ...self, cpu: ownCpu ?? self.cpu },
+      web: { url: self.url, host: this.host, port: this.port, publicOrigins: [...this.publicOrigins.values()], pages: this.clients.size, terminals: this.listeners.size, signIn: this.auth ? 'on' : 'off' },
+      run: this.live ? { id: this.live.id, segments: this.live.segments.length } : null,
+      approvals: this.approvals.size,
+      account: this.agentInfo().account ?? null,
+      mcp: mcp.serverNames().map((name) => ({ name, started: mcp.isStarted(name), transport: mcp.serverConfig(name)?.command ? 'stdio' : 'http' })),
+      dictation: this.dictation.status(),
+      pushToTalk: this.pushToTalk.status(),
+      screen: this.screen.status(),
+      shells: this.terminals.list().length,
+      system,
+      children,
+    };
   }
 
   /** Changes when an artifact is added, changed or pinned, or when the file it shows changes. */
@@ -1597,10 +1748,15 @@ export class WebServer {
       if (!ref) throw new HttpError(400, `Unknown or unfinished upload "${String(id)}".`);
       attachments.push(ref);
     }
+    sendJson(res, 202, { run: this.send(text, attachments, replyTo) });
+  }
+
+  private send(text: string, attachments: AttachmentRef[], replyTo?: string): string {
+    if (text.length > MAX_MESSAGE_CHARS) throw new HttpError(413, `Messages are limited to ${MAX_MESSAGE_CHARS} characters.`);
+    if (replyTo && !this.conversation.state.messages.some((m) => m.id === replyTo && (m.role === 'user' || (m.role === 'assistant' && m.content.trim())))) throw new HttpError(400, 'The message being replied to is not in the conversation.');
     if (!text.trim() && attachments.length === 0) throw new HttpError(400, 'The message is empty.');
     if (this.live) throw new HttpError(409, 'The agent is still working on the previous message.');
-    const run = this.startRun(text, attachments, replyTo);
-    sendJson(res, 202, { run });
+    return this.startRun(text, attachments, replyTo);
   }
 
   private startRun(text: string, attachments: AttachmentRef[], replyTo?: string): string {
@@ -1650,6 +1806,15 @@ export class WebServer {
 
   private onEvent(live: LiveRun, event: RuntimeEvent): void {
     const root = event.agentPath.length === 1;
+    if ((event.type === 'text' || event.type === 'tool_request') && !live.read) {
+      // The agent has picked up the message: every page's receipt turns to Read at the same time.
+      live.read = true;
+      const last = [...this.conversation.state.messages].reverse().find((m) => m.role === 'user');
+      if (last && this.read?.id !== last.id) {
+        this.read = { id: last.id, time: new Date().toISOString() };
+        this.broadcast('read', this.read);
+      }
+    }
     switch (event.type) {
       case 'text': {
         if (!root) return;
@@ -1735,9 +1900,7 @@ export class WebServer {
     const body = (await readJson(req)) as { decision?: unknown };
     const decision = body.decision;
     if (decision !== 'allow_once' && decision !== 'allow_always' && decision !== 'deny') throw new HttpError(400, '"decision" must be allow_once, allow_always or deny.');
-    const pending = this.approvals.get(id);
-    if (!pending) throw new HttpError(404, 'That approval is no longer pending.');
-    pending.resolve(decision);
+    this.answer(id, decision);
     sendJson(res, 200, { ok: true });
   }
 

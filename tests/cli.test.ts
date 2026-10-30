@@ -46,7 +46,7 @@ describe('sfagents CLI', () => {
   test('--help and --version', async () => {
     const help = await runCli(['--help']);
     assert.equal(help.code, 0);
-    assert.match(help.stdout, /sfagents start[\s\S]*sfagents run[\s\S]*agents validate[\s\S]*mcp list/);
+    assert.match(help.stdout, /sfagents \[start\][\s\S]*sfagents run[\s\S]*agents validate[\s\S]*mcp list/);
     const version = await runCli(['--version']);
     assert.equal(version.stdout.trim(), '0.1.0');
   });

@@ -186,6 +186,11 @@ export async function providersCommand(
   }
 }
 
+function showValue(value: unknown): string {
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '(none)';
+  return String(value);
+}
+
 export function settingsCommand(args: string[], streams: Streams, settings = new AppSettings()): number {
   const style = createStyle(streams.stdout as NodeJS.WriteStream);
   const [sub, key, ...value] = args;
@@ -198,7 +203,7 @@ export function settingsCommand(args: string[], streams: Streams, settings = new
           group = s.group;
           streams.stdout.write(`${style.bold(group)}\n`);
         }
-        streams.stdout.write(`  ${s.key.padEnd(20)} ${String(s.value)}${s.isDefault ? style.dim(' (default)') : ''}${s.restart ? style.dim('  · on next start') : ''}\n`);
+        streams.stdout.write(`  ${s.key.padEnd(20)} ${showValue(s.value)}${s.isDefault ? style.dim(' (default)') : ''}${s.restart ? style.dim('  · on next start') : ''}\n`);
       }
       streams.stdout.write(style.dim(`\n${settings.file}\n`));
       return OK;
@@ -206,12 +211,12 @@ export function settingsCommand(args: string[], streams: Streams, settings = new
     if (sub === 'set' && key && value.length) {
       settings.set({ [key]: value.join(' ') });
       const spec = SETTINGS.find((s) => s.key === key)!;
-      streams.stdout.write(`${style.green('✓')} ${key} = ${String(settings.get(key))}${spec.restart ? ' (takes effect on the next start)' : ''}\n`);
+      streams.stdout.write(`${style.green('✓')} ${key} = ${showValue(settings.get(key))}${spec.restart ? ' (takes effect on the next start)' : ''}\n`);
       return OK;
     }
     if (sub === 'reset' && key) {
       settings.set({ [key]: null });
-      streams.stdout.write(`${style.green('✓')} ${key} reset to ${String(settings.get(key))}\n`);
+      streams.stdout.write(`${style.green('✓')} ${key} reset to ${showValue(settings.get(key))}\n`);
       return OK;
     }
     streams.stderr.write('Usage: sfagents settings [list | set <key> <value> | reset <key>]\n');

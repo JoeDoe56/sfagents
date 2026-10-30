@@ -292,6 +292,8 @@ export interface FileServiceOptions {
   env?: NodeJS.ProcessEnv;
   /** Override the Trash adapter, for example for an isolated test directory. */
   trash?: Trash;
+  /** Called when a job (copy, move, compress…) ends. */
+  onJobEnd?: () => void;
 }
 
 const MAX_LIST = 10_000;
@@ -670,6 +672,7 @@ export class FileService {
     ).finally(() => {
       job.finishedAt = Date.now();
       job.current = undefined;
+      this.options.onJobEnd?.();
     });
     await Promise.race([finished, new Promise((r) => setTimeout(r, waitMs))]);
     return this.job(job.id)!;

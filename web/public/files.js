@@ -48,12 +48,16 @@ function read(key, fallback) {
   }
 }
 
+// Kept on the computer too, so every page shows the same favorites, view and order.
+const SHARED = new Set(['favorites', 'view', 'sort', 'hidden']);
+
 function write(key, value) {
   try {
     localStorage.setItem(`sfagents.files.${key}`, JSON.stringify(value));
   } catch {
     // storage unavailable: the preference lasts for this page
   }
+  if (SHARED.has(key)) postJson('/api/view', { files: { [key]: value } }).catch(() => {});
 }
 
 const sep = (p) => (p.includes('\\') && !p.startsWith('/') ? '\\' : '/');
@@ -1550,10 +1554,32 @@ export function createFileManager(options) {
     });
   }
 
+  /** The shared view changed (another page, or this one at load). */
+  function applyView(files) {
+    if (!files) return;
+    let changed = false;
+    for (const key of SHARED) {
+      if (!(key in files) || JSON.stringify(state[key]) === JSON.stringify(files[key])) continue;
+      state[key] = files[key];
+      try {
+        localStorage.setItem(`sfagents.files.${key}`, JSON.stringify(files[key]));
+      } catch {
+        // storage unavailable
+      }
+      changed = true;
+    }
+    if (changed && state.open) refresh();
+  }
+
   return {
     open,
     close,
     quickLookFile,
+    applyView,
+    /** Files changed on the computer (from another page or a job): show the folder as it is now. */
+    filesChanged: () => {
+      if (state.open && state.path !== null) refresh({ quiet: true });
+    },
     navigate: (p, o) => (state.open ? navigate(p, o) : open({ path: p, select: o?.select ?? null })),
     get isOpen() {
       return state.open;

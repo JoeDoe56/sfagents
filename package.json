@@ -5,6 +5,9 @@
   "description": "SF Agents: JSON-defined agent runtime and CLI",
   "license": "GPL-3.0-only",
   "type": "module",
+  "bin": {
+    "sfagents": "cli/bin/sfagents.js"
+  },
   "workspaces": [
     "core",
     "web",

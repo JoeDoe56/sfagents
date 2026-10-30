@@ -37,3 +37,5 @@ export type { PushToTalkStatus, Keyboard, KeyboardEvents, Microphone, Chimes } f
 export { ScreenMirror, DISPLAY_SCALES, SCREEN_RESOLUTIONS, streamConfig, transportChain, classifyAddress, vdisplayTaskXml, SCREEN_VERSION, SCREEN_ASSETS } from './screen.js';
 export type { ScreenStatus, ScreenInfo, DeviceScreenSettings } from './screen.js';
 export { rewriteCsp } from './apps.js';
+export { LogBook } from './logs.js';
+export type { LogLine } from './logs.js';

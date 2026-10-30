@@ -1,7 +1,8 @@
 /**
  * sfagents command line.
  *
- *   sfagents start                 interactive conversation with the root agent
+ *   sfagents [start]               the app: the web interface, and in a terminal the
+ *                                  full-screen interface (chat, logs, status) on the same conversation
  *   sfagents run "<task>"          one request, prints the answer, exits
  *   sfagents agents validate       validate agent JSON and print the tree
  *   sfagents mcp list              connect to configured MCP servers and list tools
@@ -47,7 +48,8 @@ import {
   type ConversationFlags,
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
-import { DEFAULT_HOST, DEFAULT_PORT, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
+import { DEFAULT_HOST, DEFAULT_PORT, LogBook, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
+import { startTui } from '../terminal/tui.js';
 import { providersCommand, settingsCommand } from './providers.js';
 
 export const VERSION = '0.1.0';
@@ -60,11 +62,13 @@ export const EXIT_CANCELLED = 130;
 const USAGE = `SF Agents ${VERSION}
 
 Usage:
-  sfagents start [options]              Start an interactive conversation (with --agent, or "main")
+  sfagents [start] [options]            Start SF Agents: the web interface (default http://127.0.0.1:${DEFAULT_PORT}) and,
+                                        in a terminal, the same conversation full screen with Chat, Logs and
+                                        Status tabs. Piped input, or --ephemeral, gives the plain line-by-line chat.
   sfagents run [options] "<task>"       Run one request and print the final answer ("-" reads stdin)
   sfagents agents validate [options]    Check the agents folder: every agent, its tools, and skipped files
   sfagents mcp list [options]           Show configured MCP servers, status and tools
-  sfagents web [options]                Serve the web interface (default http://127.0.0.1:${DEFAULT_PORT})
+  sfagents web [options]                The same as start
   sfagents providers [list|add <openrouter|openai|anthropic|custom>|rename|remove|web-key [remove]]
                                         Model providers: API keys and ChatGPT/Claude sign-ins (kept in
                                         the system keyring); agent files name them in "provider"
@@ -88,7 +92,8 @@ Options:
       --url <url>           (providers add custom) The endpoint's base URL
       --new-token           (web) Replace the access token for signing in (signs every device out)
       --port <n>            (web) Port to listen on (default: the web.port setting, ${DEFAULT_PORT})
-      --public-origin <url> (web) Accept this exact external origin behind a reverse proxy
+      --public-origin <url> (web) Also accept this exact external origin behind a reverse proxy (repeatable;
+                            Settings → Web server → Public Origins keeps them)
       --host <address>      (web) Address to listen on (default ${DEFAULT_HOST}; anything else exposes
                             the agent and its tools to your network)
   -v, --version             Print the version
@@ -147,7 +152,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         persist: { type: 'boolean', default: false },
         page: { type: 'string' },
         port: { type: 'string' },
-        'public-origin': { type: 'string' },
+        'public-origin': { type: 'string', multiple: true },
         host: { type: 'string' },
         'new-token': { type: 'boolean', default: false },
         name: { type: 'string' },
@@ -165,10 +170,11 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
     streams.stdout.write(`${VERSION}\n`);
     return EXIT_OK;
   }
-  const [command, sub, ...rest] = positionals;
-  if (values.help || !command || command === 'help') {
+  // Plain `sfagents` starts the app.
+  const [command = 'start', sub, ...rest] = positionals;
+  if (values.help || command === 'help') {
     streams.stdout.write(`${USAGE}\n`);
-    return command || values.help ? EXIT_OK : EXIT_CONFIG;
+    return EXIT_OK;
   }
   // Provider and settings commands don't need a project.
   if (command === 'providers') return providersCommand(positionals.slice(1), streams, { name: values.name, url: values.url });
@@ -184,6 +190,12 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
   const showReasoning = values['show-reasoning'] || setting('cli.showReasoning', false);
   const showContext = values['show-context'] || setting('cli.showContext', false);
 
+  // Everything said at startup is in the Logs tab too.
+  const logs = new LogBook();
+  const note = (line: string) => {
+    logs.add(line);
+    streams.stderr.write(`${line}\n`);
+  };
   let location;
   let tree: AgentTree;
   try {
@@ -191,12 +203,12 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
     loadEnvFile(location.configDir);
     // The app starts even when its folders are missing or its files are broken.
     const starting = command === 'web' || command === 'start';
-    if (starting) for (const created of ensureProject(location.configDir)) streams.stderr.write(`Created ${created}\n`);
+    if (starting) for (const created of ensureProject(location.configDir)) note(`Created ${created}`);
     tree = loadConfig(location, { fallback: starting });
     if (starting) {
       const style = createStyle(streams.stderr as NodeJS.WriteStream);
-      for (const s of tree.skipped) streams.stderr.write(`${style.yellow('skipped')} ${s.file}: ${s.error}\n`);
-      for (const w of tree.warnings) streams.stderr.write(`${style.yellow('note:')} ${w}\n`);
+      for (const s of tree.skipped) note(`${style.yellow('skipped')} ${s.file}: ${s.error}`);
+      for (const w of tree.warnings) note(`${style.yellow('note:')} ${w}`);
     }
   } catch (error) {
     return printConfigError(error, streams);
@@ -245,10 +257,45 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       if (conv instanceof Error) return EXIT_CONFIG;
       return runOnce(tree, task, { yes: values.yes, json: values.json, showReasoning, showContext, conversation: conv }, streams);
     }
-    case 'start': {
+    case 'start':
+    case 'web': {
       if (sub !== undefined) {
-        streams.stderr.write('"sfagents start" takes no arguments. Use "sfagents run <task>" for a single request.\n');
+        streams.stderr.write(`"sfagents ${command}" takes no arguments. Use "sfagents run <task>" for a single request.\n`);
         return EXIT_CONFIG;
+      }
+      const terminal = process.stdin.isTTY === true && process.stdout.isTTY === true && streams.stdout === process.stdout;
+      // The app: the web server, and in a terminal the full-screen interface on the same conversation.
+      if (command === 'web' || (terminal && !values.ephemeral)) {
+        if (values.ephemeral) {
+          streams.stderr.write('The web interface always uses a persistent conversation; --ephemeral is not available.\n');
+          return EXIT_CONFIG;
+        }
+        const port = values.port === undefined ? setting('web.port', DEFAULT_PORT) : Number(values.port);
+        if (!Number.isInteger(port) || port < 0 || port > 65535) {
+          streams.stderr.write(`--port must be a number from 0 to 65535, got "${values.port}".\n`);
+          return EXIT_CONFIG;
+        }
+        let publicOrigins: string[];
+        try {
+          // The ones saved in Settings, and any given for this run.
+          publicOrigins = [...new Set([...setting<string[]>('web.publicOrigins', []), ...(values['public-origin'] ?? []).map(parsePublicOrigin)])];
+        } catch (error) {
+          return printConfigError(error, streams);
+        }
+        // Providers can be added in Settings once the app runs.
+        try {
+          checkCredentials(tree, process.env);
+        } catch (error) {
+          note(`${createStyle(streams.stderr as NodeJS.WriteStream).yellow('note:')} ${getErrorMessage(error)}`);
+        }
+        const conversation = openSelected('start', values, tree, streams);
+        if (conversation instanceof Error || !conversation) return EXIT_CONFIG;
+        return serveWeb(
+          tree,
+          conversation,
+          { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigins, agent: values.agent, yes: values.yes, settings: appSettings, newToken: values['new-token'], tui: terminal, logs },
+          streams,
+        );
       }
       try {
         checkCredentials(tree, process.env);
@@ -295,41 +342,6 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
       } finally {
         await runExitCleanup();
       }
-    }
-    case 'web': {
-      if (sub !== undefined) {
-        streams.stderr.write('"sfagents web" takes no arguments.\n');
-        return EXIT_CONFIG;
-      }
-      if (values.ephemeral) {
-        streams.stderr.write('The web interface always uses a persistent conversation; --ephemeral is not available.\n');
-        return EXIT_CONFIG;
-      }
-      const port = values.port === undefined ? setting('web.port', DEFAULT_PORT) : Number(values.port);
-      if (!Number.isInteger(port) || port < 0 || port > 65535) {
-        streams.stderr.write(`--port must be a number from 0 to 65535, got "${values.port}".\n`);
-        return EXIT_CONFIG;
-      }
-      let publicOrigin: string | undefined;
-      try {
-        publicOrigin = values['public-origin'] === undefined ? undefined : parsePublicOrigin(values['public-origin']);
-      } catch (error) {
-        return printConfigError(error, streams);
-      }
-      // Providers can be added in Settings once the app runs.
-      try {
-        checkCredentials(tree, process.env);
-      } catch (error) {
-        streams.stderr.write(`${createStyle(streams.stderr as NodeJS.WriteStream).yellow('note:')} ${getErrorMessage(error)}\n`);
-      }
-      const conversation = openSelected('start', values, tree, streams);
-      if (conversation instanceof Error || !conversation) return EXIT_CONFIG;
-      return serveWeb(
-        tree,
-        conversation,
-        { port, host: values.host ?? setting('web.host', DEFAULT_HOST), publicOrigin, yes: values.yes, settings: appSettings, newToken: values['new-token'] },
-        streams,
-      );
     }
     default:
       streams.stderr.write(`Unknown command "${command}".\n\n${USAGE}\n`);
@@ -421,10 +433,18 @@ async function runOnce(
 async function serveWeb(
   tree: AgentTree,
   conversation: ConversationService,
-  opts: { port: number; host: string; publicOrigin?: string; yes: boolean; settings: AppSettings; newToken?: boolean },
+  opts: { port: number; host: string; publicOrigins: string[]; agent?: string; yes: boolean; settings: AppSettings; newToken?: boolean; tui: boolean; logs: LogBook },
   streams: Streams,
 ): Promise<number> {
   const style = createStyle(streams.stderr as NodeJS.WriteStream);
+  const logs = opts.logs;
+  // Until the terminal interface opens, lines are printed as well; then they are only in its Logs tab.
+  let printing = true;
+  const log = (line: string) => {
+    logs.add(line);
+    if (printing) streams.stderr.write(`${line}\n`);
+  };
+  let tokenShown = false;
   // The login gate: an access token whose hash is kept in the OS keyring.
   let auth: WebAuth | false = false;
   if (process.env['SFAGENTS_WEB_NO_LOGIN'] === '1') {
@@ -450,6 +470,7 @@ async function serveWeb(
             '',
           ].join('\n'),
         );
+        tokenShown = true;
       }
     } catch (error) {
       const message = error instanceof KeyringUnavailableError ? error.message : getErrorMessage(error);
@@ -463,8 +484,8 @@ async function serveWeb(
   // One administrator approval for everything SF Agents does with administrator
   // rights, asked for now rather than when a feature is first used.
   // Screen mirroring's setup (its helper, the virtual display) is part of it.
-  const screen = new ScreenMirror({ log: (line) => streams.stderr.write(`${line}\n`) });
-  const privileges = process.env['SFAGENTS_NO_SETUP'] === '1' ? undefined : await acquirePrivileges({ screen, log: (line) => streams.stderr.write(`${line}\n`) });
+  const screen = new ScreenMirror({ log });
+  const privileges = process.env['SFAGENTS_NO_SETUP'] === '1' ? undefined : await acquirePrivileges({ screen, log });
   const server = new WebServer({
     auth,
     screen,
@@ -473,12 +494,16 @@ async function serveWeb(
     privileges,
     port: opts.port,
     host: opts.host,
-    publicOrigin: opts.publicOrigin,
+    publicOrigins: opts.publicOrigins,
+    agent: opts.agent,
     approveAll: opts.yes,
     registry: providers().registry,
     accounts: providers().accounts,
     settings: opts.settings,
-    log: (line) => streams.stderr.write(`${line}\n`),
+    logs,
+    log: (line) => {
+      if (printing) streams.stderr.write(`${line}\n`);
+    },
   });
   // Cleanups run in reverse: stop the server (and any run) before closing the conversation.
   registerCleanup(() => conversation.close());
@@ -491,18 +516,33 @@ async function serveWeb(
     await runExitCleanup();
     return EXIT_FAILURE;
   }
-  for (const n of conversation.notices) streams.stderr.write(`${n.message}\n`);
+  for (const n of conversation.notices) log(n.message);
   // What the features need beyond the package (the screen mirroring helper, the
   // dictation model), set up in the background.
   if (process.env['SFAGENTS_NO_SETUP'] !== '1') void server.setupFeatures();
   streams.stdout.write(`SF Agents web interface: ${url}\n`);
-  if (opts.publicOrigin) streams.stdout.write(`Reverse proxy origin: ${opts.publicOrigin}\n`);
-  if (opts.host !== DEFAULT_HOST && opts.host !== 'localhost' && opts.host !== '::1') {
-    streams.stderr.write(
-      `${style.yellow('warning:')} listening on ${opts.host}. Anyone who can reach this address can talk to the agent and run its tools with your permissions.\n`,
-    );
+  logs.add(`SF Agents web interface: ${url}`);
+  for (const origin of opts.publicOrigins) {
+    streams.stdout.write(`Reverse proxy origin: ${origin}\n`);
+    logs.add(`Reverse proxy origin: ${origin}`);
   }
-  if (opts.yes) streams.stderr.write(`${style.yellow('note:')} --yes: tool calls that would ask for approval run without asking.\n`);
+  if (opts.host !== DEFAULT_HOST && opts.host !== 'localhost' && opts.host !== '::1') {
+    log(`${style.yellow('warning:')} listening on ${opts.host}. Anyone who can reach this address can talk to the agent and run its tools with your permissions.`);
+  }
+  if (opts.yes) log(`${style.yellow('note:')} --yes: tool calls that would ask for approval run without asking.`);
+  if (opts.tui) {
+    // The token is shown only once: leave it on the screen until it has been copied.
+    if (tokenShown) {
+      streams.stdout.write(style.bold('Press Enter when you have copied the token.'));
+      await waitForEnter();
+      streams.stdout.write('\n');
+    }
+    printing = false;
+    const code = await startTui({ server, logs, url });
+    streams.stderr.write('Stopping…\n');
+    await runExitCleanup();
+    return code;
+  }
   streams.stderr.write(style.dim('Press Ctrl+C to stop.\n'));
   await new Promise<void>((resolve) => {
     const stop = () => {
@@ -516,6 +556,17 @@ async function serveWeb(
   streams.stderr.write('\nStopping…\n');
   await runExitCleanup();
   return EXIT_OK;
+}
+
+function waitForEnter(): Promise<void> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, terminal: false });
+    rl.once('line', () => {
+      rl.close();
+      resolve();
+    });
+    rl.once('close', () => resolve());
+  });
 }
 
 async function listMcp(tree: AgentTree, streams: Streams): Promise<number> {

@@ -415,7 +415,7 @@ function sfagentsWindow(ctx) {
       row('Provider', s.agent.provider),
       row('Agents in the tree', String(s.agent.agents)),
       row('Address', s.url),
-      s.publicOrigin ? row('Public address', s.publicOrigin) : null,
+      ...(s.publicOrigins ?? (s.publicOrigin ? [s.publicOrigin] : [])).map((o, i, all) => row(all.length > 1 ? `Public address ${i + 1}` : 'Public address', o)),
       row('Open windows', String(s.clients)),
       row('Process ID', String(s.pid)),
       row('JavaScript memory', `${bytesText(s.memory.heapUsed)} of ${bytesText(s.memory.heapTotal)}`),

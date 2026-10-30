@@ -312,6 +312,10 @@ export function openSettingsSheet(device) {
       const pending = s.restart && String(s.value) !== String(s.running) ? `Now ${s.running}; ${s.value} after a restart` : '';
       const hint = [s.hint, pending].filter(Boolean).join('\n');
       let node;
+      if (s.type === 'origins') {
+        groups.get(s.group).push(...originRows(s, hint));
+        continue;
+      }
       if (s.type === 'boolean') {
         node = switchRow(s.label, hint, value === true, (v) => setDraft(s, v)).row;
       } else if (s.type === 'hotkey') {
@@ -400,6 +404,85 @@ export function openSettingsSheet(device) {
       setDraft(s, combo);
     });
     return f.row;
+  }
+
+  /**
+   * Public origins: one row per address (its menu removes it) and Add Public
+   * Origin, which asks for one in a sheet of its own, like Add Provider.
+   * Both save at once; the server uses them from its next start.
+   */
+  function originRows(s, hint) {
+    const list = Array.isArray(s.value) ? s.value : [];
+    const running = Array.isArray(s.running) ? s.running : [];
+    const rows = list.map((origin) => {
+      const row = createRow({
+        icon: 'globe',
+        iconTint: '#0a84ff',
+        title: origin,
+        subtitle: running.includes(origin) ? 'In use' : 'From the next start',
+        accessory: 'ellipsis',
+        onTap: () =>
+          showMenu({
+            anchor: row.el,
+            align: 'end',
+            groups: [[{ label: 'Remove', symbol: 'trash', role: 'destructive', action: () => removeOrigin(s, origin) }]],
+          }),
+      });
+      return row.el;
+    });
+    rows.push(createRow({ icon: 'plus.circle.fill', title: 'Add Public Origin', subtitle: list.length ? undefined : hint.split('\n')[0], wrap: true, tintTitle: true, onTap: () => openAddOrigin(s) }).el);
+    return rows;
+  }
+
+  async function saveOrigins(s, next) {
+    server = await postJson('/api/settings', { values: { [s.key]: next } });
+    renderServer();
+    toast('Public origins change when SF Agents restarts', { symbol: 'arrow.clockwise', timeout: 3200 });
+  }
+
+  function openAddOrigin(s) {
+    const f = field({ label: 'Address', type: 'url', placeholder: 'https://sfagents.example.com', inputmode: 'url' });
+    // eslint-disable-next-line prefer-const
+    let sheet;
+    sheet = openSheet({
+      title: 'Add Public Origin',
+      detents: ['medium'],
+      className: 'st-sheet',
+      z: 1200,
+      build(sh) {
+        sh.body.append(
+          section(
+            null,
+            [f.row],
+            'The address browsers use to reach SF Agents through a reverse proxy or Tailscale Serve: its scheme, host and port, without a path. Sign-in, passkeys and every request are accepted from it.',
+          ),
+        );
+        f.input.addEventListener('input', () => sheet?.setDirty(!!f.input.value.trim()));
+        setTimeout(() => f.input.focus(), 350);
+      },
+      onConfirm: async () => {
+        const value = f.input.value.trim();
+        const current = server.settings.find((x) => x.key === s.key)?.value ?? [];
+        try {
+          await saveOrigins(s, [...current, value]);
+          return true;
+        } catch (error) {
+          showError(error.message, "Couldn't add the address");
+          return false;
+        }
+      },
+    });
+  }
+
+  async function removeOrigin(s, origin) {
+    const ok = await confirmDialog(`Remove ${origin}?`, 'From the next start, SF Agents no longer accepts requests from this address.', 'Remove', true);
+    if (!ok) return;
+    const current = server.settings.find((x) => x.key === s.key)?.value ?? [];
+    try {
+      await saveOrigins(s, current.filter((o) => o !== origin));
+    } catch (error) {
+      showError(error.message, "Couldn't remove the address");
+    }
   }
 
   function setDraft(s, v) {
@@ -513,8 +596,13 @@ export function openSettingsSheet(device) {
     }
   }
 
-  const stop = listen((name) => {
+  const stop = listen((name, data) => {
     if (name === 'providers' || name === 'signin') loadProviders();
+    // Saved somewhere else (another page, or the terminal): show it here too, keeping this sheet's own edits.
+    if (name === 'settings' && data?.settings && server) {
+      server = { ...server, ...data };
+      renderServer();
+    }
   });
   showQuality();
   renderProviders(null);

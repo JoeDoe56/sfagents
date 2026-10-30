@@ -939,6 +939,8 @@ function applySnapshot(s) {
   state.more = s.more;
   state.live = s.live;
   state.approvals = s.approvals;
+  if (s.read !== undefined) state.read = s.read;
+  if (s.view) fileManager.applyView(s.view.files);
   state.limits = s.limits || state.limits;
   setArtifacts(s.artifacts);
   setSections(s.sections);
@@ -1019,6 +1021,16 @@ function connect() {
     setGradientSeed(info.model);
     agentSheet?.setAgent?.(info);
   });
+  // The receipt and the context are the same on every page.
+  es.addEventListener('read', (e) => {
+    state.read = JSON.parse(e.data);
+    render();
+  });
+  es.addEventListener('context', () => {
+    if (agentSheetOpen()) agentSheet?.refresh();
+  });
+  es.addEventListener('files', () => fileManager.filesChanged());
+  es.addEventListener('view', (e) => fileManager.applyView(JSON.parse(e.data).files));
   es.addEventListener('usage', (e) => agentSheet?.setUsage?.(JSON.parse(e.data)));
   es.addEventListener('dictation', (e) => dictationEvent(JSON.parse(e.data)));
   es.addEventListener('screen', (e) => remoteEvent(JSON.parse(e.data)));

@@ -2,7 +2,7 @@
 
 A small agent runtime and CLI. You define agents in JSON. Each agent talks to a model through a provider you add once (an OpenRouter key, your ChatGPT or Claude plan, or any OpenAI-compatible endpoint such as llama.cpp), uses the built-in file, search and shell tools and the MCP tools it is allowed, and can message the other agents it is granted, in persistent threads, in parallel.
 
-SF Agents started as an extraction of the minimal runtime from Qwen Code's `packages/core` and `packages/cli` (see [PROVENANCE.md](PROVENANCE.md)). It has a terminal interface and a web interface (`sfagents web`), one persistent conversation per project, and artifacts the agent creates for you to keep.
+SF Agents started as an extraction of the minimal runtime from Qwen Code's `packages/core` and `packages/cli` (see [PROVENANCE.md](PROVENANCE.md)). It has a web interface and, in the terminal that starts it, a full-screen interface on the same conversation (`sfagents`), one persistent conversation per project, and artifacts the agent creates for you to keep.
 
 ## Requirements
 
@@ -20,7 +20,10 @@ npm install        # installs dependencies and builds (via the prepare script)
 cp -R examples/agents agents
 cp examples/mcp.json mcp.json
 npx sfagents --help
+npm link           # optional, once: makes the plain `sfagents` command work (see below)
 ```
+
+**The `sfagents` command.** `npm link` in the repository (once, after `npm install`) adds an `sfagents` command to npm's global folder, which the Node.js installers put on your PATH: `sfagents.cmd` and `sfagents.ps1` on Windows (in `%APPDATA%\npm`), a link in npm's `bin` folder on macOS and Linux. From then on, `sfagents` in any project folder starts SF Agents there, the same as `npx sfagents`; the command runs this checkout, so a `git pull` and `npm run build` update it too. `npm rm -g sfagents-workspace` removes it. If npm's global folder needs administrator rights (Node.js from the macOS .pkg installer, or a system package on Linux), use `sudo npm link` or set a user prefix (`npm config set prefix ~/.npm-global` and put its `bin` on your PATH). If PowerShell refuses to run `sfagents.ps1` because scripts are disabled, `npx` is refused the same way: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` allows both.
 
 The copy commands above are for a new checkout and also work in PowerShell. Skip them if you already have your own `agents/` folder and `mcp.json`. They are optional: `sfagents web` (and `start`) creates a missing `agents/` folder with a default `main.json` that names no provider, so it replies with the provider you add in Settings. A broken agent file or `mcp.json` never stops the app: it is skipped and flagged, and if no agent file loads at all, the built-in default agent replies until one is fixed. These local configuration files are ignored by Git; edit them freely without publishing your setup. Generic defaults stay in `examples/`.
 
@@ -53,15 +56,15 @@ The agent sheet's **Account** pop-up switches by hand, among the agent's provide
 
 The older environment-variable providers still work: `"provider": "openrouter"` with `OPENROUTER_API_KEY` (in your shell or an untracked `.env` next to the `agents` folder), and `"openai-compatible"` with `providerOptions`.
 
-**Settings** that aren't about agents or MCP servers are in the same sheet and in `sfagents settings`: the web server's port and listen address, and whether the terminal prints reasoning and context sizes. They are kept in `settings.json` in the same user folder; the port and address apply the next time SF Agents starts, and command-line flags override them for one run.
+**Settings** that aren't about agents or MCP servers are in the same sheet and in `sfagents settings`: the web server's port, listen address and public origins (the addresses a reverse proxy shows it at: **Add Public Origin** adds one, its row's menu removes it), and whether the terminal prints reasoning and context sizes. They are kept in `settings.json` in the same user folder; the port, address and public origins apply the next time SF Agents starts, and command-line flags override them for one run (`--public-origin` adds to the saved ones).
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `sfagents start` | Opens (or creates) this project's persistent conversation and talks to the selected agent (`--agent <name>`, else `main`). Streams answers, shows tool activity and messages between agents, asks before risky calls. Ctrl+C cancels the running turn; `/exit` or Ctrl+D quits; `/clear` resets the working context (history is kept); `/sections` shows the topic tree; `/tree` shows the agents; `/agent <name>` hands the conversation to another agent. `--ephemeral` keeps the session in memory only. |
+| `sfagents` (or `sfagents start`) | Starts SF Agents in this project: the web interface (see `web`) and, in the terminal, the same conversation full screen with three tabs: **Chat** (the conversation, exactly as the pages show it, and a composer), **Logs** (everything SF Agents logs) and **Status** (what each part is doing: the web server and its open pages, the agent and account, MCP servers, speech, push-to-talk, screen mirroring, and the CPU and memory SF Agents, the processes it started and the computer use). Tab, F1–F3 or Alt+1–3 switch tabs; PgUp/PgDn scroll; Esc stops a reply; y, a or n answers an approval; `/agent <name>`, `/effort <level>`, `/clear`, `/tree`, `/help`; Ctrl+C twice or `/exit` quits (the web interface stops with it). A message sent in the terminal shows on every page and the other way round. With piped input, or `--ephemeral` (nothing stored), it is the plain line-by-line chat instead. |
 | `sfagents run "<task>"` | One request, ephemeral unless `--persist` (or `--conversation <file>`) records it in the conversation. The answer goes to stdout and activity to stderr. `-` reads the task from stdin. `--json` prints the structured result. Exit code: 0 done, 1 failed, 2 configuration error, 130 cancelled. |
-| `sfagents web` | Serves the web interface at http://127.0.0.1:8093 (`--port`, `--host`). Prints the sign-in token the first time; `--new-token` replaces it. The same persistent conversation as `start`, with attachments, approvals in the page and the artifacts sheet. Ctrl+C stops it. See [Web interface](#web-interface). |
+| `sfagents web` | The same as `sfagents`. The web interface is at http://127.0.0.1:8093 (`--port`, `--host`, `--public-origin`). Prints the sign-in token the first time (and waits for Enter so it can be copied); `--new-token` replaces it. Without a terminal (a service, output to a file) it only logs, and Ctrl+C stops it. See [Web interface](#web-interface). |
 | `sfagents conversation …` | Inspects the stored conversation without opening it for writing: `info`, `sections`, `show <section\|unassigned\|message id>`, `search <words>`, `artifacts`. `unlock` removes a stale lock after confirmation. |
 | `sfagents agents validate` | Reads the `agents` folder and prints each agent with its tools, grants, auto-approvals and roots, then the files it skipped and why. |
 | `sfagents providers` | Lists the providers; `providers add <openrouter\|openai\|anthropic\|custom> [--name N] [--url URL]` adds one (asks for the key without echoing it, or prints the sign-in address), `rename <name> <new>`, `remove <name>`. |
@@ -223,8 +226,9 @@ The glass is [sfgl](https://github.com/JoeDoe56/sfgl) (vendored in `web/public/v
 
 Security: the server listens on 127.0.0.1 only, accepts only requests addressed to this host and port, and refuses cross-site writes (and cross-site terminal connections). Artifacts and uploads are served in a sandbox, so a page the agent wrote cannot call the API. Application artifacts are the exception: an app runs as it would on its own port, on SF Agents' origin, so treat it like any program you run. `--host 0.0.0.0` exposes the sign-in page to your network; once signed in, a device has the agent and its tools (with your permissions). Plain HTTP on a LAN sends the session cookie unencrypted, so prefer HTTPS through a reverse proxy.
 
-Behind a reverse proxy such as Tailscale Serve, keep the loopback bind and set
-`--public-origin https://your-service.example.ts.net`. This accepts that exact
+Behind a reverse proxy such as Tailscale Serve, keep the loopback bind and add
+`https://your-service.example.ts.net` in Settings → Web server → **Add Public Origin**
+(or pass `--public-origin` for one run; both can name several). This accepts each exact
 external Host and browser origin while continuing to reject unrelated hosts and
 cross-origin writes. The sign-in gate still applies, and the session cookie is marked Secure.
 

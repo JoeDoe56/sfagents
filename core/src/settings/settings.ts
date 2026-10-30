@@ -9,7 +9,7 @@ import path from 'node:path';
 import { formatHotkey, parseHotkey } from './hotkey.js';
 import { readJsonFile, sfagentsHome, writeFileAtomic } from './home.js';
 
-export type SettingValue = string | number | boolean;
+export type SettingValue = string | number | boolean | string[];
 
 export interface SettingSpec {
   key: string;
@@ -17,7 +17,7 @@ export interface SettingSpec {
   /** One line shown under the control. */
   hint: string;
   group: 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'STT & TTS' | 'Terminal output';
-  type: 'port' | 'host' | 'boolean' | 'hotkey' | 'number' | 'text';
+  type: 'port' | 'host' | 'boolean' | 'hotkey' | 'number' | 'text' | 'origins';
   default: SettingValue;
   /** Applies on the next start of `sfagents web` (or `start`), not at once. */
   restart: boolean;
@@ -38,6 +38,15 @@ export const SETTINGS: readonly SettingSpec[] = [
     group: 'Web server',
     type: 'host',
     default: '127.0.0.1',
+    restart: true,
+  },
+  {
+    key: 'web.publicOrigins',
+    label: 'Public Origins',
+    hint: 'Addresses a reverse proxy (or Tailscale Serve) shows the web interface at, such as https://sfagents.example.com. Pages there may use SF Agents.',
+    group: 'Web server',
+    type: 'origins',
+    default: [],
     restart: true,
   },
   {
@@ -123,6 +132,20 @@ export function parseSetting(key: string, value: unknown): SettingValue {
       if (value.length > 4000) throw new SettingsError(`${spec.label} is too long.`);
       return value.trim();
     }
+    case 'origins': {
+      // A list, or (from the command line) addresses separated by commas or spaces.
+      const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[\s,]+/) : null;
+      if (!list || list.some((v) => typeof v !== 'string')) throw new SettingsError(`${spec.label} must be a list of addresses such as https://sfagents.example.com.`);
+      const out: string[] = [];
+      for (const v of list as string[]) {
+        if (!v.trim()) continue;
+        const origin = parseOrigin(v.trim());
+        if (!origin) throw new SettingsError(`${spec.label}: "${v.trim()}" is not an http(s) address without a path, such as https://sfagents.example.com.`);
+        if (!out.includes(origin)) out.push(origin);
+      }
+      if (out.length > 32) throw new SettingsError(`${spec.label}: at most 32 addresses.`);
+      return out;
+    }
     case 'hotkey': {
       if (typeof value !== 'string') throw new SettingsError(`${spec.label} must be a key, such as F13 or Ctrl+Shift+Space, or Off.`);
       try {
@@ -131,6 +154,17 @@ export function parseSetting(key: string, value: unknown): SettingValue {
         throw new SettingsError(`${spec.label}: ${error instanceof Error ? error.message : String(error)}. Use a key such as F13 or Ctrl+Shift+Space, or Off.`);
       }
     }
+  }
+}
+
+/** An HTTP(S) origin without credentials, a path, a query or a fragment, normalized; null when it is not one. */
+export function parseOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
   }
 }
 

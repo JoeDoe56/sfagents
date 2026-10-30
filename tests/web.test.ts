@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree } from '@sfagents/core';
+import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree, parseSetting } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
 import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, useAnySandbox, writeJson, type Script, writeAgent } from './helpers.js';
 
@@ -18,7 +18,7 @@ function project(agent: Record<string, unknown> = {}) {
   return dir;
 }
 
-async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string } = {}) {
+async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string; publicOrigins?: string[] } = {}) {
   const dir = project(agent);
   const tree = loadAgentTree(dir);
   const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
@@ -231,6 +231,78 @@ describe('web server', () => {
       }
       assert.equal((await request(s.base, '/', { headers: { Host: 'llms.example.ts.net:1234' } })).status, 421);
       assert.equal((await request(s.base, '/', { headers: { Host: 'evil.example', 'X-Forwarded-Host': headers.Host } })).status, 421);
+    } finally {
+      await s.stop();
+    }
+  });
+
+  test('accepts every public origin saved in Settings, each only with its own host', async () => {
+    const one = 'https://one.example.ts.net';
+    const two = 'http://two.example:8443';
+    const s = await startServer(() => ({ text: 'ok' }), {}, { publicOrigins: [one, two] });
+    try {
+      for (const origin of [one, two]) {
+        const headers = { Host: new URL(origin).host, Origin: origin };
+        assert.equal((await request(s.base, '/api/state', { headers })).status, 200);
+        assert.equal((await postJson(s.base, '/api/cancel', {}, headers)).status, 200);
+      }
+      assert.equal((await postJson(s.base, '/api/cancel', {}, { Host: new URL(one).host, Origin: two })).status, 403, 'one origin cannot use the other\'s host');
+      const status = JSON.parse((await request(s.base, '/api/system/sfagents')).body.toString());
+      assert.deepEqual(status.publicOrigins, [one, two]);
+    } finally {
+      await s.stop();
+    }
+  });
+
+  test('settings keep public origins as a list of normalized origins', () => {
+    assert.deepEqual(parseSetting('web.publicOrigins', 'https://A.example:443/, http://b.example:8080'), ['https://a.example', 'http://b.example:8080']);
+    assert.deepEqual(parseSetting('web.publicOrigins', ['https://a.example', 'https://a.example/']), ['https://a.example']);
+    assert.deepEqual(parseSetting('web.publicOrigins', ''), []);
+    assert.throws(() => parseSetting('web.publicOrigins', ['https://a.example/path']), /not an http/);
+  });
+
+  test('an in-process client gets the same events as the pages, and its messages reach them', async () => {
+    const s = await startServer(() => ({ text: 'hello back' }));
+    const events: Array<[string, unknown]> = [];
+    const pageEvents: string[] = [];
+    const page = await new Promise<http.IncomingMessage>((resolve) => http.get(`${s.base}/api/events`, resolve));
+    page.on('data', (c: Buffer) => pageEvents.push(c.toString()));
+    const stop = s.server.subscribe((event, data) => events.push([event, data]));
+    try {
+      assert.equal(events[0]![0], 'state');
+      s.server.sendMessage('from the terminal');
+      await s.server.idle();
+      await new Promise((r) => setTimeout(r, 50));
+      const names = events.map(([e]) => e);
+      for (const e of ['user', 'run_start', 'read', 'run_end']) assert.ok(names.includes(e), `${e} in ${names.join(',')}`);
+      const end = events.find(([e]) => e === 'run_end')![1] as { items: Array<{ kind: string; text: string }> };
+      assert.ok(end.items.some((i) => i.kind === 'user' && i.text === 'from the terminal'));
+      assert.ok(end.items.some((i) => i.kind === 'assistant' && i.text.includes('hello back')));
+      const stream = pageEvents.join('');
+      assert.match(stream, /event: user\ndata: .*from the terminal/);
+      assert.match(stream, /event: run_end/);
+      // A page that opens later sees when the agent read it.
+      const state = JSON.parse((await request(s.base, '/api/state')).body.toString());
+      assert.ok(state.read?.id, 'the receipt is in the state');
+      assert.throws(() => s.server.sendMessage('   '), /empty/);
+      const status = await s.server.status();
+      assert.equal(status.web.terminals, 1);
+      assert.equal(status.self.pid, process.pid);
+    } finally {
+      stop();
+      page.destroy();
+      await s.stop();
+    }
+  });
+
+  test('the Files window\'s favorites and view are shared by every page', async () => {
+    const s = await startServer(() => ({ text: 'ok' }));
+    try {
+      const saved = await postJson(s.base, '/api/view', { files: { favorites: ['/tmp'], view: 'icons', sort: { key: 'size', desc: true }, hidden: true, bogus: 1 } });
+      assert.equal(saved.status, 200);
+      const view = JSON.parse((await request(s.base, '/api/view')).body.toString());
+      assert.deepEqual(view, { files: { favorites: ['/tmp'], view: 'icons', sort: { key: 'size', desc: true }, hidden: true } });
+      assert.deepEqual(JSON.parse((await request(s.base, '/api/state')).body.toString()).view, view);
     } finally {
       await s.stop();
     }
