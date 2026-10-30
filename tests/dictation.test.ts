@@ -47,15 +47,14 @@ describe('dictation helpers', () => {
     }
   });
 
-  test('removing the llama.cpp files never removes the new model, whose name differs only in case', () => {
+  test('the llama.cpp files are found by their exact names, so the new model (the same name in other letters) is not one', () => {
     const dir = makeTempDir();
     fs.mkdirSync(path.join(dir, 'models'));
     fs.mkdirSync(path.join(dir, 'runtime'));
     fs.writeFileSync(path.join(dir, 'models', 'qwen3-asr-1.7b-q8_0.gguf'), 'new');
     fs.writeFileSync(path.join(dir, 'models', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'), 'old');
-    const found = llamaLeftovers(dir, ['qwen3-asr-1.7b-q8_0.gguf', 'vibevoice-1.5b-q8_0.gguf']).map((f) => path.relative(dir, f));
+    const found = llamaLeftovers(dir).map((f) => path.relative(dir, f));
     assert.deepEqual(found.sort(), [path.join('models', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'), 'runtime'].sort());
-    assert.ok(!found.some((f) => /qwen3-asr-1\.7b-q8_0\.gguf/i.test(path.basename(f)) && !f.includes('mmproj')), 'not the model, in any case');
   });
 
   test('the transcript is taken out of Qwen3-ASR answers that still have their markers', () => {
@@ -236,6 +235,8 @@ describe('dictation install and fallback', { skip: process.platform !== 'linux' 
       assert.deepEqual(ranges, ['/models/Qwen3-ASR/asr.gguf 100000']);
       assert.ok(states.some((s) => s.state === 'installing' && s.progress?.label === 'Speech model'));
       assert.ok(fs.readFileSync(path.join(dir, 'models', 'asr.gguf')).equals(model));
+      // Gone before the download: on Windows the old model passes for the new one by name.
+      assert.equal(fs.existsSync(path.join(dir, 'models', 'Qwen3-ASR-1.7B-Q8_0.gguf')), false);
 
       const text = await d.transcribe(wav(32000));
       assert.equal(text, 'hello from cpu, max 48', 'the CPU build ran, with the token cap for two seconds');

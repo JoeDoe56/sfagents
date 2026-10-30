@@ -420,6 +420,8 @@ export class Dictation {
     if (this.status_.state !== 'missing' && this.status_.state !== 'error') return Promise.resolve();
     this.installing = (async () => {
       try {
+        // The old model has the new one's name in other letters: on Windows it would pass for it.
+        this.removeLlamaCpp();
         const st = this.readState();
         if (Object.keys(st.runtimes).length === 0) await this.installRuntime(this.choices(st)[0]!);
         await this.downloadModel(this.asrModel, 'Speech model', (progress) => this.set({ state: 'installing', downloadSize: this.status_.downloadSize, progress }));
@@ -606,6 +608,8 @@ export class Dictation {
         throw new Error(`${path.basename(file)} did not match its checksum; it was removed. Try again.`);
       }
     }
+    // A file there under the same name in other letters (Windows) would keep its letters.
+    fs.rmSync(file, { force: true });
     fs.renameSync(part, file);
   }
 
@@ -919,7 +923,7 @@ export class Dictation {
 
   /** What the llama.cpp version of dictation downloaded (about 2.5 GB), now unused. */
   private removeLlamaCpp(): void {
-    for (const f of llamaLeftovers(this.dir, [this.asrModel, this.ttsModel].map((m) => path.basename(m.name)))) {
+    for (const f of llamaLeftovers(this.dir)) {
       try {
         fs.rmSync(f, { recursive: true, force: true });
       } catch {
@@ -972,22 +976,19 @@ function silence(seconds: number): Buffer {
  * The llama.cpp version's files that are in the folder, by their exact names.
  * Windows and macOS compare names without case, and the old model's name
  * (Qwen3-ASR-1.7B-Q8_0.gguf) is the new one's (qwen3-asr-1.7b-q8_0.gguf) in
- * other letters: removing it by name there removed the new model. So only a
- * name listed exactly as the old one is, and none of the current models'.
+ * other letters: removing the old one by name there removes the new model.
+ * A name listed exactly as the old one is the old file.
  */
-export function llamaLeftovers(dir: string, keep: readonly string[]): string[] {
-  const kept = new Set(keep.flatMap((k) => [k, `${k}.part`]).map((k) => k.toLowerCase()));
+export function llamaLeftovers(dir: string): string[] {
   const out: string[] = [];
   for (const f of LLAMA_LEFTOVERS) {
-    const base = path.basename(f);
-    if (kept.has(base.toLowerCase())) continue;
     let names: string[];
     try {
       names = fs.readdirSync(path.join(dir, path.dirname(f)));
     } catch {
       continue;
     }
-    if (names.includes(base)) out.push(path.join(dir, f));
+    if (names.includes(path.basename(f))) out.push(path.join(dir, f));
   }
   return out;
 }
