@@ -26,6 +26,8 @@ interface Segment {
   id: string;
   text: string;
   status?: string;
+  /** A step shown as something else (a message to the person). */
+  hidden?: boolean;
 }
 
 interface Approval {
@@ -786,7 +788,7 @@ export class Tui {
         if (seg.kind === 'text') {
           // Finished text only (the reply arrives whole), as on the pages.
           if (i < segs.length - 1 && seg.text.trim()) out.push('', color.magenta(color.bold(this.agent?.id ?? 'agent')), ...indent(wrap(clean(seg.text), w)));
-        } else out.push(this.activityLine(seg, w));
+        } else if (!seg.hidden) out.push(this.activityLine(seg, w));
       });
       if (!this.approvals.length) out.push('', color.dim(`  ${this.agent?.id ?? 'The agent'} is working…`));
     }

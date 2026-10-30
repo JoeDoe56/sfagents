@@ -190,7 +190,7 @@ describe('sections: model tools and grants', () => {
     seed(conversation, tree, [['the secret project codename is OSPREY', 'ok']]);
     const script: Script = (req, n, agent) => {
       if (agent === 'main') {
-        if (n === 0) return { toolCalls: [{ name: 'message_agent', args: { agent: 'reader', message: 'find the codename' } }, { name: 'message_agent', args: { agent: 'blind', message: 'find the codename' } }] };
+        if (n === 0) return { toolCalls: [{ name: 'message_agent', args: { agent: 'reader', message: 'find the codename', wait: true } }, { name: 'message_agent', args: { agent: 'blind', message: 'find the codename', wait: true } }] };
         return { text: 'done' };
       }
       if (agent === 'reader') {
@@ -204,8 +204,9 @@ describe('sections: model tools and grants', () => {
     const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
     await runtime.createSession().run('delegate');
     const readerTools = (providers.get('reader')!.requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name).sort();
-    assert.deepEqual(readerTools, ['fetch_section', 'list_sections', 'search_conversation', 'search_sections']);
-    assert.deepEqual(providers.get('blind')!.requests[0]!.request.tools, []);
+    // Besides talking back to main (which every agent in a thread can), only read access.
+    assert.deepEqual(readerTools, ['fetch_section', 'list_sections', 'message_agent', 'search_conversation', 'search_sections', 'wait_for_messages']);
+    assert.deepEqual((providers.get('blind')!.requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name).sort(), ['message_agent', 'wait_for_messages']);
     const readerReq = providers.get('reader')!.requests[1]!.messages as ChatMessage[];
     const toolOut = readerReq.filter((m) => m.role === 'tool').map((m) => (m as { content: string }).content);
     assert.match(toolOut[0]!, /OSPREY/);

@@ -9,6 +9,7 @@ export const FORMAT_VERSION = 1;
 /** A thread is the persistent conversation between two agents (see agents/threads.ts). */
 export type ConversationKind = 'main' | 'transcript' | 'thread';
 export type MessageRole = 'user' | 'assistant' | 'tool';
+export type MessageEvent = 'reaction' | 'agent';
 export type ToolMessageStatus = 'ok' | 'error' | 'denied' | 'cancelled' | 'not_started';
 export type RunStatus = 'GOAL' | 'ERROR' | 'MAX_TURNS' | 'TIMEOUT' | 'CANCELLED';
 
@@ -68,8 +69,12 @@ export interface MessageRecord extends RecordBase {
   attachments?: AttachmentRef[];
   /** User messages: an inline reply to this message (by id). */
   replyTo?: string;
-  /** User messages SF Agents wrote for the person, not typed by them: "reaction" (they reacted to a message). */
-  event?: 'reaction';
+  /**
+   * User messages SF Agents wrote, not typed by the person: "reaction" (they
+   * reacted to a message), "agent" (another agent's message that reached the
+   * agent while it worked; `agent` is the one it is from).
+   */
+  event?: MessageEvent;
 }
 
 export interface RunStartRecord extends RecordBase {

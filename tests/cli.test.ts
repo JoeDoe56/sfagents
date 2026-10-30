@@ -149,7 +149,7 @@ describe('sfagents CLI', () => {
       const system = String(body.messages[0]!['content']);
       if (system.startsWith('You are worker')) return { text: 'worker result 99' };
       return lastTool(body) === undefined
-        ? { toolCalls: [{ name: 'message_agent', args: { agent: 'worker', message: 'compute' } }] }
+        ? { toolCalls: [{ name: 'message_agent', args: { agent: 'worker', message: 'compute', wait: true } }] }
         : { text: `Final: ${JSON.parse(lastTool(body)!).reply}` };
     };
     const dir = project({ tools: { allow: ['1-worker.json'] } }, (d) =>

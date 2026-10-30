@@ -88,6 +88,14 @@ export type RuntimeEvent =
       /** Token usage the provider reported for one model request. */
       usage: TokenUsage;
     })
+  | (EventBase & {
+      type: 'agent_message';
+      /** The agent it is from. */
+      from: string;
+      /** Thread key it came through. */
+      thread?: string;
+      text: string;
+    })
   | (EventBase & { type: 'warning'; message: string })
   | (EventBase & { type: 'error'; message: string })
   | (EventBase & { type: 'agent_end'; result: AgentRunResult });

@@ -99,6 +99,10 @@ export function describeCall(name: string, argsJson: string): string {
       return `Asked ${str(args['agent']) ?? str(args['child']) ?? 'a child agent'}${str(args['task']) ? `: ${clip(String(args['task']), 60)}` : ''}`;
     case 'message_agent':
       return `Messaged ${str(args['agent']) ?? 'an agent'}${str(args['message']) ? `: ${clip(String(args['message']), 60)}` : ''}`;
+    case 'wait_for_messages':
+      return 'Waited for messages';
+    case 'message_user':
+      return 'Sent a message';
     case 'create_artifact':
       if (str(args['id'])) return `Updated ${str(args['id'])}${str(args['title']) ? ` “${clip(String(args['title']), 50)}”` : ''}`;
       return `Created ${str(args['title']) ? `“${clip(String(args['title']), 60)}”` : 'an artifact'}`;
@@ -127,6 +131,24 @@ export function describeCall(name: string, argsJson: string): string {
       }
       return `Used ${name}`;
   }
+}
+
+/** The text of a message_user call. */
+export function messageUserText(argsJson: string): string | undefined {
+  try {
+    const text = (JSON.parse(argsJson) as { text?: unknown }).text;
+    return typeof text === 'string' && text.trim() ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The thread a mid-run message from another agent came through: the one the receiving agent shares with it. */
+function agentThread(content: string, from: string, run: string, state: ConversationState): { thread?: string } {
+  const to = state.runs.get(run)?.start?.agent;
+  if (!to) return {};
+  const instance = Number(/^\[from [^,\]]*, thread (\d+)/.exec(content)?.[1] ?? 1);
+  return { thread: threadKey(to, from, instance) };
 }
 
 /** Display items for messages with seq > `afterSeq`, at most `limit` from the end. */
@@ -199,7 +221,11 @@ export function displayItems(
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
       const m = record as MessageRecord;
-      if (m.role === 'user' && m.event) {
+      if (m.role === 'user' && m.event === 'agent') {
+        // Another agent's message that reached the agent while it worked.
+        const text = m.content.replace(/^\[from [^\]]*\]\s*/, '');
+        items.push({ kind: 'activity', id: m.id, seq: m.seq, time: m.time, text: `${m.agent}: ${clip(text, 80)}`, status: 'ok', agent: m.agent, ...agentThread(m.content, m.agent, m.run, state) });
+      } else if (m.role === 'user' && m.event) {
         // A note SF Agents wrote for the person (a reaction): the badge shows it.
       } else if (m.role === 'user') {
         const replyTo = roots.messages.get(m.id);
@@ -215,6 +241,12 @@ export function displayItems(
             continue;
           }
           if (c.name === ChatToolNames.REPLY_INLINE) continue;
+          // A message to the person mid-turn: a bubble like any reply.
+          const said = c.name === 'message_user' ? messageUserText(c.arguments) : undefined;
+          if (said !== undefined) {
+            items.push({ kind: 'assistant', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: said, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
+            continue;
+          }
           items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
         }
       }

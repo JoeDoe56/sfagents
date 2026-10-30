@@ -396,6 +396,7 @@ function decorate(out) {
 
 /** A tool call: a line, a link to a thread between agents, and an artifact's card after the call that made it. */
 function pushActivity(push, key, it) {
+  if (it.hidden) return; // a step that shows as something else (a message to the person)
   if (it.thread) push({ key, type: 'threadlink', text: it.text, status: it.status, thread: it.thread, agent: it.agent });
   else push({ key, type: 'activity', text: it.text, status: it.status });
   if (it.artifact && it.status !== 'error' && it.status !== 'denied') {

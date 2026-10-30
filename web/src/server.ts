@@ -72,7 +72,7 @@ import type { LhmReader } from './lhm.js';
 import type { Privileges } from './privileges.js';
 import { runningVersion } from './version.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
-import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
+import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, messageUserText, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
 import { isEmoji, ReactionStore } from './reactions.js';
 import { LogBook } from './logs.js';
 import { SharedViewStore } from './shared-view.js';
@@ -153,6 +153,8 @@ interface LiveSegment {
   thread?: string;
   /** The artifact a call created or updated (set when it finishes). */
   artifact?: string;
+  /** A step the pages show as something else: a message to the person is its text segment. */
+  hidden?: boolean;
 }
 
 interface LiveRun {
@@ -287,6 +289,7 @@ export class WebServer {
   private read: { id: string; time: string } | null = null;
   /** Messages sent while the agent worked, oldest first. */
   private pending: PendingInput[] = [];
+  private inputWaiters: Array<() => void> = [];
   /** When the person last used a page or the terminal, and the agent message they have seen. */
   private lastActivity = 0;
   private seen: { id: string; time: string } | null = null;
@@ -1853,7 +1856,27 @@ export class WebServer {
     if (!this.live) return this.startRun(p);
     this.pending.push(p);
     this.publishPending();
+    const wake = this.inputWaiters.splice(0);
+    wake.forEach((w) => w());
     return p.id;
+  }
+
+  /** Resolves when a message is waiting for the running agent (it asked the person something). */
+  private waitForInput(signal: AbortSignal): Promise<void> {
+    if (this.pending.length) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const done = () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        this.inputWaiters = this.inputWaiters.filter((w) => w !== done);
+        reject(Object.assign(new Error('Cancelled.'), { name: 'AbortError' }));
+      };
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.inputWaiters.push(done);
+    });
   }
 
   /** Messages waiting for the agent, as the pages show them (Delivered). */
@@ -1946,6 +1969,7 @@ export class WebServer {
         }
       },
       note: () => this.receiptNote(),
+      waitForInput: (signal) => this.waitForInput(signal),
     });
     // The generator records the user message synchronously on the first next().
     const first = it.next();
@@ -2026,6 +2050,21 @@ export class WebServer {
       case 'tool_request': {
         // keep_section only confirms the topic; it is not worth a line in the chat.
         if (event.name === 'keep_section') return;
+        // A message to the person mid-turn: a finished bubble now (the hidden step after it ends the text, so later text starts a new one).
+        const said = root && event.name === 'message_user' ? messageUserText(JSON.stringify(event.args)) : undefined;
+        if (said !== undefined) {
+          // Hidden steps on both sides keep it apart from text streamed before or after.
+          const id = `${event.agentPath.join('/')}:${event.callId}`;
+          const before: LiveSegment = { kind: 'activity', id: `${id}:before`, text: '', status: 'ok', hidden: true };
+          live.segments.push(before);
+          this.broadcast('activity', { run: live.id, segment: before });
+          live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said });
+          this.broadcast('delta', { run: live.id, text: said });
+          const step: LiveSegment = { kind: 'activity', id, text: 'Sent a message', status: 'running', hidden: true };
+          live.segments.push(step);
+          this.broadcast('activity', { run: live.id, segment: step });
+          return;
+        }
         const prefix = root ? '' : `${event.agentPath.slice(1).join(' › ')}: `;
         const seg: LiveSegment = { kind: 'activity', id: `${event.agentPath.join('/')}:${event.callId}`, text: prefix + describeCall(event.name, JSON.stringify(event.args)), status: 'running' };
         if (event.name === 'message_agent' && typeof event.args['agent'] === 'string') {
@@ -2068,6 +2107,16 @@ export class WebServer {
         if (event.name === 'message_agent') this.publishThreads();
         // The agent's 👍 shows on the message at once (the result is recorded just after this event).
         if (event.name === 'react_to_message') setTimeout(() => this.broadcast('agent_reactions', { reactions: chatEffects(this.conversation.state).reactions }), 20);
+        return;
+      }
+      case 'agent_message': {
+        // Another agent's message reached the agent replying to the person.
+        if (!root) return;
+        const text = event.text.replace(/^\[from [^\]]*\]\s*/, '');
+        const instance = Number(/^\[from [^,\]]*, thread (\d+)/.exec(event.text)?.[1] ?? 1);
+        const seg: LiveSegment = { kind: 'activity', id: `mail:${live.segments.length}`, text: `${event.from}: ${text.replace(/\s+/g, ' ').slice(0, 80)}`, status: 'ok', agent: event.from, thread: threadKey(event.agentPath[0]!, event.from, instance) };
+        live.segments.push(seg);
+        this.broadcast('activity', { run: live.id, segment: seg });
         return;
       }
       case 'warning':

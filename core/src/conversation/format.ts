@@ -306,7 +306,7 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         status: status as MessageRecord['status'],
         attachments: attachments(meta, p),
         replyTo: str(meta, 'replyTo', false, p),
-        event: str(meta, 'event', false, p) === 'reaction' ? 'reaction' : undefined,
+        event: ((e) => (e === 'reaction' || e === 'agent' ? e : undefined))(str(meta, 'event', false, p)),
       };
       if (record.role === 'tool' && (!record.callId || !record.tool)) p.push('tool messages need "callId" and "tool"');
       break;

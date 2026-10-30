@@ -157,7 +157,7 @@ describe('persistent conversation (runtime)', () => {
     const first = openRuntime(dir, (req, n, agent) =>
       agent === 'main'
         ? n === 0
-          ? { toolCalls: [{ name: 'message_agent', args: { agent: 'helper', message: 'Say the password.' } }] }
+          ? { toolCalls: [{ name: 'message_agent', args: { agent: 'helper', message: 'Say the password.', wait: true } }] }
           : { text: `Helper said: ${JSON.parse(lastToolContent(req)!).reply}` }
         : { text: 'swordfish' },
     );

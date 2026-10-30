@@ -616,7 +616,7 @@ class StoreRunRecorder implements RunRecorder {
     private readonly parentCallId: string | undefined,
   ) {}
 
-  private message(fields: Omit<MessageRecord, 'kind' | 'seq' | 'time' | 'id' | 'run' | 'agent' | 'section'>): MessageRecord {
+  private message(fields: Omit<MessageRecord, 'kind' | 'seq' | 'time' | 'id' | 'run' | 'agent' | 'section'> & { agent?: string }): MessageRecord {
     const state = this.store.state;
     const section = this.store === this.service.main && fields.role !== 'tool' ? (state.currentSection ?? undefined) : undefined;
     return this.store.append({
@@ -631,6 +631,10 @@ class StoreRunRecorder implements RunRecorder {
 
   user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction'): string {
     return this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}), ...(replyTo ? { replyTo } : {}), ...(event ? { event } : {}) }).id;
+  }
+
+  note(from: string, content: string): void {
+    this.message({ role: 'user', content, event: 'agent', agent: from });
   }
 
   start(node: AgentNode): void {
