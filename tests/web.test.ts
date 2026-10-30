@@ -317,6 +317,60 @@ describe('web server', () => {
     }
   });
 
+  test('inline replies join a thread, tell the model what they answer, and reactions are kept', async () => {
+    let seen: unknown;
+    const s = await startServer((req) => {
+      seen = req.messages[req.messages.length - 1];
+      return { text: 'answer' };
+    });
+    const ev = events(s.base);
+    try {
+      await ev.wait((e) => e.event === 'state');
+      assert.equal((await postJson(s.base, '/api/messages', { text: 'first question' })).status, 202);
+      const end1 = await ev.wait((e) => e.event === 'run_end');
+      const items1 = end1.data['items'] as Array<{ kind: string; id: string; replyTo?: string }>;
+      const root = items1.find((i) => i.kind === 'user')!.id;
+      const answer = items1.find((i) => i.kind === 'assistant')!.id;
+
+      assert.equal((await postJson(s.base, '/api/messages', { text: 'about that', replyTo: 'm999' })).status, 400);
+      ev.received.length = 0;
+      // A reply starts a thread on the message it answers; the agent's answer to it joins that thread.
+      assert.equal((await postJson(s.base, '/api/messages', { text: 'about that', replyTo: answer })).status, 202);
+      const start = await ev.wait((e) => e.event === 'run_start');
+      assert.equal(start.data['replyTo'], answer);
+      const end2 = await ev.wait((e) => e.event === 'run_end');
+      const items2 = end2.data['items'] as Array<{ kind: string; id: string; text: string; replyTo?: string }>;
+      const reply = items2.find((i) => i.kind === 'user' && i.text === 'about that')!;
+      assert.equal(reply.replyTo, answer);
+      assert.equal(items2[items2.length - 1]!.replyTo, answer);
+      assert.equal(items2.find((i) => i.text === 'first question')!.replyTo, undefined);
+      assert.match((seen as { content: string }).content, /^\[Inline reply to this earlier message: "answer"\]\n\nabout that$/);
+      // A reply to a reply stays in the same thread.
+      ev.received.length = 0;
+      assert.equal((await postJson(s.base, '/api/messages', { text: 'and more', replyTo: reply.id })).status, 202);
+      const end3 = await ev.wait((e) => e.event === 'run_end');
+      const items3 = end3.data['items'] as Array<{ kind: string; text: string; replyTo?: string }>;
+      assert.equal(items3.find((i) => i.text === 'and more')!.replyTo, answer);
+      // It survives a reload of the conversation.
+      assert.match(fs.readFileSync(path.join(s.dir, '.sfagents', 'conversation.md'), 'utf8'), /"replyTo":"m\d+"/);
+
+      assert.equal((await postJson(s.base, '/api/reactions', { id: root, emoji: 'hello' })).status, 400);
+      assert.equal((await postJson(s.base, '/api/reactions', { id: 'm999', emoji: '👍' })).status, 400);
+      const set = await postJson(s.base, '/api/reactions', { id: root, emoji: '❤️' });
+      assert.equal(set.status, 200);
+      assert.deepEqual(set.json['reactions'], { [root]: '❤️' });
+      await ev.wait((e) => e.event === 'reactions');
+      const state = JSON.parse((await request(s.base, '/api/state')).body.toString()) as { reactions: Record<string, string> };
+      assert.equal(state.reactions[root], '❤️');
+      assert.deepEqual((await postJson(s.base, '/api/reactions', { id: root, emoji: null })).json['reactions'], {});
+      assert.equal((await postJson(s.base, '/api/reactions', { id: answer, emoji: '1️⃣' })).status, 200);
+      assert.equal((await postJson(s.base, '/api/reactions', { id: answer, emoji: '🏳️‍🌈' })).status, 200);
+    } finally {
+      ev.close();
+      await s.stop();
+    }
+  });
+
   test('attachments sent with a message reach the model and are served back', async () => {
     let seen: unknown;
     const s = await startServer((req) => {

@@ -708,14 +708,14 @@ export class AgentSession {
    * starts. Yields events as they happen and returns the structured result
    * of the root agent's turn.
    */
-  async *send(input: string, options: { signal?: AbortSignal; attachments?: AttachmentRef[] } = {}): AsyncGenerator<RuntimeEvent, AgentRunResult> {
+  async *send(input: string, options: { signal?: AbortSignal; attachments?: AttachmentRef[]; replyTo?: string } = {}): AsyncGenerator<RuntimeEvent, AgentRunResult> {
     if (this.busy) throw new Error('A turn is already running in this session');
     this.busy = true;
     try {
       // One definition for the whole turn, even if the agent's file changes meanwhile.
       const node = this.node;
       const recorder = this.conversation.beginRootRun(node);
-      recorder.user(input, options.attachments);
+      recorder.user(input, options.attachments, options.replyTo);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;
       const definition = node.definition;

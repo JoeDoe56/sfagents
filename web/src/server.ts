@@ -67,7 +67,8 @@ import type { LhmReader } from './lhm.js';
 import type { Privileges } from './privileges.js';
 import { runningVersion } from './version.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
-import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, type DisplayApproval, type DisplayItem } from './display.js';
+import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
+import { isEmoji, ReactionStore } from './reactions.js';
 
 export const DEFAULT_PORT = 8093;
 export const DEFAULT_HOST = '127.0.0.1';
@@ -150,6 +151,8 @@ interface LiveRun {
   id: string;
   controller: AbortController;
   segments: LiveSegment[];
+  /** An inline reply's run: the first message of its reply thread. */
+  replyTo?: string;
 }
 
 interface PendingApproval {
@@ -270,6 +273,7 @@ export class WebServer {
   private readonly startedAt = Date.now();
   private cpuMark = { at: Date.now(), usage: process.cpuUsage() };
   private readonly agentSettings: AgentSettingsStore;
+  private readonly reactions: ReactionStore;
   private readonly windows = new ModelWindows();
   readonly registry: ProviderRegistry;
   private projectWatcher: ProjectWatcher | undefined;
@@ -370,6 +374,7 @@ export class WebServer {
     });
     this.session = this.runtime.createSession();
     this.agentSettings = new AgentSettingsStore(options.conversation.dir);
+    this.reactions = new ReactionStore(options.conversation.dir);
     for (const [agent, provider] of Object.entries(this.agentSettings.get().accounts ?? {})) this.accounts.set(agent, provider);
     this.accounts.onChange((agent, provider) => {
       const settings = this.agentSettings.get();
@@ -912,6 +917,14 @@ export class WebServer {
           return this.openEvents(req, res);
         case 'POST messages':
           return this.postMessage(req, res);
+        case 'POST reactions': {
+          const body = (await readJson(req)) as { id?: unknown; emoji?: unknown };
+          if (typeof body.id !== 'string' || !this.conversation.state.messages.some((m) => m.id === body.id && m.role !== 'tool')) throw new HttpError(400, 'Unknown message.');
+          if (body.emoji !== null && (typeof body.emoji !== 'string' || !isEmoji(body.emoji))) throw new HttpError(400, '"emoji" must be one emoji, or null to remove it.');
+          const reactions = this.reactions.set(body.id, body.emoji);
+          this.broadcast('reactions', { reactions });
+          return sendJson(res, 200, { reactions });
+        }
         case 'POST cancel':
           await readJson(req);
           this.live?.controller.abort(new Error('cancelled by user'));
@@ -1438,7 +1451,8 @@ export class WebServer {
       more,
       artifacts: this.displayArtifacts(),
       sections: displaySections(this.conversation.state),
-      live: this.live ? { id: this.live.id, segments: this.live.segments } : null,
+      live: this.live ? { id: this.live.id, segments: this.live.segments, ...(this.live.replyTo ? { replyTo: this.live.replyTo } : {}) } : null,
+      reactions: this.reactions.all(),
       approvals: [...this.approvals.values()].map((a) => a.display),
       notices: [
         ...this.conversation.notices.filter((n) => n.kind === 'interrupted' || n.kind === 'recovered').map((n) => n.message),
@@ -1570,8 +1584,10 @@ export class WebServer {
   // Runs
 
   private async postMessage(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = (await readJson(req)) as { text?: unknown; attachments?: unknown };
+    const body = (await readJson(req)) as { text?: unknown; attachments?: unknown; replyTo?: unknown };
     const text = typeof body.text === 'string' ? body.text : '';
+    const replyTo = typeof body.replyTo === 'string' && body.replyTo ? body.replyTo : undefined;
+    if (replyTo && !this.conversation.state.messages.some((m) => m.id === replyTo && (m.role === 'user' || (m.role === 'assistant' && m.content.trim())))) throw new HttpError(400, 'The message being replied to is not in the conversation.');
     const ids = Array.isArray(body.attachments) ? body.attachments : [];
     if (text.length > MAX_MESSAGE_CHARS) throw new HttpError(413, `Messages are limited to ${MAX_MESSAGE_CHARS} characters.`);
     if (ids.length > MAX_ATTACHMENTS) throw new HttpError(400, `At most ${MAX_ATTACHMENTS} attachments per message.`);
@@ -1583,23 +1599,25 @@ export class WebServer {
     }
     if (!text.trim() && attachments.length === 0) throw new HttpError(400, 'The message is empty.');
     if (this.live) throw new HttpError(409, 'The agent is still working on the previous message.');
-    const run = this.startRun(text, attachments);
+    const run = this.startRun(text, attachments, replyTo);
     sendJson(res, 202, { run });
   }
 
-  private startRun(text: string, attachments: AttachmentRef[]): string {
+  private startRun(text: string, attachments: AttachmentRef[], replyTo?: string): string {
     const id = `w${randomBytes(6).toString('hex')}`;
     const live: LiveRun = { id, controller: new AbortController(), segments: [] };
     this.live = live;
-    const it = this.session.send(text, { signal: live.controller.signal, attachments });
+    const it = this.session.send(text, { signal: live.controller.signal, attachments, ...(replyTo ? { replyTo } : {}) });
     // The generator records the user message synchronously on the first next().
     const first = it.next();
     const stored = [...this.conversation.state.messages].reverse().find((m) => m.role === 'user');
     if (stored) {
-      const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment) };
+      const root = replyTo ? replyRoots(this.conversation.state).messages.get(stored.id) : undefined;
+      if (root) live.replyTo = root;
+      const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment), ...(root ? { replyTo: root } : {}) };
       this.broadcast('user', { run: id, item });
     }
-    this.broadcast('run_start', { run: id });
+    this.broadcast('run_start', { run: id, ...(live.replyTo ? { replyTo: live.replyTo } : {}) });
     this.runPromise = (async () => {
       let result: AgentRunResult | undefined;
       let failure: unknown;

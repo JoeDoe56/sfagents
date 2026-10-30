@@ -51,10 +51,17 @@ function escapeAttr(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
-/** Builds the provider user message for a stored user message. */
-export function userMessageFor(m: MessageRecord, resolve?: (ref: AttachmentRef) => Buffer | undefined): UserMessage {
-  if (!m.attachments?.length) return { role: 'user', content: m.content };
-  let text = m.content;
+/** How an inline reply tells the model which message it answers. */
+export function replyPreamble(quoted: string): string {
+  const one = quoted.replace(/\s+/g, ' ').trim();
+  return `[Inline reply to this earlier message: "${one.length > 400 ? `${one.slice(0, 399)}…` : one}"]\n\n`;
+}
+
+/** Builds the provider user message for a stored user message; `quoted` is the message an inline reply answers. */
+export function userMessageFor(m: MessageRecord, resolve?: (ref: AttachmentRef) => Buffer | undefined, quoted?: string): UserMessage {
+  const lead = quoted !== undefined ? replyPreamble(quoted) : '';
+  if (!m.attachments?.length) return { role: 'user', content: lead + m.content };
+  let text = lead + m.content;
   const images: UserContentPart[] = [];
   for (const a of m.attachments) {
     const data = resolve?.(a);

@@ -1,0 +1,230 @@
+/* Messages-style interactions: the hold menu and reactions row, reaction
+ * badges, inline reply threads, the reply view, send and receive motion. */
+
+/* A held bubble: no native callout or text selection fights the menu (Select turns it back on). */
+@media (pointer: coarse) {
+  .msg .bubble { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+}
+.msg .bubble { touch-action: manipulation; transition: transform 0.32s cubic-bezier(0.25, 1, 0.5, 1); }
+.msg .bubble.bm-pressing { transform: scale(0.95); transition-duration: 0.5s; }
+.msg .bubble.selectable { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+.bubble.bm-hidden { visibility: hidden; }
+
+.bm-layer { position: fixed; inset: 0; z-index: 2000; -webkit-user-select: none; user-select: none; touch-action: none; }
+.bm-layer.closing { pointer-events: none; }
+.bm-dim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.42); -webkit-backdrop-filter: blur(18px) saturate(1.2); backdrop-filter: blur(18px) saturate(1.2); }
+.bm-dim.light { background: rgba(0, 0, 0, 0.3); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.bm-lift { position: absolute; margin: 0; transform-origin: 0 0; pointer-events: none; display: flex; flex-direction: column; }
+.bm-lift.out { align-items: flex-end; }
+.bm-lift.in { align-items: flex-start; }
+
+.bm-pill, .bm-menu, .bm-picker { position: absolute; background: rgba(44, 44, 46, 0.74); -webkit-backdrop-filter: blur(30px) saturate(1.8); backdrop-filter: blur(30px) saturate(1.8); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), inset 0 0.5px 0 rgba(255, 255, 255, 0.12); }
+
+.bm-pill { display: flex; align-items: center; gap: 2px; padding: 5px 6px; border-radius: 26px; max-width: calc(100vw - 24px); overflow-x: auto; scrollbar-width: none; }
+.bm-pill::-webkit-scrollbar { display: none; }
+.bm-emoji {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  font: 26px/1 "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Twemoji Mozilla", sans-serif;
+  color: rgba(235, 235, 245, 0.75);
+  cursor: pointer;
+  transition: transform 0.18s cubic-bezier(0.25, 1, 0.5, 1), background-color 0.15s;
+}
+.bm-emoji.hot, .bm-emoji:focus-visible { background: rgba(255, 255, 255, 0.14); transform: scale(1.22); outline: none; }
+.bm-emoji.chosen { background: var(--out); }
+.bm-emoji:active { transform: scale(0.9); }
+
+.bm-menu { min-width: 226px; padding: 8px; border-radius: 26px; display: flex; flex-direction: column; }
+.bm-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 14px 0 12px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  font-size: 17px;
+  text-align: left;
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 0.12s;
+}
+.bm-item svg { flex: none; opacity: 0.95; }
+.bm-item.hot, .bm-item:focus-visible { background: rgba(255, 255, 255, 0.13); outline: none; }
+.bm-sep { height: 0.5px; margin: 6px 14px; background: rgba(235, 235, 245, 0.22); }
+
+.bm-picker { width: min(352px, calc(100vw - 24px)); border-radius: 26px; padding: 10px 6px 6px; display: flex; flex-direction: column; }
+.bm-picker-field {
+  margin: 0 6px 6px;
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(118, 118, 128, 0.24);
+  font-size: 16px;
+  color: #fff;
+  outline: none;
+}
+.bm-picker-field::placeholder { color: rgba(235, 235, 245, 0.45); }
+.bm-picker-scroll { height: min(300px, 40vh); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; touch-action: pan-y; }
+.bm-picker-head { position: sticky; top: 0; padding: 6px 10px 4px; font-size: 12px; font-weight: 600; color: rgba(235, 235, 245, 0.55); background: rgba(44, 44, 46, 0.92); z-index: 1; }
+.bm-picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); justify-items: center; padding: 0 2px 6px; }
+.bm-picker-grid .bm-emoji { width: 40px; height: 40px; font-size: 28px; }
+
+.bm-fly { position: fixed; z-index: 2002; pointer-events: none; font: 26px/1 "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+
+/* ---- reaction badges ---- */
+
+.msg.reacted { margin-top: 22px; }
+.reaction {
+  position: absolute;
+  top: -24px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 4px;
+  border-radius: 16px;
+  background: var(--out);
+  box-shadow: 0 0 0 2.5px var(--bg);
+  font: 18px/1 "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: pointer;
+}
+/* The two little dots that make it a thought bubble. */
+.reaction::before, .reaction::after { content: ""; position: absolute; border-radius: 50%; background: inherit; box-shadow: 0 0 0 2px var(--bg); }
+.reaction::before { width: 9px; height: 9px; bottom: -3px; }
+.reaction::after { width: 4px; height: 4px; bottom: -8px; }
+.in .reaction { right: -18px; }
+.in .reaction::before { left: 2px; }
+.in .reaction::after { left: -2px; }
+.out .reaction { left: -18px; background: #3a3a3c; }
+.out .reaction::before { right: 2px; }
+.out .reaction::after { right: -2px; }
+.reaction.pop { animation: reaction-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes reaction-pop { from { transform: scale(0.2); opacity: 0; } }
+
+/* ---- delivered / read ---- */
+
+.receipt { align-self: flex-end; margin: 3px 4px 2px; font-size: 11px; line-height: 13px; color: #8e8e93; }
+.receipt b { font-weight: 600; }
+.receipt.enter { animation: receipt-in 0.3s ease-out; }
+@keyframes receipt-in { from { opacity: 0; transform: translateY(-3px); } }
+
+/* ---- inline reply threads in the conversation ---- */
+
+.msg.threaded, .reply-count, .reply-quote, .receipt.threaded { position: relative; }
+/* The thread's line runs down the left, from the message replied to, past the replies. */
+.msg.threaded::before, .reply-count.line::before, .receipt.threaded::before {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: -12px;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: #3a3a3c;
+}
+.msg.threaded.in::before { bottom: auto; height: 22px; }
+/* Where it meets a reply from the agent, it curls into the bubble's top. */
+.msg.threaded.in::after {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 8px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid #3a3a3c;
+  border-right: 0;
+  border-top: 0;
+  border-bottom-left-radius: 9px;
+}
+.msg.threaded.in { padding-top: 16px; }
+.msg.threaded.out { padding-left: 34px; }
+.msg.threaded.thread-end.out::before { bottom: 50%; }
+
+.reply-count {
+  align-self: flex-start;
+  margin: 2px 0 2px 26px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: #0a84ff;
+  cursor: pointer;
+}
+.reply-count.line::before { left: -13px; top: -4px; bottom: -14px; }
+.receipt.threaded { align-self: stretch; text-align: right; }
+.receipt.threaded::before { top: -8px; bottom: -14px; }
+.reply-quote {
+  align-self: flex-start;
+  max-width: 60%;
+  margin-top: 12px;
+  padding: 3px 10px;
+  border: 1px solid #3a3a3c;
+  border-radius: 13px;
+  background: transparent;
+  font-size: 12px;
+  line-height: 16px;
+  color: #8e8e93;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+/* ---- the reply view: one thread over the blurred conversation ---- */
+
+.reply-view {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(24px) saturate(1.1);
+  backdrop-filter: blur(24px) saturate(1.1);
+}
+.reply-view .chat { position: absolute; inset: 0; }
+.reply-view .thread { justify-content: flex-end; min-height: 100%; padding-top: calc(76px + var(--safe-top)); }
+.reply-view.entering { animation: reply-in 0.28s ease-out; }
+.reply-view.leaving { animation: reply-out 0.22s ease-in forwards; pointer-events: none; }
+@keyframes reply-in { from { opacity: 0; } }
+@keyframes reply-out { to { opacity: 0; } }
+.reply-view .msg.threaded::before, .reply-view .msg.threaded::after, .reply-view .receipt.threaded::before { display: none; }
+.reply-view .msg.threaded { padding: 0; }
+.reply-close {
+  position: absolute;
+  top: calc(12px + var(--safe-top));
+  right: calc(14px + var(--safe-right));
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(118, 118, 128, 0.32);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  color: #fff;
+  cursor: pointer;
+}
+
+/* ---- motion ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .msg .bubble, .msg .bubble.bm-pressing { transition: none; transform: none; }
+  .reaction.pop, .receipt.enter, .reply-view.entering, .reply-view.leaving { animation: none; }
+}

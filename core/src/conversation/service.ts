@@ -569,7 +569,8 @@ export function toChatMessages(
   const list = messages ?? state.messages.filter((m) => m.seq > fromSeq);
   for (const m of list) {
     if (m.role === 'user') {
-      out.push(userMessageFor(m, resolveAttachment));
+      const quoted = m.replyTo ? state.messages.find((q) => q.id === m.replyTo)?.content : undefined;
+      out.push(userMessageFor(m, resolveAttachment, quoted));
     } else if (m.role === 'assistant') {
       const run = state.runs.get(m.run);
       const sameModel = run?.start?.provider === target.provider && run?.start?.model === target.model;
@@ -622,8 +623,8 @@ class StoreRunRecorder implements RunRecorder {
     }) as MessageRecord;
   }
 
-  user(content: string, attachments?: AttachmentRef[]): void {
-    this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}) });
+  user(content: string, attachments?: AttachmentRef[], replyTo?: string): void {
+    this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}), ...(replyTo ? { replyTo } : {}) });
   }
 
   start(node: AgentNode): void {

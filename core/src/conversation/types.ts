@@ -66,6 +66,8 @@ export interface MessageRecord extends RecordBase {
   status?: ToolMessageStatus;
   /** User messages: attached files. */
   attachments?: AttachmentRef[];
+  /** User messages: an inline reply to this message (by id). */
+  replyTo?: string;
 }
 
 export interface RunStartRecord extends RecordBase {

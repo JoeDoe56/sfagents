@@ -30,6 +30,8 @@ import { goToSignIn } from './api.js';
 import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
+import { installBubbleMenus } from './bubblemenu.js';
+import { springAnimate, springyScroll } from './springs.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
 configureUi({ scheme: 'dark' });
@@ -63,6 +65,11 @@ const state = {
   live: null, // { id, segments: [{kind, id, text, status}] }
   approvals: [],
   notices: [],
+  reactions: {}, // message id → emoji
+  outbox: [], // sent, not yet confirmed by the server: shown at once
+  reply: null, // the reply view: { root, to } (the thread's first message, the message replied to)
+  read: null, // { id, time }: when the agent picked up the last message
+
   limits: { maxUploadBytes: Infinity, maxAttachments: 20, maxMessageChars: 400000 },
   connected: false,
 };
@@ -236,6 +243,30 @@ function hashText(text) {
   return `${text.length}:${h}`;
 }
 
+/** The first message of an item's reply thread (itself when it starts one, or is in none). */
+function rootOf(id) {
+  return state.items.find((i) => i.id === id)?.replyTo ?? id;
+}
+
+/** The live run's finished text: a reply arrives whole, never as it streams. */
+function liveTexts() {
+  if (!state.live) return [];
+  const segs = state.live.segments;
+  return segs.filter((seg, i) => seg.kind === 'text' && i < segs.length - 1 && seg.text.trim());
+}
+
+const msgEntry = (it, side) => ({
+  key: it.id,
+  id: it.id,
+  type: 'msg',
+  side,
+  text: it.text,
+  attachments: it.attachments,
+  rich: side === 'in',
+  root: it.replyTo,
+  reaction: state.reactions[it.id],
+});
+
 /** Flattens items, the live run and approvals into keyed render entries. */
 function entries() {
   const out = [];
@@ -248,32 +279,114 @@ function entries() {
       push({ key: `stamp:${it.id}`, type: 'stamp', time: it.time });
     }
     if (Number.isFinite(t) && (it.kind === 'user' || it.kind === 'assistant')) lastTime = t;
-    if (it.kind === 'user') push({ key: it.id, type: 'msg', side: 'out', text: it.text, attachments: it.attachments });
-    else if (it.kind === 'assistant') push({ key: it.id, type: 'msg', side: 'in', text: it.text, rich: true });
+    if (it.kind === 'user') push(msgEntry(it, 'out'));
+    else if (it.kind === 'assistant') push(msgEntry(it, 'in'));
     else if (it.kind === 'activity') pushActivity(push, it.id, it);
     else push({ key: it.id, type: 'notice', text: it.text, level: /^Error/.test(it.text) ? 'error' : '' });
   }
+  for (const o of state.outbox) push({ key: o.key, type: 'msg', side: 'out', text: o.text, root: o.root, pending: true });
   if (state.live) {
+    const root = state.live.replyTo;
+    const shown = new Set(liveTexts());
     for (const seg of state.live.segments) {
-      if (seg.kind === 'text') push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true });
-      else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
+      if (seg.kind === 'text') {
+        if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
+      } else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
     }
-    const last = state.live.segments[state.live.segments.length - 1];
-    const waiting = !last || last.kind !== 'text' || state.live.stalled;
-    if (waiting && !state.approvals.length) push({ key: `typing:${state.live.id}`, type: 'typing' });
+    if (!state.approvals.length) push({ key: `typing:${state.live.id}`, type: 'typing', root });
   }
   for (const a of state.approvals) push({ key: `approval:${a.id}`, type: 'approval', approval: a, decision: answered.get(a.id) });
   for (const n of state.notices) push({ key: `notice:${n.id}`, type: 'notice', text: n.text, level: n.level });
-  // Group bubbles: first of a run gets spacing, last gets the tail.
+  return decorate(threaded(withReceipt(out)));
+}
+
+/** The entries of one reply thread, for the reply view. */
+function threadEntries(root) {
+  const out = [];
+  for (const it of state.items) {
+    if (it.id !== root && it.replyTo !== root) continue;
+    if (it.kind === 'user') out.push(msgEntry(it, 'out'));
+    else if (it.kind === 'assistant') out.push(msgEntry(it, 'in'));
+  }
+  for (const o of state.outbox) if (o.root === root) out.push({ key: o.key, type: 'msg', side: 'out', text: o.text, root, pending: true });
+  if (state.live?.replyTo === root) {
+    for (const seg of liveTexts()) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
+    if (!state.approvals.length) out.push({ key: `typing:${state.live.id}`, type: 'typing', root });
+  }
+  for (const e of out) e.root = undefined; // no thread lines inside the thread itself
+  return decorate(withReceipt(out));
+}
+
+/** "Delivered", then "Read" and when, under the last message sent. */
+function withReceipt(out) {
+  let last = -1;
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (out[i].type === 'msg' && out[i].side === 'out') {
+      last = i;
+      break;
+    }
+  }
+  const e = out[last];
+  if (!e || e.pending) return out;
+  let text = 'Delivered';
+  const answer = out.slice(last + 1).find((x) => x.type === 'msg' && x.side === 'in' && x.id);
+  const answerItem = answer && state.items.find((i) => i.id === answer.id);
+  const readAt = answerItem?.time ?? (state.read?.id === e.id ? state.read.time : null);
+  if (readAt) text = `<b>Read</b> ${escapeHtml(new Date(readAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }))}`;
+  out.splice(last + 1, 0, { key: `receipt:${e.key}`, type: 'receipt', html: text, root: e.root });
+  return out;
+}
+
+/**
+ * Inline replies in the conversation: the message replied to says how many
+ * replies it has; a run of replies hangs off a line from it, and a run that
+ * comes later starts with a small copy of that message.
+ */
+function threaded(out) {
+  const counts = new Map();
+  for (const it of state.items) if (it.replyTo && (it.kind === 'user' || it.kind === 'assistant')) counts.set(it.replyTo, (counts.get(it.replyTo) ?? 0) + 1);
+  for (const o of state.outbox) if (o.root) counts.set(o.root, (counts.get(o.root) ?? 0) + 1);
+  const result = [];
+  let open = null; // the thread whose line is running
+  const label = (n) => `${n} ${n === 1 ? 'Reply' : 'Replies'}`;
+  for (const e of out) {
+    const inThread = e.root && (e.type === 'msg' || e.type === 'typing' || e.type === 'receipt');
+    if (inThread && open !== e.root) {
+      const root = state.items.find((i) => i.id === e.root);
+      result.push({ key: `quote:${e.key}`, type: 'quote', root: e.root, text: root?.text ?? '' });
+      result.push({ key: `count:${e.key}`, type: 'replycount', root: e.root, text: label(counts.get(e.root) ?? 0), line: true });
+    }
+    if (inThread) e.threaded = true;
+    open = inThread ? e.root : e.type === 'stamp' ? open : null;
+    result.push(e);
+    if (e.type === 'msg' && e.id && counts.get(e.id)) {
+      result.push({ key: `count:${e.id}`, type: 'replycount', root: e.id, text: label(counts.get(e.id)), line: false });
+      open = e.id; // replies right after it continue its line
+    }
+  }
+  // Where each run of replies ends, the line ends; a reply count with replies right below it starts the line.
+  for (let i = 0; i < result.length; i++) {
+    const e = result[i];
+    if (e.type === 'replycount') e.line = !!result[i + 1]?.threaded && result[i + 1].root === e.root;
+    if (!e.threaded) continue;
+    const next = result.slice(i + 1).find((x) => x.type !== 'receipt');
+    e.threadEnd = !next || !next.threaded || next.root !== e.root;
+  }
+  // A thread that follows its own message straight away needs no copy of it.
+  return result.filter((e, i) => !(e.type === 'quote' && result[i - 1]?.type === 'replycount' && result[i - 1].root === e.root) && !(e.type === 'replycount' && e.line && result[i - 1]?.type === 'quote' && result[i - 2]?.type === 'replycount' && result[i - 2].root === e.root));
+}
+
+/** Group bubbles: first of a run gets spacing, last gets the tail. */
+function decorate(out) {
+  const sideOf = (x) => (x && x.type === 'msg' ? x.side : x && x.type === 'typing' ? 'in' : null);
   for (let i = 0; i < out.length; i++) {
     const e = out[i];
     if (e.type !== 'msg' && e.type !== 'typing') continue;
     const side = e.type === 'typing' ? 'in' : e.side;
-    const prev = out[i - 1];
-    const next = out[i + 1];
-    const sideOf = (x) => (x && x.type === 'msg' ? x.side : x && x.type === 'typing' ? 'in' : null);
-    e.first = sideOf(prev) !== side;
-    e.tail = sideOf(next) !== side;
+    let next = out[i + 1];
+    if (next?.type === 'receipt') next = out[i + 2];
+    e.first = sideOf(out[i - 1]) !== side || !!e.reaction;
+    e.tail = sideOf(next) !== side || !!next?.reaction;
   }
   return out;
 }
@@ -311,7 +424,7 @@ function buildEntry(e) {
       break;
     case 'msg': {
       el = document.createElement('div');
-      el.className = `msg ${e.side}${e.first ? ' first' : ''}${e.tail ? ' tail-room' : ''}`;
+      el.className = `msg ${e.side}${e.first ? ' first' : ''}${e.tail ? ' tail-room' : ''}${e.reaction ? ' reacted' : ''}${e.threaded ? ' threaded' : ''}${e.threadEnd ? ' thread-end' : ''}`;
       if (e.attachments?.length) {
         const media = document.createElement('div');
         media.className = 'media';
@@ -349,13 +462,42 @@ function buildEntry(e) {
         const { html, rich } = bubbleHtml(e);
         b.className = `bubble${rich ? ' rich' : ''}${e.tail ? ' tail' : ''}`;
         b.innerHTML = html;
+        if (e.id) b.tabIndex = -1;
+        if (e.reaction) {
+          const badge = document.createElement('span');
+          badge.className = 'reaction';
+          badge.textContent = e.reaction;
+          badge.setAttribute('aria-label', `Your reaction: ${e.reaction}`);
+          b.append(badge);
+        }
         el.append(b);
       }
       break;
     }
+    case 'receipt':
+      el = document.createElement('div');
+      el.className = `receipt${e.threaded ? ' threaded' : ''}`;
+      el.innerHTML = e.html;
+      break;
+    case 'quote': {
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'reply-quote';
+      el.textContent = e.text.replace(/\s+/g, ' ').trim();
+      el.setAttribute('aria-label', `Replies to “${el.textContent}”. Open the thread`);
+      el.addEventListener('click', () => openReplies(e.root));
+      break;
+    }
+    case 'replycount':
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = `reply-count${e.line ? ' line' : ''}`;
+      el.textContent = e.text;
+      el.addEventListener('click', () => openReplies(e.root));
+      break;
     case 'typing': {
       el = document.createElement('div');
-      el.className = `msg in${e.first ? ' first' : ''} tail-room`;
+      el.className = `msg in${e.first ? ' first' : ''} tail-room${e.threaded ? ' threaded' : ''}${e.threadEnd ? ' thread-end' : ''}`;
       const t = document.createElement('div');
       t.className = 'typing';
       t.setAttribute('aria-label', 'The agent is working');
@@ -403,7 +545,12 @@ function buildEntry(e) {
 function signature(e) {
   switch (e.type) {
     case 'msg':
-      return `msg|${e.side}|${e.first}|${e.tail}|${hashText(e.text || '')}|${(e.attachments || []).length}`;
+      return `msg|${e.side}|${e.first}|${e.tail}|${hashText(e.text || '')}|${(e.attachments || []).length}|${e.reaction || ''}|${e.threaded ? 't' : ''}${e.threadEnd ? 'e' : ''}`;
+    case 'receipt':
+      return `receipt|${e.html}|${e.threaded}`;
+    case 'quote':
+    case 'replycount':
+      return `${e.type}|${e.text}|${e.line}`;
     case 'activity':
       return `act|${e.status}|${e.text}`;
     case 'threadlink':
@@ -411,7 +558,7 @@ function signature(e) {
     case 'artifact':
       return `art|${e.artifact.id}|${e.artifact.rev}|${e.artifact.title}`;
     case 'typing':
-      return `typing|${e.first}`;
+      return `typing|${e.first}|${e.threaded}|${e.threadEnd}`;
     case 'approval':
       return `approval|${e.decision || ''}`;
     case 'stamp':
@@ -421,37 +568,195 @@ function signature(e) {
   }
 }
 
+// Every message bubble ever shown (by side and text), so a bubble rebuilt
+// (a live reply becoming a stored one, a reaction) does not arrive again.
+const shownTexts = new Set();
+let animateArrivals = false;
+let sendFrom = null; // { rect, at }: where the text was when it was sent
+const entryByKey = new Map();
+const sentAs = new Map(); // stored message id → the key its bubble had while it was being sent
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/** Brings `list` in line with `wanted`, rebuilding only what changed; returns the new message rows. */
+function renderList(list, wanted) {
+  const existing = new Map([...list.children].map((el) => [el.dataset.key, el]));
+  const arrivals = [];
+  const nodes = wanted.map((e) => {
+    entryByKey.set(e.key, e);
+    const sig = signature(e);
+    let el = existing.get(e.key);
+    // A sent message keeps its bubble (and the motion it is in) when the server's copy replaces it.
+    if (!el && sentAs.has(e.key)) {
+      el = existing.get(sentAs.get(e.key));
+      if (el) {
+        existing.delete(el.dataset.key);
+        el.dataset.key = e.key;
+        sentAs.delete(e.key);
+      }
+    }
+    if (!el || el.dataset.sig !== sig) {
+      const reactionBefore = el?.querySelector('.reaction')?.textContent;
+      el?.remove();
+      el = buildEntry(e);
+      el.dataset.key = e.key;
+      el.dataset.sig = sig;
+      if (e.reaction && reactionBefore !== e.reaction && animateArrivals) el.querySelector('.reaction')?.classList.add('pop');
+      if (e.type === 'receipt' && animateArrivals) el.classList.add('enter');
+      if (e.type === 'msg') {
+        const mark = `${e.side}|${hashText(e.text || '')}`;
+        if (!shownTexts.has(mark)) {
+          shownTexts.add(mark);
+          if (animateArrivals) arrivals.push({ el, e });
+        }
+      }
+    }
+    existing.delete(e.key);
+    return el;
+  });
+  for (const stale of existing.values()) stale.remove();
+  nodes.forEach((el, i) => {
+    if (list.children[i] !== el) list.insertBefore(el, list.children[i] ?? null);
+  });
+  return arrivals;
+}
+
+/**
+ * A new message's entrance: a sent one rises out of the text field into its
+ * bubble; a reply pops out of the typing bubble. Whatever was above slides
+ * up to make room instead of jumping.
+ */
+function animateArrivals_(list, arrivals, shift) {
+  if (reducedMotion()) return;
+  if (shift > 0 && shift < 600) springAnimate(list, [{ transform: `translateY(${shift}px)` }, { transform: 'none' }], { response: 0.45, bounce: 0.12 });
+  for (const { el, e } of arrivals) {
+    const bubble = el.querySelector('.bubble') ?? el.firstElementChild;
+    if (!bubble) continue;
+    if (e.side === 'out' && sendFrom && performance.now() - sendFrom.at < 4000) {
+      const from = sendFrom.rect;
+      sendFrom = null;
+      const to = bubble.getBoundingClientRect();
+      const dx = from.left + 2 - to.left;
+      const dy = from.bottom - to.bottom + (shift > 0 && shift < 600 ? -shift : 0);
+      const color = getComputedStyle(bubble).backgroundColor;
+      bubble.style.transformOrigin = 'left bottom';
+      springAnimate(bubble, [
+        { transform: `translate(${dx}px, ${dy}px) scale(${Math.min(1.2, from.width / Math.max(1, to.width)).toFixed(3)}, 1)`, backgroundColor: 'rgba(66, 143, 247, 0)' },
+        { backgroundColor: color, offset: 0.35 },
+        { transform: 'none', backgroundColor: color },
+      ], { response: 0.5, bounce: 0.16 });
+    } else {
+      bubble.style.transformOrigin = e.side === 'out' ? 'right bottom' : 'left bottom';
+      springAnimate(bubble, [{ transform: 'scale(0.55)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }], { response: 0.42, bounce: 0.3 });
+    }
+  }
+}
+
 let renderQueued = false;
 function render() {
   if (renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(() => {
     renderQueued = false;
+    // The reply view first: a message sent there rises into it, not into the conversation behind.
+    if (state.reply) renderReplies();
     const follow = stick || nearBottom();
-    const wanted = entries();
-    const existing = new Map([...thread.children].map((el) => [el.dataset.key, el]));
-    const nodes = wanted.map((e) => {
-      const sig = signature(e);
-      let el = existing.get(e.key);
-      if (!el || el.dataset.sig !== sig) {
-        el?.remove();
-        el = buildEntry(e);
-        el.dataset.key = e.key;
-        el.dataset.sig = sig;
-      }
-      existing.delete(e.key);
-      return el;
-    });
-    for (const stale of existing.values()) stale.remove();
-    nodes.forEach((el, i) => {
-      if (thread.children[i] !== el) thread.insertBefore(el, thread.children[i] ?? null);
-    });
+    const before = chat.scrollTop;
+    const arrivals = renderList(thread, entries());
     if (follow) scrollToBottom();
+    if (!state.reply) animateArrivals_(thread, arrivals, follow ? chat.scrollTop - before : 0);
   });
 }
 
+// ------------------------------------------------------------------ reply view
 
+let replyView = null; // { root, el, chat, list }
 
+/** Opens one reply thread over the blurred conversation; with `to`, the next message replies to it. */
+function openReplies(root, { to = null, focus = false } = {}) {
+  root = rootOf(root);
+  state.reply = { root, to: to ?? root };
+  if (!replyView) {
+    const el = document.createElement('div');
+    el.className = 'reply-view entering';
+    const scroller = document.createElement('div');
+    scroller.className = 'chat';
+    const list = document.createElement('div');
+    list.className = 'thread';
+    list.setAttribute('role', 'log');
+    list.setAttribute('aria-label', 'Replies');
+    scroller.append(list);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'reply-close sf-press';
+    close.setAttribute('aria-label', 'Close replies');
+    const x = document.createElement('i');
+    applySymbol(x, 'xmark', { size: 15 });
+    close.append(x);
+    close.addEventListener('click', () => closeReplies());
+    el.append(scroller, close);
+    stage.insertBefore(el, chat.nextSibling);
+    el.addEventListener('animationend', () => el.classList.remove('entering'), { once: true });
+    installBubbleMenus(list, bubbleHooks);
+    springyScroll(scroller, list);
+    replyView = { el, chat: scroller, list, stopSpring: null };
+    chat.inert = true;
+  }
+  replyView.el.dataset.root = root;
+  input.placeholder = 'Reply';
+  input.setAttribute('aria-label', 'Reply');
+  renderReplies(true);
+  if (focus) input.focus({ preventScroll: true });
+}
+
+function renderReplies(jump = false) {
+  if (!replyView || !state.reply) return;
+  const { chat: scroller, list } = replyView;
+  const follow = jump || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  const before = scroller.scrollTop;
+  list.style.setProperty('--chat-bottom', thread.style.getPropertyValue('--chat-bottom'));
+  const arrivals = renderList(list, threadEntries(state.reply.root));
+  if (follow) scroller.scrollTop = scroller.scrollHeight;
+  if (!jump) animateArrivals_(list, arrivals, follow ? scroller.scrollTop - before : 0);
+}
+
+function closeReplies() {
+  if (!replyView) return;
+  const view = replyView;
+  replyView = null;
+  state.reply = null;
+  chat.inert = false;
+  input.placeholder = 'Message';
+  input.setAttribute('aria-label', 'Message');
+  view.el.classList.add('leaving');
+  setTimeout(() => view.el.remove(), 240);
+}
+
+// ------------------------------------------------------------------ touching bubbles
+
+/** What a bubble's menu needs: only stored messages can be replied to or reacted to. */
+const bubbleHooks = {
+  message(row) {
+    const e = entryByKey.get(row.dataset.key);
+    if (!e || e.type !== 'msg' || !e.id || !e.text?.trim()) return null;
+    return { id: e.id, text: e.text, side: e.side };
+  },
+  reaction: (id) => state.reactions[id],
+  onReply: (msg) => openReplies(msg.id, { to: msg.id, focus: true }),
+  onReact(msg, emoji) {
+    const before = state.reactions[msg.id];
+    if (emoji) state.reactions[msg.id] = emoji;
+    else delete state.reactions[msg.id];
+    render();
+    postJson('/api/reactions', { id: msg.id, emoji }).catch((error) => {
+      if (before) state.reactions[msg.id] = before;
+      else delete state.reactions[msg.id];
+      render();
+      notice(`Could not react: ${error.message}`, 'error');
+    });
+  },
+};
+installBubbleMenus(thread, bubbleHooks);
+springyScroll(chat, thread);
 
 async function loadEarlier() {
   const first = state.items[0];
@@ -617,8 +922,18 @@ function notice(text, level = '') {
   }, 8000);
 }
 
+/** The agent has the last message: its receipt turns from Delivered to Read. */
+function markRead() {
+  const last = [...state.items].reverse().find((i) => i.kind === 'user');
+  if (!last || state.read?.id === last.id) return;
+  state.read = { id: last.id, time: new Date().toISOString() };
+  render();
+}
+
 function applySnapshot(s) {
   state.agent = s.agent;
+  state.reactions = s.reactions ?? {};
+  state.outbox = [];
   setGradientSeed(s.agent?.model);
   state.items = s.items;
   state.more = s.more;
@@ -631,7 +946,11 @@ function applySnapshot(s) {
   for (const n of s.notices || []) typeof n === 'string' ? notice(n) : notice(n.text, n.level);
   render();
   updateComposer();
-  requestAnimationFrame(scrollToBottom);
+  requestAnimationFrame(() => {
+    scrollToBottom();
+    // From now on, new messages arrive with motion (the history just appears).
+    requestAnimationFrame(() => (animateArrivals = true));
+  });
 }
 
 function connect() {
@@ -642,13 +961,16 @@ function connect() {
   });
   es.addEventListener('user', (e) => {
     const { item } = JSON.parse(e.data);
+    // The bubble shown when it was sent becomes the stored message, in place.
+    const sent = state.outbox.findIndex((o) => o.text === item.text);
+    if (sent >= 0) sentAs.set(item.id, state.outbox.splice(sent, 1)[0].key);
     if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
     render();
     requestAnimationFrame(scrollToBottom);
   });
   es.addEventListener('run_start', (e) => {
-    const { run } = JSON.parse(e.data);
-    state.live = { id: run, segments: [] };
+    const { run, replyTo } = JSON.parse(e.data);
+    state.live = { id: run, segments: [], ...(replyTo ? { replyTo } : {}) };
     render();
     updateComposer();
   });
@@ -659,12 +981,14 @@ function connect() {
     const last = segs[segs.length - 1];
     if (last && last.kind === 'text') last.text += text;
     else segs.push({ kind: 'text', id: `t${segs.length}`, text });
-    render();
+    // Nothing to draw: a reply is shown once it is finished, not as it streams.
+    markRead();
   });
   es.addEventListener('activity', (e) => {
     const { run, segment } = JSON.parse(e.data);
     if (!state.live || state.live.id !== run) return;
     state.live.segments.push(segment);
+    markRead();
     render();
   });
   es.addEventListener('activity_end', (e) => {
@@ -703,6 +1027,10 @@ function connect() {
     notice(text, level === 'error' ? 'error' : '');
   });
   es.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
+  es.addEventListener('reactions', (e) => {
+    state.reactions = JSON.parse(e.data).reactions ?? {};
+    render();
+  });
   es.addEventListener('threads', () => refreshTranscript());
   for (const name of ['signin', 'providers', 'settings']) es.addEventListener(name, (e) => settingsEvent(name, JSON.parse(e.data)));
   es.addEventListener('terminals', () => terminalsChanged());
@@ -910,6 +1238,8 @@ function submitFromComposer() {
     notice(`Messages are limited to ${state.limits.maxMessageChars.toLocaleString()} characters.`, 'error');
     return;
   }
+  const field = composer.field.el.getBoundingClientRect();
+  sendFrom = { rect: { left: field.left + 14, bottom: field.bottom - 4, width: Math.max(40, field.width - 90) }, at: performance.now() };
   input.value = '';
   for (const p of pending.splice(0)) {
     p.el.remove();
@@ -917,7 +1247,7 @@ function submitFromComposer() {
   }
   autosize();
   updateComposer();
-  const message = { text, jobs };
+  const message = { text, jobs, replyTo: state.reply?.to ?? null };
   if (state.live) {
     queued = message;
     notice('Your message will be sent when the agent finishes.');
@@ -926,14 +1256,26 @@ function submitFromComposer() {
   submit(message);
 }
 
-async function submit({ text, jobs }) {
+let outboxSeq = 0;
+async function submit({ text, jobs, replyTo = null }) {
+  // A message of text alone is shown at once, rising out of the field; the server's copy replaces it in place.
+  let sent = null;
+  if (!jobs.length && text.trim()) {
+    sent = { key: `outbox:${++outboxSeq}`, text, root: replyTo ? rootOf(replyTo) : undefined };
+    state.outbox.push(sent);
+    render();
+  }
   try {
     if (jobs.length) {
       if (jobs.some((j) => j.state !== 'done')) notice(`Uploading ${jobs.length === 1 ? 'the attachment' : `${jobs.length} attachments`}…`);
       await Promise.all(jobs.map((j) => j.promise));
     }
-    await postJson('/api/messages', { text, attachments: jobs.map((j) => j.attachment.id) });
+    await postJson('/api/messages', { text, attachments: jobs.map((j) => j.attachment.id), ...(replyTo ? { replyTo } : {}) });
   } catch (error) {
+    if (sent) {
+      state.outbox = state.outbox.filter((o) => o !== sent);
+      render();
+    }
     notice(`Not sent: ${error.message}`, 'error');
     if (!input.value) {
       input.value = text;
@@ -1183,6 +1525,10 @@ $('searchBtn').addEventListener('click', () =>
 // Keys --------------------------------------------------------------------
 
 addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !e.defaultPrevented && replyView && !viewer.open && !sheetOpen()) {
+    closeReplies();
+    return;
+  }
   if (e.key === 'Escape' && !e.defaultPrevented && !viewer.open && !sheetOpen() && sheet.detent !== 'collapsed') sheet.setDetent('collapsed');
 });
 

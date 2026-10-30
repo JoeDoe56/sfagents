@@ -13,8 +13,8 @@ import type { AgentRunResult } from './events.js';
 
 export interface RunRecorder {
   readonly runId: string;
-  /** The task or user input that starts this run, with any attached files. */
-  user(content: string, attachments?: AttachmentRef[]): void;
+  /** The task or user input that starts this run, with any attached files and the message it replies to inline. */
+  user(content: string, attachments?: AttachmentRef[], replyTo?: string): void;
   /** Run start with the configuration in effect (provenance only). */
   start(node: AgentNode): void;
   /** A complete assistant message (never a streaming fragment). */

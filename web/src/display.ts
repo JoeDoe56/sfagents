@@ -17,8 +17,8 @@ export interface DisplayAttachment {
 }
 
 export type DisplayItem =
-  | { kind: 'user'; id: string; seq: number; time: string; text: string; attachments: DisplayAttachment[]; /** In a thread: the agent that wrote it. */ agent?: string }
-  | { kind: 'assistant'; id: string; seq: number; time: string; text: string; agent: string }
+  | { kind: 'user'; id: string; seq: number; time: string; text: string; attachments: DisplayAttachment[]; /** In a thread: the agent that wrote it. */ agent?: string; /** An inline reply: the first message of its reply thread. */ replyTo?: string }
+  | { kind: 'assistant'; id: string; seq: number; time: string; text: string; agent: string; /** The answer to an inline reply: the first message of its reply thread. */ replyTo?: string }
   | { kind: 'activity'; id: string; seq: number; time: string; text: string; status?: string; /** A message to another agent: the thread it went to. */ thread?: string; agent?: string; /** The artifact a call created or updated. */ artifact?: string }
   | { kind: 'notice'; id: string; seq: number; time: string; text: string };
 
@@ -155,6 +155,27 @@ function artifactOf(name: string, argsJson: string, created: string | undefined)
   }
 }
 
+/**
+ * Inline replies: every reply, and the answer to it, belongs to the thread
+ * of the first message replied to (a reply to a reply joins the same
+ * thread, as in Messages).
+ */
+export function replyRoots(state: ConversationState): { messages: Map<string, string>; runs: Map<string, string> } {
+  const messages = new Map<string, string>(); // message id → thread root
+  const runs = new Map<string, string>(); // run id → thread root
+  for (const m of state.messages) {
+    if (m.role === 'user' && m.replyTo) {
+      const root = messages.get(m.replyTo) ?? m.replyTo;
+      messages.set(m.id, root);
+      runs.set(m.run, root);
+    } else if (m.role === 'assistant') {
+      const root = runs.get(m.run);
+      if (root) messages.set(m.id, root);
+    }
+  }
+  return { messages, runs };
+}
+
 export function displayItems(
   state: ConversationState,
   options: { before?: number; limit?: number; /** A run in progress, shown live instead. */ hideRun?: string; /** A thread between agents: user messages carry who wrote them. */ thread?: boolean } = {},
@@ -168,14 +189,17 @@ export function displayItems(
     if (r.kind === 'artifact' && r.run && r.callId && r.type !== 'agent_transcript') created.set(`${r.run}:${r.callId}`, r.id);
     else if (r.kind === 'artifact_update' && r.run && r.callId) created.set(`${r.run}:${r.callId}`, r.artifact);
   }
+  const roots = replyRoots(state);
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
       const m = record as MessageRecord;
       if (m.role === 'user') {
-        items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment), ...(options.thread ? { agent: m.agent } : {}) });
+        const replyTo = roots.messages.get(m.id);
+        items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment), ...(options.thread ? { agent: m.agent } : {}), ...(replyTo ? { replyTo } : {}) });
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {
-        if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent });
+        const replyTo = roots.runs.get(m.run);
+        if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
         for (const c of m.toolCalls ?? []) {
           if (c.name === 'keep_section') continue; // only confirms the topic
           items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
