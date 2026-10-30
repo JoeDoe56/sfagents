@@ -919,9 +919,9 @@ export class Dictation {
 
   /** What the llama.cpp version of dictation downloaded (about 2.5 GB), now unused. */
   private removeLlamaCpp(): void {
-    for (const f of LLAMA_LEFTOVERS) {
+    for (const f of llamaLeftovers(this.dir, [this.asrModel, this.ttsModel].map((m) => path.basename(m.name)))) {
       try {
-        fs.rmSync(path.join(this.dir, f), { recursive: true, force: true });
+        fs.rmSync(f, { recursive: true, force: true });
       } catch {
         // tried again at the next start
       }
@@ -966,6 +966,30 @@ function silence(seconds: number): Buffer {
   b.write('data', 36, 'ascii');
   b.writeUInt32LE(samples * 2, 40);
   return b;
+}
+
+/**
+ * The llama.cpp version's files that are in the folder, by their exact names.
+ * Windows and macOS compare names without case, and the old model's name
+ * (Qwen3-ASR-1.7B-Q8_0.gguf) is the new one's (qwen3-asr-1.7b-q8_0.gguf) in
+ * other letters: removing it by name there removed the new model. So only a
+ * name listed exactly as the old one is, and none of the current models'.
+ */
+export function llamaLeftovers(dir: string, keep: readonly string[]): string[] {
+  const kept = new Set(keep.flatMap((k) => [k, `${k}.part`]).map((k) => k.toLowerCase()));
+  const out: string[] = [];
+  for (const f of LLAMA_LEFTOVERS) {
+    const base = path.basename(f);
+    if (kept.has(base.toLowerCase())) continue;
+    let names: string[];
+    try {
+      names = fs.readdirSync(path.join(dir, path.dirname(f)));
+    } catch {
+      continue;
+    }
+    if (names.includes(base)) out.push(path.join(dir, f));
+  }
+  return out;
 }
 
 /** Whether a process is running (EPERM: it is, as another user). */

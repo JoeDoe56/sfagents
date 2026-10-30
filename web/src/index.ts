@@ -30,7 +30,7 @@ export { ProcessMonitor, ProcessError, parseProcStat, parsePs, parseEtime, parse
 export type { ProcessRow, ProcessDetail, ServiceRow, StartupRow } from './processes.js';
 export { PowerShell } from './powershell.js';
 export { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
-export { Dictation, ASR_MODEL, TTS_MODEL, RUNTIME_RELEASE, DEFAULT_SPEECH_SETTINGS, wavSeconds, detectHardware, runtimeChoices, transcriptFromAnswer, deviceFromList, glossaryContext, speakerScript } from './dictation.js';
+export { Dictation, ASR_MODEL, TTS_MODEL, RUNTIME_RELEASE, DEFAULT_SPEECH_SETTINGS, wavSeconds, detectHardware, runtimeChoices, transcriptFromAnswer, deviceFromList, glossaryContext, speakerScript, llamaLeftovers } from './dictation.js';
 export type { DictationStatus, VoiceStatus, RuntimeRelease, SpeechSettings, Hardware, Backend } from './dictation.js';
 export { PushToTalk, hasSpeech, isFiller, KeyboardProcess, windowsHotkeyLine, namedHotkeyLine, KEYBOARD_WORKER, pcmToWav, readWav, windowsVirtualKey, modifierMask, WINDOWS_INPUT_EXE, SOUNDS_DIR } from './push-to-talk.js';
 export type { PushToTalkStatus, Keyboard, KeyboardEvents, Microphone, Chimes } from './push-to-talk.js';

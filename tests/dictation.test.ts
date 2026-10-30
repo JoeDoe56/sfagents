@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { Dictation, RUNTIME_RELEASE, deviceFromList, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus, type SpeechSettings } from '@sfagents/web';
+import { Dictation, RUNTIME_RELEASE, deviceFromList, llamaLeftovers, glossaryContext, runtimeChoices, speakerScript, transcriptFromAnswer, wavSeconds, type DictationStatus, type SpeechSettings } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
 describe('dictation helpers', () => {
@@ -45,6 +45,17 @@ describe('dictation helpers', () => {
         }
       }
     }
+  });
+
+  test('removing the llama.cpp files never removes the new model, whose name differs only in case', () => {
+    const dir = makeTempDir();
+    fs.mkdirSync(path.join(dir, 'models'));
+    fs.mkdirSync(path.join(dir, 'runtime'));
+    fs.writeFileSync(path.join(dir, 'models', 'qwen3-asr-1.7b-q8_0.gguf'), 'new');
+    fs.writeFileSync(path.join(dir, 'models', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'), 'old');
+    const found = llamaLeftovers(dir, ['qwen3-asr-1.7b-q8_0.gguf', 'vibevoice-1.5b-q8_0.gguf']).map((f) => path.relative(dir, f));
+    assert.deepEqual(found.sort(), [path.join('models', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'), 'runtime'].sort());
+    assert.ok(!found.some((f) => /qwen3-asr-1\.7b-q8_0\.gguf/i.test(path.basename(f)) && !f.includes('mmproj')), 'not the model, in any case');
   });
 
   test('the transcript is taken out of Qwen3-ASR answers that still have their markers', () => {
