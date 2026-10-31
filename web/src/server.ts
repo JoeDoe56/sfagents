@@ -18,6 +18,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { Readable, Writable } from 'node:stream';
 import {
   AgentRuntime,
   AgentTerminateMode,
@@ -63,7 +64,7 @@ import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
 import { AuthError, WebAuth } from './auth.js';
 import { Dictation, SPEECH_RATE, speechText } from './dictation.js';
-import { PushToTalk } from './push-to-talk.js';
+import { PushToTalk, playPcm } from './push-to-talk.js';
 import { DISPLAY_SCALES, ScreenMirror } from './screen.js';
 import { getDisplayScale, setDisplayScale } from './remote-dpi.js';
 import { TerminalError, TerminalManager } from './terminal.js';
@@ -585,6 +586,7 @@ export class WebServer {
     this.server.closeAllConnections?.();
     await this.up2k.close();
     this.providersApi.close();
+    this.stopSpeaking();
     this.projectWatcher?.close();
     this.terminals.dispose();
     await this.runtime.dispose();
@@ -812,288 +814,291 @@ export class WebServer {
       return sendJson(res, 200, await this.auth.handle(action, body, req, res, ctx));
     }
 
-    if (p.startsWith('/api/')) {
-      const parts = p.split('/').slice(2).map(decodeURIComponent);
-      const route = `${method} ${parts[0]}`;
-      switch (route) {
-        case 'GET state':
-          return sendJson(res, 200, this.snapshot());
-        case 'GET messages': {
-          const before = Number(url.searchParams.get('before'));
-          return sendJson(res, 200, displayItems(this.conversation.state, { before: Number.isFinite(before) && before > 0 ? before : undefined, limit: 200 }));
-        }
-        case 'GET files':
-          this.checkFetchSite(req);
-          return this.getFiles(parts[1] ?? '', url, req, res);
-        case 'POST files':
-          await this.postFiles(parts[1] ?? '', parts[2], req, res);
-          // Every page's Files window shows the change (jobs say so again when they end).
-          if (!['attach', 'jobs'].includes(parts[1] ?? '')) this.broadcast('files', {});
-          return;
-        case 'GET system':
-          this.checkFetchSite(req);
-          return this.getSystem(parts[1], res);
-        case 'POST system':
-          return this.postSystem(parts[1] ?? '', req, res);
-        case 'GET processes':
-          this.checkFetchSite(req);
-          if (parts[1]) return sendJson(res, 200, await this.processes.detail(parts[1]));
-          return sendJson(res, 200, await this.processes.list());
-        case 'POST processes': {
-          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-          if (parts[2] === 'end') return sendJson(res, 200, await this.processes.end(parts[1], { force: body.force === true, tree: body.tree === true }));
-          if (parts[2] === 'priority') return sendJson(res, 200, this.processes.setPriority(parts[1], body.level));
-          throw new HttpError(404, 'Not found.');
-        }
-        case 'GET dictation':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, this.dictation.status());
-        case 'POST dictation': {
-          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-          if (body['action'] === 'install') {
-            // Long: progress arrives as "dictation" events.
-            this.dictation.install().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
-          } else if (body['action'] === 'start') {
-            this.dictation.start().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
-          } else if (body['action'] === 'stop') {
-            this.dictation.stop();
-          } else if (body['action'] === 'install-voice') {
-            // Qwen3-TTS, for Speak Response; progress arrives as "dictation" events too.
-            this.dictation.installVoice().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
-          } else if (body['action'] === 'transcribe-voice') {
-            // The reference clip transcribed again by Qwen3-ASR; the transcript replaces the setting.
-            try {
-              await this.dictation.transcribeReference();
-            } catch (error) {
-              throw new HttpError(409, getErrorMessage(error));
-            }
-          } else throw new HttpError(400, 'Unknown action.');
-          return sendJson(res, 200, this.dictation.status());
-        }
-        case 'GET voice': {
-          // The reference voice clip Qwen3-TTS copies.
-          this.checkFetchSite(req);
-          // With byte ranges: Safari on iPhone plays no audio served without them.
-          let stat: fs.Stats;
+    if (p.startsWith('/api/')) return this.api(req, res, url, method, p);
+    if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
+    return this.serveStatic(p, req, res);
+  }
+
+  /** The JSON API (`/api/…`), after the host, sign-in and write checks. */
+  private async api(req: IncomingMessage, res: ServerResponse, url: URL, method: string, p: string): Promise<void> {
+    const parts = p.split('/').slice(2).map(decodeURIComponent);
+    const route = `${method} ${parts[0]}`;
+    switch (route) {
+      case 'GET state':
+        return sendJson(res, 200, this.snapshot());
+      case 'GET messages': {
+        const before = Number(url.searchParams.get('before'));
+        return sendJson(res, 200, displayItems(this.conversation.state, { before: Number.isFinite(before) && before > 0 ? before : undefined, limit: 200 }));
+      }
+      case 'GET files':
+        this.checkFetchSite(req);
+        return this.getFiles(parts[1] ?? '', url, req, res);
+      case 'POST files':
+        await this.postFiles(parts[1] ?? '', parts[2], req, res);
+        // Every page's Files window shows the change (jobs say so again when they end).
+        if (!['attach', 'jobs'].includes(parts[1] ?? '')) this.broadcast('files', {});
+        return;
+      case 'GET system':
+        this.checkFetchSite(req);
+        return this.getSystem(parts[1], res);
+      case 'POST system':
+        return this.postSystem(parts[1] ?? '', req, res);
+      case 'GET processes':
+        this.checkFetchSite(req);
+        if (parts[1]) return sendJson(res, 200, await this.processes.detail(parts[1]));
+        return sendJson(res, 200, await this.processes.list());
+      case 'POST processes': {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        if (parts[2] === 'end') return sendJson(res, 200, await this.processes.end(parts[1], { force: body.force === true, tree: body.tree === true }));
+        if (parts[2] === 'priority') return sendJson(res, 200, this.processes.setPriority(parts[1], body.level));
+        throw new HttpError(404, 'Not found.');
+      }
+      case 'GET dictation':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, this.dictation.status());
+      case 'POST dictation': {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        if (body['action'] === 'install') {
+          // Long: progress arrives as "dictation" events.
+          this.dictation.install().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
+        } else if (body['action'] === 'start') {
+          this.dictation.start().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
+        } else if (body['action'] === 'stop') {
+          this.dictation.stop();
+        } else if (body['action'] === 'install-voice') {
+          // Qwen3-TTS, for Speak Response; progress arrives as "dictation" events too.
+          this.dictation.installVoice().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
+        } else if (body['action'] === 'transcribe-voice') {
+          // The reference clip transcribed again by Qwen3-ASR; the transcript replaces the setting.
           try {
-            stat = fs.statSync(this.dictation.voicePath);
-          } catch {
-            throw new HttpError(404, 'No voice clip is set.');
-          }
-          return this.serveFile({ path: this.dictation.voicePath, size: stat.size, modified: stat.mtimeMs, type: { mime: 'audio/wav' } }, false, req, res);
-        }
-        case 'POST voice': {
-          const type = String(req.headers['content-type'] ?? '');
-          if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
-          try {
-            this.dictation.setReference(await readBody(req, MAX_AUDIO_BYTES));
+            await this.dictation.transcribeReference();
           } catch (error) {
-            if (error instanceof HttpError) throw error;
-            throw new HttpError(400, getErrorMessage(error));
+            throw new HttpError(409, getErrorMessage(error));
           }
-          return sendJson(res, 200, this.dictation.status());
+        } else throw new HttpError(400, 'Unknown action.');
+        return sendJson(res, 200, this.dictation.status());
+      }
+      case 'GET voice': {
+        // The reference voice clip Qwen3-TTS copies.
+        this.checkFetchSite(req);
+        // With byte ranges: Safari on iPhone plays no audio served without them.
+        let stat: fs.Stats;
+        try {
+          stat = fs.statSync(this.dictation.voicePath);
+        } catch {
+          throw new HttpError(404, 'No voice clip is set.');
         }
-        case 'DELETE voice':
-          this.dictation.setReference(null);
-          return sendJson(res, 200, this.dictation.status());
-        case 'POST speak': {
-          // Text to speech with Qwen3-TTS: with stream, 16-bit mono PCM as it is
-          // made (the page plays it as it comes); without, the whole reply as one WAV file.
-          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-          const text = typeof body['text'] === 'string' ? body['text'] : '';
-          if (!speechText(text)) throw new HttpError(400, 'Nothing to say.'); // only code, emoji or Markdown
-          if (text.length > 20_000) throw new HttpError(413, 'That is too long to speak at once.');
-          if (body['stream'] === true) {
-            // The page stopping (or going away) stops the generation.
-            const stop = new AbortController();
-            res.on('close', () => stop.abort());
-            let pcm: AsyncIterable<Buffer>;
-            try {
-              pcm = await this.dictation.speakStream(text, stop.signal);
-            } catch (error) {
-              if (stop.signal.aborted) return;
-              throw new HttpError(this.dictation.status().voice.state === 'missing' ? 409 : 503, getErrorMessage(error));
-            }
-            res.writeHead(200, { 'Content-Type': `audio/L16; rate=${SPEECH_RATE}; channels=1`, 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
-            res.flushHeaders();
-            try {
-              for await (const chunk of pcm) if (!res.write(chunk)) await new Promise((r) => res.once('drain', r));
-            } catch (error) {
-              if (!stop.signal.aborted) this.log(`speak: ${getErrorMessage(error)}`);
-            }
-            return void res.end();
-          }
-          let wav: Buffer;
+        return this.serveFile({ path: this.dictation.voicePath, size: stat.size, modified: stat.mtimeMs, type: { mime: 'audio/wav' } }, false, req, res);
+      }
+      case 'POST voice': {
+        const type = String(req.headers['content-type'] ?? '');
+        if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
+        try {
+          this.dictation.setReference(await readBody(req, MAX_AUDIO_BYTES));
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(400, getErrorMessage(error));
+        }
+        return sendJson(res, 200, this.dictation.status());
+      }
+      case 'DELETE voice':
+        this.dictation.setReference(null);
+        return sendJson(res, 200, this.dictation.status());
+      case 'POST speak': {
+        // Text to speech with Qwen3-TTS: with stream, 16-bit mono PCM as it is
+        // made (the page plays it as it comes); without, the whole reply as one WAV file.
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const text = typeof body['text'] === 'string' ? body['text'] : '';
+        if (!speechText(text)) throw new HttpError(400, 'Nothing to say.'); // only code, emoji or Markdown
+        if (text.length > 20_000) throw new HttpError(413, 'That is too long to speak at once.');
+        if (body['stream'] === true) {
+          // The page stopping (or going away) stops the generation.
+          const stop = new AbortController();
+          res.on('close', () => stop.abort());
+          let pcm: AsyncIterable<Buffer>;
           try {
-            wav = await this.dictation.speak(text);
+            pcm = await this.dictation.speakStream(text, stop.signal);
           } catch (error) {
+            if (stop.signal.aborted) return;
             throw new HttpError(this.dictation.status().voice.state === 'missing' ? 409 : 503, getErrorMessage(error));
           }
-          res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'Content-Length': wav.length });
-          return void res.end(wav);
-        }
-        case 'GET push-to-talk':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, this.pushToTalk.status());
-        case 'GET screen':
-          this.checkFetchSite(req);
-          return this.getScreen(parts[1] ?? '', url, req, res);
-        case 'POST screen':
-          return this.postScreen(parts[1] ?? '', req, res);
-        case 'POST transcribe': {
-          const type = String(req.headers['content-type'] ?? '');
-          if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
-          const wav = await readBody(req, MAX_AUDIO_BYTES);
-          const language = url.searchParams.get('language') || undefined;
+          res.writeHead(200, { 'Content-Type': `audio/L16; rate=${SPEECH_RATE}; channels=1`, 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+          res.flushHeaders();
           try {
-            return sendJson(res, 200, { text: await this.dictation.transcribe(wav, language) });
+            for await (const chunk of pcm) if (!res.write(chunk)) await new Promise((r) => res.once('drain', r));
           } catch (error) {
-            throw new HttpError(503, getErrorMessage(error));
+            if (!stop.signal.aborted) this.log(`speak: ${getErrorMessage(error)}`);
           }
+          return void res.end();
         }
-        case 'GET settings':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, this.providersApi.settings());
-        case 'POST settings':
-          return sendJson(res, 200, this.providersApi.saveSettings(((await readJson(req)) ?? {}) as Record<string, unknown>));
-        case 'GET providers':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, await this.providersApi.handle('GET', parts, {}));
-        case 'POST providers':
-          return sendJson(res, 200, await this.providersApi.handle('POST', parts, ((await readJson(req)) ?? {}) as Record<string, unknown>));
-        case 'GET search':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, this.search(url.searchParams.get('q') ?? ''));
-        case 'GET terminals':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, { terminals: this.terminals.list() });
-        case 'POST terminals': {
-          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-          if (!parts[1]) {
-            if (body.action !== 'create') throw new HttpError(400, '"action" must be "create".');
-            return sendJson(res, 200, await this.terminals.create({ cols: Number(body.cols), rows: Number(body.rows), cwd: typeof body.cwd === 'string' ? body.cwd : undefined }));
-          }
-          if (body.action === 'close') this.terminals.close(parts[1]);
-          else if (body.action === 'rename') this.terminals.rename(parts[1], body.title);
-          else throw new HttpError(400, '"action" must be "close" or "rename".');
-          return sendJson(res, 200, { terminals: this.terminals.list() });
+        let wav: Buffer;
+        try {
+          wav = await this.dictation.speak(text);
+        } catch (error) {
+          throw new HttpError(this.dictation.status().voice.state === 'missing' ? 409 : 503, getErrorMessage(error));
         }
-        case 'GET agents':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, this.agentsInfo());
-        case 'GET diffs': {
-          this.checkFetchSite(req);
-          // Asked for directly, the list is checked now rather than served from the last poll.
-          if (!parts[1]) return sendJson(res, 200, { repos: await this.checkDiffs() });
-          const repo = this.diffs.find((r) => r.id === parts[1]) ?? (await this.checkDiffs()).find((r) => r.id === parts[1]);
-          if (!repo) throw new HttpError(404, 'That repository has no uncommitted changes.');
-          return sendJson(res, 200, await repoDiff(repo.path));
+        res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'Content-Length': wav.length });
+        return void res.end(wav);
+      }
+      case 'GET push-to-talk':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, this.pushToTalk.status());
+      case 'GET screen':
+        this.checkFetchSite(req);
+        return this.getScreen(parts[1] ?? '', url, req, res);
+      case 'POST screen':
+        return this.postScreen(parts[1] ?? '', req, res);
+      case 'POST transcribe': {
+        const type = String(req.headers['content-type'] ?? '');
+        if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
+        const wav = await readBody(req, MAX_AUDIO_BYTES);
+        const language = url.searchParams.get('language') || undefined;
+        try {
+          return sendJson(res, 200, { text: await this.dictation.transcribe(wav, language) });
+        } catch (error) {
+          throw new HttpError(503, getErrorMessage(error));
         }
-        case 'GET threads': {
-          this.checkFetchSite(req);
-          if (!parts[1]) return sendJson(res, 200, { threads: this.runtime.threads.list() });
-          const state = this.runtime.threads.read(parts[1]);
-          if (!state) throw new HttpError(404, 'No such thread.');
-          const info = this.runtime.threads.list().find((t) => t.key === parts[1]);
-          return sendJson(res, 200, { thread: info, ...displayItems(state, { thread: true, limit: 2000 }) });
+      }
+      case 'GET settings':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, this.providersApi.settings());
+      case 'POST settings':
+        return sendJson(res, 200, this.providersApi.saveSettings(((await readJson(req)) ?? {}) as Record<string, unknown>));
+      case 'GET providers':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, await this.providersApi.handle('GET', parts, {}));
+      case 'POST providers':
+        return sendJson(res, 200, await this.providersApi.handle('POST', parts, ((await readJson(req)) ?? {}) as Record<string, unknown>));
+      case 'GET search':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, this.search(url.searchParams.get('q') ?? ''));
+      case 'GET terminals':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, { terminals: this.terminals.list() });
+      case 'POST terminals': {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        if (!parts[1]) {
+          if (body.action !== 'create') throw new HttpError(400, '"action" must be "create".');
+          return sendJson(res, 200, await this.terminals.create({ cols: Number(body.cols), rows: Number(body.rows), cwd: typeof body.cwd === 'string' ? body.cwd : undefined }));
         }
-        case 'GET agent':
-          this.checkFetchSite(req);
-          if (parts[1] === 'context') return sendJson(res, 200, await this.contextInfo());
-          if (parts[1] === 'usage') return sendJson(res, 200, await this.usageInfo(url.searchParams.get('refresh') === '1'));
-          if (parts[1]) throw new HttpError(404, 'Not found.');
-          return sendJson(res, 200, this.agentInfo());
-        case 'POST agent': {
-          const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
-          if (body.action === 'reset-context') return sendJson(res, 200, await this.resetContext());
-          return sendJson(res, 200, this.configureAgent(body));
-        }
-        case 'GET view':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, this.sharedView.get());
-        case 'POST view': {
-          const view = this.sharedView.update(await readJson(req));
-          this.broadcast('view', view);
-          return sendJson(res, 200, view);
-        }
-        case 'POST presence':
-          await readJson(req);
-          this.presence();
-          return sendJson(res, 200, { ok: true });
-        case 'GET status':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, await this.status());
-        case 'GET logs':
-          this.checkFetchSite(req);
-          return sendJson(res, 200, { lines: this.logs.lines() });
-        case 'GET events':
-          return this.openEvents(req, res);
-        case 'POST messages':
-          return this.postMessage(req, res);
-        case 'POST reactions': {
-          const body = (await readJson(req)) as { id?: unknown; emoji?: unknown };
-          const known = typeof body.id === 'string' && (this.conversation.state.messages.some((m) => m.id === body.id && m.role !== 'tool' && !m.event) || chatEffects(this.conversation.state).replies.has(body.id));
-          if (!known) throw new HttpError(400, 'Unknown message.');
-          if (body.emoji !== null && (typeof body.emoji !== 'string' || !isEmoji(body.emoji))) throw new HttpError(400, '"emoji" must be one emoji, or null to remove it.');
-          const before = this.reactions.all()[body.id as string] ?? null;
-          const reactions = this.reactions.set(body.id as string, body.emoji);
-          this.broadcast('reactions', { reactions });
-          if (before !== body.emoji) this.reactionInput(body.id as string, body.emoji);
-          return sendJson(res, 200, { reactions });
-        }
-        case 'POST cancel':
-          await readJson(req);
-          this.cancel();
-          return sendJson(res, 200, { ok: true });
-        case 'POST approvals':
-          return this.answerApproval(parts[1] ?? '', req, res);
-        case 'GET artifacts':
-          if (parts[1] && parts[2] === 'raw') return this.serveArtifact(parts[1], url, res);
-          if (parts[1] && parts[2] === 'view') return sendJson(res, 200, this.readView(parts[1]));
-          return sendJson(res, 200, { artifacts: this.displayArtifacts() });
-        case 'POST artifacts': {
-          if (parts[1] && parts[2] === 'save') {
-            const body = (await readJson(req)) as { saved?: unknown };
-            if (typeof body.saved !== 'boolean') throw new HttpError(400, '"saved" must be true or false.');
-            this.conversation.setArtifactSaved(parts[1], body.saved);
-            this.publishArtifacts(true);
-            return sendJson(res, 200, { ok: true });
-          }
-          if (parts[1] && parts[2] === 'state') {
-            const body = (await readJson(req)) as { state?: unknown };
-            this.writeViewState(parts[1], body.state);
-            return sendJson(res, 200, { ok: true });
-          }
-          if (!parts[1] || parts[2] !== 'pin') throw new HttpError(404, 'Not found.');
-          const body = (await readJson(req)) as { pinned?: unknown };
-          if (typeof body.pinned !== 'boolean') throw new HttpError(400, '"pinned" must be true or false.');
-          this.conversation.setArtifactPinned(parts[1], body.pinned);
+        if (body.action === 'close') this.terminals.close(parts[1]);
+        else if (body.action === 'rename') this.terminals.rename(parts[1], body.title);
+        else throw new HttpError(400, '"action" must be "close" or "rename".');
+        return sendJson(res, 200, { terminals: this.terminals.list() });
+      }
+      case 'GET agents':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, this.agentsInfo());
+      case 'GET diffs': {
+        this.checkFetchSite(req);
+        // Asked for directly, the list is checked now rather than served from the last poll.
+        if (!parts[1]) return sendJson(res, 200, { repos: await this.checkDiffs() });
+        const repo = this.diffs.find((r) => r.id === parts[1]) ?? (await this.checkDiffs()).find((r) => r.id === parts[1]);
+        if (!repo) throw new HttpError(404, 'That repository has no uncommitted changes.');
+        return sendJson(res, 200, await repoDiff(repo.path));
+      }
+      case 'GET threads': {
+        this.checkFetchSite(req);
+        if (!parts[1]) return sendJson(res, 200, { threads: this.runtime.threads.list() });
+        const state = this.runtime.threads.read(parts[1]);
+        if (!state) throw new HttpError(404, 'No such thread.');
+        const info = this.runtime.threads.list().find((t) => t.key === parts[1]);
+        return sendJson(res, 200, { thread: info, ...displayItems(state, { thread: true, limit: 2000 }) });
+      }
+      case 'GET agent':
+        this.checkFetchSite(req);
+        if (parts[1] === 'context') return sendJson(res, 200, await this.contextInfo());
+        if (parts[1] === 'usage') return sendJson(res, 200, await this.usageInfo(url.searchParams.get('refresh') === '1'));
+        if (parts[1]) throw new HttpError(404, 'Not found.');
+        return sendJson(res, 200, this.agentInfo());
+      case 'POST agent': {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        if (body.action === 'reset-context') return sendJson(res, 200, await this.resetContext());
+        return sendJson(res, 200, this.configureAgent(body));
+      }
+      case 'GET view':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, this.sharedView.get());
+      case 'POST view': {
+        const view = this.sharedView.update(await readJson(req));
+        this.broadcast('view', view);
+        return sendJson(res, 200, view);
+      }
+      case 'POST presence':
+        await readJson(req);
+        this.presence();
+        return sendJson(res, 200, { ok: true });
+      case 'GET status':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, await this.status());
+      case 'GET logs':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, { lines: this.logs.lines() });
+      case 'GET events':
+        return this.openEvents(req, res);
+      case 'POST messages':
+        return this.postMessage(req, res);
+      case 'POST reactions': {
+        const body = (await readJson(req)) as { id?: unknown; emoji?: unknown };
+        const known = typeof body.id === 'string' && (this.conversation.state.messages.some((m) => m.id === body.id && m.role !== 'tool' && !m.event) || chatEffects(this.conversation.state).replies.has(body.id));
+        if (!known) throw new HttpError(400, 'Unknown message.');
+        if (body.emoji !== null && (typeof body.emoji !== 'string' || !isEmoji(body.emoji))) throw new HttpError(400, '"emoji" must be one emoji, or null to remove it.');
+        const before = this.reactions.all()[body.id as string] ?? null;
+        const reactions = this.reactions.set(body.id as string, body.emoji);
+        this.broadcast('reactions', { reactions });
+        if (before !== body.emoji) this.reactionInput(body.id as string, body.emoji);
+        return sendJson(res, 200, { reactions });
+      }
+      case 'POST cancel':
+        await readJson(req);
+        this.cancel();
+        return sendJson(res, 200, { ok: true });
+      case 'POST approvals':
+        return this.answerApproval(parts[1] ?? '', req, res);
+      case 'GET artifacts':
+        if (parts[1] && parts[2] === 'raw') return this.serveArtifact(parts[1], url, res);
+        if (parts[1] && parts[2] === 'view') return sendJson(res, 200, this.readView(parts[1]));
+        return sendJson(res, 200, { artifacts: this.displayArtifacts() });
+      case 'POST artifacts': {
+        if (parts[1] && parts[2] === 'save') {
+          const body = (await readJson(req)) as { saved?: unknown };
+          if (typeof body.saved !== 'boolean') throw new HttpError(400, '"saved" must be true or false.');
+          this.conversation.setArtifactSaved(parts[1], body.saved);
           this.publishArtifacts(true);
           return sendJson(res, 200, { ok: true });
         }
-        case 'GET uploads':
-          return this.serveUpload(parts[1] ?? '', res);
-        case 'POST up2k': {
-          if (parts[1] === 'handshake') {
-            const body = await readJson(req);
-            const dest = body && typeof body === 'object' && 'dest' in body ? await this.files.uploadFolder((body as { dest: unknown }).dest) : undefined;
-            return sendJson(res, 200, await this.up2k.handshake(body, dest));
-          }
-          if (parts[1] === 'chunk') {
-            const wark = String(req.headers['x-up2k-wark'] ?? '');
-            const hash = String(req.headers['x-up2k-hash'] ?? '');
-            if (!wark || !hash) throw new HttpError(400, 'X-Up2k-Wark and X-Up2k-Hash are required.');
-            const r = await this.up2k.receive(wark, hash, req);
-            return sendJson(res, 200, { remaining: r.remaining, ...(r.attachment ? { attachment: displayAttachment(r.attachment) } : {}), ...(r.file ? { file: r.file } : {}) });
-          }
-          throw new HttpError(404, 'Not found.');
+        if (parts[1] && parts[2] === 'state') {
+          const body = (await readJson(req)) as { state?: unknown };
+          this.writeViewState(parts[1], body.state);
+          return sendJson(res, 200, { ok: true });
         }
-        default:
-          throw new HttpError(404, 'Not found.');
+        if (!parts[1] || parts[2] !== 'pin') throw new HttpError(404, 'Not found.');
+        const body = (await readJson(req)) as { pinned?: unknown };
+        if (typeof body.pinned !== 'boolean') throw new HttpError(400, '"pinned" must be true or false.');
+        this.conversation.setArtifactPinned(parts[1], body.pinned);
+        this.publishArtifacts(true);
+        return sendJson(res, 200, { ok: true });
       }
+      case 'GET uploads':
+        return this.serveUpload(parts[1] ?? '', res);
+      case 'POST up2k': {
+        if (parts[1] === 'handshake') {
+          const body = await readJson(req);
+          const dest = body && typeof body === 'object' && 'dest' in body ? await this.files.uploadFolder((body as { dest: unknown }).dest) : undefined;
+          return sendJson(res, 200, await this.up2k.handshake(body, dest));
+        }
+        if (parts[1] === 'chunk') {
+          const wark = String(req.headers['x-up2k-wark'] ?? '');
+          const hash = String(req.headers['x-up2k-hash'] ?? '');
+          if (!wark || !hash) throw new HttpError(400, 'X-Up2k-Wark and X-Up2k-Hash are required.');
+          const r = await this.up2k.receive(wark, hash, req);
+          return sendJson(res, 200, { remaining: r.remaining, ...(r.attachment ? { attachment: displayAttachment(r.attachment) } : {}), ...(r.file ? { file: r.file } : {}) });
+        }
+        throw new HttpError(404, 'Not found.');
+      }
+      default:
+        throw new HttpError(404, 'Not found.');
     }
-    if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
-    return this.serveStatic(p, req, res);
   }
 
   /**
@@ -1255,6 +1260,8 @@ export class WebServer {
         const file = await f.openForRead(body.path);
         if (file.size > MAX_ATTACH_FROM_FILES) throw new HttpError(413, 'The file is too large to attach (over 50 MB).');
         const ref = this.conversation.addUpload(path.basename(file.path), file.type.mime, await fs.promises.readFile(file.path));
+        // Registered as an upload, so a message can carry it.
+        this.up2k.register(ref);
         return sendJson(res, 200, { attachment: displayAttachment(ref) });
       }
       default:
@@ -1676,9 +1683,98 @@ export class WebServer {
     return this.snapshot();
   }
 
+  /**
+   * One call of the JSON API from this process (the terminal interface), as a
+   * page makes it: the same routes and answers, without the network, the
+   * sign-in or the browser checks. Resolves with the status and the body.
+   */
+  async request(method: string, pathname: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown>; body: Buffer; type: string }> {
+    const data = body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(body));
+    const req = Readable.from(data.length ? [data] : []) as unknown as IncomingMessage;
+    Object.assign(req, { method, url: pathname, headers: { host: 'localhost', 'content-type': 'application/json', 'content-length': String(data.length) } });
+    const chunks: Buffer[] = [];
+    let status = 200;
+    const headers: Record<string, string> = {};
+    const res = new Writable({
+      write(chunk: Buffer | string, _enc, cb) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        cb();
+      },
+    }) as unknown as ServerResponse & { headersSent: boolean };
+    const done = new Promise<void>((resolve) => {
+      (res as unknown as Writable).on('finish', () => resolve());
+      (res as unknown as Writable).on('close', () => resolve());
+    });
+    Object.assign(res, {
+      headersSent: false,
+      writeHead(code: number, h?: Record<string, string | number>) {
+        status = code;
+        for (const [k, v] of Object.entries(h ?? {})) headers[k.toLowerCase()] = String(v);
+        res.headersSent = true;
+        return res;
+      },
+      setHeader(k: string, v: string | number) {
+        headers[k.toLowerCase()] = String(v);
+        return res;
+      },
+      getHeader: (k: string) => headers[k.toLowerCase()],
+      removeHeader: (k: string) => delete headers[k.toLowerCase()],
+      flushHeaders: () => undefined,
+    });
+    const url = new URL(pathname, 'http://localhost');
+    try {
+      await this.api(req, res, url, method, url.pathname);
+    } catch (error) {
+      this.fail(res, error);
+    }
+    if (!(res as unknown as Writable).writableFinished && !(res as unknown as Writable).destroyed) await done;
+    const buf = Buffer.concat(chunks);
+    const type = headers['content-type'] ?? '';
+    let json: Record<string, unknown> = {};
+    if (/json/.test(type)) {
+      try {
+        json = JSON.parse(buf.toString('utf8')) as Record<string, unknown>;
+      } catch {
+        json = {};
+      }
+    }
+    return { status, json, body: buf, type };
+  }
+
   /** Sends a message, as the composer does. Throws when it cannot be sent (a reply is running, it is empty). */
   sendMessage(text: string, options: { replyTo?: string } = {}): string {
     return this.send(text, [], options.replyTo);
+  }
+
+  private speaking: AbortController | null = null;
+
+  /**
+   * Speaks text through this computer's speakers (the terminal's Speak
+   * Response): Qwen3-TTS as it is made, played with PvSpeaker. Speaking
+   * something else, or stopSpeaking(), stops it.
+   */
+  async speakAloud(text: string): Promise<void> {
+    if (!speechText(text)) throw new Error('Nothing to say.');
+    if (text.length > 20_000) throw new Error('That is too long to speak at once.');
+    this.stopSpeaking();
+    const stop = new AbortController();
+    this.speaking = stop;
+    try {
+      const pcm = await this.dictation.speakStream(text, stop.signal);
+      await playPcm(pcm, SPEECH_RATE, stop.signal);
+    } catch (error) {
+      if (!stop.signal.aborted) throw error;
+    } finally {
+      if (this.speaking === stop) this.speaking = null;
+    }
+  }
+
+  /** Stops speakAloud(); true if something was being spoken. */
+  stopSpeaking(): boolean {
+    const s = this.speaking;
+    this.speaking = null;
+    s?.abort();
+    return !!s;
   }
 
   /** Stops the running reply. */

@@ -8,18 +8,55 @@
  * Three tabs: Chat (the conversation and the composer), Logs (every line
  * SF Agents logs) and Status (what each part is doing, and the CPU and memory
  * it uses). Tab, F1–F3 or Alt+1–3 switch tabs.
+ *
+ * What a page shows in its sheets and side windows (threads, topics,
+ * search, artifacts, changes, usage and context, settings, files) opens as
+ * a pane over the chat (panes.ts), through the same API calls the pages make
+ * (WebServer.request). Ctrl+↑ picks a message to reply to, react to, speak or copy.
  */
 
 import readline from 'node:readline';
-import { describeTree, stripAnsiAndControl } from '@sfagents/core';
+import { describeTree } from '@sfagents/core';
 import type { LogBook, LogLine, WebServer } from '@sfagents/web';
+import { bar, bytesText, clean, color, durationText, esc, percentText, stampText, timeText } from './ansi.js';
+import {
+  artifactPane,
+  artifactsPane,
+  contextPane,
+  diffsPane,
+  filesPane,
+  itemLines,
+  numberedAnswer,
+  questionLines,
+  questionsPane,
+  searchPane,
+  settingsPane,
+  threadPane,
+  threadsPane,
+  tokens,
+  topicsPane,
+  usageLines,
+  type ArtifactInfo,
+  type Attachment,
+  type ChatItem,
+  type Pane,
+  type PaneHost,
+  type Question,
+  type RepoInfo,
+  type Row,
+  type SectionInfo,
+  type UsageInfo,
+} from './panes.js';
 import { fit, textWidth, truncate, wrap } from './width.js';
+import os from 'node:os';
+import path from 'node:path';
 
 type Item =
-  | { kind: 'user'; id: string; time: string; text: string; attachments?: Array<{ name: string; size: number }>; replyTo?: string; view?: string }
-  | { kind: 'assistant'; id: string; time: string; text: string; agent: string; replyTo?: string }
-  | { kind: 'activity'; id: string; time: string; text: string; status?: string; thread?: string; agent?: string; artifact?: string }
-  | { kind: 'notice'; id: string; time: string; text: string };
+  | { kind: 'user'; id: string; seq?: number; time: string; text: string; attachments?: Array<{ name: string; size: number }>; replyTo?: string; view?: string }
+  | { kind: 'assistant'; id: string; seq?: number; time: string; text: string; agent: string; replyTo?: string }
+  | { kind: 'activity'; id: string; seq?: number; time: string; text: string; status?: string; thread?: string; agent?: string; artifact?: string }
+  | { kind: 'notice'; id: string; seq?: number; time: string; text: string }
+  | { kind: 'questions'; id: string; seq?: number; time: string; agent: string; questions: Question[]; answered: boolean };
 
 interface Segment {
   kind: 'text' | 'activity';
@@ -28,7 +65,30 @@ interface Segment {
   status?: string;
   /** A step shown as something else (a message to the person). */
   hidden?: boolean;
+  thread?: string;
+  artifact?: string;
+  /** Questions the agent asked the person in this step. */
+  questions?: Question[];
+  answered?: boolean;
 }
+
+/** Something in the chat that Ctrl+↑ can pick: its lines, from the top. */
+interface Pick {
+  id: string;
+  start: number;
+  end: number;
+  kind: 'user' | 'assistant' | 'activity' | 'questions';
+  text: string;
+  thread?: string;
+  artifact?: string;
+  questions?: Question[];
+  agent?: string;
+  /** A message others replied to inline. */
+  replies?: number;
+}
+
+/** The web interface's quick reactions (emoji.js). */
+const QUICK = ['❤️', '👍', '👎', '😂', '‼️', '❓', '😭'];
 
 interface Approval {
   id: string;
@@ -52,6 +112,8 @@ export interface TuiOptions {
   url: string;
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
+  /** Send what else the process writes to the Logs tab (default true; tests turn it off). */
+  captureOutput?: boolean;
 }
 
 const TABS = ['Chat', 'Logs', 'Status'] as const;
@@ -64,76 +126,24 @@ const HELP = [
   '  /effort [level]    the reasoning effort (low, medium, high, xhigh, max, or default)',
   '  /clear             reset the working context (the history is kept)',
   '  /tree              the agents and what each may use',
+  '  /attach <path>     attach a file to your next message (/detach drops them)',
+  '  /answer            answer the agent’s questions option by option',
+  '  /search <words>    search the messages and artifacts',
+  '  /topics            the conversation’s topics: jump to one',
+  '  /threads           the threads between agents',
+  '  /artifacts         the artifacts: open, pin, save views',
+  '  /changes           uncommitted changes in the agents’ repositories',
+  '  /context           plan usage and what the working context holds',
+  '  /files [folder]    the file manager',
+  '  /settings          settings, providers and speech',
+  '  /speak [stop]      speak the latest reply aloud on this computer (or stop)',
   '  /exit              quit SF Agents (the web interface stops too)',
   'Keys: Tab or F1–F3 switch tabs · the mouse wheel, PgUp/PgDn or Shift+↑↓ scroll (Shift+drag selects text) · Esc stops the reply · y/a/n answer an approval (with an empty composer) · Ctrl+K quits SF Agents (and the web interface) · Ctrl+C twice also quits',
+  'Messages: Ctrl+↑ (or Alt+↑) picks one, then r replies, e reacts, s speaks it, c copies it, Enter opens its thread, artifact or questions, Esc goes back to typing',
+  'Not here: screen mirroring and remote desktop (they need a picture) and terminal tabs (this is a terminal). Speak with push to talk: it types into this window too.',
 ];
 
-const esc = (code: string) => `\u001b[${code}`;
-const color = {
-  dim: (s: string) => `${esc('2m')}${s}${esc('22m')}`,
-  bold: (s: string) => `${esc('1m')}${s}${esc('22m')}`,
-  inverse: (s: string) => `${esc('7m')}${s}${esc('27m')}`,
-  red: (s: string) => `${esc('31m')}${s}${esc('39m')}`,
-  green: (s: string) => `${esc('32m')}${s}${esc('39m')}`,
-  yellow: (s: string) => `${esc('33m')}${s}${esc('39m')}`,
-  blue: (s: string) => `${esc('34m')}${s}${esc('39m')}`,
-  magenta: (s: string) => `${esc('35m')}${s}${esc('39m')}`,
-  cyan: (s: string) => `${esc('36m')}${s}${esc('39m')}`,
-};
-
-const clean = (text: string) => stripAnsiAndControl(text).replace(/\t/g, '  ');
-
-function timeText(iso: string): string {
-  const d = new Date(iso);
-  return Number.isFinite(d.getTime()) ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '';
-}
-
-function stampText(iso: string): string {
-  const d = new Date(iso);
-  const now = new Date();
-  const same = (a: Date, b: Date) => a.toDateString() === b.toDateString();
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  const day = same(d, now) ? 'Today' : same(d, yesterday) ? 'Yesterday' : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-  return `${day} ${timeText(iso)}`;
-}
-
-export function bytesText(n: number | null | undefined): string {
-  if (n === null || n === undefined || !Number.isFinite(n)) return '—';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
-}
-
-export function percentText(share: number | null | undefined): string {
-  if (share === null || share === undefined || !Number.isFinite(share)) return '—';
-  const p = share * 100;
-  return `${p < 10 && p > 0 ? p.toFixed(1) : Math.round(p)}%`;
-}
-
-export function durationText(seconds: number): string {
-  const s = Math.max(0, Math.round(seconds));
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  if (d) return `${d}d ${h}h`;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${s % 60}s`;
-  return `${s}s`;
-}
-
-function bar(share: number | null | undefined, width = 12): string {
-  if (share === null || share === undefined || !Number.isFinite(share)) return color.dim('·'.repeat(width));
-  const full = Math.round(Math.min(1, Math.max(0, share)) * width);
-  const fill = '█'.repeat(full);
-  const tint = share > 0.85 ? color.red : share > 0.6 ? color.yellow : color.green;
-  return `${tint(fill)}${color.dim('░'.repeat(width - full))}`;
-}
+export { bytesText, durationText, percentText } from './ansi.js';
 
 export class Tui {
   private readonly input: NodeJS.ReadStream;
@@ -158,6 +168,24 @@ export class Tui {
   private pending: Array<Extract<Item, { kind: 'user' }>> = [];
   private agentReactions: Record<string, string> = {};
   private lastPresence = 0;
+  private artifacts: ArtifactInfo[] = [];
+  private diffs: RepoInfo[] = [];
+  private sections: SectionInfo[] = [];
+
+  /** Sheets over the chat (threads, artifacts, settings…), the top one last. */
+  private panes: Pane[] = [];
+  /** A question in the composer (a pane's prompt): Enter answers it, Esc cancels. */
+  private prompt: { label: string; done: (text: string) => void; saved: { text: string; cursor: number } } | null = null;
+  private confirming: { question: string; yes: () => void } | null = null;
+  /** The message picked with Ctrl+↑, or null while typing. */
+  private picked: string | null = null;
+  private picks: Pick[] = [];
+  private replyTo: { id: string; who: string; text: string } | null = null;
+  private attachments: Attachment[] = [];
+  private usage: UsageInfo | null = null;
+  private context: { used: number; budget: number } | null = null;
+  private contextAt = 0;
+  private loadingEarlier = false;
 
   // The composer.
   private text = '';
@@ -199,8 +227,10 @@ export class Tui {
     const { server, logs } = this.options;
     // Anything else written to the terminal while the interface is up (warnings from
     // libraries, debug output) goes to the Logs tab instead of over the screen.
-    this.captureOutput(process.stdout);
-    this.captureOutput(process.stderr);
+    if (this.options.captureOutput !== false) {
+      this.captureOutput(process.stdout);
+      this.captureOutput(process.stderr);
+    }
     this.logLines = logs.lines();
     this.cleanups.push(
       logs.onLine((line) => {
@@ -274,7 +304,8 @@ export class Tui {
   // ---------------------------------------------------------------- events
 
   private onEvent(event: string, raw: unknown): void {
-    const data = raw as Record<string, unknown>;
+    const data = (raw ?? {}) as Record<string, unknown>;
+    for (const p of this.panes) p.event?.(event, data);
     switch (event) {
       case 'state': {
         const s = data as { agent: AgentInfo; items: Item[]; more: boolean; live: Tui['live']; approvals: Approval[]; reactions?: Record<string, string>; read?: Tui['read']; notices?: Array<string | { text: string; level?: string }> };
@@ -288,6 +319,8 @@ export class Tui {
         this.pending = (s as { pending?: Tui['pending'] }).pending ?? [];
         this.agentReactions = (s as { agentReactions?: Record<string, string> }).agentReactions ?? {};
         this.setViews((s as { artifacts?: unknown }).artifacts);
+        this.diffs = ((s as { diffs?: RepoInfo[] }).diffs ?? []) as RepoInfo[];
+        this.sections = ((s as { sections?: SectionInfo[] }).sections ?? []) as SectionInfo[];
         for (const n of s.notices ?? []) typeof n === 'string' ? this.notice(n) : this.notice(n.text, n.level);
         break;
       }
@@ -296,6 +329,30 @@ export class Tui {
         break;
       case 'artifacts':
         this.setViews(data.artifacts);
+        break;
+      case 'diffs':
+        this.diffs = (data.repos as RepoInfo[]) ?? [];
+        break;
+      case 'sections':
+        this.sections = (data.sections as SectionInfo[]) ?? [];
+        break;
+      case 'usage':
+        this.usage = data as unknown as UsageInfo;
+        break;
+      case 'context': {
+        const c = data as { used?: number; budget?: number };
+        if (typeof c.used === 'number' && typeof c.budget === 'number') this.context = { used: c.used, budget: c.budget };
+        break;
+      }
+      case 'signin':
+        if (data.state === 'done') this.notice(`Signed in: “${String((data.provider as { name?: string } | null)?.name ?? '')}” is ready.`);
+        else if (data.state === 'failed' && data.error !== 'Cancelled.') this.notice(`The sign-in didn’t finish: ${String(data.error ?? '')}`, 'error');
+        break;
+      case 'settings':
+      case 'providers':
+      case 'dictation':
+      case 'threads':
+      case 'files':
         break;
       case 'agent_reactions':
         this.agentReactions = (data.reactions as Record<string, string>) ?? {};
@@ -438,10 +495,20 @@ export class Tui {
     // Ctrl+K: one press quits SF Agents, the web interface and everything it started
     // (after the paste check, so a pasted vertical tab does not).
     if (key.ctrl && name === 'k') return this.quit();
+    // A yes-or-no question: y does it, anything else leaves things as they are.
+    if (this.confirming) {
+      const c = this.confirming;
+      this.confirming = null;
+      if (str && /^y$/i.test(str)) c.yes();
+      else this.notice('Left as it was.');
+      return this.schedule();
+    }
     // Tabs.
     const number = key.meta && /^[1-3]$/.test(name) ? Number(name) : /^f[1-3]$/.test(name) ? Number(name.slice(1)) : 0;
     if (number) return this.setTab(TABS[number - 1]!);
     if (name === 'tab') return this.setTab(TABS[(TABS.indexOf(this.tab) + (key.shift ? TABS.length - 1 : 1)) % TABS.length]!);
+    // A pane over the chat takes the keys (unless it asked for text).
+    if (this.tab === 'Chat' && this.panes.length && !this.prompt) return this.paneKey(str, key, name);
     // Scrolling.
     const page = Math.max(1, this.viewHeight - 2);
     if (name === 'pageup') return this.scrollBy(page);
@@ -456,9 +523,12 @@ export class Tui {
       if (str === 'q') return this.setTab('Chat');
       return;
     }
+    // A message picked with Ctrl+↑: its keys.
+    if (this.picked && !this.prompt && this.pickKey(str, key, name)) return;
+    if ((key.ctrl || key.meta) && name === 'up' && !this.prompt) return this.pickNext(-1);
     // An approval waiting, and nothing typed: y, a or n answers it.
     const pending = this.approvals.find((a) => !this.answered.has(a.id));
-    if (pending && !this.text && str && /^[yan]$/i.test(str)) {
+    if (pending && !this.text && !this.prompt && str && /^[yan]$/i.test(str)) {
       const decision = { y: 'allow_once', a: 'allow_always', n: 'deny' }[str.toLowerCase() as 'y' | 'a' | 'n'] as 'allow_once' | 'allow_always' | 'deny';
       try {
         this.options.server.answer(pending.id, decision);
@@ -468,13 +538,21 @@ export class Tui {
       return;
     }
     if (name === 'escape') {
-      if (this.live) this.options.server.cancel();
+      if (this.prompt) return this.endPrompt();
+      if (this.replyTo) this.replyTo = null;
+      else if (this.live) this.options.server.cancel();
       this.schedule();
       return;
     }
     if (name === 'return' || name === 'enter') {
       if (key.meta || key.shift) return this.insert('\n');
       const line = this.text;
+      if (this.prompt) {
+        const done = this.prompt.done;
+        this.endPrompt();
+        done(line);
+        return this.schedule();
+      }
       this.text = '';
       this.cursor = 0;
       this.historyAt = -1;
@@ -522,7 +600,7 @@ export class Tui {
     if (key.ctrl && name === 'w') return this.deleteWord();
     if (key.ctrl && name === 'l') return this.draw();
     if (name === 'up' || name === 'down') {
-      if (!this.history.length) return;
+      if (!this.history.length || this.prompt) return;
       if (name === 'up') this.historyAt = this.historyAt < 0 ? this.history.length - 1 : Math.max(0, this.historyAt - 1);
       else this.historyAt = this.historyAt < 0 ? -1 : this.historyAt + 1 >= this.history.length ? -1 : this.historyAt + 1;
       this.text = this.historyAt < 0 ? '' : this.history[this.historyAt]!;
@@ -564,6 +642,286 @@ export class Tui {
     } else this.notice('Press Ctrl+C again, or Ctrl+K, to quit SF Agents (the web interface stops too).');
   }
 
+  // ---------------------------------------------------------------- panes
+
+  private width(): number {
+    return Math.max(20, this.output.columns || 80);
+  }
+
+  private paneKey(str: string | undefined, key: readline.Key, name: string): void {
+    const pane = this.panes[this.panes.length - 1]!;
+    const rows = pane.rows(this.width());
+    const picks = rows.flatMap((r, i) => (r.pick ? [i] : []));
+    const move = (d: number) => {
+      if (!picks.length) pane.scroll = Math.max(0, Math.min(pane.scroll, 1_000_000) + d);
+      else {
+        const at = picks.indexOf(pane.selected);
+        pane.selected = picks[Math.max(0, Math.min(picks.length - 1, (at < 0 ? 0 : at) + d))]!;
+      }
+      this.schedule();
+    };
+    const page = Math.max(1, this.viewHeight - 3);
+    if (name === 'escape' || (str === 'q' && !key.ctrl)) return this.back();
+    if (name === 'up' || str === 'k') return move(-1);
+    if (name === 'down' || str === 'j') return move(1);
+    if (name === 'pageup') return move(picks.length ? -Math.max(1, Math.floor(page / 2)) : -page);
+    if (name === 'pagedown') return move(picks.length ? Math.max(1, Math.floor(page / 2)) : page);
+    if (name === 'home') return move(-1_000_000);
+    if (name === 'end') return move(1_000_000);
+    const row = rows[pane.selected]?.pick ? rows[pane.selected] : undefined;
+    if (name === 'return' || name === 'enter') {
+      if (row) pane.enter?.(row);
+      return this.schedule();
+    }
+    if (name === 'backspace' || name === 'left') {
+      if (pane.key?.(name === 'left' ? 'left' : '\b', row)) return this.schedule();
+      if (name === 'backspace') this.back();
+      return;
+    }
+    const ch = name === 'space' ? ' ' : str;
+    if (ch && !key.ctrl && !key.meta && pane.key?.(ch, row)) return this.schedule();
+  }
+
+  private openPane(pane: Pane): void {
+    this.picked = null;
+    this.panes.push(pane);
+    this.setTab('Chat');
+  }
+
+  private back(): void {
+    this.panes.pop();
+    this.schedule();
+  }
+
+  /** What the panes use to reach the server and the person. */
+  private readonly host: PaneHost = {
+    api: (method, p, body) => this.api(method, p, body),
+    raw: async (p) => {
+      const r = await this.options.server.request('GET', `/api/${p}`);
+      if (r.status >= 400) throw new Error(String(r.json.error ?? `HTTP ${r.status}`));
+      return { body: r.body, type: r.type };
+    },
+    open: (pane) => this.openPane(pane),
+    back: () => this.back(),
+    closeAll: () => {
+      this.panes = [];
+      this.schedule();
+    },
+    redraw: () => this.schedule(),
+    notice: (text, level) => this.notice(text, level),
+    fail: (error) => this.notice(error instanceof Error ? error.message : String(error), 'error'),
+    ask: (label, initial, done) => this.ask(label, initial, done),
+    confirm: (question, yes) => {
+      this.confirming = { question, yes };
+      this.schedule();
+    },
+    attach: (a) => {
+      if (!this.attachments.some((x) => x.id === a.id)) this.attachments.push(a);
+      this.schedule();
+    },
+    jump: (id, seq) => void this.jump(id, seq),
+    send: (text) => this.send(text),
+    url: () => this.options.url,
+    artifacts: () => this.artifacts,
+    diffs: () => this.diffs,
+    sections: () => this.sections,
+  };
+
+  private async api<T = Record<string, unknown>>(method: 'GET' | 'POST', p: string, body?: unknown): Promise<T> {
+    const r = await this.options.server.request(method, `/api/${p}`, body);
+    if (r.status >= 400) throw new Error(String(r.json.error ?? `HTTP ${r.status}`));
+    return r.json as T;
+  }
+
+  /** Asks for a line of text in the composer; what was typed comes back after. */
+  private ask(label: string, initial: string, done: (text: string) => void): void {
+    if (this.prompt) this.endPrompt();
+    this.prompt = { label, done, saved: { text: this.text, cursor: this.cursor } };
+    this.text = initial;
+    this.cursor = initial.length;
+    this.schedule();
+  }
+
+  private endPrompt(): void {
+    if (!this.prompt) return;
+    this.text = this.prompt.saved.text;
+    this.cursor = this.prompt.saved.cursor;
+    this.prompt = null;
+    this.schedule();
+  }
+
+  /** Shows a message in the chat, loading earlier messages until it is there. */
+  private async jump(id: string, seq: number): Promise<void> {
+    this.panes = [];
+    const has = () => this.items.find((i) => i.id === id) ?? this.items.find((i) => (i.seq ?? 0) >= seq && (i.kind === 'user' || i.kind === 'assistant'));
+    while (!this.items.some((i) => i.id === id) && this.more && (this.items[0]?.seq ?? 0) > seq) {
+      if (!(await this.loadEarlier())) break;
+    }
+    const found = has();
+    if (!found) return this.notice('That message isn’t in the conversation any more.', 'error');
+    this.picked = found.id;
+    this.schedule();
+  }
+
+  /** The page of messages before the first one shown; false when there are none. */
+  private async loadEarlier(): Promise<boolean> {
+    const first = this.items[0]?.seq;
+    if (!this.more || this.loadingEarlier || first === undefined) return false;
+    this.loadingEarlier = true;
+    try {
+      const r = await this.api<{ items: Item[]; more: boolean }>('GET', `messages?before=${first}`);
+      const known = new Set(this.items.map((i) => i.id));
+      this.items = [...r.items.filter((i) => !known.has(i.id)), ...this.items];
+      this.more = r.more;
+      return r.items.length > 0;
+    } catch (error) {
+      this.notice(error instanceof Error ? error.message : String(error), 'error');
+      return false;
+    } finally {
+      this.loadingEarlier = false;
+      this.schedule();
+    }
+  }
+
+  // ---------------------------------------------------------------- picking messages
+
+  /** Moves the pick up (-1) or down (+1); past the last message it goes back to typing. */
+  private pickNext(d: number): void {
+    const list = this.picks;
+    if (!list.length) return this.notice('Nothing to pick yet.');
+    const at = this.picked ? list.findIndex((p) => p.id === this.picked) : -1;
+    if (at < 0) this.picked = list[list.length - 1]!.id;
+    else if (at + d >= list.length) this.picked = null;
+    else if (at + d < 0) {
+      if (this.more) void this.loadEarlier();
+    } else this.picked = list[at + d]!.id;
+    this.schedule();
+  }
+
+  /** A key while a message is picked; false lets it through to the composer (picking ends). */
+  private pickKey(str: string | undefined, key: readline.Key, name: string): boolean {
+    const pick = this.picks.find((p) => p.id === this.picked);
+    if (!pick) {
+      this.picked = null;
+      return false;
+    }
+    const message = pick.kind === 'user' || pick.kind === 'assistant';
+    const done = () => {
+      this.schedule();
+      return true;
+    };
+    if (name === 'up' || (str === 'k' && !key.ctrl)) return (this.pickNext(-1), true);
+    if (name === 'down' || (str === 'j' && !key.ctrl)) return (this.pickNext(1), true);
+    if (name === 'escape') {
+      this.picked = null;
+      return done();
+    }
+    if (name === 'return' || name === 'enter') {
+      if (pick.thread) this.openPane(threadPane(this.host, pick.thread));
+      else if (pick.artifact) {
+        const a = this.artifacts.find((x) => x.id === pick.artifact);
+        if (a) this.openPane(artifactPane(this.host, a));
+      } else if (pick.questions) this.openPane(questionsPane(this.host, pick.agent ?? 'The agent', pick.questions));
+      else if (pick.replies) this.openPane(this.replyPane(pick.id));
+      else if (message) this.startReply(pick);
+      return done();
+    }
+    if (key.ctrl || key.meta) return false;
+    switch (str) {
+      case 'r':
+        if (message) this.startReply(pick);
+        return done();
+      case 't':
+        if (pick.replies) this.openPane(this.replyPane(pick.id));
+        return done();
+      case 'e':
+        if (!message) return done();
+        this.picked = null;
+        this.ask(`React with ${QUICK.map((e, i) => `${i + 1} ${e}`).join('  ')} (or type an emoji; 0 removes):`, '', (text) => {
+          const t = text.trim();
+          const emoji = /^[1-9]$/.test(t) ? QUICK[Number(t) - 1] : t === '0' || t === '' ? null : t;
+          if (emoji === undefined) return;
+          this.api<{ reactions: Record<string, string> }>('POST', 'reactions', { id: pick.id, emoji }).then((r) => {
+            this.reactions = r.reactions;
+            this.schedule();
+          }, this.host.fail);
+        });
+        return done();
+      case 's':
+        if (message) this.speak(pick.text);
+        return done();
+      case 'c':
+        this.copy(pick.text);
+        return done();
+      default:
+        this.picked = null;
+        return false;
+    }
+  }
+
+  private startReply(pick: Pick): void {
+    this.replyTo = { id: pick.id, who: pick.kind === 'user' ? 'You' : (pick.agent ?? 'the agent'), text: pick.text };
+    this.picked = null;
+  }
+
+  /** An inline reply thread: the message and the replies to it. */
+  private replyPane(root: string): Pane {
+    const tui = this;
+    return {
+      title: 'Replies',
+      hint: '↑↓ PgUp PgDn scroll · r replies in this thread · Esc goes back',
+      selected: 0,
+      scroll: Number.MAX_SAFE_INTEGER,
+      rows(w: number): Row[] {
+        const items = [...tui.items, ...tui.pending].filter((i) => (i.id === root || ('replyTo' in i && i.replyTo === root)) && (i.kind === 'user' || i.kind === 'assistant'));
+        return itemLines(items as ChatItem[], w).map((l) => ({ lines: [l] }));
+      },
+      key(ch: string) {
+        if (ch !== 'r') return false;
+        const it = tui.items.find((i) => i.id === root);
+        if (it && (it.kind === 'user' || it.kind === 'assistant')) tui.replyTo = { id: root, who: it.kind === 'user' ? 'You' : it.agent, text: it.text };
+        tui.back();
+        return true;
+      },
+    };
+  }
+
+  /** The questions waiting for an answer: those of the running reply, or the latest ones asked. */
+  private openQuestions(): { agent: string; questions: Question[] } | null {
+    for (const seg of [...(this.live?.segments ?? [])].reverse()) if (seg.questions?.length && !seg.answered) return { agent: this.agent?.id ?? 'The agent', questions: seg.questions };
+    const last = [...this.items].reverse().find((i) => i.kind === 'questions' || i.kind === 'user');
+    return last && last.kind === 'questions' && !last.answered ? { agent: last.agent, questions: last.questions } : null;
+  }
+
+  /** Speaks text aloud on this computer (Qwen3-TTS, through its speakers). */
+  private speak(text: string): void {
+    this.notice('Speaking… (/speak stop stops it)');
+    this.options.server.speakAloud(text).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.notice(`Couldn’t speak it: ${message}${/not set up|not installed|missing/i.test(message) ? ' /settings → Speech installs the voice.' : ''}`, 'error');
+    });
+  }
+
+  /** Copies text with the terminal's clipboard escape (OSC 52), which most terminals take, over SSH too. */
+  private copy(text: string): void {
+    this.rawWrite(`\u001b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\u0007`);
+    this.notice('Copied (if this terminal allows it; otherwise Shift+drag selects text).');
+  }
+
+  private async attachPath(input: string): Promise<void> {
+    let p = input.trim().replace(/^(["'])(.*)\1$/, '$2');
+    if (!p) return this.notice('Which file? /attach ~/Documents/notes.txt', 'error');
+    if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) p = path.join(os.homedir(), p.slice(1));
+    p = path.resolve(p);
+    try {
+      const r = await this.api<{ attachment: Attachment }>('POST', 'files/attach', { path: p });
+      this.host.attach(r.attachment);
+      this.notice(`“${r.attachment.name}” will go with your next message.`);
+    } catch (error) {
+      this.notice(error instanceof Error ? error.message : String(error), 'error');
+    }
+  }
+
   private setTab(tab: Tab): void {
     this.tab = tab;
     if (tab === 'Logs') this.unreadErrors = 0;
@@ -578,6 +936,18 @@ export class Tui {
   }
 
   private scrollBy(lines: number): void {
+    // Over a pane the wheel moves through it.
+    if (this.tab === 'Chat' && this.panes.length) {
+      const pane = this.panes[this.panes.length - 1]!;
+      const rows = pane.rows(this.width());
+      const picks = rows.flatMap((r, i) => (r.pick ? [i] : []));
+      if (!picks.length) pane.scroll = Math.max(0, Math.min(pane.scroll, 1_000_000) - lines);
+      else {
+        const at = Math.max(0, picks.indexOf(pane.selected));
+        pane.selected = picks[Math.max(0, Math.min(picks.length - 1, at - Math.sign(lines)))]!;
+      }
+      return this.schedule();
+    }
     this.scroll[this.tab] = Math.max(0, Math.min(this.scroll[this.tab] + lines, 1_000_000));
     this.schedule();
   }
@@ -587,6 +957,13 @@ export class Tui {
     this.statusBusy = true;
     try {
       this.status = await this.options.server.status();
+      // The plan's usage (the server reads it again at most once a minute) and the working context.
+      const [usage, context] = await Promise.all([this.api<UsageInfo>('GET', 'agent/usage').catch(() => null), this.context && Date.now() - this.contextAt < 10_000 ? null : this.api<{ used: number; budget: number }>('GET', 'agent/context').catch(() => null)]);
+      if (usage) this.usage = usage;
+      if (context) {
+        this.context = { used: context.used, budget: context.budget };
+        this.contextAt = Date.now();
+      }
     } catch (error) {
       this.options.logs.add(`status: ${error instanceof Error ? error.message : String(error)}`, 'error');
     } finally {
@@ -598,17 +975,42 @@ export class Tui {
   // ---------------------------------------------------------------- sending and commands
 
   private submit(line: string): void {
-    const text = line.replace(/\s+$/, '');
-    if (!text.trim()) return this.schedule();
-    if (this.history[this.history.length - 1] !== text) this.history.push(text);
+    let text = line.replace(/\s+$/, '');
+    if (!text.trim() && !this.attachments.length) return this.schedule();
+    if (text.trim() && this.history[this.history.length - 1] !== text) this.history.push(text);
     if (text.startsWith('/') && !text.includes('\n')) return this.command(text.trim());
+    // Numbers answer the agent's questions with its options ("2", or "1,3" where it takes several).
+    const asked = this.replyTo ? null : this.openQuestions();
+    if (asked) text = numberedAnswer(asked.questions, text) ?? text;
+    this.send(text);
+  }
+
+  /** Sends a message, with the reply and attachments being written. */
+  private send(text: string): void {
     // While the agent works the message waits, Delivered, and the agent reads it at its next step.
-    try {
-      this.options.server.sendMessage(text);
-      this.scroll.Chat = 0;
-    } catch (error) {
-      this.notice(error instanceof Error ? error.message : String(error), 'error');
+    const replyTo = this.replyTo;
+    const attachments = this.attachments;
+    this.scroll.Chat = 0;
+    // Writing answers the questions asked so far (the server marks them too).
+    for (const seg of this.live?.segments ?? []) if (seg.questions) seg.answered = true;
+    if (!attachments.length) {
+      try {
+        this.options.server.sendMessage(text, replyTo ? { replyTo: replyTo.id } : {});
+        this.replyTo = null;
+      } catch (error) {
+        this.notice(error instanceof Error ? error.message : String(error), 'error');
+      }
+      return this.schedule();
     }
+    this.replyTo = null;
+    this.attachments = [];
+    this.api('POST', 'messages', { text, attachments: attachments.map((a) => a.id), ...(replyTo ? { replyTo: replyTo.id } : {}) }).catch((error: unknown) => {
+      // Not sent: the reply and the files are back in the composer.
+      this.replyTo ??= replyTo;
+      if (!this.attachments.length) this.attachments = attachments;
+      this.notice(error instanceof Error ? error.message : String(error), 'error');
+    });
+    this.schedule();
   }
 
   private command(line: string): void {
@@ -653,6 +1055,44 @@ export class Tui {
           fail,
         );
         return;
+      case '/attach':
+        void this.attachPath(arg);
+        return;
+      case '/detach':
+        this.attachments = [];
+        return this.notice('No files attached.');
+      case '/answer': {
+        const asked = this.openQuestions();
+        if (!asked) return this.notice('No questions are waiting for an answer.');
+        return this.openPane(questionsPane(this.host, asked.agent, asked.questions));
+      }
+      case '/search':
+        if (arg) return this.openPane(searchPane(this.host, arg));
+        return this.ask('Search for:', '', (q) => q.trim() && this.openPane(searchPane(this.host, q.trim())));
+      case '/topics':
+      case '/sections':
+        return this.openPane(topicsPane(this.host));
+      case '/threads':
+        return this.openPane(threadsPane(this.host));
+      case '/artifacts':
+        return this.openPane(artifactsPane(this.host));
+      case '/changes':
+      case '/diffs':
+        return this.openPane(diffsPane(this.host));
+      case '/context':
+      case '/usage':
+        return this.openPane(contextPane(this.host));
+      case '/files':
+        return this.openPane(filesPane(this.host, arg ? path.resolve(arg.replace(/^~(?=$|[\\/])/, os.homedir())) : undefined));
+      case '/settings':
+      case '/providers':
+        return this.openPane(settingsPane(this.host));
+      case '/speak': {
+        if (arg === 'stop') return this.notice(server.stopSpeaking() ? 'Stopped speaking.' : 'Nothing is being spoken.');
+        const last = [...this.items].reverse().find((i) => i.kind === 'assistant');
+        if (!last || last.kind !== 'assistant') return this.notice('No reply to speak yet.');
+        return this.speak(last.text);
+      }
       default:
         this.notice(`Unknown command ${cmd}. /help lists them.`, 'error');
     }
@@ -683,14 +1123,24 @@ export class Tui {
     const height = Math.max(8, this.output.rows || 24);
     const footer = this.footer(width);
     this.viewHeight = height - 1 - footer.lines.length;
-    const body = this.tab === 'Chat' ? this.chatLines(width) : this.tab === 'Logs' ? this.logView(width) : this.statusLines(width);
+    const paneOpen = this.tab === 'Chat' && this.panes.length > 0;
+    const body = paneOpen ? [] : this.tab === 'Chat' ? this.chatLines(width) : this.tab === 'Logs' ? this.logView(width) : this.statusLines(width);
+    // A picked message stays in view.
+    const pick = !paneOpen && this.tab === 'Chat' && this.picked ? this.picks.find((p) => p.id === this.picked) : undefined;
+    if (pick) {
+      const fromBottom = body.length - 1 - pick.end; // lines below the pick's last line
+      const need = Math.min(fromBottom, Math.max(0, body.length - pick.start - this.viewHeight));
+      if (this.scroll.Chat > fromBottom) this.scroll.Chat = fromBottom;
+      if (this.scroll.Chat < need) this.scroll.Chat = need;
+    }
     // The visible window, from the bottom (or the top for Status), after scrolling.
     const max = Math.max(0, body.length - this.viewHeight);
-    const offset = Math.min(this.scroll[this.tab], max);
+    const offset = paneOpen ? 0 : Math.min(this.scroll[this.tab], max);
     // (Status keeps its place at the top until it has been read.)
-    if (this.tab !== 'Status' || this.status) this.scroll[this.tab] = offset;
+    if (!paneOpen && (this.tab !== 'Status' || this.status)) this.scroll[this.tab] = offset;
     let shown: string[];
-    if (this.tab === 'Status') shown = body.slice(max - offset, max - offset + this.viewHeight);
+    if (paneOpen) shown = this.paneLines(width);
+    else if (this.tab === 'Status') shown = body.slice(max - offset, max - offset + this.viewHeight);
     else shown = body.slice(Math.max(0, body.length - this.viewHeight - offset), body.length - offset);
     while (shown.length < this.viewHeight) this.tab === 'Status' ? shown.push('') : shown.unshift('');
     const frame = [this.tabBar(width, offset), ...shown.map((l) => fit(l, width)), ...footer.lines];
@@ -720,11 +1170,58 @@ export class Tui {
     return gap >= 1 ? `${left}${' '.repeat(gap)}${right}` : left;
   }
 
+  /** The pane on top, drawn in the chat's place: a title line, then its rows around the selection. */
+  private paneLines(width: number): string[] {
+    const pane = this.panes[this.panes.length - 1]!;
+    const rows = pane.rows(width);
+    const picks = rows.flatMap((r, i) => (r.pick ? [i] : []));
+    if (picks.length && !rows[pane.selected]?.pick) pane.selected = picks.find((i) => i >= pane.selected) ?? picks[picks.length - 1]!;
+    const lines: string[] = [];
+    let start = -1;
+    let end = -1;
+    rows.forEach((r, i) => {
+      if (picks.length && i === pane.selected) {
+        start = lines.length;
+        r.lines.forEach((l, j) => lines.push(j === 0 ? `${color.cyan(color.bold('›'))}${l.startsWith(' ') ? l.slice(1) : l}` : l));
+        end = lines.length - 1;
+      } else lines.push(...r.lines);
+    });
+    const h = Math.max(1, this.viewHeight - 1);
+    const max = Math.max(0, lines.length - h);
+    if (picks.length && start >= 0) {
+      if (start < pane.scroll) pane.scroll = start;
+      if (end >= pane.scroll + h) pane.scroll = Math.max(start - Math.max(0, h - (end - start + 1)), end - h + 1);
+      // Headings just above the first pick stay in view.
+      if (pane.selected === picks[0]) pane.scroll = 0;
+    }
+    pane.scroll = Math.max(0, Math.min(pane.scroll, max));
+    const trail = this.panes.length > 1 ? color.dim(` ‹ ${this.panes.slice(0, -1).reverse().map((p) => clean(p.title)).join(' ‹ ')}`) : '';
+    const where = lines.length > h ? color.dim(` ${Math.round((100 * (pane.scroll + h)) / lines.length)}%`) : '';
+    const title = `${color.bold(color.cyan(` ${clean(pane.title)}`))}${trail}`;
+    const head = `${truncate(title, Math.max(10, width - textWidth(where) - 1))}${where}`;
+    const shown = lines.slice(pane.scroll, pane.scroll + h);
+    while (shown.length < h) shown.push('');
+    return [head, ...shown];
+  }
+
   private footer(width: number): { lines: string[]; cursor?: { row: number; col: number } } {
     const rule = color.dim('─'.repeat(width));
+    if (this.confirming) return { lines: [rule, `${color.yellow(color.bold(truncate(` ${clean(this.confirming.question)}`, width - 14)))} ${color.bold('[y]')} yes  ${color.dim('any key: no')}`] };
     if (this.tab !== 'Chat') {
       const hint = this.tab === 'Logs' ? `${this.logLines.length} lines · ↑↓ PgUp PgDn scroll · End follows · Tab switches tabs · Ctrl+K quits` : `${this.options.url} · refreshes every 2 seconds · Tab switches tabs · Ctrl+K quits`;
       return { lines: [rule, color.dim(truncate(` ${hint}`, width))] };
+    }
+    // Over a pane, notes show above its keys (the chat, where they usually go, is covered).
+    const notes = this.panes.length ? this.notices.slice(-2).map((n) => (n.level === 'error' ? color.red : color.yellow)(truncate(` ${clean(n.text)}`, width))) : [];
+    if (this.panes.length && !this.prompt) return { lines: [rule, ...notes, ...wrap(this.panes[this.panes.length - 1]!.hint, width - 2).slice(0, 2).map((l) => color.dim(` ${l}`))] };
+    // Above the composer: what is being asked, the message being replied to, the files going with it.
+    const above: string[] = [];
+    above.push(...notes);
+    if (this.prompt) above.push(color.yellow(truncate(` ${this.prompt.label}`, width - 1)));
+    else {
+      if (this.picked) above.push(color.dim(truncate(' r reply · e react · s speak · c copy · Enter opens · ↑↓ move · Esc back to typing', width)));
+      if (this.replyTo) above.push(`${color.cyan(' ↳ ')}${color.dim(truncate(`Replying to ${this.replyTo.who}: ${clean(this.replyTo.text).replace(/\s+/g, ' ')}`, width - 18))}${color.dim(' · Esc cancels')}`);
+      if (this.attachments.length) above.push(color.dim(truncate(` 📎 ${this.attachments.map((a) => `${clean(a.name)} (${bytesText(a.size)})`).join(' · ')} · /detach drops them`, width)));
     }
     const prompt = '› ';
     const avail = Math.max(4, width - textWidth(prompt) - 1);
@@ -736,25 +1233,56 @@ export class Tui {
     const curCol = textWidth(before[curRow] ?? '');
     const first = Math.max(0, Math.min(curRow - 4, lines.length - 5));
     const visible = lines.slice(first, first + 5);
-    const placeholder = this.live ? 'The agent reads what you send at its next step · Esc stops the reply' : `Message ${this.agent?.id ?? 'the agent'} · /help for commands`;
+    const asked = this.openQuestions();
+    const placeholder = this.prompt
+      ? 'Enter answers · Esc cancels'
+      : asked
+        ? `Answer ${asked.agent} (a number picks an option) · Ctrl+↑ picks a message · /help`
+        : this.live
+          ? 'The agent reads what you send at its next step · Esc stops the reply'
+          : `Message ${this.agent?.id ?? 'the agent'} · Ctrl+↑ picks a message · /help for commands`;
     const rendered = this.text
       ? visible.map((l, i) => `${i === 0 && first === 0 ? color.cyan(prompt) : '  '}${l}`)
       : [`${color.cyan(prompt)}${color.dim(truncate(placeholder, avail))}`];
-    return { lines: [rule, ...rendered], cursor: { row: 1 + (this.text ? curRow - first : 0), col: textWidth(prompt) + (this.text ? curCol : 0) } };
+    if (this.picked && !this.prompt) return { lines: [rule, ...above, ...rendered] };
+    return { lines: [rule, ...above, ...rendered], cursor: { row: 1 + above.length + (this.text ? curRow - first : 0), col: textWidth(prompt) + (this.text ? curCol : 0) } };
   }
 
   private chatLines(width: number): string[] {
     const w = Math.max(10, width - 4);
     const out: string[] = [];
+    const picks: Pick[] = [];
     const indent = (lines: string[], pad = '  ') => lines.map((l) => `${pad}${l}`);
     const root = (it: { replyTo?: string; id?: string }) => (it.replyTo && it.replyTo !== it.id ? color.dim('│ ') : '');
-    if (this.more) out.push(color.dim('  … earlier messages are in the web interface and `sfagents conversation`'), '');
+    if (this.more) out.push(color.dim('  … earlier messages: Ctrl+↑ past the first one loads them (or /search, /topics)'), '');
     let lastTime = 0;
     let lastUser: string | undefined;
     for (const it of [...this.items, ...this.pending]) if (it.kind === 'user') lastUser = it.id;
     const badge = (id: string) => {
       const r = [this.reactions[id], this.agentReactions[id]].filter(Boolean).join('');
       return r ? ` ${r}` : '';
+    };
+    // Inline replies: how many each message has, and where a run of them starts away from its message.
+    const replies = new Map<string, number>();
+    for (const it of [...this.items, ...this.pending]) if ('replyTo' in it && it.replyTo && it.replyTo !== it.id) replies.set(it.replyTo, (replies.get(it.replyTo) ?? 0) + 1);
+    let openRoot: string | undefined;
+    const quote = (it: Item) => {
+      const r = 'replyTo' in it && it.replyTo && it.replyTo !== it.id ? it.replyTo : undefined;
+      if (r && openRoot !== r) {
+        const target = this.items.find((x) => x.id === r);
+        const text = target && 'text' in target ? clean(target.text).replace(/\s+/g, ' ') : '';
+        out.push('', color.dim(truncate(`╭ ↳ ${target?.kind === 'user' ? 'You' : target && 'agent' in target ? target.agent : ''}: ${text}`, w)));
+      }
+      openRoot = r ?? (replies.get(it.id) ? it.id : undefined);
+    };
+    const mark = (p: Omit<Pick, 'start' | 'end'>, from: number) => {
+      // The blank line before a message isn't part of it.
+      const start = out[from] === '' ? from + 1 : from;
+      picks.push({ ...p, start, end: out.length - 1 });
+    };
+    const replyCount = (id: string, thread: string) => {
+      const n = replies.get(id);
+      if (n) out.push(`${thread}  ${color.dim(`${n} ${n === 1 ? 'reply' : 'replies'}`)}`);
     };
     for (const it of this.items) {
       const t = new Date(it.time).getTime();
@@ -763,9 +1291,12 @@ export class Tui {
         lastTime = t;
       }
       const thread = root(it);
+      const from = out.length;
       if (it.kind === 'user') {
-        const from = it.view ? color.dim(` · from the view “${clean(this.views.get(it.view) ?? it.view)}”`) : '';
-        out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(it.time))}${from}${badge(it.id)}`);
+        quote(it);
+        const at = out.length;
+        const from2 = it.view ? color.dim(` · from the view “${clean(this.views.get(it.view) ?? it.view)}”`) : '';
+        out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(it.time))}${from2}${badge(it.id)}`);
         out.push(...indent(wrap(clean(it.text), w - textWidth(thread)), `${thread}  `));
         for (const a of it.attachments ?? []) out.push(`${thread}  ${color.dim(`📎 ${clean(a.name)} (${bytesText(a.size)})`)}`);
         if (it.id === lastUser) {
@@ -773,18 +1304,30 @@ export class Tui {
           const receipt = answered ? '' : this.read?.id === it.id ? `Read ${timeText(this.read.time)}` : 'Delivered';
           if (receipt) out.push(`${thread}  ${color.dim(receipt)}`);
         }
+        replyCount(it.id, thread);
+        mark({ id: it.id, kind: 'user', text: it.text, replies: replies.get(it.id) }, at);
       } else if (it.kind === 'assistant') {
+        quote(it);
+        const at = out.length;
         out.push('', `${thread}${color.magenta(color.bold(it.agent))} ${color.dim(timeText(it.time))}${badge(it.id)}`);
         out.push(...indent(wrap(clean(it.text), w - textWidth(thread)), `${thread}  `));
+        replyCount(it.id, thread);
+        mark({ id: it.id, kind: 'assistant', text: it.text, agent: it.agent, replies: replies.get(it.id) }, at);
       } else if (it.kind === 'activity') {
         out.push(this.activityLine(it, w));
         if (it.status !== 'error' && it.status !== 'denied') out.push(...this.viewLine(it.artifact, w));
+        if (it.thread) out.push(`    ${color.dim(truncate(`↪ a thread with ${clean(it.agent ?? 'another agent')}: Ctrl+↑, then Enter, opens it`, w - 4))}`);
+        if (it.thread || (it.artifact && this.artifacts.some((a) => a.id === it.artifact))) mark({ id: it.id, kind: 'activity', text: it.text, thread: it.thread, artifact: it.thread ? undefined : it.artifact }, from);
+      } else if (it.kind === 'questions') {
+        out.push(...questionLines(it.agent, it.questions, it.answered, w));
+        mark({ id: it.id, kind: 'questions', text: it.questions.map((q) => q.question).join('\n'), questions: it.answered ? undefined : it.questions, agent: it.agent }, from);
       } else {
         out.push(...indent(wrap(clean(it.text), w).map((l) => (/^Error/.test(it.text) ? color.red(l) : color.yellow(l)))));
       }
     }
     for (const p of this.pending) {
       const thread = root(p);
+      quote(p);
       out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(p.time))}`);
       out.push(...indent(wrap(clean(p.text), w - textWidth(thread)), `${thread}  `));
       for (const a of p.attachments ?? []) out.push(`${thread}  ${color.dim(`📎 ${clean(a.name)} (${bytesText(a.size)})`)}`);
@@ -793,10 +1336,22 @@ export class Tui {
     if (this.live) {
       const segs = this.live.segments;
       segs.forEach((seg, i) => {
+        const from = out.length;
+        if (seg.questions?.length) {
+          out.push(...questionLines(this.agent?.id ?? 'The agent', seg.questions, !!seg.answered, w));
+          mark({ id: `live:${seg.id}`, kind: 'questions', text: seg.questions.map((q) => q.question).join('\n'), questions: seg.answered ? undefined : seg.questions, agent: this.agent?.id }, from);
+        }
         if (seg.kind === 'text') {
           // Finished text only (the reply arrives whole), as on the pages.
           if (i < segs.length - 1 && seg.text.trim()) out.push('', color.magenta(color.bold(this.agent?.id ?? 'agent')), ...indent(wrap(clean(seg.text), w)));
-        } else if (!seg.hidden) out.push(this.activityLine(seg, w));
+        } else if (!seg.hidden) {
+          const at = out.length;
+          out.push(this.activityLine(seg, w));
+          if (seg.thread) {
+            out.push(`    ${color.dim('↪ a thread between agents: Ctrl+↑, then Enter, opens it')}`);
+            mark({ id: `live:${seg.id}`, kind: 'activity', text: seg.text, thread: seg.thread }, at);
+          }
+        }
       });
       if (!this.approvals.length) out.push('', color.dim(`  ${this.agent?.id ?? 'The agent'} is working…`));
     }
@@ -815,11 +1370,17 @@ export class Tui {
     for (const n of this.notices) out.push('', ...indent(wrap(clean(n.text), w)).map(n.level === 'error' ? color.red : color.yellow));
     if (!this.items.length && !this.live) out.push('', color.dim(`  No messages yet. Type below, or open ${this.options.url}`));
     out.push('');
+    // The picked message: a bar down its left side.
+    this.picks = picks;
+    const picked = picks.find((p) => p.id === this.picked);
+    if (this.picked && !picked) this.picked = null;
+    if (picked) for (let i = picked.start; i <= picked.end; i++) out[i] = `${color.cyan('▌')}${out[i]!.startsWith(' ') ? out[i]!.slice(1) : out[i]}`;
     return out;
   }
 
   private setViews(list: unknown): void {
     if (!Array.isArray(list)) return;
+    this.artifacts = list as ArtifactInfo[];
     this.views = new Map(list.filter((a) => a?.type === 'genui').map((a) => [String(a.id), String(a.title)]));
   }
 
@@ -876,6 +1437,8 @@ export class Tui {
     row('Model', String(this.agent?.model ?? s.self.agent.model ?? '—'));
     const c = s.self.conversation;
     row('Conversation', `${c.messages} messages · ${c.artifacts} artifacts · ${c.sections} sections · ${bytesText(c.size)}`);
+    for (const [label, value] of usageLines(this.usage)) row(label, value);
+    if (this.context) row('Context', `${bar(this.context.budget ? this.context.used / this.context.budget : null)} ${tokens(this.context.used)} of ${tokens(this.context.budget)} tokens ${color.dim('(/context breaks it down)')}`);
     row('MCP servers', s.mcp.length ? s.mcp.map((m) => `${m.name} ${m.started ? ok('running') : color.dim('starts when used')}`).join(' · ') : color.dim('none'));
 
     section('Components');

@@ -183,6 +183,16 @@ export class Up2kStore {
     return this.completed.get(id);
   }
 
+  /** Makes an attachment that arrived some other way (a file attached from the Files window or the terminal) sendable. */
+  register(ref: AttachmentRef): void {
+    this.completed.set(ref.id, ref);
+    try {
+      fs.writeFileSync(path.join(this.doneDir, `${ref.id}.json`), JSON.stringify(ref));
+    } catch {
+      // it stays usable until the server restarts
+    }
+  }
+
   wark(size: number, hashes: readonly string[], dest?: string): string {
     // An upload into a folder is its own upload, so the same file can go to two places.
     const text = `${this.salt}\n${size}\n${hashes.join('\n')}${dest ? `\n${dest}` : ''}`;

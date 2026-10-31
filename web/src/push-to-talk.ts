@@ -578,6 +578,46 @@ interface PvSpeakerClass {
   new (sampleRate: number, bitsPerSample: number, options?: { bufferSizeSecs?: number; deviceIndex?: number }): { start(): void; stop(): void; write(pcm: ArrayBuffer): number; release(): void };
 }
 
+/**
+ * Plays 16-bit mono PCM (little-endian) as it arrives, through PvSpeaker,
+ * until it ends and has been heard, or the signal stops it.
+ */
+export async function playPcm(chunks: AsyncIterable<Buffer>, rate: number, signal: AbortSignal): Promise<void> {
+  const { PvSpeaker } = optional<{ PvSpeaker: PvSpeakerClass }>(() => require(require.resolve('@picovoice/pvspeaker-node')), '@picovoice/pvspeaker-node', 'The sound library');
+  const speaker = new PvSpeaker(rate, 16, { bufferSizeSecs: 4, deviceIndex: -1 });
+  const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  speaker.start();
+  let written = 0;
+  let started = 0;
+  try {
+    let carry: Buffer = Buffer.alloc(0);
+    for await (const chunk of chunks) {
+      if (signal.aborted) return;
+      const data = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      const even = data.length - (data.length % 2);
+      carry = Buffer.from(data.subarray(even));
+      let samples = new Int16Array(even / 2);
+      for (let i = 0; i < samples.length; i++) samples[i] = data.readInt16LE(i * 2);
+      while (samples.length && !signal.aborted) {
+        const n = speaker.write(samples.slice().buffer);
+        if (!started && n) started = Date.now();
+        written += n;
+        samples = samples.subarray(n);
+        if (samples.length) await wait(40); // the buffer is full: let some of it play
+      }
+    }
+    // The end is in the buffer: wait while it plays.
+    while (!signal.aborted && started && Date.now() - started < (written / rate) * 1000 + 250) await wait(50);
+  } finally {
+    try {
+      speaker.stop();
+      speaker.release();
+    } catch {
+      // already gone
+    }
+  }
+}
+
 const LEAD_IN_SECONDS = 0.15;
 
 /** How long the speaker stays open after a chime (opening it for each one can clip the chime's start). */
