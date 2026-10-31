@@ -26,6 +26,12 @@ export interface HostCommands {
   artifact?: ArtifactCommand;
 }
 
+/** How a command is described where tools are listed (the agent sheet): what it does, and its usage. */
+export function hostCommandSchema(name: string): { name: string; description: string; usage: string } {
+  if (name === WEB_COMMAND) return { name, description: 'Web search and pages, fetched by SF Agents on the host (Bright Data). A command in the shell tool, explained in its description; agents without "shell" get a shell that runs only these commands.', usage: WEB_USAGE };
+  return { name, description: 'Shows a file, a folder or a web app running on this computer as an artifact, or changes one. A command in the shell tool, explained in its description; agents without "shell" get a shell that runs only these commands.', usage: ARTIFACT_USAGE };
+}
+
 export type HostCommandReply = { ok: true; text: string; truncated?: boolean } | { ok: false; error: string };
 
 /** The commands this agent has, by name. */

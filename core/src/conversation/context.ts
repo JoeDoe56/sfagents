@@ -209,6 +209,11 @@ export interface ContextTool {
   server?: string;
   /** The tool's schema as sent to the model. */
   schema: unknown;
+  /**
+   * A command run through another tool (sf-web and sf-artifact, in the
+   * shell): listed with its usage, but its tokens are already that tool's.
+   */
+  partOf?: string;
 }
 
 export interface ContextBreakdown {
@@ -223,7 +228,7 @@ export interface ContextBreakdown {
     id: 'system' | 'builtin' | 'mcp' | 'agents' | 'conversation' | 'index' | 'messages';
     label: string;
     tokens: number;
-    items?: Array<{ name: string; tokens: number; detail?: string; schema?: unknown }>;
+    items?: Array<{ name: string; tokens: number; detail?: string; schema?: unknown; partOf?: string }>;
   }>;
   exchanges: { included: number; omitted: number; recentLimit: number; sinceReset: number };
   sections: { shown: number; total: number };
@@ -247,7 +252,7 @@ export function contextBreakdown(
 ): ContextBreakdown {
   const budget = policy.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS;
   const reserve = Math.floor(budget * TURN_RESERVE);
-  const fixedText = systemPrompt + JSON.stringify(tools.map((t) => t.schema));
+  const fixedText = systemPrompt + JSON.stringify(tools.filter((t) => !t.partOf).map((t) => t.schema));
   let working: WorkingContext | undefined;
   let problem: string | undefined;
   try {
@@ -258,8 +263,11 @@ export function contextBreakdown(
   }
   const toolTokens = (t: ContextTool) => estimateTokens(JSON.stringify(t.schema));
   const family = (group: ContextTool['group']) => tools.filter((t) => t.group === group);
-  const itemsOf = (list: readonly ContextTool[]) => list.map((t) => ({ name: t.name, tokens: toolTokens(t), ...(t.server ? { detail: t.server } : {}), schema: t.schema })).sort((a, b) => b.tokens - a.tokens);
-  const sum = (list: Array<{ tokens: number }>) => list.reduce((a, x) => a + x.tokens, 0);
+  const itemsOf = (list: readonly ContextTool[]) =>
+    list
+      .map((t) => ({ name: t.name, tokens: toolTokens(t), ...(t.server ? { detail: t.server } : t.partOf ? { detail: `command in ${t.partOf}`, partOf: t.partOf } : {}), schema: t.schema }))
+      .sort((a, b) => b.tokens - a.tokens);
+  const sum = (list: Array<{ tokens: number; partOf?: string }>) => list.reduce((a, x) => a + (x.partOf ? 0 : x.tokens), 0);
   const builtin = itemsOf(family('builtin'));
   const mcp = itemsOf(family('mcp'));
   const agents = itemsOf(family('agents'));

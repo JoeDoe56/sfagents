@@ -15,7 +15,7 @@ import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definit
 import { CHAT_GUIDANCE, ChatToolNames, createChatTools } from '../conversation/chat-tools.js';
 import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
 import { ARTIFACT_COMMAND, ARTIFACT_GUIDANCE, artifactCommand, artifactIndex } from '../conversation/artifacts.js';
-import { availableHostCommands, type HostCommands } from '../tools/host-commands.js';
+import { availableHostCommands, hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import {
@@ -919,6 +919,11 @@ export class AgentSession {
       ...(tool instanceof DiscoveredMcpTool ? { server: tool.serverName } : {}),
       schema: tool.schema,
     }));
+    // SF Agents' commands are part of the shell tool; listed so they can be found.
+    const shell = tools.get(ToolNames.SHELL);
+    if (shell instanceof ShellTool) {
+      for (const name of shell.commandNames) list.push({ name, group: 'builtin', partOf: ToolNames.SHELL, schema: hostCommandSchema(name) });
+    }
     const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
     const index = conversation.file && artifactAccess(definition, 0) !== 'none' ? artifactIndex(conversation) : undefined;
     const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined, undefined, features(tools)), list, {

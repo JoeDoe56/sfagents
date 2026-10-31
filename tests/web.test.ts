@@ -789,6 +789,12 @@ describe('agent settings and context', () => {
       assert.ok(byId.system.tokens > 0);
       assert.ok(byId.messages.tokens > 0);
       assert.ok(byId.conversation.items.some((t: { name: string }) => t.name === 'search_conversation'));
+      // sf-artifact is listed with the tools, as a command in the shell (its tokens are the shell's).
+      type Item = { name: string; tokens: number; partOf?: string; schema: { usage?: string } };
+      const art = (byId.builtin.items as Item[]).find((t) => t.name === 'sf-artifact')!;
+      assert.equal(art.partOf, 'shell');
+      assert.match(art.schema.usage!, /sf-artifact --port/);
+      assert.equal(byId.builtin.tokens, (byId.builtin.items as Item[]).filter((t) => !t.partOf).reduce((a, t) => a + t.tokens, 0));
       assert.equal(c.exchanges.included, 1);
       assert.equal(c.modelWindow, null);
       assert.ok(c.lastRequest?.usage);

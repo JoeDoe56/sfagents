@@ -539,8 +539,13 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       detents: ['large'],
       className: 'ag-tool-sheet',
       build(sheet) {
-        const meta = el('p', 'ag-tool-meta', `${tokensText(item.tokens)} tokens${item.detail ? ` · ${item.detail}` : ''}`);
+        const meta = el('p', 'ag-tool-meta', item.partOf ? `Counted in ${item.partOf} · ${item.detail}` : `${tokensText(item.tokens)} tokens${item.detail ? ` · ${item.detail}` : ''}`);
         const desc = el('p', 'ag-tool-desc', schema.description || 'No description.');
+        if (item.partOf) {
+          // A command run through another tool (sf-web, sf-artifact in the shell).
+          sheet.body.append(meta, desc, el('h3', 'ag-tool-label', 'Usage'), el('pre', 'ag-tool-json', schema.usage ?? ''));
+          return;
+        }
         const label = el('h3', 'ag-tool-label', 'Parameters');
         const pre = el('pre', 'ag-tool-json', JSON.stringify(schema.parameters ?? {}, null, 2));
         const rawLabel = el('h3', 'ag-tool-label', 'As sent');
@@ -606,7 +611,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       const group = createGroup();
       for (const cat of families) {
         const kids = cat.items.map((it) =>
-          createRow({ title: it.name, value: `${it.detail ? `${it.detail} · ` : ''}${tokensText(it.tokens)}`, accessory: 'chevron', onTap: () => showTool(it) }),
+          createRow({ title: it.name, value: it.partOf ? it.detail : `${it.detail ? `${it.detail} · ` : ''}${tokensText(it.tokens)}`, accessory: 'chevron', onTap: () => showTool(it) }),
         );
         for (const k of kids) k.el.classList.add('nested');
         const chevron = sfIcon('chevron.right', 12);
