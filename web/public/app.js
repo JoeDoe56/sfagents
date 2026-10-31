@@ -12,6 +12,7 @@ import { chatGlass } from './glass.js';
 import { createComposer } from './composer.js';
 import { SEND_TINT } from './glassvalues.js';
 import { renderTiles, createViewer, chatCard } from './artifacts.js';
+import { mountView, refreshViews } from './genui.js';
 import { openTranscript, refreshTranscript } from './transcript.js';
 import { UploadJob } from './up2k.js';
 import { createRail } from './rail.js';
@@ -320,6 +321,7 @@ const msgEntry = (it, side) => ({
   attachments: it.attachments,
   rich: side === 'in',
   root: it.replyTo,
+  view: it.view,
   reaction: state.reactions[it.id] ?? state.agentReactions[it.id],
 });
 
@@ -335,14 +337,14 @@ function entries() {
       push({ key: `stamp:${it.id}`, type: 'stamp', time: it.time });
     }
     if (Number.isFinite(t) && (it.kind === 'user' || it.kind === 'assistant')) lastTime = t;
-    if (it.kind === 'user') push(msgEntry(it, 'out'));
+    if (it.kind === 'user') pushUser(push, msgEntry(it, 'out'));
     else if (it.kind === 'assistant') push(msgEntry(it, 'in'));
     else if (it.kind === 'activity') pushActivity(push, it.id, it);
     else if (it.kind === 'questions') push({ key: it.id, type: 'questions', questions: it.questions, answered: it.answered });
     else push({ key: it.id, type: 'notice', text: it.text, level: /^Error/.test(it.text) ? 'error' : '' });
   }
-  for (const p of state.pending) push({ ...msgEntry(p, 'out'), key: p.id });
-  for (const o of state.outbox) push({ key: o.key, type: 'msg', side: 'out', text: o.text, root: o.root, pending: true });
+  for (const p of state.pending) pushUser(push, { ...msgEntry(p, 'out'), key: p.id });
+  for (const o of state.outbox) pushUser(push, { key: o.key, type: 'msg', side: 'out', text: o.text, root: o.root, view: o.view, pending: true });
   if (state.live) {
     const root = state.live.replyTo;
     const shown = new Set(liveTexts());
@@ -355,7 +357,30 @@ function entries() {
   }
   for (const a of state.approvals) push({ key: `approval:${a.id}`, type: 'approval', approval: a, decision: answered.get(a.id) });
   for (const n of state.notices) push({ key: `notice:${n.id}`, type: 'notice', text: n.text, level: n.level });
-  return decorate(threaded(withReceipt(out)));
+  return decorate(threaded(withReceipt(liveViews(out))));
+}
+
+/** A message sent from a view: it hangs off a small copy of the view's title, like an inline reply. */
+function pushUser(push, e) {
+  if (e.view) {
+    const a = state.artifacts.find((x) => x.id === e.view);
+    push({ key: `viewquote:${e.key}`, type: 'viewquote', view: e.view, text: a?.title ?? 'View' });
+    e.threaded = true;
+    e.threadEnd = true;
+  }
+  push(e);
+}
+
+/** A view shows live where it last appears in the chat; earlier appearances are cards that point to it. */
+function liveViews(out) {
+  const seen = new Set();
+  for (let i = out.length - 1; i >= 0; i--) {
+    const e = out[i];
+    if (e.type !== 'artifact' || e.artifact.type !== 'genui') continue;
+    e.live = !seen.has(e.artifact.id);
+    seen.add(e.artifact.id);
+  }
+  return out;
 }
 
 /** The entries of one reply thread, for the reply view. */
@@ -588,7 +613,21 @@ function buildEntry(e) {
     case 'artifact': {
       el = document.createElement('div');
       el.className = 'msg in first tail-room';
-      el.append(chatCard(e.artifact, openArtifact));
+      if (e.artifact.type === 'genui' && e.live && !e.artifact.missing) {
+        el.classList.add('genui-msg');
+        el.append(mountView(e.artifact, viewHooks).root);
+      } else el.append(chatCard(e.artifact, e.artifact.type === 'genui' ? (a) => showView(a.id) : openArtifact));
+      break;
+    }
+    case 'viewquote': {
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'reply-quote view-quote';
+      const icon = document.createElement('i');
+      applySymbol(icon, 'square.grid.2x2', { size: 11 });
+      el.append(icon, document.createTextNode(` ${e.text.replace(/\s+/g, ' ').trim()}`));
+      el.setAttribute('aria-label', `Sent from the view “${e.text}”. Show the view`);
+      el.addEventListener('click', () => showView(e.view));
       break;
     }
     case 'notice':
@@ -611,7 +650,7 @@ function buildEntry(e) {
 function signature(e) {
   switch (e.type) {
     case 'msg':
-      return `msg|${e.side}|${e.first}|${e.tail}|${hashText(e.text || '')}|${(e.attachments || []).length}|${e.reaction || ''}|${e.threaded ? 't' : ''}${e.threadEnd ? 'e' : ''}`;
+      return `msg|${e.side}|${e.view || ''}|${e.first}|${e.tail}|${hashText(e.text || '')}|${(e.attachments || []).length}|${e.reaction || ''}|${e.threaded ? 't' : ''}${e.threadEnd ? 'e' : ''}`;
     case 'receipt':
       return `receipt|${e.html}|${e.threaded}`;
     case 'quote':
@@ -622,7 +661,11 @@ function signature(e) {
     case 'threadlink':
       return `thr|${e.status}|${e.text}|${e.thread}`;
     case 'artifact':
-      return `art|${e.artifact.id}|${e.artifact.rev}|${e.artifact.title}`;
+      // A live view redraws itself when its file changes.
+      if (e.artifact.type === 'genui') return `view|${e.artifact.id}|${e.live ? 'live' : e.artifact.version}|${e.artifact.missing ? 1 : 0}`;
+      return `art|${e.artifact.id}|${e.artifact.version ?? e.artifact.rev}|${e.artifact.title}`;
+    case 'viewquote':
+      return `vq|${e.view}|${e.text}`;
     case 'typing':
       return `typing|${e.first}|${e.threaded}|${e.threadEnd}`;
     case 'approval':
@@ -1389,7 +1432,43 @@ const viewer = createViewer({
   open: $('viewerOpen'),
   download: $('viewerDownload'),
   onPin: (a, pinned) => pinArtifact(a, pinned),
+  renderView: (a) => {
+    viewerView?.dispose();
+    viewerView = mountView(a, viewHooks);
+    return viewerView.root;
+  },
 });
+let viewerView = null;
+
+/** What a view can do in the page: send a message from itself, save itself, open itself. */
+const viewHooks = {
+  send: (text, a) => submit({ text, jobs: [], view: a.id }),
+  onSave: (a, saved) => saveView(a, saved),
+  onOpen: (a) => viewer.show(a),
+};
+
+async function saveView(a, saved) {
+  try {
+    await postJson(`/api/artifacts/${encodeURIComponent(a.id)}/save`, { saved });
+  } catch (error) {
+    notice(`Could not ${saved ? 'save' : 'remove'} “${a.title}”: ${error.message}`, 'error');
+  }
+}
+
+/** Scrolls to a view where it is live in the chat (or opens it, when it is not in the loaded part). */
+function showView(id) {
+  if (state.reply) closeReplies();
+  const el = thread.querySelector(`.genui[data-view="${CSS.escape(id)}"]`);
+  if (!el) {
+    const a = state.artifacts.find((x) => x.id === id);
+    if (a) viewer.show(a);
+    return;
+  }
+  el.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
+  el.classList.remove('found');
+  void el.offsetWidth;
+  el.classList.add('found');
+}
 
 async function pinArtifact(a, pinned) {
   try {
@@ -1402,15 +1481,19 @@ async function pinArtifact(a, pinned) {
 function setArtifacts(list) {
   state.artifacts = list || [];
   const handlers = { onOpen: openArtifact, onPin: pinArtifact };
-  renderTiles($('pinned'), state.artifacts.filter((a) => a.pinned), handlers);
-  renderTiles($('allArtifacts'), state.artifacts, handlers);
+  // A view is in the artifacts once the person saves it with its bookmark.
+  const kept = state.artifacts.filter((a) => a.type !== 'genui' || a.saved);
+  renderTiles($('pinned'), kept.filter((a) => a.pinned), handlers);
+  renderTiles($('allArtifacts'), kept, handlers);
   viewer.refresh(state.artifacts);
+  refreshViews(state.artifacts);
   render(); // the chat's artifact cards
 }
 
 /** A file artifact opens in the file manager's Quick Look, a folder in the file manager itself; without a file on disk, in the artifact viewer. */
 function openArtifact(a) {
   if (a.type === 'app') return openApp(a);
+  if (a.type === 'genui') return viewer.show(a);
   if (a.type === 'folder' && a.file && !a.missing) return openFiles(a.file);
   if (!a.file || a.missing) return viewer.show(a);
   fileManager.quickLookFile(a.file).catch(() => viewer.show(a));
@@ -1566,11 +1649,11 @@ function submitFromComposer() {
 }
 
 let outboxSeq = 0;
-async function submit({ text, jobs, replyTo = null }) {
+async function submit({ text, jobs, replyTo = null, view = null }) {
   // A message of text alone is shown at once, rising out of the field; the server's copy replaces it in place.
   let sent = null;
   if (!jobs.length && text.trim()) {
-    sent = { key: `outbox:${++outboxSeq}`, text, root: replyTo ? rootOf(replyTo) : undefined };
+    sent = { key: `outbox:${++outboxSeq}`, text, root: replyTo ? rootOf(replyTo) : undefined, ...(view ? { view } : {}) };
     state.outbox.push(sent);
     render();
   }
@@ -1579,14 +1662,14 @@ async function submit({ text, jobs, replyTo = null }) {
       if (jobs.some((j) => j.state !== 'done')) notice(`Uploading ${jobs.length === 1 ? 'the attachment' : `${jobs.length} attachments`}…`);
       await Promise.all(jobs.map((j) => j.promise));
     }
-    await postJson('/api/messages', { text, attachments: jobs.map((j) => j.attachment.id), ...(replyTo ? { replyTo } : {}) });
+    await postJson('/api/messages', { text, attachments: jobs.map((j) => j.attachment.id), ...(replyTo ? { replyTo } : {}), ...(view ? { view } : {}) });
   } catch (error) {
     if (sent) {
       state.outbox = state.outbox.filter((o) => o !== sent);
       render();
     }
     notice(`Not sent: ${error.message}`, 'error');
-    if (!input.value) {
+    if (!input.value && !view) {
       input.value = text;
       autosize();
       updateComposer();

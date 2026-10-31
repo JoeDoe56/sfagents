@@ -41,7 +41,7 @@ async function loadPreview(a) {
   if (previews.has(key)) return previews.get(key);
   let value = { kind: 'icon' };
   if (a.type === 'image') value = { kind: 'image' };
-  else if (a.type === 'app' || a.missing || !['document', 'code', 'data', 'text', 'genui'].includes(a.type)) value = { kind: 'icon' };
+  else if (a.type === 'app' || a.missing || !['document', 'code', 'data', 'text'].includes(a.type)) value = { kind: 'icon' };
   else {
     try {
       const res = await fetch(`${a.url}?rev=${a.version ?? a.rev}`);
@@ -205,7 +205,7 @@ export function chatCard(a, onOpen) {
 }
 
 /** The full-screen artifact viewer. */
-export function createViewer({ root, title, meta, body, close, pin, open, download, onPin }) {
+export function createViewer({ root, title, meta, body, close, pin, open, download, onPin, renderView }) {
   let current = null;
   let lastFocus = null;
 
@@ -229,6 +229,14 @@ export function createViewer({ root, title, meta, body, close, pin, open, downlo
     body.replaceChildren();
     root.hidden = false;
     close.focus();
+    if (a.type === 'genui' && renderView && !a.missing) {
+      // A view keeps itself up to date.
+      const wrap = document.createElement('div');
+      wrap.className = 'genui-page';
+      wrap.append(renderView(a));
+      body.append(wrap);
+      return;
+    }
     if (a.type === 'html') {
       const frame = document.createElement('iframe');
       frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals');
@@ -298,7 +306,7 @@ export function createViewer({ root, title, meta, body, close, pin, open, downlo
       if (!current) return;
       const next = artifacts.find((x) => x.id === current.id);
       if (!next) return hide();
-      if (next.rev !== current.rev) return show(next);
+      if (next.rev !== current.rev && next.type !== 'genui') return show(next);
       current = next;
       updatePin(next.pinned);
     },

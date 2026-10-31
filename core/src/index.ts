@@ -113,7 +113,7 @@ export type {
 export { GENUI_DIR_NAME } from './conversation/service.js';
 export { replayTarget } from './runtime/runtime.js';
 export { PersistenceFailure } from './runtime/recorder.js';
-export type { RunRecorder } from './runtime/recorder.js';
+export type { RunRecorder, ViewSource } from './runtime/recorder.js';
 export type { ToolCallContext } from './tools/tools.js';
 export {
   addSection,
@@ -160,6 +160,15 @@ export {
   safeFilename,
 } from './conversation/artifacts.js';
 export type { ArtifactAccess, ArtifactCommand, ArtifactRequest } from './conversation/artifacts.js';
+export {
+  GENUI_GUIDANCE,
+  GENUI_VERSION,
+  genuiStateSummary,
+  MAX_GENUI_STATE_CHARS,
+  parseGenui,
+  validateGenui,
+  writeGenuiState,
+} from './conversation/genui.js';
 export { availableHostCommands, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, splitCommandLine, WEB_COMMAND } from './tools/host-commands.js';
 export type { HostCommandReply, HostCommands } from './tools/host-commands.js';
 export {

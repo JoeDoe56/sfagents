@@ -44,6 +44,8 @@ export interface ArtifactView {
   mime?: string;
   rev: number;
   pinned: boolean;
+  /** GenUI views only: kept in the artifacts (they otherwise show only in the chat). */
+  saved: boolean;
   createdSeq: number;
   createdTime: string;
   updatedSeq: number;
@@ -305,6 +307,7 @@ export class ConversationState {
           mime: record.mime,
           rev: 1,
           pinned: false,
+          saved: false,
           createdSeq: record.seq,
           createdTime: record.time,
           updatedSeq: record.seq,
@@ -328,9 +331,12 @@ export class ConversationState {
         view.updatedTime = record.time;
         break;
       }
-      case 'artifact_pin':
-        this.artifactViews.get(record.artifact)!.pinned = record.pinned;
+      case 'artifact_pin': {
+        const view = this.artifactViews.get(record.artifact)!;
+        view.pinned = record.pinned;
+        if (record.saved !== undefined) view.saved = record.saved;
         break;
+      }
       case 'context_reset':
         this.lastResetSeq = record.seq;
         break;

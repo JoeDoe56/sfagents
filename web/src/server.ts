@@ -22,7 +22,11 @@ import {
   AgentRuntime,
   AgentTerminateMode,
   ArtifactError,
+  genuiStateSummary,
+  MAX_GENUI_STATE_CHARS,
   OPENROUTER_BASE_URL,
+  parseGenui,
+  writeGenuiState,
   getErrorMessage,
   threadKey,
   type AgentRunResult,
@@ -35,6 +39,7 @@ import {
   type ConversationService,
   type ProviderFactory,
   type RuntimeEvent,
+  type ViewSource,
   AccountState,
   AppSettings,
   credentialEnvNames,
@@ -185,6 +190,8 @@ interface PendingInput {
   event?: 'reaction';
   /** A reaction's message. */
   target?: string;
+  /** Sent from a GenUI view by one of its buttons. */
+  from?: ViewSource;
 }
 
 interface PendingApproval {
@@ -1042,8 +1049,21 @@ export class WebServer {
           return this.answerApproval(parts[1] ?? '', req, res);
         case 'GET artifacts':
           if (parts[1] && parts[2] === 'raw') return this.serveArtifact(parts[1], url, res);
+          if (parts[1] && parts[2] === 'view') return sendJson(res, 200, this.readView(parts[1]));
           return sendJson(res, 200, { artifacts: this.displayArtifacts() });
         case 'POST artifacts': {
+          if (parts[1] && parts[2] === 'save') {
+            const body = (await readJson(req)) as { saved?: unknown };
+            if (typeof body.saved !== 'boolean') throw new HttpError(400, '"saved" must be true or false.');
+            this.conversation.setArtifactSaved(parts[1], body.saved);
+            this.publishArtifacts(true);
+            return sendJson(res, 200, { ok: true });
+          }
+          if (parts[1] && parts[2] === 'state') {
+            const body = (await readJson(req)) as { state?: unknown };
+            this.writeViewState(parts[1], body.state);
+            return sendJson(res, 200, { ok: true });
+          }
           if (!parts[1] || parts[2] !== 'pin') throw new HttpError(404, 'Not found.');
           const body = (await readJson(req)) as { pinned?: unknown };
           if (typeof body.pinned !== 'boolean') throw new HttpError(400, '"pinned" must be true or false.');
@@ -1384,6 +1404,38 @@ export class WebServer {
     const rev = url.searchParams.get('rev');
     const content = this.conversation.artifactContent(id, rev ? Number(rev) : undefined);
     this.serveBytes(res, content.data, content.mime, content.filename, url.searchParams.has('download'));
+  }
+
+  /** A GenUI view's file, checked: the document, or what is wrong with it. */
+  private viewFile(id: string): string {
+    const view = this.conversation.state.artifactViews.get(id);
+    if (!view || view.type !== 'genui' || !view.file) throw new HttpError(404, 'No such view.');
+    return this.conversation.resolveArtifactFile(view.file);
+  }
+
+  private readView(id: string): { doc?: Record<string, unknown>; errors: string[]; version: number } {
+    const file = this.viewFile(id);
+    let text: string;
+    let version = 0;
+    try {
+      text = fs.readFileSync(file, 'utf8');
+      version = Math.round(fs.statSync(file).mtimeMs);
+    } catch {
+      return { errors: ['The view\'s file is missing.'], version };
+    }
+    return { ...parseGenui(text), version };
+  }
+
+  /** The person changed a view: its state goes into the file, like an edit to any artifact. */
+  private writeViewState(id: string, state: unknown): void {
+    const file = this.viewFile(id);
+    if (JSON.stringify(state ?? null).length > MAX_GENUI_STATE_CHARS) throw new HttpError(413, 'The view\'s state is too large.');
+    try {
+      writeGenuiState(file, state);
+    } catch (error) {
+      throw new HttpError(400, getErrorMessage(error));
+    }
+    this.publishArtifacts(true);
   }
 
   private serveUpload(id: string, res: ServerResponse): void {
@@ -1755,7 +1807,7 @@ export class WebServer {
             v = 'missing';
           }
         }
-        return `${a.id}:${a.rev}:${a.pinned ? 1 : 0}:${v}`;
+        return `${a.id}:${a.rev}:${a.pinned ? 1 : 0}${a.saved ? 's' : ''}:${v}`;
       })
       .join(',');
   }
@@ -1873,9 +1925,16 @@ export class WebServer {
   // Runs
 
   private async postMessage(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = (await readJson(req)) as { text?: unknown; attachments?: unknown; replyTo?: unknown };
+    const body = (await readJson(req)) as { text?: unknown; attachments?: unknown; replyTo?: unknown; view?: unknown };
     const text = typeof body.text === 'string' ? body.text : '';
     const replyTo = typeof body.replyTo === 'string' && body.replyTo ? body.replyTo : undefined;
+    if (body.view !== undefined) {
+      // A view's button: the message goes out marked as from the view, with the view's state at that moment.
+      if (typeof body.view !== 'string') throw new HttpError(400, '"view" must be an artifact id.');
+      const state = genuiStateSummary(this.viewFile(body.view));
+      sendJson(res, 202, { run: this.send(text, [], undefined, { view: body.view, ...(state ? { state } : {}) }) });
+      return;
+    }
     if (replyTo && !this.conversation.state.messages.some((m) => m.id === replyTo && (m.role === 'user' || (m.role === 'assistant' && m.content.trim())))) throw new HttpError(400, 'The message being replied to is not in the conversation.');
     const ids = Array.isArray(body.attachments) ? body.attachments : [];
     if (text.length > MAX_MESSAGE_CHARS) throw new HttpError(413, `Messages are limited to ${MAX_MESSAGE_CHARS} characters.`);
@@ -1904,11 +1963,11 @@ export class WebServer {
    * Sends a message. With no reply running it starts one; otherwise it waits,
    * Delivered, and the agent takes it at its next step (or right after).
    */
-  private send(text: string, attachments: AttachmentRef[], replyTo?: string): string {
+  private send(text: string, attachments: AttachmentRef[], replyTo?: string, from?: ViewSource): string {
     if (text.length > MAX_MESSAGE_CHARS) throw new HttpError(413, `Messages are limited to ${MAX_MESSAGE_CHARS} characters.`);
     const target = this.replyTarget(replyTo);
     if (!text.trim() && attachments.length === 0) throw new HttpError(400, 'The message is empty.');
-    return this.deliver({ id: `q${randomBytes(6).toString('hex')}`, time: new Date().toISOString(), text, attachments, ...(target ? { replyTo: target } : {}) });
+    return this.deliver({ id: `q${randomBytes(6).toString('hex')}`, time: new Date().toISOString(), text, attachments, ...(target ? { replyTo: target } : {}), ...(from ? { from } : {}) });
   }
 
   private deliver(p: PendingInput): string {
@@ -1945,7 +2004,7 @@ export class WebServer {
     const roots = replyRoots(this.conversation.state).messages;
     return this.pending
       .filter((p) => !p.event)
-      .map((p) => ({ kind: 'user' as const, id: p.id, pending: true, time: p.time, text: p.text, attachments: p.attachments.map(displayAttachment), ...(p.replyTo ? { replyTo: roots.get(p.replyTo) ?? p.replyTo } : {}) }));
+      .map((p) => ({ kind: 'user' as const, id: p.id, pending: true, time: p.time, text: p.text, attachments: p.attachments.map(displayAttachment), ...(p.replyTo ? { replyTo: roots.get(p.replyTo) ?? p.replyTo } : {}), ...(p.from ? { view: p.from.view } : {}) }));
   }
 
   private publishPending(): void {
@@ -2014,13 +2073,14 @@ export class WebServer {
       attachments: p.attachments,
       ...(p.replyTo ? { replyTo: p.replyTo } : {}),
       ...(p.event ? { event: p.event } : {}),
+      ...(p.from ? { from: p.from } : {}),
       // Messages sent meanwhile: the agent takes them between its steps.
       inbox: () => {
         const taken = this.pending.splice(0);
         if (!taken.length) return [];
         live.taken.push(...taken);
         this.publishPending();
-        return taken.map((t) => ({ content: t.text, attachments: t.attachments, ...(t.replyTo ? { replyTo: t.replyTo } : {}), ...(t.event ? { event: t.event } : {}) }));
+        return taken.map((t) => ({ content: t.text, attachments: t.attachments, ...(t.replyTo ? { replyTo: t.replyTo } : {}), ...(t.event ? { event: t.event } : {}), ...(t.from ? { from: t.from } : {}) }));
       },
       onInput: (record) => {
         const from = live.taken.shift();
@@ -2083,7 +2143,7 @@ export class WebServer {
 
   private broadcastUser(run: string, stored: MessageRecord, pendingId?: string): void {
     const root = stored.replyTo ? replyRoots(this.conversation.state).messages.get(stored.id) : undefined;
-    const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment), ...(root ? { replyTo: root } : {}) };
+    const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment), ...(root ? { replyTo: root } : {}), ...(stored.view ? { view: stored.view } : {}) };
     this.broadcast('user', { run, item, ...(pendingId ? { pending: pendingId } : {}) });
   }
 

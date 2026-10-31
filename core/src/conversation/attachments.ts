@@ -57,9 +57,18 @@ export function replyPreamble(quoted: string): string {
   return `[Inline reply to this earlier message: "${one.length > 400 ? `${one.slice(0, 399)}…` : one}"]\n\n`;
 }
 
-/** Builds the provider user message for a stored user message; `quoted` is the message an inline reply answers. */
-export function userMessageFor(m: MessageRecord, resolve?: (ref: AttachmentRef) => Buffer | undefined, quoted?: string): UserMessage {
-  const lead = quoted !== undefined ? replyPreamble(quoted) : '';
+/** What the model is told about a message the person sent from a GenUI view. */
+export function viewPreamble(id: string, view: { title: string } | undefined, state: string | undefined): string {
+  const name = view ? ` "${view.title.replace(/\s+/g, ' ')}"` : '';
+  return `[Sent from the GenUI view ${id}${name} with one of its buttons.${state ? ` Its state then: ${state}` : ''}]\n\n`;
+}
+
+/**
+ * Builds the provider user message for a stored user message; `quoted` is the
+ * message an inline reply answers, `view` the GenUI view it was sent from.
+ */
+export function userMessageFor(m: MessageRecord, resolve?: (ref: AttachmentRef) => Buffer | undefined, quoted?: string, view?: { title: string }): UserMessage {
+  const lead = (m.view ? viewPreamble(m.view, view, m.viewState) : '') + (quoted !== undefined ? replyPreamble(quoted) : '');
   if (!m.attachments?.length) return { role: 'user', content: lead + m.content };
   let text = lead + m.content;
   const images: UserContentPart[] = [];

@@ -1,0 +1,175 @@
+/* GenUI views (genui.js): the agent's interactive pieces, inline in the chat. */
+
+.msg.genui-msg { align-items: stretch; }
+.genui {
+  width: min(560px, 92%);
+  margin: 4px 0 2px;
+  border-radius: 18px;
+  background: var(--in);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 20px;
+  overflow: visible;
+}
+.genui.found { animation: found 1.6s ease; }
+.genui-page .genui { width: 100%; max-width: 760px; margin: 0 auto; }
+.genui-page { padding: 16px; overflow: auto; height: 100%; box-sizing: border-box; }
+
+.genui-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px 0 14px; }
+.genui-title {
+  flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--ink-2); font: inherit;
+  font-size: 12px; line-height: 16px; font-weight: 600; text-align: left; letter-spacing: 0.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+}
+.genui-save {
+  flex: none; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 14px;
+  background: transparent; color: var(--ink-2); cursor: pointer;
+}
+.genui-save svg { fill: none; stroke: currentColor; stroke-width: 1.6; }
+.genui-save.on { color: var(--send); }
+.genui-save.on svg { fill: currentColor; }
+.genui-save:hover { background: rgba(255, 255, 255, 0.08); }
+
+.genui-body { padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.genui-notice { margin: 0 14px 12px; font-size: 12px; color: var(--danger); }
+.genui-error { font-size: 13px; line-height: 18px; color: rgba(235, 235, 245, 0.8); }
+.genui-error strong { display: block; margin-bottom: 4px; color: #ff9f0a; font-weight: 600; }
+.genui-error ul { margin: 0; padding-left: 18px; }
+
+.genui :focus-visible { outline: 2px solid var(--send); outline-offset: 2px; }
+
+/* Layout */
+.genui-column, .genui-repeat { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.genui-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.genui-row > .genui-repeat { flex-direction: row; flex-wrap: wrap; }
+.genui-grid { display: grid; gap: 10px; }
+.genui-grid > .genui-repeat { display: contents; }
+.genui-card { padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, 0.06); min-width: 0; }
+.genui-card-title { margin-bottom: 8px; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--ink-2); }
+.genui-divider { width: 100%; height: 1px; margin: 2px 0; border: 0; background: rgba(84, 84, 88, 0.6); }
+.genui-spacer { flex: none; }
+.genui-scroll { overflow: auto; overscroll-behavior: contain; border-radius: 10px; }
+.genui-tabs { display: flex; flex-direction: column; gap: 10px; }
+.genui-tabbar { display: flex; gap: 18px; border-bottom: 1px solid rgba(84, 84, 88, 0.65); overflow-x: auto; }
+.genui-tabbar > button {
+  flex: none; padding: 6px 0 7px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; background: none;
+  color: var(--ink-2); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.genui-tabbar > button.on { color: var(--ink); border-bottom-color: var(--send); }
+.genui-form { margin: 0; }
+.genui-form > .genui-button[type="submit"] { align-self: flex-start; }
+
+.genui-carousel { display: flex; flex-direction: column; gap: 8px; }
+.genui-slide { min-height: 40px; touch-action: pan-y; }
+.genui-carousel-nav { display: flex; align-items: center; justify-content: center; gap: 10px; }
+.genui-dots { display: flex; gap: 6px; }
+.genui-dots button { width: 7px; height: 7px; padding: 0; border: 0; border-radius: 4px; background: rgba(235, 235, 245, 0.3); cursor: pointer; }
+.genui-dots button.on { background: var(--ink); }
+.genui-round {
+  width: 30px; height: 30px; padding: 0; border: 0; border-radius: 15px; background: rgba(255, 255, 255, 0.1);
+  color: var(--ink); font: inherit; font-size: 18px; line-height: 30px; cursor: pointer;
+}
+.genui-round:disabled { opacity: 0.35; cursor: default; }
+
+.genui-popover { position: relative; align-self: flex-start; }
+.genui-popover-panel {
+  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; width: max-content; min-width: 200px; max-width: min(340px, 80vw);
+  padding: 12px; border-radius: 14px; background: #3a3a3c; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+/* Text */
+.genui-text { min-width: 0; overflow-wrap: anywhere; }
+.genui-plain { white-space: pre-wrap; }
+.genui-text.size-small { font-size: 13px; line-height: 18px; }
+.genui-text.size-headline { font-size: 17px; line-height: 22px; font-weight: 600; }
+.genui-text.size-title { font-size: 22px; line-height: 28px; font-weight: 700; }
+.genui-text.bold { font-weight: 600; }
+.genui-text.tone-muted { color: var(--ink-2); }
+.genui-text.tone-accent { color: #64d2ff; }
+.genui-text.tone-success { color: #30d158; }
+.genui-text.tone-warning { color: #ff9f0a; }
+.genui-text.tone-danger { color: var(--danger); }
+.genui-markdown > :first-child { margin-top: 0; }
+.genui-markdown > :last-child { margin-bottom: 0; }
+.genui-markdown p { margin: 0 0 8px; }
+.genui-markdown a { color: #64d2ff; }
+.genui-markdown code, .genui-code { font: 13px/18px ui-monospace, "SF Mono", Menlo, monospace; }
+.genui-code { margin: 0; padding: 10px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.35); overflow: auto; white-space: pre; }
+.genui-math { overflow-x: auto; overflow-y: hidden; text-align: center; }
+.genui-math .katex-display { margin: 4px 0; }
+
+/* Controls */
+.genui-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.genui-field.inline { flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+.genui-label { font-size: 13px; line-height: 17px; color: var(--ink-2); }
+.genui-field.inline .genui-label { font-size: 15px; line-height: 20px; color: var(--ink); }
+.genui-help { font-size: 12px; line-height: 16px; color: var(--ink-3); }
+.genui-input {
+  width: 100%; box-sizing: border-box; min-height: 36px; padding: 7px 11px; border: 1px solid rgba(84, 84, 88, 0.65);
+  border-radius: 10px; background: rgba(0, 0, 0, 0.25); color: var(--ink); font: inherit; font-size: 15px;
+}
+textarea.genui-input { resize: vertical; min-height: 72px; }
+select.genui-input { appearance: none; padding-right: 30px; background-image: linear-gradient(45deg, transparent 50%, #8e8e93 50%), linear-gradient(135deg, #8e8e93 50%, transparent 50%); background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.genui-input:disabled, .genui-button:disabled { opacity: 0.45; }
+.genui-button {
+  align-self: flex-start; min-height: 34px; padding: 7px 16px; border: 0; border-radius: 17px; font: inherit; font-size: 15px;
+  font-weight: 600; cursor: pointer; background: rgba(255, 255, 255, 0.12); color: var(--ink);
+}
+.genui-row > .genui-button { align-self: center; }
+.genui-button.primary { background: var(--send); color: #fff; }
+.genui-button.danger { background: rgba(255, 69, 58, 0.18); color: var(--danger); }
+.genui-button:active:not(:disabled) { filter: brightness(1.2); }
+
+.genui-segmented { display: flex; flex-wrap: wrap; gap: 2px; padding: 2px; border-radius: 10px; background: rgba(118, 118, 128, 0.24); }
+.genui-segmented > button {
+  flex: 1 1 auto; min-height: 30px; padding: 5px 12px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--ink); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.genui-segmented > button.on { background: #636366; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); font-weight: 600; }
+.genui-radios { display: flex; flex-direction: column; gap: 6px; }
+.genui-check, .genui-radios input { width: 20px; height: 20px; margin: 0; accent-color: var(--send); }
+.genui-switch {
+  appearance: none; flex: none; position: relative; width: 51px; height: 31px; margin: 0; border-radius: 16px;
+  background: rgba(120, 120, 128, 0.32); cursor: pointer; transition: background 0.2s;
+}
+.genui-switch::after {
+  content: ""; position: absolute; left: 2px; top: 2px; width: 27px; height: 27px; border-radius: 14px; background: #fff;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.15); transition: transform 0.2s;
+}
+.genui-switch:checked { background: #30d158; }
+.genui-switch:checked::after { transform: translateX(20px); }
+.genui-slider-row { display: flex; align-items: center; gap: 10px; }
+.genui-slider { flex: 1; accent-color: var(--send); }
+.genui-slider-value { min-width: 3ch; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); font-size: 13px; }
+
+/* Table */
+.genui-table { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.genui-search { min-height: 32px; }
+.genui-table-scroll { overflow-x: auto; }
+.genui-table table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 19px; font-variant-numeric: tabular-nums; }
+.genui-table caption { text-align: left; padding-bottom: 6px; color: var(--ink-2); font-size: 13px; }
+.genui-table th { padding: 6px 8px; border-bottom: 1px solid rgba(84, 84, 88, 0.65); text-align: left; font-weight: 600; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.genui-table td { padding: 7px 8px; border-bottom: 1px solid rgba(84, 84, 88, 0.3); }
+.genui-table tr.selectable { cursor: pointer; }
+.genui-table tr.selectable:hover td { background: rgba(255, 255, 255, 0.04); }
+.genui-table tr.on td { background: rgba(66, 143, 247, 0.22); }
+.genui-sort { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.genui-empty { color: var(--ink-3); text-align: center; }
+.genui-pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; font-size: 12px; color: var(--ink-2); }
+
+/* Chart */
+.genui-chart { margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.genui-chart-title { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.genui-chart-svg { width: 100%; height: auto; overflow: visible; }
+.genui-chart-svg .genui-grid { stroke: rgba(84, 84, 88, 0.45); stroke-width: 1; }
+.genui-chart-svg .genui-axis { stroke: rgba(235, 235, 245, 0.35); stroke-width: 1; }
+.genui-chart-svg .genui-tick { fill: rgba(235, 235, 245, 0.55); font-size: 11px; font-family: var(--font); }
+.genui-chart-svg .genui-mark { cursor: pointer; }
+.genui-chart-svg .genui-mark:hover, .genui-chart-svg .genui-mark:focus { filter: brightness(1.25); outline: none; }
+.genui-chart-readout { min-height: 16px; font-size: 12px; line-height: 16px; color: var(--ink-2); }
+.genui-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--ink-2); }
+.genui-legend-item::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 4px; background: var(--c); }
+
+/* A message sent from a view: like an inline reply to it. */
+.view-quote { display: inline-flex; align-items: center; gap: 4px; }
+.view-quote > i { flex: none; opacity: 0.8; }

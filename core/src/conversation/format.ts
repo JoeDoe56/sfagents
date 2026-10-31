@@ -36,14 +36,14 @@ const KINDS: ReadonlySet<string> = new Set([
 /** Fields each kind maps explicitly; anything else round-trips via `extra`. */
 const KNOWN_FIELDS: Record<string, readonly string[]> = {
   conversation: ['seq', 'time', 'v', 'id', 'kind', 'run', 'parentRun', 'agent'],
-  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'attachments', 'replyTo', 'event', 'b', 'fence'],
+  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'attachments', 'replyTo', 'view', 'viewState', 'event', 'b', 'fence'],
   run_start: ['seq', 'time', 'run', 'agent', 'parentRun', 'callId', 'provider', 'model', 'reasoning', 'config', 'configHash'],
   tool_start: ['seq', 'time', 'run', 'callId', 'tool'],
   run_end: ['seq', 'time', 'run', 'status', 'error', 'turns', 'usage'],
   section: ['seq', 'time', 'op', 'section', 'rev', 'expected', 'title', 'parent', 'assign', 'unassign', 'merge', 'current'],
   artifact: ['seq', 'time', 'id', 'type', 'title', 'path', 'run', 'message', 'callId', 'mime', 'file', 'url'],
   artifact_update: ['seq', 'time', 'artifact', 'rev', 'path', 'title', 'mime', 'run', 'callId', 'file', 'url'],
-  artifact_pin: ['seq', 'time', 'artifact', 'pinned'],
+  artifact_pin: ['seq', 'time', 'artifact', 'pinned', 'saved'],
   context_reset: ['seq', 'time'],
   interrupted: ['seq', 'time', 'run', 'notStarted', 'unknown'],
   recovery: ['seq', 'time', 'reason', 'savedTo', 'bytes'],
@@ -105,6 +105,7 @@ export function decorationFor(record: ConversationRecord): string {
         ? `<sub>Artifact ${escapeHtml(record.artifact)} revision ${record.rev}: <a href="${escapeHtml(record.path)}">${escapeHtml(record.title ?? 'updated')}</a></sub>`
         : `<sub>Artifact ${escapeHtml(record.artifact)} revision ${record.rev}</sub>`;
     case 'artifact_pin':
+      if (record.saved !== undefined) return `<sub>Artifact ${escapeHtml(record.artifact)} ${record.saved ? 'saved' : 'unsaved'}</sub>`;
       return `<sub>Artifact ${escapeHtml(record.artifact)} ${record.pinned ? 'pinned' : 'unpinned'}</sub>`;
     case 'context_reset':
       return '<sub>Context reset</sub>';
@@ -307,6 +308,8 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         status: status as MessageRecord['status'],
         attachments: attachments(meta, p),
         replyTo: str(meta, 'replyTo', false, p),
+        view: str(meta, 'view', false, p),
+        viewState: str(meta, 'viewState', false, p),
         event: ((e) => (e === 'reaction' || e === 'agent' ? e : undefined))(str(meta, 'event', false, p)),
       };
       if (record.role === 'tool' && (!record.callId || !record.tool)) p.push('tool messages need "callId" and "tool"');
@@ -403,7 +406,9 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
     case 'artifact_pin': {
       const pinned = meta['pinned'];
       if (typeof pinned !== 'boolean') p.push('"pinned" must be a boolean');
-      record = { kind: 'artifact_pin', ...base, artifact: str(meta, 'artifact', true, p) ?? '', pinned: pinned === true };
+      const saved = meta['saved'];
+      if (saved !== undefined && typeof saved !== 'boolean') p.push('"saved" must be a boolean');
+      record = { kind: 'artifact_pin', ...base, artifact: str(meta, 'artifact', true, p) ?? '', pinned: pinned === true, ...(typeof saved === 'boolean' ? { saved } : {}) };
       break;
     }
     case 'context_reset':

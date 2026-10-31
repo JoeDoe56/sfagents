@@ -57,7 +57,7 @@ import {
   type RuntimeEvent,
   type ToolActivity,
 } from './events.js';
-import { PersistenceFailure, type RunRecorder } from './recorder.js';
+import { PersistenceFailure, type RunRecorder, type ViewSource } from './recorder.js';
 import { ConversationService, STATE_DIR_NAME, type ReplayTarget } from '../conversation/service.js';
 import { buildWorkingContext, contextBreakdown, type ContextBreakdown, type ContextReport, type ContextTool } from '../conversation/context.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
@@ -823,6 +823,8 @@ export interface InboxItem {
   attachments?: AttachmentRef[];
   replyTo?: string;
   event?: 'reaction';
+  /** Sent from a GenUI view. */
+  from?: ViewSource;
 }
 
 export interface SendOptions {
@@ -831,6 +833,8 @@ export interface SendOptions {
   replyTo?: string;
   /** The input is a note SF Agents wrote (a reaction), not the person's typing. */
   event?: 'reaction';
+  /** The input was sent from a GenUI view. */
+  from?: ViewSource;
   /** Messages that arrived since; the model takes them between its steps. */
   inbox?: () => InboxItem[];
   /** Resolves when the person's next message is waiting in the inbox (so the agent can wait for an answer). */
@@ -943,7 +947,7 @@ export class AgentSession {
       // One definition for the whole turn, even if the agent's file changes meanwhile.
       const node = this.node;
       const recorder = this.conversation.beginRootRun(node);
-      recorder.user(input, options.attachments, options.replyTo, options.event);
+      recorder.user(input, options.attachments, options.replyTo, options.event, options.from);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;
       const definition = node.definition;
@@ -961,7 +965,7 @@ export class AgentSession {
       const inbox = options.inbox
         ? () =>
             options.inbox!().flatMap((item) => {
-              const id = recorder.user(item.content, item.attachments, item.replyTo, item.event);
+              const id = recorder.user(item.content, item.attachments, item.replyTo, item.event, item.from);
               const record = id ? conversation.state.messages.find((m) => m.id === id) : undefined;
               if (!record) return [];
               options.onInput?.(record);

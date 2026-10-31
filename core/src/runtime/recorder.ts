@@ -11,10 +11,16 @@ import type { AssistantMessage, ToolMessage } from '../providers/types.js';
 import type { AttachmentRef, ToolMessageStatus } from '../conversation/types.js';
 import type { AgentRunResult } from './events.js';
 
+/** A message the person sent from a GenUI view: the view's artifact id and its state (JSON) at the time. */
+export interface ViewSource {
+  view: string;
+  state?: string;
+}
+
 export interface RunRecorder {
   readonly runId: string;
   /** The task or user input that starts this run, with any attached files and the message it replies to inline. */
-  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction'): string | void;
+  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction', from?: ViewSource): string | void;
   /** Another agent's message that joined the run while it worked (see Mailbox). */
   note?(from: string, content: string): void;
   /** Run start with the configuration in effect (provenance only). */

@@ -27,6 +27,10 @@ web/public/vendor/sfgl/symbols/glyphs contains SF Symbols, which are Apple
 Inc.'s artwork and are not licensed by this project; see
 web/public/vendor/sfgl/symbols/PROVENANCE.md before redistributing them.
 
+The web interface also includes KaTeX 0.16.22 (https://katex.org),
+Copyright 2013-2020 Khan Academy and other contributors, licensed under the
+MIT License (web/public/vendor/katex/LICENSE), for math in GenUI views.
+
 The upload protocol in web/src/up2k.ts and web/public/up2k.js follows the
 design of copyparty's up2k (https://github.com/9001/copyparty, MIT License).
 It is an independent implementation; no copyparty code is included.

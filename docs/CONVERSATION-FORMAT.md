@@ -68,7 +68,7 @@ All records have `seq` (integer, strictly increasing by 1 from 1 within a file) 
 | `section` | no | `op` (`add` or `edit`), `section`, `rev`, `expected`, plus operation fields | A change to the section hierarchy. |
 | `artifact` | no | `id` (`a<seq>`), `type`, `title`, optional `path`, `run`, `message`, `callId`, `mime` | Something displayable produced in the conversation (revision 1). |
 | `artifact_update` | no | `artifact` (an artifact ID), `rev` (exactly one more than the current revision), optional `path`, `title`, `mime`, `run`, `callId` | A new revision of an artifact. |
-| `artifact_pin` | no | `artifact`, `pinned` (boolean) | The user pinned or unpinned an artifact. |
+| `artifact_pin` | no | `artifact`, `pinned` (boolean), optional `saved` (boolean, GenUI views only) | The user pinned or unpinned an artifact, or saved a GenUI view to the artifacts or took it out (`saved`). |
 | `context_reset` | no | none | `/clear`: the working context starts fresh after this point. History stays searchable. |
 | `interrupted` | no | `run`, `notStarted` (call IDs), `unknown` (call IDs) | Written on reopen for runs that never ended. |
 | `recovery` | no | `reason`, `savedTo` (relative path), `bytes` | A damaged trailing record was moved aside. |
@@ -77,7 +77,7 @@ All records have `seq` (integer, strictly increasing by 1 from 1 within a file) 
 
 | Role | Body | Extra fields |
 | --- | --- | --- |
-| `user` | The user's text, exactly as entered. | `attachments`: `[{"id","name","mime","path","size"}]`, files the user attached; `path` is relative to the `.sfagents` directory (`uploads/<id>/<name>`) |
+| `user` | The user's text, exactly as entered. | `attachments`: `[{"id","name","mime","path","size"}]`, files the user attached; `path` is relative to the `.sfagents` directory (`uploads/<id>/<name>`). `view`: the GenUI view (an artifact ID) the message was sent from by one of its buttons, with `viewState`, the view's state (JSON text) at that moment |
 | `assistant` | The model's visible text (may be empty). | `toolCalls`: `[{"id","name","arguments"}]` with `arguments` as the exact JSON string sent to the provider; `reasoning` (text) or `reasoningDetails` (array), opaque provider continuation data stored unmodified; `finish` (provider finish reason) |
 | `tool` | The full text returned to the model, fenced. | `callId`, `tool`, `status` (`ok`, `error`, `denied`, `cancelled`, `not_started`) |
 
@@ -124,6 +124,8 @@ The runtime writes `agent_transcript` artifacts for child runs. Model-created ar
 Retitling or repointing an artifact (`sf-artifact --id`; `create_artifact` with its `id` or `update_artifact` in older conversations) writes the next revision to `artifacts/<id>/r<rev>/<file name>` and appends an `artifact_update`; earlier revision files are kept. `artifact_pin` records are written by clients when the user pins or unpins. The current view of an artifact (latest path, title, revision, pin state) is the `artifact` record with every later `artifact_update` and `artifact_pin` for it applied in order. An update that skips a revision, or an update or pin naming an unknown artifact, is a semantic error.
 
 `artifact_update` and `artifact_pin` were added after the first release of version 1. Older SF Agents builds report them as unknown record kinds.
+
+A GenUI view (an artifact whose file is in the project's `genui/` folder) shows only in the chat until the user saves it: `artifact_pin` with `"saved": true`. Pinning a view saves it; unsaving it also unpins it. When a model sees a message with `view`, it is told which view sent it and the view's state. Builds before GenUI keep `saved`, `view` and `viewState` as unknown fields.
 
 ### Attachments
 

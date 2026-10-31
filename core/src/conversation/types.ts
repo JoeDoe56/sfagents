@@ -69,6 +69,10 @@ export interface MessageRecord extends RecordBase {
   attachments?: AttachmentRef[];
   /** User messages: an inline reply to this message (by id). */
   replyTo?: string;
+  /** User messages: sent from this GenUI view (an artifact id) by one of its buttons. */
+  view?: string;
+  /** User messages from a view: its state (JSON) when the message was sent. */
+  viewState?: string;
   /**
    * User messages SF Agents wrote, not typed by the person: "reaction" (they
    * reacted to a message), "agent" (another agent's message that reached the
@@ -161,11 +165,13 @@ export interface ArtifactUpdateRecord extends RecordBase {
   url?: string;
 }
 
-/** The user pinned or unpinned an artifact. */
+/** The user pinned or unpinned an artifact, or saved or unsaved a GenUI view (`saved`). */
 export interface ArtifactPinRecord extends RecordBase {
   kind: 'artifact_pin';
   artifact: string;
   pinned: boolean;
+  /** GenUI views: kept in the artifacts (true) or shown only in the chat (false). */
+  saved?: boolean;
 }
 
 export interface ContextResetRecord extends RecordBase {

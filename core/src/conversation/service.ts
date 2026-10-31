@@ -14,7 +14,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { AgentNode } from '../agents/loader.js';
 import type { AssistantMessage, ChatMessage, ToolMessage } from '../providers/types.js';
 import type { AgentRunResult } from '../runtime/events.js';
-import type { RunRecorder } from '../runtime/recorder.js';
+import type { RunRecorder, ViewSource } from '../runtime/recorder.js';
 import { ConversationLock } from './lock.js';
 import { FileConversationStore, MemoryConversationStore, readConversation, type ConversationStore, type StoreIO } from './store.js';
 import type { ConversationState } from './state.js';
@@ -469,7 +469,16 @@ export class ConversationService {
   setArtifactPinned(id: string, pinned: boolean): ArtifactView {
     this.assertOpen();
     const view = this.requireArtifact(id);
-    if (view.pinned !== pinned) this.main.append({ kind: 'artifact_pin', artifact: id, pinned });
+    if (view.pinned !== pinned) this.main.append({ kind: 'artifact_pin', artifact: id, pinned, ...(view.type === 'genui' && pinned && !view.saved ? { saved: true } : {}) });
+    return this.state.artifactViews.get(id)!;
+  }
+
+  /** Saves a GenUI view to the artifacts or takes it out (unsaving also unpins). No record when nothing changes. */
+  setArtifactSaved(id: string, saved: boolean): ArtifactView {
+    this.assertOpen();
+    const view = this.requireArtifact(id);
+    if (view.type !== 'genui') throw new ArtifactError(`Artifact ${id} is not a GenUI view; only views are saved.`);
+    if (view.saved !== saved) this.main.append({ kind: 'artifact_pin', artifact: id, pinned: saved ? view.pinned : false, saved });
     return this.state.artifactViews.get(id)!;
   }
 
@@ -574,7 +583,7 @@ export function toChatMessages(
   for (const m of list) {
     if (m.role === 'user') {
       const quoted = m.replyTo ? state.messages.find((q) => q.id === m.replyTo)?.content : undefined;
-      const msg = userMessageFor(m, resolveAttachment, quoted);
+      const msg = userMessageFor(m, resolveAttachment, quoted, m.view ? state.artifactViews.get(m.view) : undefined);
       // In the main conversation the model sees each message's id, for react_to_message and reply_inline.
       if (state.header?.conversationKind === 'main' && !m.event) {
         if (typeof msg.content === 'string') msg.content = `[${m.id}] ${msg.content}`;
@@ -633,8 +642,15 @@ class StoreRunRecorder implements RunRecorder {
     }) as MessageRecord;
   }
 
-  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction'): string {
-    return this.message({ role: 'user', content, ...(attachments?.length ? { attachments } : {}), ...(replyTo ? { replyTo } : {}), ...(event ? { event } : {}) }).id;
+  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction', from?: ViewSource): string {
+    return this.message({
+      role: 'user',
+      content,
+      ...(attachments?.length ? { attachments } : {}),
+      ...(replyTo ? { replyTo } : {}),
+      ...(from ? { view: from.view, ...(from.state ? { viewState: from.state } : {}) } : {}),
+      ...(event ? { event } : {}),
+    }).id;
   }
 
   note(from: string, content: string): void {

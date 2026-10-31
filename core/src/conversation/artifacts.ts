@@ -19,6 +19,7 @@ import type { ConversationService } from './service.js';
 import type { ArtifactView } from './state.js';
 import type { WorkspaceContext } from '../permissions/workspace.js';
 import fs from 'node:fs';
+import { genuiErrorText, GENUI_GUIDANCE, parseGenui } from './genui.js';
 
 export type ArtifactAccess = 'none' | 'read' | 'create';
 export const ARTIFACT_ACCESS_LEVELS: readonly ArtifactAccess[] = ['none', 'read', 'create'];
@@ -137,7 +138,7 @@ export function safeFilename(name: string, fallback = 'artifact.txt'): string {
 /** One line describing an artifact for the model. */
 export function describeArtifact(v: ArtifactView): string {
   const where = v.url ? v.url : v.file ? v.file : v.path ? path.posix.basename(v.path) : '(no file)';
-  return `[${v.id}] ${v.title} — ${where}, ${v.type}${v.pinned ? ', pinned by the user' : ''}`;
+  return `[${v.id}] ${v.title} — ${where}, ${v.type}${v.pinned ? ', pinned by the user' : v.saved ? ', saved by the user' : ''}`;
 }
 
 /** Artifacts newest-updated first; transcripts last unless asked for. */
@@ -168,7 +169,9 @@ You make and change artifacts with the \`sf-artifact\` command in your shell:
 - \`--content "..."\` (or \`--stdin\`) writes the file before showing it, for when you have no other way to write files.
 - To read an artifact, read its file (the index below gives each file).
 - Short answers and small snippets belong in the chat reply, not in an artifact.
-</artifacts_guidance>`;
+</artifacts_guidance>
+
+${GENUI_GUIDANCE}`;
 
 /** What `sf-artifact` prints for --help or a usage error. */
 export const ARTIFACT_USAGE = `Usage:
@@ -300,7 +303,14 @@ export function runArtifactRequest(
 
   // A file or folder.
   if (view) {
-    if (p.title === undefined && p.path === undefined && p.content === undefined) throw new ArtifactError('Give a new --title, a file, or --content for the artifact.');
+    if (p.title === undefined && p.path === undefined && p.content === undefined) {
+      // `sf-artifact --id` alone checks a GenUI view after the agent edited it.
+      if (view.type === 'genui' && view.file) {
+        checkGenui(service.resolveArtifactFile(view.file), view.file);
+        return `Artifact ${view.id} "${view.title}" is a valid GenUI view.`;
+      }
+      throw new ArtifactError('Give a new --title, a file, or --content for the artifact.');
+    }
   } else if (!p.title || p.path === undefined) throw new ArtifactError(`A new artifact needs a file or folder and --title.\n${ARTIFACT_USAGE}`);
   const target = p.path !== undefined ? where(p.path) : view?.file ? service.resolveArtifactFile(view.file) : undefined;
   let file: string | undefined;
@@ -314,6 +324,8 @@ export function runArtifactRequest(
     file = check.resolvedPath;
   } else if (p.path !== undefined) file = existingFile(workspace, where(p.path));
   const folder = file !== undefined && fs.statSync(file).isDirectory();
+  const shown = file ?? (view?.file ? service.resolveArtifactFile(view.file) : undefined);
+  if (shown && !folder && service.fileArtifactType(shown) === 'genui') checkGenui(shown, p.path ?? view?.file ?? shown);
   if (view) {
     const repoint = p.path !== undefined && file !== undefined;
     if (repoint && folder !== (view.type === 'folder')) throw new ArtifactError(`Artifact ${view.id} shows a ${view.type === 'folder' ? 'folder' : 'file'}; make a new artifact for ${p.path}.`);
@@ -328,6 +340,18 @@ export function runArtifactRequest(
     : service.linkArtifact({ title: p.title!, file: file!, run: o.runId, callId: o.callId, ...(folder ? { type: 'folder' } : {}) });
   const follows = folder ? 'It opens the folder in the file manager.' : 'It follows the file: edit the file to change it.';
   return `${recorded ? 'Artifact' : 'Created artifact'} ${v.id} "${v.title}" shows ${p.path}. ${follows}`;
+}
+
+/** Throws the validator's findings for a GenUI view file, so the agent fixes them. */
+function checkGenui(file: string, shownAs: string): void {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    throw new ArtifactError(`There is no file at ${shownAs}.`);
+  }
+  const { errors } = parseGenui(text);
+  if (errors.length) throw new ArtifactError(genuiErrorText(shownAs, errors));
 }
 
 /** What an agent's `sf-artifact` runs: bound to its conversation, workspace and run. */

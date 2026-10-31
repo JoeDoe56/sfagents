@@ -16,7 +16,7 @@ import type { LogBook, LogLine, WebServer } from '@sfagents/web';
 import { fit, textWidth, truncate, wrap } from './width.js';
 
 type Item =
-  | { kind: 'user'; id: string; time: string; text: string; attachments?: Array<{ name: string; size: number }>; replyTo?: string }
+  | { kind: 'user'; id: string; time: string; text: string; attachments?: Array<{ name: string; size: number }>; replyTo?: string; view?: string }
   | { kind: 'assistant'; id: string; time: string; text: string; agent: string; replyTo?: string }
   | { kind: 'activity'; id: string; time: string; text: string; status?: string; thread?: string; agent?: string; artifact?: string }
   | { kind: 'notice'; id: string; time: string; text: string };
@@ -146,6 +146,8 @@ export class Tui {
   private items: Item[] = [];
   private more = false;
   private live: { id: string; segments: Segment[]; replyTo?: string } | null = null;
+  /** GenUI views by artifact id → title: the terminal names them and points to the web interface. */
+  private views = new Map<string, string>();
   private approvals: Approval[] = [];
   private readonly answered = new Map<string, string>();
   private reactions: Record<string, string> = {};
@@ -285,11 +287,15 @@ export class Tui {
         this.read = s.read ?? null;
         this.pending = (s as { pending?: Tui['pending'] }).pending ?? [];
         this.agentReactions = (s as { agentReactions?: Record<string, string> }).agentReactions ?? {};
+        this.setViews((s as { artifacts?: unknown }).artifacts);
         for (const n of s.notices ?? []) typeof n === 'string' ? this.notice(n) : this.notice(n.text, n.level);
         break;
       }
       case 'pending':
         this.pending = (data.pending as Tui['pending']) ?? [];
+        break;
+      case 'artifacts':
+        this.setViews(data.artifacts);
         break;
       case 'agent_reactions':
         this.agentReactions = (data.reactions as Record<string, string>) ?? {};
@@ -758,7 +764,8 @@ export class Tui {
       }
       const thread = root(it);
       if (it.kind === 'user') {
-        out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(it.time))}${badge(it.id)}`);
+        const from = it.view ? color.dim(` · from the view “${clean(this.views.get(it.view) ?? it.view)}”`) : '';
+        out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(it.time))}${from}${badge(it.id)}`);
         out.push(...indent(wrap(clean(it.text), w - textWidth(thread)), `${thread}  `));
         for (const a of it.attachments ?? []) out.push(`${thread}  ${color.dim(`📎 ${clean(a.name)} (${bytesText(a.size)})`)}`);
         if (it.id === lastUser) {
@@ -771,6 +778,7 @@ export class Tui {
         out.push(...indent(wrap(clean(it.text), w - textWidth(thread)), `${thread}  `));
       } else if (it.kind === 'activity') {
         out.push(this.activityLine(it, w));
+        if (it.status !== 'error' && it.status !== 'denied') out.push(...this.viewLine(it.artifact, w));
       } else {
         out.push(...indent(wrap(clean(it.text), w).map((l) => (/^Error/.test(it.text) ? color.red(l) : color.yellow(l)))));
       }
@@ -808,6 +816,17 @@ export class Tui {
     if (!this.items.length && !this.live) out.push('', color.dim(`  No messages yet. Type below, or open ${this.options.url}`));
     out.push('');
     return out;
+  }
+
+  private setViews(list: unknown): void {
+    if (!Array.isArray(list)) return;
+    this.views = new Map(list.filter((a) => a?.type === 'genui').map((a) => [String(a.id), String(a.title)]));
+  }
+
+  /** A GenUI view the agent showed: it works in the web interface only. */
+  private viewLine(id: string | undefined, w: number): string[] {
+    const title = id ? this.views.get(id) : undefined;
+    return title === undefined ? [] : [`    ${color.dim(truncate(`▦ ${clean(title)}: an interactive view. Open it in the web interface.`, w - 4))}`];
   }
 
   private activityLine(seg: { text: string; status?: string; thread?: string }, w: number): string {
