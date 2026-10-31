@@ -17,6 +17,9 @@ use windows_sys::Win32::{
     System::{Console::*, Environment::*, JobObjects::*, StationsAndDesktops::*, Threading::*},
 };
 
+/// The host commands a sandboxed shell may be given (see host-commands.ts).
+const HOST_TOOLS: &[&str] = &["sf-node", "sf-web", "sf-artifact"];
+
 #[derive(Serialize, Deserialize)]
 struct Journal {
     aces: Vec<Ace>,
@@ -374,7 +377,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     let tool_dir = temp.join("bin");
     fs::create_dir(&tool_dir).map_err(|e| e.to_string())?;
     for tool in &policy.tools {
-        if tool.name != "sf-node" && tool.name != "sf-web" {
+        if !HOST_TOOLS.contains(&tool.name.as_str()) {
             return Err("unknown host helper tool".into());
         }
         let p = canonical(&tool.path)?;
@@ -390,31 +393,32 @@ pub fn run(args: &[String]) -> Result<i32> {
             perms.add(&p, &sid, READ, false, false)?;
         }
     }
-    let node = policy.tools.iter().find(|t| t.name == "sf-node");
-    let web = policy.tools.iter().find(|t| t.name == "sf-web");
-    if let (Some(node), Some(web)) = (node, web) {
-        fs::copy(&web.path, tool_dir.join("sf-web.cjs")).map_err(|e| e.to_string())?;
+    if let Some(node) = policy.tools.iter().find(|t| t.name == "sf-node") {
         // Node's path is host-generated. Do not expose a shell-generated script
         // containing an unescaped percent sign or quote.
         if node.path.contains(['%', '"', '\r', '\n']) {
-            return Err("unsupported Node path for sf-web".into());
+            return Err("unsupported Node path for host commands".into());
         }
-        // The run folder lives under the host profile, whose folders (e.g.
-        // AppData) the sandbox account cannot lstat. Node's default realpath of
-        // the main script walks every ancestor; preserving the path skips that.
-        fs::write(
-            tool_dir.join("sf-web.cmd"),
-            format!(
-                "@\"{}\" --preserve-symlinks-main \"%~dp0sf-web.cjs\" %*\r\n",
-                node.path
-            ),
-        )
-        .map_err(|e| e.to_string())?;
         fs::write(
             tool_dir.join("sf-node.cmd"),
             format!("@\"{}\" %*\r\n", node.path),
         )
         .map_err(|e| e.to_string())?;
+        for tool in policy.tools.iter().filter(|t| t.name != "sf-node") {
+            fs::copy(&tool.path, tool_dir.join(format!("{}.cjs", tool.name)))
+                .map_err(|e| e.to_string())?;
+            // The run folder lives under the host profile, whose folders (e.g.
+            // AppData) the sandbox account cannot lstat. Node's default realpath of
+            // the main script walks every ancestor; preserving the path skips that.
+            fs::write(
+                tool_dir.join(format!("{}.cmd", tool.name)),
+                format!(
+                    "@\"{}\" --preserve-symlinks-main \"%~dp0{}.cjs\" %*\r\n",
+                    node.path, tool.name
+                ),
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
     perms.add(tool_dir.to_str().unwrap(), &sid, WRITE_BITS, true, true)?;
     if let Some(channel) = &policy.host_channel {

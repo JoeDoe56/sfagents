@@ -14,12 +14,25 @@ import {
   readConversation,
   safeFilename,
   serializeConversation,
+  splitCommandLine,
   type ChatMessage,
   type FunctionDeclaration,
 } from '@sfagents/core';
 import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent, catFile, useAnySandbox } from './helpers.js';
 
 const realSandbox = await useAnySandbox();
+
+/** A shell call running `sf-artifact` with these options (and a path). */
+function sfArtifact(o: { id?: string; title?: string; path?: string; content?: string; port?: number }) {
+  const q = (v: string) => `"${v.replace(/[\\"$`]/g, '\\$&')}"`;
+  const words = ['sf-artifact'];
+  if (o.id) words.push('--id', q(o.id));
+  if (o.title) words.push('--title', q(o.title));
+  if (o.content !== undefined) words.push('--content', q(o.content));
+  if (o.port) words.push('--port', String(o.port));
+  if (o.path) words.push(q(o.path));
+  return { name: 'shell', args: { command: words.join(' ') } };
+}
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
   const dir = makeTempDir();
@@ -121,17 +134,17 @@ describe('artifacts: model tools and grants', () => {
       const id = conversation.artifacts().find((v) => v.title.startsWith('Haiku'))?.id;
       switch (call) {
         case 0:
-          return { toolCalls: [{ name: 'create_artifact', args: { title: 'Haiku', path: 'haiku.md', content: 'old pond' } }] };
+          return { toolCalls: [sfArtifact({ title: 'Haiku', path: 'haiku.md', content: 'old pond' })] };
         case 1:
-          return { toolCalls: [{ name: 'create_artifact', args: { title: 'Numbers', path: 'docs/existing.csv' } }] };
+          return { toolCalls: [sfArtifact({ title: 'Numbers', path: 'docs/existing.csv' })] };
         case 2:
           return { text: `Done: ${lastToolContent(req)}` };
         case 3:
-          return { toolCalls: [{ name: 'create_artifact', args: { id, content: 'old pond\nfrog jumps in' } }] };
+          return { toolCalls: [sfArtifact({ id, content: 'old pond\nfrog jumps in' })] };
         case 4:
-          return { toolCalls: [{ name: 'create_artifact', args: { id, title: 'Haiku (two lines)' } }] };
+          return { toolCalls: [sfArtifact({ id, title: 'Haiku (two lines)' })] };
         case 5:
-          return { toolCalls: [{ name: 'create_artifact', args: { title: 'Outside', path: '../elsewhere.md', content: 'x' } }] };
+          return { toolCalls: [sfArtifact({ title: 'Outside', path: '../elsewhere.md', content: 'x' })] };
         default:
           return { text: 'ok' };
       }
@@ -148,7 +161,7 @@ describe('artifacts: model tools and grants', () => {
     assert.deepEqual([haiku.file, haiku.type, haiku.rev], ['haiku.md', 'document', 1]);
     const numbers = conversation.artifacts().find((v) => v.title === 'Numbers')!;
     assert.deepEqual([numbers.file, numbers.type], ['docs/existing.csv', 'data']);
-    // create_artifact with "id" writes the artifact's file and retitles it.
+    // sf-artifact --id writes the artifact's file and retitles it.
     await session.run('Add a second line');
     const requests = providers.get('main')!.requests;
     assert.equal(fs.readFileSync(path.join(dir, 'haiku.md'), 'utf8'), 'old pond\nfrog jumps in');
@@ -156,8 +169,9 @@ describe('artifacts: model tools and grants', () => {
     const v = conversation.artifacts().find((x) => x.id === haiku.id)!;
     assert.deepEqual([v.title, v.rev, v.file], ['Haiku (two lines)', 2, 'haiku.md']);
     const firstTools = (requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name);
-    for (const n of ['create_artifact', 'create_app_artifact']) assert.ok(firstTools.includes(n), n);
-    for (const n of ['update_artifact', 'list_artifacts', 'read_artifact']) assert.ok(!firstTools.includes(n), n);
+    // No general shell: the shell tool runs only SF Agents' commands.
+    assert.deepEqual(firstTools.filter((n) => /shell|artifact/.test(n)), ['shell']);
+    assert.match((requests[0]!.request.tools as FunctionDeclaration[]).find((t) => t.name === 'shell')!.description!, /sf-artifact/);
     assert.match((requests[0]!.messages[0] as { content: string }).content, /<artifacts_guidance>/);
     assert.match((requests[3]!.messages[0] as { content: string }).content, new RegExp(`<artifacts>[\\s\\S]*\\[${haiku.id}\\] Haiku — haiku.md, document`));
     // Outside the agent's workspace: refused.
@@ -177,8 +191,8 @@ describe('artifacts: model tools and grants', () => {
     const { tree, conversation } = open(dir);
     const script: Script = (req, call) => {
       const id = conversation.artifacts().find((v) => v.title === 'Site')?.id;
-      if (call === 0) return { toolCalls: [{ name: 'create_artifact', args: { title: 'Site', path: 'site' } }] };
-      if (call === 1) return { toolCalls: [{ name: 'create_artifact', args: { id, path: 'site/index.html' } }, { name: 'create_artifact', args: { title: 'Bad', path: 'site/css', content: 'x' } }] };
+      if (call === 0) return { toolCalls: [sfArtifact({ title: 'Site', path: 'site' })] };
+      if (call === 1) return { toolCalls: [sfArtifact({ id, path: 'site/index.html' }), sfArtifact({ title: 'Bad', path: 'site/css', content: 'x' })] };
       return { text: JSON.stringify((req.messages.filter((m) => m.role === 'tool') as Array<{ content: string }>).map((m) => m.content)) };
     };
     const { factory } = scriptedFactory(script);
@@ -188,7 +202,7 @@ describe('artifacts: model tools and grants', () => {
     assert.deepEqual([site.type, site.file, site.mime], ['folder', 'site', 'inode/directory']);
     assert.match(r.text, /opens the folder in the file manager/);
     // A folder artifact cannot become a file one, and content cannot be written to a folder.
-    assert.match(r.text, /shows a folder; create a new artifact/);
+    assert.match(r.text, /shows a folder; make a new artifact/);
     assert.match(r.text, /EISDIR|is a directory|folder/i);
     assert.equal(conversation.artifacts().filter((v) => v.title === 'Bad').length, 0);
     assert.throws(() => conversation.artifactContent(site.id), /is a folder/);
@@ -196,7 +210,7 @@ describe('artifacts: model tools and grants', () => {
     conversation.close();
   });
 
-  test('create_artifact writes without asking, inside the workspace rules; app artifacts record the address', async () => {
+  test('sf-artifact writes without asking, inside the workspace rules; app artifacts record the address', async () => {
     const dir = project({ tools: { allow: [] } });
     const { tree, conversation } = open(dir);
     let asked = 0;
@@ -204,9 +218,9 @@ describe('artifacts: model tools and grants', () => {
       call === 0
         ? {
             toolCalls: [
-              { name: 'create_artifact', args: { title: 'Plan', path: 'plan.md', content: '# Plan' } },
-              { name: 'create_app_artifact', args: { title: 'Prototype', port: 5173 } },
-              { name: 'create_artifact', args: { title: 'Sneaky', path: 'agents/sneaky.json', content: '{}' } },
+              sfArtifact({ title: 'Plan', path: 'plan.md', content: '# Plan' }),
+              sfArtifact({ title: 'Prototype', port: 5173 }),
+              sfArtifact({ title: 'Sneaky', path: 'agents/sneaky.json', content: '{}' }),
             ],
           }
         : { text: 'ok' };
@@ -232,9 +246,9 @@ describe('artifacts: model tools and grants', () => {
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
     const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation });
     const inThread = await runtime.buildTools(tree.byId.get('helper')!, ['main', 'helper'], () => {}, undefined, conversation, 'thread');
-    assert.equal([...inThread.keys()].some((k) => k.includes('artifact')), false);
+    assert.equal(inThread.has('shell'), false);
     const asMain = await runtime.buildTools(tree.byId.get('helper')!, ['helper'], () => {}, undefined, conversation, 'main');
-    assert.ok(asMain.has('create_artifact'), 'the same agent replying in the conversation creates artifacts');
+    assert.ok(asMain.has('shell'), 'the same agent replying in the conversation creates artifacts (sf-artifact)');
     await runtime.dispose();
     conversation.close();
 
@@ -243,7 +257,7 @@ describe('artifacts: model tools and grants', () => {
     const c2 = ConversationService.open(path.join(ro, '.sfagents', 'conversation.md'), { configDir: t2.configDir });
     const rt2 = new AgentRuntime({ tree: t2, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation: c2 });
     const names = [...(await rt2.buildTools(t2.root, ['main'], () => {}, undefined, c2)).keys()];
-    assert.equal(names.some((k) => k.includes('artifact')), false);
+    assert.equal(names.some((k) => k.includes('artifact') || k === 'shell'), false);
     // ...but it still sees the index, and reads the files with the shell.
     fs.writeFileSync(path.join(ro, 'notes.md'), '# Notes');
     c2.linkArtifact({ title: 'Notes', file: path.join(ro, 'notes.md') });
@@ -257,6 +271,35 @@ describe('artifacts: model tools and grants', () => {
 
     const bad = project({ artifacts: { access: 'write' } }, { 'agents/ok.json': baseAgent('ok') });
     assert.match(loadAgentTree(bad).skipped[0]!.error, /must be "none", "read" or "create"/);
+  });
+
+  test('without "shell" the shell tool runs only sf-artifact (and sf-web), one plain command at a time', async () => {
+    const dir = project({ tools: { allow: [] } });
+    const { tree, conversation } = open(dir);
+    const script: Script = (req, call) =>
+      call === 0
+        ? {
+            toolCalls: [
+              { name: 'shell', args: { command: 'ls -la' } },
+              { name: 'shell', args: { command: 'sf-artifact --title X x.md | cat' } },
+              { name: 'shell', args: { command: 'sf-web search cats' } },
+              { name: 'shell', args: { command: 'sf-artifact --help' } },
+            ],
+          }
+        : { text: JSON.stringify((req.messages.filter((m) => m.role === 'tool') as Array<{ content: string }>).map((m) => m.content)) };
+    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => 'deny' });
+    const out = JSON.parse((await runtime.createSession().run('go')).text) as string[];
+    assert.match(out[0]!, /can only run sf-artifact, one command at a time/);
+    assert.match(out[1]!, /without pipes or redirection/);
+    assert.match(out[2]!, /can only run sf-artifact/, 'no web access without "web"');
+    assert.match(out[3]!, /Usage:\n\s+sf-artifact/);
+    assert.equal(conversation.artifacts().length, 0);
+    await runtime.dispose();
+    conversation.close();
+
+    assert.deepEqual(splitCommandLine(`sf-artifact --title "A \\"b\\"" 'c d' e\\ f`, false), ['sf-artifact', '--title', 'A "b"', 'c d', 'e f']);
+    assert.deepEqual(splitCommandLine('sf-artifact C:\\x\\y.md', true), ['sf-artifact', 'C:\\x\\y.md']);
+    for (const bad of ['a | b', 'a > f', 'a; b', 'a && b', 'echo $HOME', 'echo "$(id)"', 'a `b`', '"open']) assert.equal(splitCommandLine(bad, false), undefined, bad);
   });
 
   test('shell commands cannot reach artifact files', { skip: !realSandbox && 'no OS sandbox on this machine' }, async () => {

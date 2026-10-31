@@ -348,7 +348,7 @@ describe('web server', () => {
 
   test('a message streams over SSE, creates an artifact, and the artifact can be pinned and served sandboxed', async () => {
     const script: Script = (req, call) => {
-      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'create_artifact', args: { title: 'Page', path: 'index.html', content: '<h1>hi</h1>' } }] };
+      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'shell', args: { command: 'sf-artifact --title Page --content "<h1>hi</h1>" index.html' } }] };
       return { text: `Done (${lastToolContent(req)?.slice(0, 20)})` };
     };
     const s = await startServer(script);

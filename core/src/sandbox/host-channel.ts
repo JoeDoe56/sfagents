@@ -1,12 +1,14 @@
 /**
- * The host channel: while a sandboxed command of an agent with web access
- * runs, a Unix socket in a private folder serves its `sf-web` requests from
- * the host, which holds the Bright Data key and the network. Each
- * connection carries one JSON request line and gets one JSON answer line.
- * The host enforces the agent's request quota, a size limit and a time limit.
+ * The host channel: while a sandboxed command of an agent with web access or
+ * artifacts runs, a Unix socket (a named pipe on Windows) in a private folder
+ * serves its `sf-web` and `sf-artifact` requests from the host, which holds
+ * the Bright Data key, the network and the conversation. Each connection
+ * carries one JSON request line ({argv, cwd, stdin?}) and gets one JSON
+ * answer line. The host enforces the agent's grants (see host-commands.ts).
  *
- * `sf-web` is a small script run by this process's own Node binary (mounted
- * read-only into the sandbox as `sf-node`), so it works wherever SF Agents does.
+ * The commands are small scripts run by this process's own Node binary
+ * (mounted read-only into the sandbox as `sf-node`), so they work wherever
+ * SF Agents does.
  */
 
 import fs from 'node:fs';
@@ -16,12 +18,13 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { sfagentsHome } from '../settings/home.js';
 import { getErrorMessage } from '../utils/errors.js';
-import type { WebAccess, WebOperation } from '../web/brightdata.js';
+import type { WebAccess } from '../web/brightdata.js';
+import { HOST_COMMAND_NAMES, runHostCommand, type HostCommandReply, type HostCommands } from '../tools/host-commands.js';
 import type { SandboxPolicy } from './sandbox.js';
 
-export const MAX_WEB_RESULT_BYTES = 1024 * 1024;
-export const WEB_REQUEST_TIMEOUT_MS = 90_000;
 export const DEFAULT_WEB_REQUESTS = 25;
+/** Largest request line (an artifact's --content or --stdin is the big one). */
+const MAX_REQUEST_BYTES = 4 * 1024 * 1024 + 65_536;
 
 /** An agent's web access for one run: shared by its commands, so the quota is per run. */
 export interface WebGrant {
@@ -34,49 +37,35 @@ export interface HostChannel {
   close(): Promise<void>;
 }
 
-interface WebRequest {
-  op: WebOperation;
-  arg: string;
+interface HostRequest {
+  argv: string[];
+  cwd?: string;
+  stdin?: string;
 }
 
-function parseRequest(line: string): WebRequest {
-  const raw = JSON.parse(line) as Partial<WebRequest>;
-  if (raw.op !== 'search' && raw.op !== 'markdown' && raw.op !== 'html') throw new Error('Unknown request.');
-  if (typeof raw.arg !== 'string' || !raw.arg.trim() || raw.arg.length > 4000) throw new Error('Missing or too long argument.');
-  if (raw.op !== 'search') {
-    let url: URL;
-    try {
-      url = new URL(raw.arg);
-    } catch {
-      throw new Error(`Not an address: ${raw.arg}`);
-    }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Only http and https addresses can be fetched.');
-  }
-  return { op: raw.op, arg: raw.arg.trim() };
+function parseRequest(line: string): HostRequest {
+  const raw = JSON.parse(line) as Partial<HostRequest>;
+  if (!Array.isArray(raw.argv) || !raw.argv.length || !raw.argv.every((a) => typeof a === 'string')) throw new Error('Malformed request.');
+  return { argv: raw.argv, ...(typeof raw.cwd === 'string' ? { cwd: raw.cwd } : {}), ...(typeof raw.stdin === 'string' ? { stdin: raw.stdin } : {}) };
 }
 
-async function answer(grant: WebGrant, line: string, signal: AbortSignal): Promise<{ ok: true; text: string; truncated?: boolean } | { ok: false; error: string }> {
+async function answer(cmds: HostCommands, line: string, o: { callId?: string; signal: AbortSignal }): Promise<HostCommandReply> {
+  let request: HostRequest;
   try {
-    const request = parseRequest(line);
-    if (grant.remaining <= 0) return { ok: false, error: 'This run has used all of its web requests (limits.webRequests in the agent file).' };
-    grant.remaining--;
-    const timeout = AbortSignal.timeout(WEB_REQUEST_TIMEOUT_MS);
-    const text = await grant.access.request(request.op, request.arg, AbortSignal.any([signal, timeout]));
-    const bytes = Buffer.from(text, 'utf8');
-    if (bytes.length <= MAX_WEB_RESULT_BYTES) return { ok: true, text };
-    return { ok: true, text: bytes.subarray(0, MAX_WEB_RESULT_BYTES).toString('utf8'), truncated: true };
+    request = parseRequest(line);
   } catch (error) {
     return { ok: false, error: getErrorMessage(error) };
   }
+  return runHostCommand(request.argv, cmds, { cwd: request.cwd, stdin: request.stdin, callId: o.callId, signal: o.signal });
 }
 
 /** Starts a channel for one command. */
-export async function openHostChannel(grant: WebGrant, signal: AbortSignal): Promise<HostChannel> {
+export async function openHostChannel(cmds: HostCommands, o: { callId?: string; signal: AbortSignal }): Promise<HostChannel> {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-host-')));
   fs.chmodSync(dir, 0o700);
   // The native broker grants just the selected sandbox account access to this
   // pipe before the command starts. No TCP/loopback exception is needed.
-  const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\sfagents-web-${randomUUID()}` : path.join(dir, 'host.sock');
+  const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\sfagents-host-${randomUUID()}` : path.join(dir, 'host.sock');
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -86,11 +75,11 @@ export async function openHostChannel(grant: WebGrant, signal: AbortSignal): Pro
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => {
       buffer += chunk;
-      if (buffer.length > 16_384) return socket.destroy();
+      if (buffer.length > MAX_REQUEST_BYTES) return socket.destroy();
       const end = buffer.indexOf('\n');
       if (end < 0) return;
       socket.removeAllListeners('data');
-      void answer(grant, buffer.slice(0, end), signal).then((reply) => socket.end(`${JSON.stringify(reply)}\n`));
+      void answer(cmds, buffer.slice(0, end), o).then((reply) => socket.end(`${JSON.stringify(reply)}\n`));
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -110,70 +99,82 @@ export async function openHostChannel(grant: WebGrant, signal: AbortSignal): Pro
   };
 }
 
-/** The `sf-web` command. CommonJS, Node built-ins only: it runs inside the sandbox. */
-export const SF_WEB_SCRIPT = `#!/usr/bin/env sf-node
+/**
+ * The client script for one of SF Agents' commands (sf-web, sf-artifact).
+ * CommonJS, Node built-ins only: it runs inside the sandbox and hands its
+ * arguments (and, with --stdin, what is piped in) to the host channel.
+ */
+export function hostCommandScript(name: string): string {
+  return `#!/usr/bin/env sf-node
 'use strict';
 const net = require('node:net');
-const [op, ...rest] = process.argv.slice(2);
-const usage = 'Usage:\\n  sf-web search <query>   Google results (JSON)\\n  sf-web markdown <url>   a page as Markdown\\n  sf-web html <url>       a page as HTML\\n';
-if (!['search', 'markdown', 'html'].includes(op) || !rest.length) {
-  process.stderr.write(usage);
-  process.exit(op === '-h' || op === '--help' ? 0 : 2);
-}
+const NAME = ${JSON.stringify(name)};
+const args = process.argv.slice(2);
 const socketPath = process.env.SFAGENTS_HOST;
 if (!socketPath) {
-  process.stderr.write('sf-web: no host channel (this agent has no web access).\\n');
+  process.stderr.write(NAME + ': no host channel (this agent may not use ' + NAME + ').\\n');
   process.exit(1);
 }
-const socket = net.createConnection(socketPath, () => socket.write(JSON.stringify({ op, arg: rest.join(' ') }) + '\\n'));
-let data = '';
-socket.setEncoding('utf8');
-socket.on('data', (chunk) => (data += chunk));
-socket.on('error', (error) => {
-  process.stderr.write('sf-web: ' + error.message + '\\n');
-  process.exit(1);
-});
-socket.on('end', () => {
-  let reply;
-  try {
-    reply = JSON.parse(data);
-  } catch {
-    process.stderr.write('sf-web: no answer from the host.\\n');
+function send(stdin) {
+  const socket = net.createConnection(socketPath, () => socket.write(JSON.stringify({ argv: [NAME, ...args], cwd: process.cwd(), ...(stdin !== undefined ? { stdin } : {}) }) + '\\n'));
+  let data = '';
+  socket.setEncoding('utf8');
+  socket.on('data', (chunk) => (data += chunk));
+  socket.on('error', (error) => {
+    process.stderr.write(NAME + ': ' + error.message + '\\n');
     process.exit(1);
-  }
-  if (!reply.ok) {
-    process.stderr.write('sf-web: ' + reply.error + '\\n');
-    process.exit(1);
-  }
-  process.stdout.write(reply.text.endsWith('\\n') ? reply.text : reply.text + '\\n');
-  if (reply.truncated) process.stderr.write('sf-web: the result was cut at 1 MB.\\n');
-});
+  });
+  socket.on('end', () => {
+    let reply;
+    try {
+      reply = JSON.parse(data);
+    } catch {
+      process.stderr.write(NAME + ': no answer from the host.\\n');
+      process.exit(1);
+    }
+    if (!reply.ok) {
+      process.stderr.write(NAME + ': ' + reply.error + '\\n');
+      process.exit(1);
+    }
+    process.stdout.write(reply.text.endsWith('\\n') ? reply.text : reply.text + '\\n');
+    if (reply.truncated) process.stderr.write(NAME + ': the result was cut at 1 MB.\\n');
+  });
+}
+if (args.includes('--stdin')) {
+  let input = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (c) => (input += c));
+  process.stdin.on('end', () => send(input));
+} else send();
 `;
+}
 
 let toolsCache: SandboxPolicy['tools'] | undefined;
 
-/** The files that put `sf-web` (and the Node binary it needs) on the sandbox's PATH. */
-export function webTools(): NonNullable<SandboxPolicy['tools']> {
+/** The files that put SF Agents' commands (and the Node binary they need) on the sandbox's PATH. */
+export function hostCommandTools(): NonNullable<SandboxPolicy['tools']> {
   if (toolsCache) return toolsCache;
   const dir = path.join(sfagentsHome(), 'sandbox');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  // .cjs: Node then needs no package.json lookup to know how to load it.
-  const script = path.join(dir, 'sf-web.cjs');
-  let current = '';
-  try {
-    current = fs.readFileSync(script, 'utf8');
-  } catch {
-    // first use
+  const tools: Array<{ path: string; name: string }> = [{ path: fs.realpathSync(process.execPath), name: 'sf-node' }];
+  for (const name of HOST_COMMAND_NAMES) {
+    // .cjs: Node then needs no package.json lookup to know how to load it.
+    const script = path.join(dir, `${name}.cjs`);
+    const content = hostCommandScript(name);
+    let current = '';
+    try {
+      current = fs.readFileSync(script, 'utf8');
+    } catch {
+      // first use
+    }
+    if (current !== content) {
+      const tmp = `${script}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, content, { mode: 0o755 });
+      fs.renameSync(tmp, script);
+    }
+    fs.chmodSync(script, 0o755);
+    tools.push({ path: fs.realpathSync(script), name });
   }
-  if (current !== SF_WEB_SCRIPT) {
-    const tmp = `${script}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, SF_WEB_SCRIPT, { mode: 0o755 });
-    fs.renameSync(tmp, script);
-  }
-  fs.chmodSync(script, 0o755);
-  toolsCache = [
-    { path: fs.realpathSync(process.execPath), name: 'sf-node' },
-    { path: fs.realpathSync(script), name: 'sf-web' },
-  ];
+  toolsCache = tools;
   return toolsCache;
 }

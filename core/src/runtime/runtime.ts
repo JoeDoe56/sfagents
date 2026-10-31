@@ -14,7 +14,8 @@ import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
 import { CHAT_GUIDANCE, ChatToolNames, createChatTools } from '../conversation/chat-tools.js';
 import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
-import { ARTIFACT_GUIDANCE, ArtifactToolNames, artifactIndex, createArtifactTools } from '../conversation/artifacts.js';
+import { ARTIFACT_COMMAND, ARTIFACT_GUIDANCE, artifactCommand, artifactIndex } from '../conversation/artifacts.js';
+import { availableHostCommands, type HostCommands } from '../tools/host-commands.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import {
@@ -152,7 +153,13 @@ function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
   return { message: { role: 'tool', tool_call_id: call.id, content }, activity: { name: call.name, ok: false }, status: 'error' };
 }
 
-export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink): string {
+/** Whether the agent's shell has `sf-artifact` (it then gets the artifact guidance). */
+function hasArtifactCommand(tools: ReadonlyMap<string, AnyDeclarativeTool>): boolean {
+  const shell = tools.get(ToolNames.SHELL);
+  return shell instanceof ShellTool && shell.commandNames.includes(ARTIFACT_COMMAND);
+}
+
+export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean } = {}): string {
   const d = node.definition;
   const env = [
     `Agent id: ${node.id}`,
@@ -171,7 +178,7 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
   if (toolNames.includes(ToolNames.MESSAGE_AGENT) && node.grants.size > 0) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
   if (partner && toolNames.includes(ToolNames.MESSAGE_AGENT)) guidance += `\n\n${THREAD_MESSAGING_GUIDANCE}`;
   if (toolNames.includes(ToolNames.MESSAGE_USER)) guidance += `\n\n${MESSAGE_USER_GUIDANCE}`;
-  if (toolNames.includes(ArtifactToolNames.CREATE)) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
+  if (features.artifacts) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
   if (toolNames.includes(ChatToolNames.REACT)) guidance += `\n\n${CHAT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
 }
@@ -243,23 +250,30 @@ export class AgentRuntime implements AgentMessenger {
     const tools = new Map<string, AnyDeclarativeTool>();
     const allow = d.tools?.allow ?? [];
     const sandbox = this.sandboxPolicy(node);
-    if (allow.length > 0 && node.roots.length > 0) {
+    const workspace = node.roots.length
+      ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules)
+      : undefined;
+    // SF Agents' own commands: sf-web ("web" in tools.allow) and sf-artifact (artifacts.access "create").
+    const commands: HostCommands = {
+      ...(allow.includes(ToolNames.WEB) ? { web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS } } : {}),
+      ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, workspace) } : {}),
+    };
+    if (!commands.artifact) delete commands.artifact;
+    // "shell" in tools.allow is the general shell (in the sandbox); without it, an agent
+    // with web access or artifacts gets a shell that runs only those commands.
+    const fullShell = allow.includes(ToolNames.SHELL) && !!workspace;
+    if (fullShell || availableHostCommands(commands).length) {
       const ctx: ToolContext = {
-        workspace: new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules),
+        ...(workspace ? { workspace } : {}),
         maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
         secretEnvNames: this.secretEnvNames,
         shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
         sandbox,
         askShell: d.tools?.ask === true,
-        ...(allow.includes(ToolNames.WEB) ? { web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS } } : {}),
+        commands,
+        shellMode: fullShell ? 'full' : 'helpers',
       };
-      const factories: Record<string, () => AnyDeclarativeTool> = {
-        [ToolNames.SHELL]: () => new ShellTool(ctx),
-      };
-      for (const id of allow) {
-        const make = factories[id];
-        if (make) tools.set(id, make());
-      }
+      tools.set(ToolNames.SHELL, new ShellTool(ctx));
     }
 
     for (const [server, grantedTools] of mcpGrants(d)) {
@@ -294,10 +308,6 @@ export class AgentRuntime implements AgentMessenger {
     // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
     if (conversation?.file) {
       for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
-      const artifactWorkspace = node.roots.length
-        ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules)
-        : undefined;
-      for (const tool of createArtifactTools(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, artifactWorkspace)) tools.set(tool.name, tool);
       // Reactions and inline replies: the agent talking with the person.
       if (role === 'main' && conversation === this.conversation) for (const tool of createChatTools(conversation)) tools.set(tool.name, tool);
     }
@@ -462,7 +472,7 @@ export class AgentRuntime implements AgentMessenger {
     let systemExtra: string | undefined = deferredNote;
     if (params.prepareContext) {
       try {
-        const base = buildSystemPrompt(node, activeNames(), deferredNote, link);
+        const base = buildSystemPrompt(node, activeNames(), deferredNote, link, { artifacts: hasArtifactCommand(tools) });
         const prepared = params.prepareContext(base + JSON.stringify(declarations()));
         messages.splice(0, messages.length, ...prepared.messages);
         systemExtra = [deferredNote, prepared.systemExtra].filter(Boolean).join('\n\n') || undefined;
@@ -479,7 +489,7 @@ export class AgentRuntime implements AgentMessenger {
     }
     // Tools called earlier in the conversation stay loaded (their calls are in the history).
     for (const name of calledToolNames(messages)) if (deferred.has(name)) loadedTools.add(name);
-    const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link);
+    const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link, { artifacts: hasArtifactCommand(tools) });
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
     const maxTurns = d.limits?.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -901,7 +911,7 @@ export class AgentSession {
     }));
     const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
     const index = conversation.file && artifactAccess(definition, 0) !== 'none' ? artifactIndex(conversation) : undefined;
-    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined), list, {
+    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined, undefined, { artifacts: hasArtifactCommand(tools) }), list, {
       retrievable,
       resolveAttachment: (ref) => conversation.readAttachment(ref),
       ...(index ? { extraSystem: index } : {}),

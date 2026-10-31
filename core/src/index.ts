@@ -144,18 +144,23 @@ export {
 export type { ContextPolicy, ContextReport, WorkingContext, ContextBreakdown, ContextTool } from './conversation/context.js';
 export {
   ArtifactError,
-  ArtifactToolNames,
+  ARTIFACT_COMMAND,
   ARTIFACT_GUIDANCE,
+  ARTIFACT_USAGE,
+  artifactCommand,
+  parseArtifactArgs,
+  runArtifactRequest,
   artifactIndex,
   artifactTypeFor,
-  createArtifactTools,
   describeArtifact,
   isTextMime,
   MAX_ARTIFACT_CHARS,
   mimeForFilename,
   safeFilename,
 } from './conversation/artifacts.js';
-export type { ArtifactAccess } from './conversation/artifacts.js';
+export type { ArtifactAccess, ArtifactCommand, ArtifactRequest } from './conversation/artifacts.js';
+export { availableHostCommands, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, splitCommandLine, WEB_COMMAND } from './tools/host-commands.js';
+export type { HostCommandReply, HostCommands } from './tools/host-commands.js';
 export {
   IMAGE_TOKEN_ESTIMATE,
   looksLikeText,
@@ -171,7 +176,7 @@ export { buildSandboxPolicy, GIT_PROTECTED } from './sandbox/policy.js';
 export { BubblewrapSandbox, bubblewrapCommand, findBubblewrap } from './sandbox/linux.js';
 export { SeatbeltSandbox, seatbeltProfile } from './sandbox/macos.js';
 export { WindowsSandbox, detectWindowsSandbox, windowsSandboxPath } from './sandbox/windows.js';
-export { openHostChannel, webTools, SF_WEB_SCRIPT, DEFAULT_WEB_REQUESTS, MAX_WEB_RESULT_BYTES } from './sandbox/host-channel.js';
+export { openHostChannel, hostCommandTools, hostCommandScript, DEFAULT_WEB_REQUESTS } from './sandbox/host-channel.js';
 export type { HostChannel, WebGrant } from './sandbox/host-channel.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
 export type { WebAccess, WebOperation } from './web/brightdata.js';

@@ -2143,7 +2143,7 @@ export class WebServer {
         if (seg) seg.status = status;
         // A new or changed artifact shows in the chat where it was made.
         let artifact: string | undefined;
-        if (seg && event.ok && (event.name === 'create_artifact' || event.name === 'update_artifact' || event.name === 'create_app_artifact')) {
+        if (seg && event.ok && (event.name === 'shell' || event.name === 'create_artifact' || event.name === 'update_artifact' || event.name === 'create_app_artifact')) {
           // An update names its artifact ("id"); a new one is found by the record this call wrote.
           if (seg.artifact) artifact = seg.artifact;
           else {

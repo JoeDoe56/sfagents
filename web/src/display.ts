@@ -93,8 +93,27 @@ export function describeCall(name: string, argsJson: string): string {
     case 'list_directory':
       return `Listed ${file ? clip(file, 60) : 'a folder'}`;
     case 'run_shell_command':
-    case 'shell':
-      return `Ran ${str(args['command']) ? `\`${clip(String(args['command']), 60)}\`` : 'a command'}`;
+    case 'shell': {
+      const cmd = str(args['command'])?.trim() ?? '';
+      const words = cmd.split(/\s+/);
+      if (words[0] === 'sf-artifact') {
+        const flag = (f: string) => {
+          const i = words.indexOf(f);
+          return i >= 0 && words[i + 1] ? words[i + 1]!.replace(/^["']|["']$/g, '') : undefined;
+        };
+        const title = /--title\s+(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(cmd);
+        const t = title ? (title[1] ?? title[2] ?? title[3]) : undefined;
+        if (flag('--id')) return `Updated ${flag('--id')}${t ? ` “${clip(t, 50)}”` : ''}`;
+        if (flag('--port')) return `Opened ${t ? `“${clip(t, 60)}”` : 'an app'} (port ${flag('--port')})`;
+        return `Created ${t ? `“${clip(t, 60)}”` : 'an artifact'}`;
+      }
+      if (words[0] === 'sf-web') {
+        const rest = clip(words.slice(2).join(' ').replace(/^["']|["']$/g, ''), 60);
+        if (words[1] === 'search') return `Searched the web${rest ? ` for “${rest}”` : ''}`;
+        if (words[1] === 'markdown' || words[1] === 'html') return `Read ${rest || 'a page'}`;
+      }
+      return `Ran ${cmd ? `\`${clip(cmd, 60)}\`` : 'a command'}`;
+    }
     case 'invoke_child':
       return `Asked ${str(args['agent']) ?? str(args['child']) ?? 'a child agent'}${str(args['task']) ? `: ${clip(String(args['task']), 60)}` : ''}`;
     case 'message_agent':
@@ -172,7 +191,9 @@ function threadOf(name: string, argsJson: string, from: string): { thread?: stri
 
 /** The artifact a create_artifact (or older update_artifact) call made or changed. */
 function artifactOf(name: string, argsJson: string, created: string | undefined): { artifact?: string } {
-  if (name === 'create_app_artifact' || (name === 'create_artifact' && created)) return created ? { artifact: created } : {};
+  // The record a call wrote (sf-artifact in a shell call, or the older tools) names its artifact.
+  if (created) return { artifact: created };
+  if (name === 'create_app_artifact') return {};
   // update_artifact is from older conversations; create_artifact with "id" replaced it.
   if (name !== 'update_artifact' && name !== 'create_artifact') return {};
   try {

@@ -78,14 +78,20 @@ describe('sf-web (Linux, bubblewrap)', { skip: !linuxSandbox && 'bubblewrap is n
 });
 
 describe('web access setup', () => {
-  test('"web" needs the shell and is not something to auto-approve', () => {
+  test('"web" works without "shell" (sf-web only, run on the host) and is not something to auto-approve', async () => {
     const dir = makeTempDir();
-    writeAgent(dir, baseAgent('a', { tools: { allow: ['web'] } }));
     writeAgent(dir, baseAgent('b', { tools: { allow: ['shell', 'web'], autoApprove: ['web'] } }));
     writeAgent(dir, baseAgent('main'));
-    const tree = loadAgentTree(dir);
-    assert.match(tree.skipped.find((s) => s.file.includes('a.json'))!.error, /needs "shell" too/);
-    assert.match(tree.skipped.find((s) => s.file.includes('b.json'))!.error, /not a tool call/);
+    assert.match(loadAgentTree(dir).skipped.find((s) => s.file.includes('b.json'))!.error, /not a tool call/);
+
+    const web = new FakeWeb();
+    const { tools: t } = await tools({ tools: { allow: ['web'] } }, web);
+    assert.match(t.get('shell')!.description, /sf-web search/);
+    const ok = await sh(t, 'sf-web search "kiln temperatures"');
+    assert.match(ok.llmContent, /About kiln temperatures/);
+    const no = await sh(t, 'cat /etc/passwd');
+    assert.match(no.llmContent, /can only run sf-web/);
+    assert.deepEqual(web.calls, [['search', 'kiln temperatures']]);
   });
 
   test('the Bright Data key lives in the keyring; without one the agent is told how to add it', async () => {

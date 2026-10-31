@@ -8,7 +8,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { WindowsSandbox, buildSandboxPolicy, detectWindowsSandbox, openHostChannel, webTools, type SandboxPolicy } from '@sfagents/core';
+import { WindowsSandbox, buildSandboxPolicy, detectWindowsSandbox, openHostChannel, hostCommandTools, type SandboxPolicy } from '@sfagents/core';
 import { REPO_ROOT } from './helpers.js';
 const { runShellCommand } = await import(pathToFileURL(path.join(REPO_ROOT, 'core/dist/tools/shell.js')).href) as typeof import('../core/dist/tools/shell.js');
 
@@ -160,9 +160,9 @@ describe('Windows sandbox native isolation', { skip: !enabled && 'requires appro
   });
 
   test('offline sf-web uses only the host pipe and enforces quota', async () => {
-    const channel = await openHostChannel({ remaining: 1, access: { request: async (_op, arg) => `page:${arg}`, close: async () => {} } }, new AbortController().signal);
+    const channel = await openHostChannel({ web: { remaining: 1, access: { request: async (_op: string, arg: string) => `page:${arg}`, close: async () => {} } } }, { signal: new AbortController().signal });
     try {
-      const p = { ...policy, hostChannel: { path: channel.path }, tools: webTools() };
+      const p = { ...policy, hostChannel: { path: channel.path }, tools: hostCommandTools() };
       assert.match(success(await command('sf-web search "kiln temperatures"', p)), /page:kiln temperatures/);
       const r = await command('sf-web search again', p);
       assert.notEqual(r.exitCode, 0);

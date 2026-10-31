@@ -440,9 +440,6 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     const legacyInfo = legacy.length
       ? { tools: legacy, access: (hadShell || legacy.some((id) => LEGACY_WRITE_TOOL_IDS.includes(id)) ? 'write' : 'read') as 'read' | 'write' }
       : undefined;
-    if (allow.includes(ToolNames.WEB) && !allow.includes(ToolNames.SHELL)) {
-      c.fail('tools.allow', '"web" gives the shell an `sf-web` command, so it needs "shell" too');
-    }
     const autoApprove = c
       .stringArray(t['autoApprove'], 'tools.autoApprove', { unique: true, nonEmptyItems: true })
       ?.filter((entry) => !LEGACY_FILE_TOOL_IDS.includes(entry));

@@ -1,6 +1,6 @@
 import type { WorkspaceContext } from '../permissions/workspace.js';
 import type { SandboxPolicy } from '../sandbox/sandbox.js';
-import type { WebGrant } from '../sandbox/host-channel.js';
+import type { HostCommands } from './host-commands.js';
 
 /**
  * Everything a built-in tool needs from its owning agent. Replaces upstream's
@@ -8,7 +8,8 @@ import type { WebGrant } from '../sandbox/host-channel.js';
  * limits, never another agent's.
  */
 export interface ToolContext {
-  readonly workspace: WorkspaceContext;
+  /** The agent's folders; undefined for an agent with none (it then has only SF Agents' commands). */
+  readonly workspace?: WorkspaceContext;
   /** Upper bound on the text returned to the model from one tool call. */
   readonly maxOutputChars: number;
   /** Environment variable names removed from spawned processes. */
@@ -19,8 +20,14 @@ export interface ToolContext {
   readonly sandbox: SandboxPolicy;
   /** Ask before each shell command (`tools.ask`). */
   readonly askShell: boolean;
-  /** Web access through `sf-web` ("web" in tools.allow), with this run's remaining requests. */
-  readonly web?: WebGrant;
+  /** SF Agents' own commands this agent may run (`sf-web`, `sf-artifact`). */
+  readonly commands?: HostCommands;
+  /**
+   * "full": any command, in the OS sandbox ("shell" in tools.allow).
+   * "helpers": only SF Agents' own commands, run directly (an agent with web
+   * access or artifacts but no general shell).
+   */
+  readonly shellMode?: 'full' | 'helpers';
 }
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 30_000;
