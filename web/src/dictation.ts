@@ -53,6 +53,9 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { getErrorMessage, sfagentsHome } from '@sfagents/core';
+import { speechText } from './speech-text.js';
+
+export { speechText };
 
 // A fixed revision: the files on main change (Qwen3-ASR's did on 2026-10-19), and a pinned checksum would then refuse them.
 const MODEL_REPO = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/874fcb41ececda20bcbc0782d6b4ea7f7d069ea8';
@@ -364,10 +367,6 @@ export function glossaryContext(glossary: string): string {
   return [...new Set(terms)].join(', ');
 }
 
-/** A reply as Qwen3-TTS reads it: one paragraph. */
-export function speechText(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
 
 export interface DictationOptions {
   dir?: string;

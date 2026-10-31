@@ -8,6 +8,41 @@ import path from 'node:path';
 import { Dictation, RUNTIME_RELEASE, coresFromCpuinfo, deviceFromList, isNoRoom, physicalCores, placementText, llamaLeftovers, glossaryContext, runtimeChoices, speechText, transcriptFromAnswer, trimReference, wavSeconds, type DictationStatus } from '@sfagents/web';
 import { makeTempDir } from './helpers.js';
 
+describe('text as Qwen3-TTS reads it', () => {
+  const said = (s: string) => speechText(s);
+
+  test('Markdown keeps its words: headings, emphasis, lists, quotes, tables', () => {
+    assert.equal(said('## Summary\n\nThe **build** passed and _all_ tests are ~~red~~ green.'), 'Summary. The build passed and all tests are red green.');
+    assert.equal(said('- First item\n- Second with `code_name`\n1. One\n2) Two'), 'First item. Second with code name. One. Two.');
+    assert.equal(said('> **Note:** read this'), 'Note: read this.');
+    assert.equal(said('| Model | VRAM |\n|---|:---:|\n| Qwen3-ASR | 2.5 GB |'), 'Model, VRAM. Qwen3-ASR, 2.5 GB.');
+    assert.equal(said('***\nAfter a rule.\n\n- [x] Done\n- [ ] Open\n\nNote[^1].\n\n[^1]: The note.'), 'After a rule. Done. Open. Note. The note.');
+    assert.equal(said('Title\n=====\nText'), 'Title. Text.');
+  });
+
+  test('code blocks are not read; inline code is', () => {
+    assert.equal(said('Run this:\n\n```bash\nnpm run build\nnpm test\n```\n\nThen restart.'), 'Run this: Code omitted. Then restart.');
+    assert.equal(said('Unclosed:\n```\nrm -rf /'), 'Unclosed: Code omitted.');
+    assert.equal(said('Call `speak()` now.'), 'Call speak now.');
+  });
+
+  test('links, addresses and HTML become words', () => {
+    assert.equal(said('See [the PR](https://github.com/x/y/pull/12) and ![a chart](c.png).'), 'See the PR and a chart.');
+    assert.equal(said('Visit https://www.example.com/path?q=1. Or <https://docs.python.org/3/>.'), 'Visit example.com. Or docs.python.org.');
+    assert.equal(said('Line one<br>Line two &amp; three &lt;tag&gt; &#8212; done.'), 'Line one. Line two and three tag, done.');
+  });
+
+  test('emoji and stray characters go; symbols are said as words', () => {
+    assert.equal(said('All green ✅ 🎉🎉 👍🏽!!!'), 'All green!');
+    assert.equal(said('About ~2x faster -> 3–4 s, cost ≈ $5 & time ≤ 10 min, speed >= 1.5.'), 'About about 2 times faster to 3 to 4 s, cost about $5 and time at most 10 min, speed at least 1.5.');
+    assert.equal(said('Issue #42: 2*3 is 6.'), 'Issue number 42: 2 times 3 is 6.');
+    assert.equal(said('Released 2026-10-30, version 1.2-3.'), 'Released 2026-10-30, version 1.2-3.', 'dates and versions are not ranges');
+    assert.equal(said('snake_case and my_var stay words; 5 * 3 = 15'), 'snake case and my var stay words; 5 times 3 equals 15.');
+    assert.equal(said('Hello.\n\nHow are   you?'), 'Hello. How are you?');
+    assert.equal(said('**'), '');
+  });
+});
+
 describe('dictation helpers', () => {
   test('runtime choices put the GPU builds first and always end with the CPU build', () => {
     const names = (c: ReturnType<typeof runtimeChoices>) => c.map((x) => x.backend);
