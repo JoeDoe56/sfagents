@@ -5,15 +5,11 @@ dist/
 .env.*
 !.env.example
 coverage/
-.sfagents/
 .tools/
 
-# Personal project configuration; generic starting points live in examples/.
-/agents/
-/prompts/
-/artifacts/
-/mcp.json
-/brightdata-mcp-example.json
+# Everything of the person's (agents, prompts, mcp.json, .env, GenUI views,
+# the conversation): SF Agents keeps it all here. Starting points live in examples/.
+/userdata/
 
 web/native/bin/
 core/native/bin/

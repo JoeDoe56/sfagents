@@ -180,7 +180,8 @@ export function makeTempDir(prefix = 'sfagents-test-'): string {
 /** Writes an agent definition to <project>/agents/<id>.json (the id defaults to "main"). */
 export function writeAgent(projectDir: string, definition: Record<string, unknown>): string {
   const file = path.join(projectDir, 'agents', `${String(definition['id'] ?? 'main')}.json`);
-  writeJson(file, definition);
+  // Agents have no workspace unless their file gives one; most tests grant the project folder.
+  writeJson(file, 'workspace' in definition ? definition : { ...definition, workspace: { roots: ['.'] } });
   return file;
 }
 

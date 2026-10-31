@@ -33,6 +33,11 @@ export class WorkspaceContext {
   private readonly secretPaths: readonly string[];
   private readonly rules: readonly SandboxRule[] | undefined;
 
+  /** The workspace root folders. */
+  get roots(): readonly string[] {
+    return this.directories;
+  }
+
   /**
    * @param directories Absolute or relative root directories. Each must exist.
    * @param protectedPaths Files that may be read but never written by agents.

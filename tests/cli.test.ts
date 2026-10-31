@@ -214,7 +214,8 @@ describe('sfagents settings and providers', () => {
     const dir = makeTempDir();
     const r = await runCli(['start'], { cwd: dir, env: { SFAGENTS_HOME: makeTempDir() }, input: '/exit\n' });
     assert.match(r.stderr, /Created .*agents/);
-    assert.ok(fs.existsSync(path.join(dir, 'agents', 'main.json')));
+    assert.ok(fs.existsSync(path.join(dir, 'userdata', 'agents', 'main.json')));
+    assert.ok(fs.existsSync(path.join(dir, 'userdata', 'genui')), 'the view folder is ready');
     assert.equal(r.code, 2);
     assert.match(r.stderr, /has no provider yet\. Add one in Settings/);
     // Other commands still say the folder is missing rather than creating it.

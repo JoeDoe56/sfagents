@@ -27,7 +27,8 @@ export const STATE_DIR_NAME = '.sfagents';
 export const CONVERSATION_FILE_NAME = 'conversation.md';
 
 export function defaultConversationFile(configDir: string): string {
-  return path.join(configDir, STATE_DIR_NAME, CONVERSATION_FILE_NAME);
+  // In the project's data folder (userdata/), once it has one.
+  return path.join(path.dirname(genuiDirFor(configDir)), STATE_DIR_NAME, CONVERSATION_FILE_NAME);
 }
 
 export function newRunId(): string {
@@ -90,8 +91,14 @@ export interface LinkArtifactInput {
   callId?: string;
 }
 
-/** Project folder whose files are GenUI components (rendered inline in the chat; schema to come). */
+/** The folder (in the project's data folder) whose files are GenUI views, rendered inline in the chat. */
 export const GENUI_DIR_NAME = 'genui';
+
+/** The GenUI folder of a project: userdata/genui, or genui/ in a project whose data has not moved yet. */
+export function genuiDirFor(projectDir: string): string {
+  const data = path.join(projectDir, 'userdata');
+  return path.join(fs.existsSync(data) ? data : projectDir, GENUI_DIR_NAME);
+}
 
 export interface UpdateArtifactInput {
   content: string | Buffer;
@@ -390,13 +397,31 @@ export class ConversationService {
 
   /** Resolves a recorded file path. */
   resolveArtifactFile(recorded: string): string {
-    return path.isAbsolute(recorded) ? recorded : path.join(this.configDir, ...recorded.split('/'));
+    if (path.isAbsolute(recorded)) return recorded;
+    const parts = recorded.split('/');
+    const file = path.join(this.configDir, ...parts);
+    // A view recorded as genui/… before the project's data moved into userdata/ is there now.
+    if (parts[0] === GENUI_DIR_NAME && !fs.existsSync(file)) {
+      const moved = path.join(path.dirname(this.genuiDir), ...parts);
+      if (fs.existsSync(moved)) return moved;
+    }
+    return file;
+  }
+
+  /** The folder GenUI views are written in (userdata/genui). */
+  get genuiDir(): string {
+    return genuiDirFor(this.configDir);
+  }
+
+  /** Where sf-artifact keeps files an agent made but has no workspace folder for (userdata/artifacts). */
+  get artifactsDir(): string {
+    return path.join(path.dirname(this.genuiDir), 'artifacts');
   }
 
   /** The display type of a file artifact: by its folder (GenUI), else by its extension. */
   fileArtifactType(abs: string): string {
-    const rel = path.relative(this.configDir, abs).split(path.sep);
-    if (rel.length > 1 && rel[0] === GENUI_DIR_NAME) return 'genui';
+    const rel = path.relative(this.genuiDir, abs);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return 'genui';
     return artifactTypeFor(abs);
   }
 

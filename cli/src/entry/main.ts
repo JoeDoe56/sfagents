@@ -26,6 +26,8 @@ import {
   type ProviderFactory,
   describeTree,
   ensureProject,
+  moveUserData,
+  USER_DATA_DIR_NAME,
   getErrorMessage,
   KeyringUnavailableError,
   isLeftover,
@@ -206,9 +208,16 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
   let tree: AgentTree;
   try {
     location = locateConfig(values.config, values.mcp, process.cwd(), values.agent);
-    loadEnvFile(location.configDir);
     // The app starts even when its folders are missing or its files are broken.
     const starting = command === 'web' || command === 'start';
+    if (starting) {
+      // Everything of the person's lives in userdata/ (moved there from an older project's top level).
+      const { moved, failed } = moveUserData(location.configDir);
+      if (moved.length) note(`Moved ${moved.join(', ')} into ${USER_DATA_DIR_NAME}/ (everything of yours now lives there; it is the one folder git ignores)`);
+      for (const f of failed) note(`Couldn't move ${f.name} into ${USER_DATA_DIR_NAME}/: ${f.error}. Move it by hand while SF Agents is stopped.`);
+      location = locateConfig(values.config, values.mcp, process.cwd(), values.agent);
+    }
+    loadEnvFile(location.configDir);
     if (starting) for (const created of ensureProject(location.configDir)) note(`Created ${created}`);
     tree = loadConfig(location, { fallback: starting });
     if (starting) {

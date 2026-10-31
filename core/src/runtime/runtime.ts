@@ -328,7 +328,7 @@ export class AgentRuntime implements AgentMessenger {
       roots: node.roots,
       secretFiles: this.tree.secretFiles,
       // The .sfagents folder is hidden whether or not this run keeps a conversation in it.
-      stateDirs: [stateDir ?? path.join(this.tree.configDir, STATE_DIR_NAME), ...state.filter((p) => p !== stateDir && !path.extname(p))],
+      stateDirs: [stateDir ?? path.join(this.tree.dataDir, STATE_DIR_NAME), ...state.filter((p) => p !== stateDir && !path.extname(p))],
       stateFiles: state.filter((p) => p !== stateDir && !!path.extname(p)),
       protectedFiles: this.tree.protectedFiles,
       agentsDir: this.tree.agentsDir,

@@ -20,6 +20,8 @@ import type { ArtifactView } from './state.js';
 import type { WorkspaceContext } from '../permissions/workspace.js';
 import fs from 'node:fs';
 import { genuiErrorText, GENUI_GUIDANCE, parseGenui } from './genui.js';
+import { isPathWithinRoot } from '../permissions/workspace.js';
+import { GENUI_DIR_NAME } from './service.js';
 
 export type ArtifactAccess = 'none' | 'read' | 'create';
 export const ARTIFACT_ACCESS_LEVELS: readonly ArtifactAccess[] = ['none', 'read', 'create'];
@@ -166,7 +168,8 @@ You make and change artifacts with the \`sf-artifact\` command in your shell:
 - \`sf-artifact docs/plan.md --title "Launch plan"\` shows a file you wrote (or a folder: it opens in the file manager). Keep your reply short and refer to the artifact by title.
 - \`sf-artifact --port 5173 --title "Dashboard"\` shows a web app you started (a dev server on this computer); \`--page /settings\` opens another page first. The user opens it inside SF Agents, also from their phone.
 - To change an artifact, change its file. \`sf-artifact --id a3 --title "New title"\` retitles it, and \`sf-artifact --id a3 other.md\` points it at another file. Never make a second artifact for the same file.
-- \`--content "..."\` (or \`--stdin\`) writes the file before showing it, for when you have no other way to write files.
+- \`--content "..."\` (or \`--stdin\`) writes the file before showing it, for when you have no other way to write files. A relative name you have no workspace folder to write in goes in SF Agents' own artifacts folder, so you can always make an artifact.
+- \`sf-artifact --id a3 --print\` prints an artifact's file.
 - To read an artifact, read its file (the index below gives each file).
 - Short answers and small snippets belong in the chat reply, not in an artifact.
 </artifacts_guidance>
@@ -178,6 +181,8 @@ export const ARTIFACT_USAGE = `Usage:
   sf-artifact <file-or-folder> --title "Title"      show a file or folder as an artifact
   sf-artifact --port <port> [--page /path] --title "Title"   show a web app running on this computer
   sf-artifact --id <id> [--title T] [<file>] [--port N]     change an artifact
+  sf-artifact --id <id> --print                            print an artifact's file
+  sf-artifact genui/<name>.json --title "Title" --content '<json>'   a GenUI view (SF Agents' view folder)
 Options: --content "text" or --stdin writes the file first.`;
 
 /** An existing file or folder the agent may read, as an absolute canonical path. */
@@ -202,6 +207,8 @@ export interface ArtifactRequest {
   /** A file or folder (relative to `cwd`). */
   path?: string;
   content?: string;
+  /** Print the artifact's file (--print). */
+  print?: boolean;
   /** A web app on this computer (127.0.0.1). */
   port?: number;
   page?: string;
@@ -244,6 +251,9 @@ export function parseArtifactArgs(args: readonly string[], stdin?: string): Arti
       case '--page':
         out.page = take();
         break;
+      case '--print':
+        out.print = true;
+        break;
       case '--path':
         paths.push(take());
         break;
@@ -276,6 +286,25 @@ export function runArtifactRequest(
   const where = (rel: string) => (o.cwd && !path.isAbsolute(rel) ? path.resolve(o.cwd, rel) : rel);
   const view = p.id !== undefined ? service.state.artifactViews.get(p.id) : undefined;
   if (p.id !== undefined && !view) throw new ArtifactError(`There is no artifact "${p.id}". The <artifacts> index lists the IDs.`);
+  // SF Agents' own folders (the GenUI views, and artifacts made without a workspace) need no workspace access.
+  const own = (abs: string) => [service.genuiDir, service.artifactsDir].some((d) => isPathWithinRoot(path.resolve(abs), d));
+  const inside = (dir: string, rel: string) => {
+    const abs = path.resolve(dir, rel);
+    if (!isPathWithinRoot(abs, dir) || abs === path.resolve(dir)) throw new ArtifactError(`${rel} must be a file name inside ${path.basename(dir)}/.`);
+    return abs;
+  };
+  // "genui/<name>.json" is always the GenUI folder.
+  const genuiPath = (rel: string | undefined) => {
+    if (rel === undefined || path.isAbsolute(rel)) return undefined;
+    const parts = rel.split(/[\\/]+/);
+    return parts[0] === GENUI_DIR_NAME && parts.length > 1 ? inside(service.genuiDir, parts.slice(1).join('/')) : undefined;
+  };
+  if (p.print) {
+    if (!view?.file) throw new ArtifactError('--print needs --id of a file artifact.');
+    const file = service.resolveArtifactFile(view.file);
+    if (!own(file)) existingFile(workspace, file);
+    return fs.readFileSync(file, 'utf8');
+  }
   if (p.port !== undefined && (p.path !== undefined || p.content !== undefined)) throw new ArtifactError('An artifact shows either a file or folder, or a web app (--port), not both.');
 
   // A web app.
@@ -312,17 +341,31 @@ export function runArtifactRequest(
       throw new ArtifactError('Give a new --title, a file, or --content for the artifact.');
     }
   } else if (!p.title || p.path === undefined) throw new ArtifactError(`A new artifact needs a file or folder and --title.\n${ARTIFACT_USAGE}`);
-  const target = p.path !== undefined ? where(p.path) : view?.file ? service.resolveArtifactFile(view.file) : undefined;
+  const target = genuiPath(p.path) ?? (p.path !== undefined ? where(p.path) : view?.file ? service.resolveArtifactFile(view.file) : undefined);
   let file: string | undefined;
   if (p.content !== undefined) {
     if (target === undefined) throw new ArtifactError(`Artifact ${view?.id} has no file to write; give one.`);
     if (p.content.length > MAX_ARTIFACT_CHARS) throw new ArtifactError(`The content is too large (${p.content.length} characters; the limit is ${MAX_ARTIFACT_CHARS}).`);
-    const check = workspace?.check(target, 'write');
-    if (!check?.ok || !check.resolvedPath) throw new ArtifactError(check?.reason ?? 'This agent has no workspace folders to write in.');
-    fs.mkdirSync(path.dirname(check.resolvedPath), { recursive: true });
-    fs.writeFileSync(check.resolvedPath, p.content.replace(/\r\n/g, '\n'), 'utf8');
-    file = check.resolvedPath;
-  } else if (p.path !== undefined) file = existingFile(workspace, where(p.path));
+    let dest: string;
+    if (own(target)) dest = path.resolve(target);
+    else {
+      const check = workspace?.check(target, 'write');
+      if (check?.ok && check.resolvedPath) dest = check.resolvedPath;
+      // No workspace folder to write it in: a new file goes in SF Agents' artifacts folder.
+      else if (p.path !== undefined && !path.isAbsolute(p.path) && !view && !p.path.split(/[\\/]+/).includes('..') && !(workspace?.roots ?? []).some((r) => isPathWithinRoot(path.resolve(target), r))) {
+        dest = inside(service.artifactsDir, p.path);
+      }
+      else throw new ArtifactError(check?.reason ?? 'This agent has no workspace folders to write in.');
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, p.content.replace(/\r\n/g, '\n'), 'utf8');
+    file = dest;
+  } else if (p.path !== undefined) {
+    if (own(target!)) {
+      if (!fs.existsSync(target!)) throw new ArtifactError(`There is no file at ${p.path}. Write it with --content (or --stdin).`);
+      file = path.resolve(target!);
+    } else file = existingFile(workspace, target!);
+  }
   const folder = file !== undefined && fs.statSync(file).isDirectory();
   const shown = file ?? (view?.file ? service.resolveArtifactFile(view.file) : undefined);
   if (shown && !folder && service.fileArtifactType(shown) === 'genui') checkGenui(shown, p.path ?? view?.file ?? shown);

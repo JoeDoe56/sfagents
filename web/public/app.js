@@ -1149,7 +1149,14 @@ function markRead() {
   render();
 }
 
+let pageBuild = null;
 function applySnapshot(s) {
+  // SF Agents was updated and restarted while this page stayed open: its scripts are old, so load the new ones.
+  if (s.build && pageBuild && s.build !== pageBuild) {
+    if (!input.value.trim()) return location.reload();
+    notice('SF Agents was updated. Reload the page to use the new version.', 'error');
+  }
+  pageBuild ??= s.build ?? null;
   state.agent = s.agent;
   state.reactions = s.reactions ?? {};
   state.outbox = [];

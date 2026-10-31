@@ -283,9 +283,12 @@ describe('persistent conversation (CLI)', () => {
     assert.equal((await runCli(['run', 'hello'], { cwd: dir })).code, 0);
     assert.equal(fs.existsSync(path.join(dir, '.sfagents')), false);
     assert.equal((await runCli(['start', '--ephemeral'], { cwd: dir, input: 'hi\n/exit\n' })).code, 0);
+    // (Starting moved the project's data into userdata/.)
     assert.equal(fs.existsSync(path.join(dir, '.sfagents')), false);
+    assert.equal(fs.existsSync(path.join(dir, 'userdata', '.sfagents')), false);
+    assert.ok(fs.existsSync(path.join(dir, 'userdata', 'agents')));
     assert.equal((await runCli(['run', '--persist', 'remember this'], { cwd: dir })).code, 0);
-    assert.equal(readConversation(path.join(dir, '.sfagents', 'conversation.md')).state.messages.length, 2);
+    assert.equal(readConversation(path.join(dir, 'userdata', '.sfagents', 'conversation.md')).state.messages.length, 2);
     const custom = path.join(dir, 'elsewhere', 'chat.md');
     assert.equal((await runCli(['run', '--conversation', custom, 'x'], { cwd: dir })).code, 0);
     assert.ok(fs.existsSync(custom));

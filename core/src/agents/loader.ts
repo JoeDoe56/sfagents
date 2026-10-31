@@ -24,6 +24,67 @@ import { loadMcpConfig, type McpConfigFile } from '../mcp/config.js';
 import { PROMPTS_DIR_NAME, PromptReferenceError, ensurePrompts, expandPrompt } from './prompts.js';
 
 export const AGENTS_DIR_NAME = 'agents';
+/**
+ * The project's own folder for everything that belongs to the person and not
+ * to the code: agents, prompts, mcp.json, .env, GenUI views and the
+ * conversation (.sfagents). One folder, so one line keeps it out of git.
+ */
+export const USER_DATA_DIR_NAME = 'userdata';
+/** What an older project kept at its top level, and moveUserData() moves into userdata/. */
+export const LEGACY_USER_DATA = ['agents', 'prompts', 'mcp.json', '.env', '.sfagents', 'genui', 'artifacts', 'brightdata-mcp-example.json'] as const;
+
+/** Where a project's data is: its userdata folder, or (an older project not moved yet) the project folder itself. */
+export function dataDirFor(projectDir: string): string {
+  const dir = path.join(projectDir, USER_DATA_DIR_NAME);
+  return fs.existsSync(dir) ? dir : projectDir;
+}
+
+/**
+ * Moves an older project's data (agents/, prompts/, mcp.json, .env,
+ * .sfagents/, genui/…) into userdata/, and creates userdata/ for a new one.
+ * Returns what moved; what can't move (in use, or already there) stays and
+ * is listed in `failed`.
+ */
+export function moveUserData(projectDir: string): { moved: string[]; failed: Array<{ name: string; error: string }> } {
+  const dir = path.join(projectDir, USER_DATA_DIR_NAME);
+  const moved: string[] = [];
+  const failed: Array<{ name: string; error: string }> = [];
+  const fresh = !fs.existsSync(dir);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const name of LEGACY_USER_DATA) {
+    const from = path.join(projectDir, name);
+    if (!fs.existsSync(from)) continue;
+    const to = path.join(dir, name);
+    if (fs.existsSync(to)) {
+      failed.push({ name, error: `${USER_DATA_DIR_NAME}/${name} already exists` });
+      continue;
+    }
+    try {
+      fs.renameSync(from, to);
+      moved.push(name);
+    } catch (error) {
+      failed.push({ name, error: error instanceof Error ? error.message : String(error) });
+      if (fresh) {
+        // All or nothing the first time (a running SF Agents holds .sfagents, say): put back what moved,
+        // so the project keeps working as it was.
+        for (const back of moved.reverse()) {
+          try {
+            fs.renameSync(path.join(dir, back), path.join(projectDir, back));
+          } catch {
+            // left in userdata/; reported below
+          }
+        }
+        try {
+          fs.rmdirSync(dir);
+        } catch {
+          // not empty: something could not go back
+        }
+        return { moved: [], failed };
+      }
+    }
+  }
+  return { moved, failed };
+}
 /** The agent the project starts with when none is chosen: "main", else the first by name. */
 export const DEFAULT_AGENT_NAME = 'main';
 
@@ -48,8 +109,10 @@ export interface SkippedAgentFile {
 }
 
 export interface AgentTree {
-  /** The project directory (holding the agents folder, mcp.json, .env and .sfagents). */
+  /** The project directory (workspace paths in agent files are relative to it). */
   readonly configDir: string;
+  /** Where the project's data is: userdata/ (agents, prompts, mcp.json, .env, genui, .sfagents), or configDir in an older project. */
+  readonly dataDir: string;
   readonly agentsDir: string;
   /** The shared prompt files agents reference ("@name.txt"); may not exist. */
   readonly promptsDir: string;
@@ -83,8 +146,7 @@ export interface LoadOptions {
 export const DEFAULT_AGENT = Object.freeze({
   description: 'The default agent, created because the project had none. It replies with the provider added in Settings; name one here with "provider" and "model" to choose.',
   systemPrompt:
-    'You are the SF Agents main agent. Answer directly when you can, and use the shell to inspect and change files in the workspace (it runs in a sandbox limited to the workspace). Keep answers concise.',
-  workspace: Object.freeze({ roots: Object.freeze(['.']) }),
+    'You are the SF Agents main agent. Answer directly when you can, and use the shell to inspect and change files in the workspace folders you are given (it runs in a sandbox limited to them). Keep answers concise.',
   tools: Object.freeze({ allow: Object.freeze(['shell']) }),
 });
 
@@ -95,8 +157,16 @@ const DEFAULT_AGENT_PROMPTS = ['main-agent.txt', 'working-rules.txt'];
  * Creates what a project needs to start: the agents folder, and in it the
  * default agent when the folder has no agent files. Returns the paths it created.
  */
-export function ensureProject(projectDir: string): string[] {
+export function ensureProject(project: string): string[] {
   const created: string[] = [];
+  // The agents, prompts and the rest go in the project's data folder (userdata/ once moved).
+  const projectDir = dataDirFor(project);
+  // The folder GenUI views are written in, ready for the agents.
+  const genui = path.join(projectDir, 'genui');
+  if (projectDir !== project && !fs.existsSync(genui)) {
+    fs.mkdirSync(genui, { recursive: true });
+    created.push(genui);
+  }
   // The shared prompt files (default ones the first time).
   if (fs.existsSync(path.join(projectDir, AGENTS_DIR_NAME)) || !fs.existsSync(path.join(projectDir, 'agent.json'))) created.push(...ensurePrompts(projectDir));
   const agentsDir = path.join(projectDir, AGENTS_DIR_NAME);
@@ -111,8 +181,8 @@ export function ensureProject(projectDir: string): string[] {
   const file = path.join(agentsDir, `${DEFAULT_AGENT_NAME}.json`);
   // With the default prompt files at hand, the new agent uses them.
   const shared = DEFAULT_AGENT_PROMPTS.every((name) => fs.existsSync(path.join(projectDir, PROMPTS_DIR_NAME, name)));
-  // Its workspace is the project folder, by absolute path, with every permission.
-  const agent = { ...DEFAULT_AGENT, ...(shared ? { systemPrompt: DEFAULT_AGENT_PROMPTS.map((name) => `@${name}`) } : {}), workspace: { paths: { [fs.realpathSync(projectDir)]: 'rwd' } } };
+  // No workspace: it reaches only the folders the person gives it (workspace.paths), never where SF Agents happens to run.
+  const agent = { ...DEFAULT_AGENT, ...(shared ? { systemPrompt: DEFAULT_AGENT_PROMPTS.map((name) => `@${name}`) } : {}) };
   fs.writeFileSync(file, `${JSON.stringify(agent, null, 2)}\n`, { flag: 'wx' });
   created.push(file);
   return created;
@@ -154,12 +224,15 @@ function rel(configDir: string, file: string): string {
  */
 export function locateProject(target: string): { projectDir: string; agent?: string } {
   const abs = path.resolve(target);
+  // A folder inside userdata/ belongs to the project above it.
+  const project = (dataDir: string) => (path.basename(dataDir) === USER_DATA_DIR_NAME ? path.dirname(dataDir) : dataDir);
   if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
-    if (path.basename(abs) === AGENTS_DIR_NAME && !fs.existsSync(path.join(abs, AGENTS_DIR_NAME))) return { projectDir: path.dirname(abs) };
+    if (path.basename(abs) === AGENTS_DIR_NAME && !fs.existsSync(path.join(abs, AGENTS_DIR_NAME))) return { projectDir: project(path.dirname(abs)) };
+    if (path.basename(abs) === USER_DATA_DIR_NAME && fs.existsSync(path.join(abs, AGENTS_DIR_NAME))) return { projectDir: path.dirname(abs) };
     return { projectDir: abs };
   }
   if (abs.toLowerCase().endsWith('.json') && path.basename(path.dirname(abs)) === AGENTS_DIR_NAME) {
-    return { projectDir: path.dirname(path.dirname(abs)), agent: path.basename(abs).replace(/\.json$/i, '') };
+    return { projectDir: project(path.dirname(path.dirname(abs))), agent: path.basename(abs).replace(/\.json$/i, '') };
   }
   if (path.basename(abs) === 'agent.json' && fs.existsSync(abs)) {
     throw new ConfigError(
@@ -175,14 +248,15 @@ export function locateProject(target: string): { projectDir: string; agent?: str
 export function loadAgentTree(target: string, options: LoadOptions = {}): AgentTree {
   const located = locateProject(target);
   const configDir = fs.realpathSync(located.projectDir);
-  const agentsDir = path.join(configDir, AGENTS_DIR_NAME);
-  const promptsDir = path.join(configDir, PROMPTS_DIR_NAME);
+  const dataDir = dataDirFor(configDir);
+  const agentsDir = path.join(dataDir, AGENTS_DIR_NAME);
+  const promptsDir = path.join(dataDir, PROMPTS_DIR_NAME);
   if (!fs.existsSync(agentsDir) || !fs.statSync(agentsDir).isDirectory()) {
     const legacy = path.join(configDir, 'agent.json');
     if (fs.existsSync(legacy)) locateProject(legacy); // throws the migration message
     throw new ConfigError(agentsDir, undefined, `no "${AGENTS_DIR_NAME}" folder: create it and add an agent definition (for example ${AGENTS_DIR_NAME}/main.json)`);
   }
-  const mcpFile = path.resolve(options.mcpConfigFile ?? path.join(configDir, 'mcp.json'));
+  const mcpFile = path.resolve(options.mcpConfigFile ?? path.join(dataDir, 'mcp.json'));
   const mcp = loadMcpConfig(mcpFile);
   const mcpShown = rel(configDir, mcpFile);
 
@@ -259,9 +333,9 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
           warnings.push(`${shown}: on Linux an "rw" folder inside an "rwd" one still allows deleting (${nested.map((r) => r.path).join(', ')}). Give it "r", or move it out of the "rwd" folder.`);
         }
       } else {
-        // Workspace roots are relative to the project directory ("." is the
-        // project, and the default).
-        const specs = def.workspace?.roots ?? ['.'];
+        // Workspace roots are relative to the project directory. None by default:
+        // an agent reaches only the folders its file lists.
+        const specs = def.workspace?.roots ?? [];
         specs.forEach((spec, i) => {
           try {
             roots.push(WorkspaceContext.resolveAndValidateDir(path.resolve(configDir, spec)));
@@ -298,7 +372,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
     // Nothing loaded: the built-in default agent replies until a file is fixed.
     const file = path.join(agentsDir, `${DEFAULT_AGENT_NAME}.json`);
     const definition = parseAgentDefinition(structuredClone(DEFAULT_AGENT), rel(configDir, file), DEFAULT_AGENT_NAME);
-    loaded.set(DEFAULT_AGENT_NAME, { file, definition, roots: [configDir], access: [] });
+    loaded.set(DEFAULT_AGENT_NAME, { file, definition, roots: [], access: [] });
     warnings.push(`No agent file could be loaded, so the built-in default agent replies until one is fixed.${why}`);
   }
 
@@ -328,6 +402,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
 
   const tree: AgentTree = {
     configDir,
+    dataDir,
     agentsDir,
     promptsDir,
     root: byId.get(rootName)!,
@@ -336,7 +411,7 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
     skipped,
     warnings,
     protectedFiles: [...protectedFiles],
-    secretFiles: [path.join(configDir, '.env')],
+    secretFiles: [path.join(dataDir, '.env')],
   };
   return deepFreeze(tree);
 }

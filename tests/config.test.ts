@@ -2,8 +2,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadAgentTree, describeTree, ConfigError, ensureProject, locateProject, withRoot, buildSandboxPolicy, accessFor } from '@sfagents/core';
-import { baseAgent, makeTempDir, writeJson, stdioServerConfig } from './helpers.js';
+import { loadAgentTree, describeTree, ConfigError, ensureProject, locateProject, withRoot, buildSandboxPolicy, accessFor, moveUserData, defaultConversationFile } from '@sfagents/core';
+import { baseAgent, makeTempDir, writeJson, writeAgent, stdioServerConfig } from './helpers.js';
 
 /** A project: files are relative to it (agents go in "agents/"). */
 function setup(files: Record<string, unknown>, mcp?: unknown): string {
@@ -54,15 +54,15 @@ describe('agents folder', () => {
     assert.deepEqual([...tree.root.grants], [['Research Helper', 2]]);
     assert.deepEqual([...helper.grants], [['main', 1]], 'grants may point back: any graph is allowed');
     assert.ok(helper.definition.tools?.allow?.includes('shell'), 'any agent may have the shell');
-    assert.deepEqual(tree.byId.get('plain')!.roots, [dir], 'the project directory by default');
+    assert.deepEqual(tree.byId.get('plain')!.roots, [], 'no workspace unless the file gives one');
     assert.ok(Object.isFrozen(tree.root.definition), 'definitions are frozen');
     assert.match(describeTree(tree), /\* main[\s\S]*message:Research Helper×2/);
     assert.ok(tree.protectedFiles.includes(path.join(dir, 'agents', 'plain.json')));
   });
 
-  test('an agent with file tools and no roots works in the project directory', () => {
+  test('an agent whose file names no folders has no workspace: where SF Agents runs gives it nothing', () => {
     const dir = setup({ 'agents/main.json': baseAgent('main') });
-    assert.deepEqual(loadAgentTree(dir).root.roots, [dir]);
+    assert.deepEqual(loadAgentTree(dir).root.roots, []);
   });
 
   test('picks the agent to start with: --agent, an agent file, "main", else the first', () => {
@@ -188,12 +188,33 @@ describe('agents folder', () => {
     skippedError(both, /replaces roots and access/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], paths: { [outside]: 'r' } } }), 'agents/ok.json': baseAgent('ok') });
   });
 
-  test('a new project\'s agent gets the project folder by absolute path, with every permission', () => {
+  test('a new project\'s agent gets no folders until the person gives it some', () => {
     const dir = makeTempDir();
     ensureProject(dir);
-    const def = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'main.json'), 'utf8')) as { workspace: unknown };
-    assert.deepEqual(def.workspace, { paths: { [fs.realpathSync(dir)]: 'rwd' } });
-    assert.deepEqual(loadAgentTree(dir).root.roots, [fs.realpathSync(dir)]);
+    const def = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'main.json'), 'utf8')) as { workspace?: unknown };
+    assert.equal(def.workspace, undefined);
+    assert.deepEqual(loadAgentTree(dir).root.roots, []);
+  });
+
+  test('a project\'s data moves into userdata/, all of it or none, and is found there', () => {
+    const dir = makeTempDir();
+    writeAgent(dir, baseAgent('main'));
+    fs.writeFileSync(path.join(dir, 'mcp.json'), '{"mcpServers":{}}');
+    fs.mkdirSync(path.join(dir, '.sfagents'));
+    fs.mkdirSync(path.join(dir, 'genui'));
+    fs.mkdirSync(path.join(dir, 'src'));
+    const r = moveUserData(dir);
+    assert.deepEqual(r.moved.sort(), ['.sfagents', 'agents', 'genui', 'mcp.json']);
+    assert.deepEqual(r.failed, []);
+    assert.ok(fs.existsSync(path.join(dir, 'src')), 'the project\'s own files stay');
+    const tree = loadAgentTree(dir);
+    assert.equal(tree.configDir, fs.realpathSync(dir));
+    assert.equal(tree.dataDir, path.join(fs.realpathSync(dir), 'userdata'));
+    assert.equal(tree.agentsDir, path.join(tree.dataDir, 'agents'));
+    assert.equal(tree.mcp.file, path.join(tree.dataDir, 'mcp.json'));
+    assert.equal(defaultConversationFile(dir), path.join(dir, 'userdata', '.sfagents', 'conversation.md'));
+    assert.equal(loadAgentTree(path.join(dir, 'userdata')).configDir, fs.realpathSync(dir), 'the userdata folder names its project');
+    assert.deepEqual(moveUserData(dir), { moved: [], failed: [] }, 'nothing left to move');
   });
 
   test('validates mcp.json, leaving out invalid servers', () => {

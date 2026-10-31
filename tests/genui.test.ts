@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { ArtifactError, ConversationService, loadAgentTree, parseConversation, runArtifactRequest, serializeConversation, validateGenui, type ChatMessage } from '@sfagents/core';
+import { AgentRuntime, ArtifactError, ConversationService, loadAgentTree, moveUserData, parseConversation, runArtifactRequest, serializeConversation, validateGenui, type ChatMessage } from '@sfagents/core';
 import { WebServer } from '@sfagents/web';
 import { baseAgent, makeTempDir, scriptedFactory, writeAgent, type Script } from './helpers.js';
 
@@ -142,6 +142,44 @@ function request(base: string, pathname: string, method = 'GET', body?: unknown)
     req.end();
   });
 }
+
+describe('GenUI: SF Agents\' own folders', () => {
+  test('an agent with no workspace still writes views and artifacts with sf-artifact, and reads them back', async () => {
+    const dir = makeTempDir('sfagents-genui-own-');
+    writeAgent(dir, { ...baseAgent('main'), tools: { allow: [] }, workspace: undefined });
+    moveUserData(dir);
+    const { tree, conversation } = open(dir);
+    assert.deepEqual(tree.root.roots, [], 'no workspace');
+    const json = JSON.stringify({ version: 1, title: 'Demo', state: { n: 1 }, view: { type: 'text', value: 'hi' } });
+    const q = (v: string) => `"${v.replace(/[\\"$`]/g, '\\$&')}"`;
+    const script: Script = (_req, call) =>
+      call === 0
+        ? {
+            toolCalls: [
+              { name: 'shell', args: { command: `sf-artifact genui/demo.json --title "Demo" --content ${q(json)}` } },
+              { name: 'shell', args: { command: 'sf-artifact notes.md --title "Notes" --content "hello"' } },
+              { name: 'shell', args: { command: 'sf-artifact ../escape.md --title "Out" --content "x"' } },
+            ],
+          }
+        : call === 1
+          ? { toolCalls: [{ name: 'shell', args: { command: `sf-artifact --id ${conversation.artifacts().find((a) => a.title === 'Demo')?.id} --print` } }] }
+          : { text: 'ok' };
+    const { factory, providers } = scriptedFactory(script);
+    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
+    await runtime.createSession().run('make a view');
+    const demo = conversation.artifacts().find((a) => a.title === 'Demo')!;
+    assert.equal(demo.type, 'genui');
+    assert.equal(fs.readFileSync(path.join(dir, 'userdata', 'genui', 'demo.json'), 'utf8'), json);
+    assert.equal(fs.readFileSync(path.join(dir, 'userdata', 'artifacts', 'notes.md'), 'utf8'), 'hello');
+    assert.equal(fs.existsSync(path.join(dir, 'escape.md')), false);
+    assert.equal(conversation.artifacts().some((a) => a.title === 'Out'), false);
+    const printed = providers.get('main')!.requests.flatMap((r) => r.messages).filter((m) => (m as { role: string }).role === "tool").map((m) => String((m as { content: unknown }).content));
+    assert.ok(printed.some((t) => t.includes('"title":"Demo"')), 'the view printed back');
+    assert.ok(printed.some((t) => /no workspace folders|must be a file name|outside/.test(t)), 'an escaping name is refused');
+    await runtime.dispose();
+    conversation.close();
+  });
+});
 
 describe('GenUI: the web server', () => {
   test('views are read checked, keep the person’s state in the file, save, and send messages marked as from them', async () => {

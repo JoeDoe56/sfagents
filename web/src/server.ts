@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Readable, Writable } from 'node:stream';
 import {
@@ -99,6 +99,34 @@ const MAX_ATTACHMENTS = 20;
 const MAX_ATTACH_FROM_FILES = 50 * 1024 * 1024;
 
 const options_watch = (o: { watchAgents?: boolean }) => o.watchAgents !== false;
+
+/** A short id of the page's files (names, sizes, times), for telling an open page it is out of date. */
+function pageBuild(dir: string): string {
+  const hash = createHash('sha256');
+  const walk = (d: string, depth: number) => {
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((x, y) => x.name.localeCompare(y.name))) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (depth < 3) walk(full, depth + 1);
+      } else if (/\.(js|css|html)$/.test(e.name)) {
+        try {
+          const st = fs.statSync(full);
+          hash.update(`${full}:${st.size}:${st.mtimeMs}\n`);
+        } catch {
+          // gone
+        }
+      }
+    }
+  };
+  walk(dir, 0);
+  return hash.digest('hex').slice(0, 12);
+}
 
 export const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -316,6 +344,8 @@ export class WebServer {
   private live: LiveRun | undefined;
   private artifactSignature = '';
   private readonly publicDir: string;
+  /** Changes when the page's files do: an open page from an older build reloads itself. */
+  private readonly build: string;
   private readonly log: (line: string) => void;
   private heartbeat: NodeJS.Timeout | undefined;
   private port: number;
@@ -365,6 +395,7 @@ export class WebServer {
       this.publicOrigins.set(new URL(origin).host, origin);
     }
     this.publicDir = options.publicDir ?? PUBLIC_DIR;
+    this.build = pageBuild(this.publicDir);
     // The first path segments SF Agents serves itself; everything else may belong to an open app.
     this.ownNames = new Set(['', 'api', 'apps', ...(() => {
       try {
@@ -390,7 +421,7 @@ export class WebServer {
     this.logs.onLine((line) => this.broadcastRaw(`event: log\ndata: ${JSON.stringify(line)}\n\n`));
     this.registry = options.registry ?? new ProviderRegistry();
     this.auth = options.auth === false ? null : (options.auth ?? new WebAuth());
-    this.mcpFile = options.tree.mcp.file ?? path.join(options.tree.configDir, 'mcp.json');
+    this.mcpFile = options.tree.mcp.file ?? path.join(options.tree.dataDir, 'mcp.json');
     this.dictation =
       options.dictation ??
       new Dictation({
@@ -529,7 +560,7 @@ export class WebServer {
       if (this.clients.size) this.refreshDiffs(0);
     }, 10_000);
     this.diffsPoll.unref?.();
-    if (options_watch(this.options)) this.projectWatcher = watchProject({ configDir: this.runtime.tree.configDir, mcpFile: this.mcpFile, onChange: () => this.reloadAgents() });
+    if (options_watch(this.options)) this.projectWatcher = watchProject({ configDir: this.runtime.tree.dataDir, mcpFile: this.mcpFile, onChange: () => this.reloadAgents() });
     const shown = this.host === '0.0.0.0' || this.host === '::' ? 'localhost' : this.host.includes(':') ? `[${this.host}]` : this.host;
     return `http://${shown}:${this.port}/`;
   }
@@ -1636,6 +1667,7 @@ export class WebServer {
         ...this.runtime.tree.skipped.map((sk) => ({ text: `${path.basename(sk.file)} was skipped: ${sk.error}`, level: 'error' })),
         ...this.runtime.tree.warnings.map((w) => ({ text: w, level: 'error' })),
       ],
+      build: this.build,
       limits: { maxUploadBytes: this.up2k.maxBytes, maxAttachments: MAX_ATTACHMENTS, maxMessageChars: MAX_MESSAGE_CHARS },
     };
   }

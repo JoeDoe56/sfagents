@@ -671,7 +671,7 @@ describe('sfagents web (CLI)', () => {
     const base = /(http:\/\/127\.0\.0\.1:\d+)\//.exec(out)![1]!;
     const page = await request(base, '/');
     assert.equal(page.status, 200);
-    assert.ok(fs.existsSync(path.join(dir, '.sfagents', 'conversation.lock')), 'the web server holds the conversation lock');
+    assert.ok(fs.existsSync(path.join(dir, 'userdata', '.sfagents', 'conversation.lock')), 'the web server holds the conversation lock (in userdata/, where starting moved the data)');
     if (process.platform === 'win32') {
       // Windows has no SIGINT for child processes; kill() terminates it abruptly.
       child.kill();
@@ -681,7 +681,7 @@ describe('sfagents web (CLI)', () => {
     child.kill('SIGINT');
     const code = await new Promise<number | null>((resolve) => child.on('exit', (c) => resolve(c)));
     assert.equal(code, 0, err);
-    assert.equal(fs.existsSync(path.join(dir, '.sfagents', 'conversation.lock')), false, 'lock released');
+    assert.equal(fs.existsSync(path.join(dir, 'userdata', '.sfagents', 'conversation.lock')), false, 'lock released');
   });
 
   test('rejects a bad port, --lhm (sensors are always built in) and --ephemeral', async () => {
