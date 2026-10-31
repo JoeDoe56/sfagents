@@ -168,7 +168,7 @@ describe('agents folder', () => {
       [path.join('a', 'sensitive'), 'none'],
       [path.join('b', 'project'), 'write'],
     ]);
-    if (process.platform === 'linux') assert.ok(tree.warnings.some((w) => /cannot let commands write without deleting/.test(w)));
+    assert.ok(!tree.warnings.some((w) => /still allows deleting/.test(w)), 'no "rw" folder inside an "rwd" one');
     const policy = buildSandboxPolicy({ roots: main.roots, access: main.access });
     const at = (...p: string[]) => accessFor(policy.rules, path.join(real(outside), ...p));
     assert.deepEqual([at('a', 'sensitive', 'x'), at('a', 'notes.md'), at('b', 'x.md'), at('b', 'project', 'x.md'), at('c')], ['none', 'read', 'edit', 'write', 'none']);

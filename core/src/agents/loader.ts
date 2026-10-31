@@ -253,8 +253,10 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
             throw new ConfigError(shown, `workspace.paths["${paths[i]!.path}"]`, error instanceof Error ? error.message : String(error));
           }
         });
-        if (process.platform === 'linux' && paths.some((e) => e.access === 'edit')) {
-          warnings.push(`${shown}: on Linux the sandbox cannot let commands write without deleting, so "rw" folders allow deleting too (as "rwd").`);
+        // Landlock rules only add rights down a folder tree, so Linux cannot narrow "rwd" to "rw" inside it.
+        const nested = access.filter((r) => r.access === 'edit' && access.some((w) => w.access === 'write' && w.path !== r.path && isPathWithinRoot(r.path, w.path)));
+        if (process.platform === 'linux' && nested.length) {
+          warnings.push(`${shown}: on Linux an "rw" folder inside an "rwd" one still allows deleting (${nested.map((r) => r.path).join(', ')}). Give it "r", or move it out of the "rwd" folder.`);
         }
       } else {
         // Workspace roots are relative to the project directory ("." is the

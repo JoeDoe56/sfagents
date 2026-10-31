@@ -1,11 +1,16 @@
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import {
   AgentRuntime,
   buildSandboxPolicy,
+  bubblewrapCommand,
   detectSandbox,
+  findPython,
+  landlockCommand,
+  LINUX_SYSTEM_PATHS,
   loadAgentTree,
   seatbeltProfile,
   setSandboxForTesting,
@@ -274,5 +279,66 @@ describe('policy', () => {
     // "rw" without "d": writes, but no deleting or renaming.
     const edit = seatbeltProfile({ rules: [{ path: '/Users/me/notes', access: 'edit' }], network: false }, '/private/var/folders/x/T/sfagents-sandbox-2');
     assert.match(edit, /\(allow file-read\* file-write\* \(subpath "\/Users\/me\/notes"\)\)\n\(deny file-write-unlink \(subpath "\/Users\/me\/notes"\)\)/);
+  });
+});
+
+describe('workspace.paths through the shell (Linux, bubblewrap)', { skip: !linuxSandbox && 'bubblewrap is not available' }, () => {
+  test('"r", "rw", "rwd" and "" do what they say, nested folders included', async () => {
+    const f = await fixture();
+    const base = fs.realpathSync(f.outside);
+    for (const d of ['b/project', 'a/sensitive']) fs.mkdirSync(path.join(base, d), { recursive: true });
+    fs.writeFileSync(path.join(base, 'a', 'read.txt'), 'readable\n');
+    fs.writeFileSync(path.join(base, 'a', 'sensitive', 'key'), 'hidden\n');
+    fs.writeFileSync(path.join(base, 'b', 'keep.txt'), 'keep\n');
+    fs.writeFileSync(path.join(base, 'b', 'project', 'old.txt'), 'old\n');
+    writeAgent(f.dir, baseAgent('main', { tools: { allow: ['shell'] }, workspace: { paths: { [f.dir]: 'rwd', [path.join(base, 'a')]: 'r', [path.join(base, 'a', 'sensitive')]: '', [path.join(base, 'b')]: 'rw', [path.join(base, 'b', 'project')]: 'rwd' } } }));
+    f.tools = await buildTools(f.dir);
+    const run = async (cmd: string) => stdout((await sh(f, cmd)).result).trim();
+    assert.equal(await run(`cat '${base}/a/read.txt'; echo x > '${base}/a/new' 2>/dev/null || echo a-readonly`), 'readable\na-readonly');
+    assert.equal(await run(`cat '${base}/a/sensitive/key' 2>/dev/null || echo blocked`), 'blocked');
+    assert.equal(await run(`cd '${base}/b' && echo more >> keep.txt && echo n > n.txt && echo wrote; rm keep.txt 2>/dev/null || echo no-delete; mv n.txt m.txt 2>/dev/null || echo no-rename`), 'wrote\nno-delete\nno-rename');
+    assert.equal(await run(`rm '${base}/b/project/old.txt' && echo project-delete-ok; rm src/a.txt && echo root-delete-ok`), 'project-delete-ok\nroot-delete-ok');
+    assert.equal(fs.readFileSync(path.join(base, 'b', 'keep.txt'), 'utf8'), 'keep\nmore\n');
+    // Temporary files can still be deleted (the "rw" folder is inside /tmp here, so the command has its own).
+    assert.equal(await run('t=$(mktemp) && rm "$t" && mkdir -p ~/.cache/x && rm -r ~/.cache && echo temp-ok'), 'temp-ok');
+  });
+});
+
+describe('"rw" without delete on Linux (Landlock)', () => {
+  const python = process.platform === 'linux' ? findPython(LINUX_SYSTEM_PATHS) : undefined;
+  const landlock = python !== undefined && spawnSync(python, ['-I', '-c', 'import ctypes,sys; s=ctypes.CDLL(None).syscall; s.restype=ctypes.c_long; sys.exit(0 if s(444, None, ctypes.c_size_t(0), ctypes.c_uint32(1)) >= 1 else 1)']).status === 0;
+
+  test('bubblewrap starts commands through the launcher only when a folder is "rw"', { skip: !python && 'no python3 here' }, () => {
+    const dir = fs.realpathSync(makeTempDir());
+    const cmd = { executable: '/bin/sh', args: ['-c', 'true'], cwd: dir, env: { HOME: '/home/agent', PATH: '/usr/bin:/bin' } };
+    const plain = bubblewrapCommand('/usr/bin/bwrap', cmd, { rules: [{ path: dir, access: 'write' }], network: false });
+    assert.deepEqual(plain.args.slice(-4), ['--', '/bin/sh', '-c', 'true']);
+    fs.mkdirSync(path.join(dir, 'notes'));
+    const edit = bubblewrapCommand('/usr/bin/bwrap', cmd, { rules: [{ path: dir, access: 'read' }, { path: path.join(dir, 'notes'), access: 'edit' }], network: false });
+    const at = edit.args.indexOf('--');
+    assert.deepEqual(edit.args.slice(at + 1, at + 4), [python, '-I', '-c']);
+    // The "rw" folder is inside /tmp here, so the command gets its own temporary folder, where it may delete.
+    assert.deepEqual(JSON.parse(edit.args[at + 5]!), ['/dev', '/run/sfagents-scratch/tmp', '/home/agent']);
+    assert.equal(edit.env['TMPDIR'], '/run/sfagents-scratch/tmp');
+    assert.deepEqual(edit.args.slice(-3), ['/bin/sh', '-c', 'true']);
+    assert.ok(edit.args.join(' ').includes(`--bind ${path.join(dir, 'notes')} ${path.join(dir, 'notes')}`));
+  });
+
+  test('the launcher lets commands write but not delete or rename outside the "rwd" folders', { skip: !landlock && 'Landlock is not available here' }, () => {
+    const dir = fs.realpathSync(makeTempDir());
+    for (const d of ['rwd', 'rw']) fs.mkdirSync(path.join(dir, d));
+    fs.writeFileSync(path.join(dir, 'rwd', 'x'), '1');
+    fs.writeFileSync(path.join(dir, 'rw', 'y'), '1');
+    const script = [
+      'echo new > rw/new && echo more >> rw/y && mkdir rw/sub && echo wrote',
+      'rm rw/y 2>/dev/null || echo rm-blocked',
+      'mv rw/y rw/z 2>/dev/null || echo rename-blocked',
+      'rmdir rw/sub 2>/dev/null || echo rmdir-blocked',
+      'rm rwd/x && echo rwd-delete-ok',
+    ].join('; ');
+    const [exe, ...args] = landlockCommand(python!, [path.join(dir, 'rwd')], ['/bin/sh', '-c', `cd '${dir}'; ${script}`]);
+    const r = spawnSync(exe!, args, { encoding: 'utf8' });
+    assert.equal(r.stdout, 'wrote\nrm-blocked\nrename-blocked\nrmdir-blocked\nrwd-delete-ok\n', r.stderr);
+    assert.equal(fs.readFileSync(path.join(dir, 'rw', 'y'), 'utf8'), '1more\n');
   });
 });

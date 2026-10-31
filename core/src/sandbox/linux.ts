@@ -5,6 +5,9 @@
  * rules bound read-only and `none` rules masked. The home folder and /tmp are
  * empty, and there is no network unless the policy allows it. Paths keep
  * their real names, so a symlink that leaves the workspace finds nothing.
+ * Folders that may be written but not deleted from ("edit") are bound
+ * read-write too, and Landlock keeps deleting and moving to the rest (see
+ * landlock.ts).
  */
 
 import fs from 'node:fs';
@@ -21,11 +24,15 @@ import {
   type SandboxStatus,
   type WrappedCommand,
 } from './sandbox.js';
+import { findPython, landlockCommand } from './landlock.js';
+import { isPathWithinRoot } from '../permissions/workspace.js';
 
 /** System folders every command may read. */
 export const LINUX_SYSTEM_PATHS = ['/usr', '/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32', '/etc', '/opt', '/nix/store'];
 /** Extra paths that DNS needs when the network is allowed (systemd-resolved stub). */
 const NETWORK_PATHS = ['/run/systemd/resolve'];
+/** A separate temporary home and /tmp, for commands with an "rw" folder inside the usual ones. */
+const SCRATCH_DIR = '/run/sfagents-scratch';
 
 export function findBubblewrap(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const dirs = ['/usr/bin', '/usr/local/bin', '/bin', ...(env['PATH'] ?? '').split(path.delimiter)];
@@ -63,10 +70,32 @@ export function bubblewrapCommand(bwrap: string, command: SandboxCommand, policy
   // An empty home: tools find their usual paths, none of the user's files.
   const home = command.env['HOME'] || os.homedir();
   const env: NodeJS.ProcessEnv = { ...command.env, HOME: home, TMPDIR: '/tmp' };
-  if (!LINUX_SYSTEM_PATHS.some((s) => home === s || home.startsWith(s + '/'))) args.push('--tmpfs', home);
+  const homeIsSystem = LINUX_SYSTEM_PATHS.some((s) => home === s || home.startsWith(s + '/'));
+  if (!homeIsSystem) args.push('--tmpfs', home);
 
-  for (const rule of prepareRules(policy.rules)) {
-    // A bind mount cannot allow writing but not deleting: "edit" is "write" here (the loader warns).
+  const rules = prepareRules(policy.rules);
+  // Folders that may be written but not deleted from: Landlock allows deleting
+  // only under the folders it is given, and always for a whole tree. The
+  // temporary home and /tmp are given too, unless an "rw" folder is inside
+  // one: then the command gets a separate one instead.
+  const edits = rules.filter((r) => r.access === 'edit');
+  const removable = rules.filter((r) => r.access === 'write').map((r) => r.path);
+  if (edits.length) {
+    const above = (dir: string) => edits.some((r) => isPathWithinRoot(r.path, dir));
+    removable.push('/dev');
+    if (above('/tmp')) {
+      args.push('--tmpfs', `${SCRATCH_DIR}/tmp`);
+      env['TMPDIR'] = `${SCRATCH_DIR}/tmp`;
+      removable.push(`${SCRATCH_DIR}/tmp`);
+    } else removable.push('/tmp');
+    if (homeIsSystem || above(home)) {
+      args.push('--tmpfs', `${SCRATCH_DIR}/home`);
+      env['HOME'] = `${SCRATCH_DIR}/home`;
+      removable.push(`${SCRATCH_DIR}/home`);
+    } else removable.push(home);
+  }
+
+  for (const rule of rules) {
     if (rule.access === 'write' || rule.access === 'edit') args.push('--bind', rule.path, rule.path);
     else if (rule.access === 'read') args.push('--ro-bind', rule.path, rule.path);
     else if (fs.statSync(rule.path).isDirectory()) args.push('--tmpfs', rule.path, '--remount-ro', rule.path);
@@ -88,7 +117,13 @@ export function bubblewrapCommand(bwrap: string, command: SandboxCommand, policy
     }
   }
 
-  args.push('--chdir', command.cwd, '--', command.executable, ...command.args);
+  let argv = [command.executable, ...command.args];
+  if (edits.length) {
+    const python = findPython(LINUX_SYSTEM_PATHS);
+    if (!python) throw new Error('Folders with "rw" (no delete) need python3 (in /usr/bin) to be enforced on Linux. Install it, or give the folder "rwd" or "r".');
+    argv = landlockCommand(python, removable, argv);
+  }
+  args.push('--chdir', command.cwd, '--', ...argv);
   return { executable: bwrap, args, env };
 }
 
