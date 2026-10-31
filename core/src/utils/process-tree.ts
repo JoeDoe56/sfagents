@@ -59,6 +59,20 @@ export function isSandboxRun(command: string): boolean {
   return /sfagents-sandbox(?:\.exe)?"?\s+run\s/i.test(command);
 }
 
+/**
+ * One of SF Agents' own programs, by its command line, that is left running
+ * when its SF Agents is gone: a sandboxed command (isSandboxRun), the
+ * keyboard and sensor programs (SfAgents.Input/Sensors), the keyboard worker,
+ * screen mirroring's helper, or a speech server whose config is in SF Agents'
+ * folder (@p home).
+ */
+export function isLeftover(command: string, home: string): boolean {
+  if (isSandboxRun(command)) return true;
+  const c = command.toLowerCase();
+  if (/sfagents\.(?:input|sensors)(?:\.exe)?\b|keyboard-worker\.js|sfagents-screen/.test(c)) return true;
+  return c.includes('audiocpp_server') && c.includes(home.toLowerCase());
+}
+
 /** `pid ppid command` per line, as printed by listProcesses' commands. */
 export function parseProcessList(text: string): ProcessEntry[] {
   const rows: ProcessEntry[] = [];

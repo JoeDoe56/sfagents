@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { descendantsOf, isSandboxRun, killProcessTree, orphansOf, parseProcessList } from '@sfagents/core';
+import { descendantsOf, isLeftover, isSandboxRun, killProcessTree, orphansOf, parseProcessList } from '@sfagents/core';
 
 test('descendantsOf walks the whole tree and spares what keep matches', () => {
   const rows = parseProcessList(
@@ -26,6 +26,27 @@ test('sandboxed commands left behind by an earlier SF Agents are found; ones wit
   assert.deepEqual(orphansOf(rows, isSandboxRun).map((p) => p.pid), [300]);
   assert.equal(isSandboxRun('/opt/sfagents/sfagents-sandbox run --policy p.json -- sh'), true);
   assert.equal(isSandboxRun('sfagents-sandbox.exe recover'), false);
+});
+
+test('SF Agents\' own helpers count as leftovers; nothing else does', () => {
+  const home = 'C:\\Users\\me\\AppData\\Roaming\\SF Agents';
+  for (const c of [
+    '"C:\\sfagents\\core\\native\\bin\\win-x64\\sfagents-sandbox.exe" run --policy p.json -- cmd.exe',
+    'C:\\sfagents\\web\\native\\bin\\win-x64\\SfAgents.Input.exe --broker sfagents-input-1',
+    'C:\\sfagents\\web\\native\\bin\\win-x64\\SfAgents.Sensors.exe --broker sfagents-sensors-1',
+    '/usr/bin/node /opt/sfagents/web/dist/keyboard-worker.js',
+    'C:\\Program Files\\SF Agents\\sfagents-screen.exe --port 1',
+    `"${home}\\dictation\\audiocpp\\cuda\\audiocpp_server.exe" --config "${home}\\dictation\\server-gpu.json" --no-ui`,
+  ]) assert.equal(isLeftover(c, home), true, c);
+  for (const c of [
+    '"node" "C:\\sfagents\\cli\\bin\\sfagents.js" web',
+    'C:\\Temp\\bench\\audiocpp_server.exe --config C:\\Temp\\bench\\server.json',
+    'sfagents-sandbox.exe recover',
+    'notepad.exe',
+  ]) assert.equal(isLeftover(c, home), false, c);
+  // A helper whose SF Agents is still running has its parent: not an orphan.
+  const rows = parseProcessList(['100     1 node sfagents', `200   100 ${home}\\dictation\\audiocpp\\cuda\\audiocpp_server.exe --config "${home}\\dictation\\server-cpu.json"`, '300  9999 C:\\x\\SfAgents.Input.exe --broker p'].join('\n'));
+  assert.deepEqual(orphansOf(rows, (c) => isLeftover(c, home)).map((p) => p.pid), [300]);
 });
 
 test('killProcessTree stops children and grandchildren', { skip: process.platform === 'win32' }, async () => {

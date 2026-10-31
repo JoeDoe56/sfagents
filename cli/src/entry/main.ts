@@ -28,8 +28,10 @@ import {
   ensureProject,
   getErrorMessage,
   KeyringUnavailableError,
+  isLeftover,
   isSandboxRun,
   killProcessTree,
+  sfagentsHome,
   windowsSandboxPath,
   mcpGrants,
   MissingCredentialError,
@@ -572,8 +574,11 @@ async function stopEverything(code: number, streams: Streams): Promise<never> {
   await runExitCleanup();
   try {
     // Turning off screen mirroring's virtual display is left to finish on its own.
-    // Sandboxed commands an earlier SF Agents left behind go too (they lock the helper's file).
-    const stopped = await killProcessTree({ graceMs: 2_000, keep: (command) => command.includes('--vdisplay-off'), orphans: isSandboxRun });
+    // What an earlier SF Agents left behind goes too: sandboxed commands (they
+    // lock the helper's file), the keyboard and sensor programs, the keyboard
+    // worker, the screen helper and speech servers whose parent is gone.
+    const home = sfagentsHome();
+    const stopped = await killProcessTree({ graceMs: 2_000, keep: (command) => command.includes('--vdisplay-off'), orphans: (command) => isLeftover(command, home) });
     if (stopped.length) {
       streams.stderr.write(`Stopped ${stopped.length} process${stopped.length === 1 ? '' : 'es'} left running.\n`);
       // A sandboxed command killed this way skipped the helper's own cleanup: put its permission changes back.
