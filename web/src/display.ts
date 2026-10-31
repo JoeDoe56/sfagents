@@ -98,7 +98,13 @@ export function describeCall(name: string, argsJson: string): string {
       return `Listed ${file ? clip(file, 60) : 'a folder'}`;
     case 'run_shell_command':
     case 'shell': {
+      const action = str(args['job_action']);
+      const job = str(args['job_id']);
+      if (action === 'list') return 'Listed background commands';
+      if (action === 'output') return `Read the output of ${job ?? 'a background command'}`;
+      if (action === 'stop') return `Stopped ${job ?? 'a background command'}`;
       const cmd = str(args['command'])?.trim() ?? '';
+      if (args['background'] === true) return `Started \`${clip(cmd, 60)}\` in the background`;
       const words = cmd.split(/\s+/);
       if (words[0] === 'sf-artifact') {
         const flag = (f: string) => {
