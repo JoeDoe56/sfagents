@@ -28,7 +28,7 @@ describe('text as Qwen3-TTS reads it', () => {
 
   test('links, addresses and HTML become words', () => {
     assert.equal(said('See [the PR](https://github.com/x/y/pull/12) and ![a chart](c.png).'), 'See the PR and a chart.');
-    assert.equal(said('Visit https://www.example.com/path?q=1. Or <https://docs.python.org/3/>.'), 'Visit example.com. Or docs.python.org.');
+    assert.equal(said('Visit https://www.example.com/path?q=1. Or <https://docs.python.org/3/>.'), 'Visit example dot com. Or docs dot python dot org.');
     assert.equal(said('Line one<br>Line two &amp; three &lt;tag&gt; &#8212; done.'), 'Line one. Line two and three tag, done.');
   });
 
@@ -40,6 +40,13 @@ describe('text as Qwen3-TTS reads it', () => {
     assert.equal(said('snake_case and my_var stay words; 5 * 3 = 15'), 'snake case and my var stay words; 5 times 3 equals 15.');
     assert.equal(said('Hello.\n\nHow are   you?'), 'Hello. How are you?');
     assert.equal(said('**'), '');
+    assert.equal(said('A line wrapped\ninside a paragraph.'), 'A line wrapped inside a paragraph.');
+  });
+
+  test('dots, slashes and other characters are said the way a person says them', () => {
+    assert.equal(said('I changed `web/src/dictation.ts` and Node.js, e.g. the parser.'), 'I changed web slash src slash dictation dot ts and Node dot js, for example the parser.');
+    assert.equal(said('Mail me@example.com. It is 50% done at 22°C; 2+2 is 4 in C++ for R&D.'), 'Mail me at example dot com. It is 50 percent done at 22 degrees Celsius; 2 plus 2 is 4 in C plus plus for R and D.');
+    assert.equal(said('Use and/or w/ care: version 0.9.3 costs $2.50, i.e. cheap. See .env and /api/speak.'), 'Use and or with care: version 0.9.3 costs $2.50, that is cheap. See dot env and slash api slash speak.');
   });
 });
 

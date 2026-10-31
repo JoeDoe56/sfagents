@@ -10,7 +10,8 @@
  *   - links and images become their text; a bare address, its site name;
  *   - HTML tags go, entities become their characters;
  *   - emoji and stray Markdown characters go; symbols that have a word are
- *     said with it (≥ "at least", → "to", & "and", …).
+ *     said with it (≥ "at least", → "to", & "and", . "dot", / "slash",
+ *     @ "at", % "percent", …).
  */
 
 /** Symbols read as words. */
@@ -38,6 +39,38 @@ const WORDS: Array<[RegExp, string]> = [
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hellip: '…', copy: '©', reg: '®', trade: '™', deg: '°' };
 
+/** Abbreviations read as their words. */
+const ABBREVIATIONS: Array<[RegExp, string]> = [
+  [/\be\.g\.(?=\s|,|$)/gi, 'for example'],
+  [/\bi\.e\.(?=\s|,|$)/gi, 'that is'],
+  [/\betc\./gi, 'et cetera.'],
+  [/\bvs\.?(?=\s)/gi, 'versus'],
+  [/\bw\/(?=\s)/gi, 'with'],
+  [/\band\/or\b/gi, 'and or'],
+];
+
+/**
+ * Characters said the way a person says them there: dictation.ts → "dictation
+ * dot ts", web/src → "web slash src", me@x.com → "me at x dot com", 50% → "50
+ * percent". A decimal point (2.5) and a version (1.2.3) stay as they are.
+ */
+function spell(s: string): string {
+  for (const [re, words] of ABBREVIATIONS) s = s.replace(re, words);
+  s = s.replace(/(?<=[\p{L}\d])@(?=[\p{L}\d])/gu, ' at ');
+  s = s.replace(/(?<=\s|^)@(?=[\p{L}\d_])/gu, 'at ');
+  s = s.replace(/(?<=[\p{L}\d])\.(?=\p{L})|(?<=\p{L})\.(?=\d)/gu, ' dot ');
+  s = s.replace(/(?<=\s|^)\.(?=\p{L})/gu, 'dot ');
+  s = s.replace(/(?<=\S)\/(?=\S)/g, ' slash ');
+  s = s.replace(/(?<=\s|^)\/(?=\S)/g, 'slash ');
+  s = s.replace(/(?<=\d)\s*%/g, ' percent');
+  s = s.replace(/(?<=\d)\s*°\s*([CF])\b/g, (_m, u: string) => (u === 'C' ? ' degrees Celsius' : ' degrees Fahrenheit'));
+  s = s.replace(/(?<=\d)\s*°/g, ' degrees');
+  s = s.replace(/(?<=\d)\s*\+\s*(?=\d)/g, ' plus ');
+  s = s.replace(/(?<=\S)\+\+/g, ' plus plus');
+  s = s.replace(/(?<=\p{L})&(?=\p{L})/gu, ' and ');
+  return s;
+}
+
 /** A sentence's end: the line gets a full stop unless it has its own. */
 function end(line: string): string {
   const t = line.trim();
@@ -62,7 +95,7 @@ export function speechText(input: string): string {
   // <address> links, before the HTML tags they look like.
   s = s.replace(/<((?:https?|ftp):\/\/[^>\s]+)>/g, (_m, u: string) => site(u));
   // HTML: line breaks and blocks end lines; other tags go; entities become characters.
-  s = s.replace(/<br\s*\/?>|<\/(?:p|div|li|h[1-6]|tr)>/gi, '\n');
+  s = s.replace(/<br\s*\/?>|<\/(?:p|div|li|h[1-6]|tr)>/gi, '\n\n');
   s = s.replace(/<\/?[a-z][^>]*>/gi, '');
   s = s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e: string) => {
     if (e[0] === '#') {
@@ -84,22 +117,50 @@ export function speechText(input: string): string {
   // Inline code: its text.
   s = s.replace(/`+([^`\n]+?)`+/g, '$1');
 
-  // Line by line: headings, quotes, lists, tables and rules.
-  const lines: string[] = [];
+  // Line by line: headings, quotes, lists, tables and rules. Each of those
+  // ends a sentence, and so does a paragraph; a line wrapped inside one does not.
+  const out: string[] = [];
+  let paragraph: string[] = [];
+  const close = () => {
+    out.push(end(paragraph.join(' ')));
+    paragraph = [];
+  };
   for (let line of s.split('\n')) {
-    if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) continue; // a rule
+    if (/^\s*(?:=+|-+)\s*$/.test(line) && paragraph.length) {
+      close(); // a heading's underline
+      continue;
+    }
+    if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) {
+      close(); // a rule
+      continue;
+    }
     if (/^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line)) continue; // a table's header line
-    if (/^\s*(?:=+|-+)\s*$/.test(line)) continue; // a heading's underline
+    if (!line.trim()) {
+      close();
+      continue;
+    }
     line = line.replace(/^\s*(?:>\s?)+/, ''); // quotes
-    line = line.replace(/^\s*#{1,6}\s+(.*?)\s*#*\s*$/, '$1'); // headings
-    line = line.replace(/^\s*(?:[-*+•◦▪‣]|\d+[.)])\s+/, ''); // list items
-    if (/\|/.test(line) && /\S\s*\|\s*\S/.test(line)) {
+    let block = false;
+    if (/^\s*#{1,6}\s+/.test(line)) {
+      line = line.replace(/^\s*#{1,6}\s+(.*?)\s*#*\s*$/, '$1'); // headings
+      block = true;
+    } else if (/^\s*(?:[-*+•◦▪‣]|\d+[.)])\s+/.test(line)) {
+      line = line.replace(/^\s*(?:[-*+•◦▪‣]|\d+[.)])\s+/, ''); // list items
+      block = true;
+    } else if (/\|/.test(line) && /\S\s*\|\s*\S/.test(line)) {
       // a table row: its cells, in a sentence
       line = line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim()).filter(Boolean).join(', ');
+      block = true;
     }
-    lines.push(end(line));
+    if (block) {
+      close();
+      out.push(end(line));
+    } else {
+      paragraph.push(line.trim());
+    }
   }
-  s = lines.filter(Boolean).join(' ');
+  close();
+  s = out.filter(Boolean).join(' ');
 
   // Emphasis and strikethrough: their words (not snake_case or 2*3).
   s = s.replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2');
@@ -110,6 +171,7 @@ export function speechText(input: string): string {
   // Emoji and pictographs, with their joiners and variation selectors.
   s = s.replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\u{1F1E6}-\u{1F1FF}‍︎️⃣]/gu, '');
   for (const [re, word] of WORDS) s = s.replace(re, word);
+  s = spell(s);
   // What is left of Markdown and other characters with no sound.
   s = s.replace(/\\([\\`*_{}[\]()#+\-.!|~>])/g, '$1');
   s = s.replace(/[*_`~^|<>{}[\]\\#=•◦▪‣]+/g, ' ');

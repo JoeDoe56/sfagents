@@ -57,7 +57,7 @@ import {
 import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
 import { AuthError, WebAuth } from './auth.js';
-import { Dictation, SPEECH_RATE } from './dictation.js';
+import { Dictation, SPEECH_RATE, speechText } from './dictation.js';
 import { PushToTalk } from './push-to-talk.js';
 import { DISPLAY_SCALES, ScreenMirror } from './screen.js';
 import { getDisplayScale, setDisplayScale } from './remote-dpi.js';
@@ -894,7 +894,7 @@ export class WebServer {
           // made (the page plays it as it comes); without, the whole reply as one WAV file.
           const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
           const text = typeof body['text'] === 'string' ? body['text'] : '';
-          if (!text.trim()) throw new HttpError(400, 'Nothing to say.');
+          if (!speechText(text)) throw new HttpError(400, 'Nothing to say.'); // only code, emoji or Markdown
           if (text.length > 20_000) throw new HttpError(413, 'That is too long to speak at once.');
           if (body['stream'] === true) {
             // The page stopping (or going away) stops the generation.
