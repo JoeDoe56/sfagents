@@ -4,8 +4,9 @@
 
 export * from './agents/definition.js';
 export * from './agents/loader.js';
-export { MessageAgentTool, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText } from './agents/message-agent.js';
-export type { AgentReplyPayload, MessageAgentParams, AgentMessenger } from './agents/message-agent.js';
+export { MessageTool, MAX_QUESTION_OPTIONS, USER, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText } from './agents/message-agent.js';
+export type { MessageParams, MessageQuestion } from './agents/message-agent.js';
+export type { AgentReplyPayload, AgentMessenger } from './agents/message-agent.js';
 export { watchProject } from './agents/watch.js';
 export { PROMPTS_DIR_NAME, PromptReferenceError, defaultPromptsDir, ensurePrompts, expandPrompt, isPromptReference } from './agents/prompts.js';
 export { Mailbox, type MailItem } from './agents/mailbox.js';

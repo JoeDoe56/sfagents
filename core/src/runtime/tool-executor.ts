@@ -72,7 +72,7 @@ function failure(callId: string, name: string, message: string, type: ToolErrorT
   return { callId, name, result: { llmContent: message, returnDisplay: message, error: { message, type } } };
 }
 
-const UNTIMED_TOOLS = new Set<string>([ToolNames.MESSAGE_AGENT, ToolNames.WAIT_FOR_MESSAGES, ToolNames.MESSAGE_USER]);
+const UNTIMED_TOOLS = new Set<string>([ToolNames.MESSAGE]);
 
 async function runWithTimeout(
   invocation: AnyToolInvocation,

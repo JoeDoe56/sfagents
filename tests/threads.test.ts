@@ -58,7 +58,7 @@ describe('agents messaging each other in threads', () => {
     });
     const script: Script = (req, _n, agent) => {
       if (agent === 'main') {
-        if (!hasToolResult(req)) return { toolCalls: [{ name: 'message_agent', args: { agent: 'worker', message: 'Read data.txt; echo the number.', wait: true } }] };
+        if (!hasToolResult(req)) return { toolCalls: [{ name: 'message', args: { to: 'worker', text: 'Read data.txt; echo the number.', wait: true } }] };
         const payload = JSON.parse(lastToolContent(req)!) as AgentReplyPayload;
         return { text: `Worker (${payload.status}): ${payload.reply}` };
       }
@@ -82,7 +82,7 @@ describe('agents messaging each other in threads', () => {
     assert.equal(lastUser(req), 'Read data.txt; echo the number.');
     assert.doesNotMatch(JSON.stringify(req.messages), /Ask the worker/);
     // It can talk back to main while it works.
-    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['mcp__local__echo', 'message_agent', 'shell', 'wait_for_messages']);
+    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['mcp__local__echo', 'message', 'shell']);
     // The writer's prompt says how to talk to agents.
     assert.match(systemOf(providers.get('main')!.requests[0]!.request), /<agent_messaging>[\s\S]*terse, structured/);
     assert.deepEqual(events.filter((e) => e.type === 'agent_start').map((e) => e.agentPath.join('/')), ['main', 'main/worker']);
@@ -100,11 +100,11 @@ describe('agents messaging each other in threads', () => {
     let mainTurn = 0;
     const script: Script = (req, _n, agent) => {
       if (agent === 'main' && !inThread(req)) {
-        if (!hasToolResult(req)) return { toolCalls: [{ name: 'message_agent', args: { agent: 'worker', message: mainTurn++ === 0 ? 'Remember 42.' : 'What number?', wait: true } }] };
+        if (!hasToolResult(req)) return { toolCalls: [{ name: 'message', args: { to: 'worker', text: mainTurn++ === 0 ? 'Remember 42.' : 'What number?', wait: true } }] };
         return { text: JSON.parse(lastToolContent(req)!).reply };
       }
       if (agent === 'worker' && !inThread(req)) {
-        if (!hasToolResult(req)) return { toolCalls: [{ name: 'message_agent', args: { agent: 'main', message: 'Which number did you give me?', wait: true } }] };
+        if (!hasToolResult(req)) return { toolCalls: [{ name: 'message', args: { to: 'main', text: 'Which number did you give me?', wait: true } }] };
         return { text: JSON.parse(lastToolContent(req)!).reply };
       }
       // Replies in the thread use what the thread holds.
@@ -135,9 +135,9 @@ describe('agents messaging each other in threads', () => {
         if (!hasToolResult(req)) {
           return {
             toolCalls: [
-              { name: 'message_agent', args: { agent: 'worker', message: 'a', wait: true } },
-              { name: 'message_agent', args: { agent: 'worker', message: 'b', wait: true } },
-              { name: 'message_agent', args: { agent: 'other', message: 'c', wait: true } },
+              { name: 'message', args: { to: 'worker', text: 'a', wait: true } },
+              { name: 'message', args: { to: 'worker', text: 'b', wait: true } },
+              { name: 'message', args: { to: 'other', text: 'c', wait: true } },
             ],
           };
         }
@@ -165,15 +165,15 @@ describe('agents messaging each other in threads', () => {
       const last = req.messages[req.messages.length - 1]!;
       if (agent === 'main') {
         if (last.role === 'user' && /^\[from worker, replied\]/.test(content(last))) return { text: `final: ${content(last)}` };
-        if (last.role === 'user' && /^\[from worker\] which number/.test(content(last))) return { toolCalls: [{ name: 'message_agent', args: { agent: 'worker', message: 'use 5' } }] };
+        if (last.role === 'user' && /^\[from worker\] which number/.test(content(last))) return { toolCalls: [{ name: 'message', args: { to: 'worker', text: 'use 5' } }] };
         if (last.role === 'tool') {
           if (/"status":"delivered"/.test(content(last))) return { text: 'answered the worker' };
-          return { toolCalls: [{ name: 'wait_for_messages', args: { timeout_seconds: 5 } }] };
+          return { toolCalls: [{ name: 'message', args: { wait: true, timeout_seconds: 5 } }] };
         }
-        return { toolCalls: [{ name: 'message_agent', args: { agent: 'worker', message: 'compute' } }, { name: 'message_agent', args: { agent: 'other', message: 'x' } }] };
+        return { toolCalls: [{ name: 'message', args: { to: 'worker', text: 'compute' } }, { name: 'message', args: { to: 'other', text: 'x' } }] };
       }
       // The worker asks the agent it works for and waits for the answer, mid-run.
-      if (last.role !== 'tool') return { toolCalls: [{ name: 'message_agent', args: { agent: 'main', message: 'which number?', wait: true } }] };
+      if (last.role !== 'tool') return { toolCalls: [{ name: 'message', args: { to: 'main', text: 'which number?', wait: true } }] };
       return { text: `doubled: ${/use (\d+)/.exec(content(last))?.[1] ?? '?'}0` };
     };
     const { runtime, providers } = start(tree, script, conversation);
@@ -184,10 +184,10 @@ describe('agents messaging each other in threads', () => {
     // The worker could message main without a grant (it works for main), and main was told how to talk back.
     const workerReq = providers.get('worker')!.requests[0]!.request;
     assert.match(systemOf(workerReq), /<talking_back>/);
-    assert.ok(workerReq.tools!.some((t) => t.name === 'message_agent'));
+    assert.ok(workerReq.tools!.some((t) => t.name === 'message'));
     // Ungranted agents still cannot be messaged.
     const mainTools = providers.get('main')!.requests.flatMap((r) => r.messages.filter((m: unknown) => (m as { role: string }).role === 'tool').map(content));
-    assert.ok(mainTools.some((t) => /params\/agent must be equal to one of the allowed values/.test(t)), mainTools.join(' | '));
+    assert.ok(mainTools.some((t) => /params\/to must be equal to one of the allowed values/.test(t)), mainTools.join(' | '));
     assert.deepEqual(events.filter((e) => e.type === 'agent_message').map((e) => (e as { from: string }).from), ['worker', 'worker']);
     // Both messages from the worker are in the conversation, as the agent's (not the person's) messages.
     const notes = conversation.state.messages.filter((m) => m.event === 'agent');
@@ -198,7 +198,7 @@ describe('agents messaging each other in threads', () => {
     assert.match(JSON.stringify(thread.messages.filter((m) => m.role === 'tool').map((m) => m.content)), /use 5/);
   });
 
-  test('message_user tells the person something mid-turn and can wait for their answer', async () => {
+  test('message to the user tells the person something mid-turn; questions wait for their answer', async () => {
     const { tree, conversation } = project({ main: {} });
     const pending: string[] = [];
     let wake: (() => void) | undefined;
@@ -206,7 +206,7 @@ describe('agents messaging each other in threads', () => {
       const last = req.messages[req.messages.length - 1]!;
       if (last.role === 'user' && /blue/.test(String((last as { content: string }).content))) return { text: 'Painting it blue.' };
       if (last.role === 'tool') return { text: 'no answer' };
-      return { toolCalls: [{ name: 'message_user', args: { text: 'Which color?', wait_for_reply: true, timeout_seconds: 5 } }] };
+      return { toolCalls: [{ name: 'message', args: { to: 'user', questions: [{ question: 'Which color?', options: ['red', 'blue'] }], timeout_seconds: 5 } }] };
     };
     const { runtime } = start(tree, script, conversation);
     const session = runtime.createSession();
@@ -221,7 +221,7 @@ describe('agents messaging each other in threads', () => {
         result = next.value;
         break;
       }
-      if (next.value.type === 'tool_request' && next.value.name === 'message_user') {
+      if (next.value.type === 'tool_request' && next.value.name === 'message') {
         setTimeout(() => {
           pending.push('blue');
           wake?.();
@@ -231,6 +231,25 @@ describe('agents messaging each other in threads', () => {
     assert.equal(result.text, 'Painting it blue.');
     const users = conversation.state.messages.filter((m) => m.role === 'user').map((m) => m.content);
     assert.deepEqual(users, ['paint the fence', 'blue']);
-    assert.ok(conversation.state.messages.some((m) => m.toolCalls?.some((c) => c.name === 'message_user')));
+    assert.ok(conversation.state.messages.some((m) => m.toolCalls?.some((c) => c.name === 'message')));
+  });
+
+  test('message checks who it is for and what questions offer', async () => {
+    const { tree, conversation } = project({ main: {} });
+    const calls = [
+      { to: 'user', questions: [{ question: 'Pick', options: ['1', '2', '3', '4', '5', '6', '7'] }] },
+      { text: 'hi' },
+      { to: 'nobody', text: 'hi' },
+      { to: 'user', text: 'Starting now.' },
+      {},
+    ];
+    const script: Script = (req, n) => (n === 0 ? { toolCalls: calls.map((args) => ({ name: 'message', args })) } : { text: JSON.stringify(req.messages.filter((m) => m.role === 'tool').map((m) => (m as { content: string }).content)) });
+    const { runtime } = start(tree, script, conversation);
+    const out = JSON.parse((await runtime.createSession().run('go')).text) as string[];
+    assert.match(out[0]!, /must NOT have more than 6 items/);
+    assert.match(out[1]!, /Say who it is for/);
+    assert.match(out[2]!, /params\/to must be equal to one of the allowed values/);
+    assert.match(out[3]!, /Sent\. Keep working/);
+    assert.match(out[4]!, /"wait": true alone/);
   });
 });

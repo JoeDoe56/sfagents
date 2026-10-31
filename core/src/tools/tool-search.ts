@@ -28,9 +28,7 @@ const MAX_RESULTS = 20;
 const NEVER_DEFERRED: ReadonlySet<string> = new Set([
   ToolNames.TOOL_SEARCH,
   ToolNames.SHELL,
-  ToolNames.MESSAGE_AGENT,
-  ToolNames.WAIT_FOR_MESSAGES,
-  ToolNames.MESSAGE_USER,
+  ToolNames.MESSAGE,
 ]);
 
 export type DeferSetting = boolean | 'auto' | readonly string[];

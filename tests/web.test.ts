@@ -615,6 +615,38 @@ describe('web server', () => {
     }
   });
 
+  test('questions from the agent show as a card that the next message answers', async () => {
+    const questions = [{ question: 'Which color?', options: ['red', 'blue'] }, { question: 'Anything else?' }];
+    const script: Script = (req, call) => {
+      if (call === 0) return { toolCalls: [{ name: 'message', args: { to: 'user', text: 'Two things first.', questions, wait: false } }] };
+      return { text: call === 1 ? 'Waiting for you.' : `Got: ${String((req.messages[req.messages.length - 1] as { content: unknown }).content)}` };
+    };
+    const s = await startServer(script);
+    const ev = events(s.base);
+    try {
+      await ev.wait((e) => e.event === 'state');
+      await postJson(s.base, '/api/messages', { text: 'paint the fence' });
+      const asked = await ev.wait((e) => e.event === 'activity' && Array.isArray((e.data['segment'] as { questions?: unknown }).questions));
+      assert.deepEqual((asked.data['segment'] as { questions: unknown }).questions, [{ question: 'Which color?', options: ['red', 'blue'] }, { question: 'Anything else?', options: [] }]);
+      const first = await ev.wait((e) => e.event === 'run_end');
+      type Item = { kind: string; text?: string; answered?: boolean };
+      const before = first.data['items'] as Item[];
+      assert.deepEqual(before.map((i) => i.kind), ['user', 'assistant', 'questions', 'assistant']);
+      assert.equal(before[1]!.text, 'Two things first.');
+      assert.equal(before[2]!.answered, false);
+      await postJson(s.base, '/api/messages', { text: '**Which color?**\nblue' });
+      const second = await ev.wait((e) => e.event === 'run_end' && e !== first);
+      const after = second.data['items'] as Item[];
+      assert.equal(after.find((i) => i.kind === 'questions')!.answered, true);
+      assert.match(after[after.length - 1]!.text!, /Got: \*\*Which color\?\*\*\nblue/);
+      assert.equal(describeCall('message', JSON.stringify({ to: 'helper', text: 'go' })), 'Messaged helper: go');
+      assert.equal(describeCall('message', JSON.stringify({ wait: true })), 'Waited for messages');
+    } finally {
+      ev.close();
+      await s.stop();
+    }
+  });
+
   test('tool calls are described for people', () => {
     assert.equal(describeCall('read_file', JSON.stringify({ file_path: 'src/app.ts' })), 'Read src/app.ts');
     assert.equal(describeCall('shell', JSON.stringify({ command: 'npm test' })), 'Ran `npm test`');

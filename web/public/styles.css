@@ -266,6 +266,50 @@ button { -webkit-tap-highlight-color: transparent; }
 .approval.done { opacity: 0.6; }
 .approval.done .actions { display: none; }
 
+/* Questions from the agent */
+.ask {
+  width: min(100%, 420px);
+  padding: 12px 14px 10px;
+  border-radius: 20px;
+  background: #1c1c1e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.ask-q { border: 0; margin: 0 0 12px; padding: 0; min-width: 0; }
+.ask-q legend { padding: 0; margin-bottom: 8px; font-size: 15px; line-height: 20px; font-weight: 600; }
+.ask-hint { margin: -6px 0 8px; font-size: 12px; color: var(--ink-2); }
+.ask-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.ask-options button {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  padding: 6px 12px;
+  font-size: 14px;
+  line-height: 18px;
+  background: #2c2c2e;
+  text-align: left;
+  cursor: pointer;
+}
+.ask-options button[aria-checked='true'] { background: var(--send); border-color: var(--send); color: #fff; }
+.ask-other {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #000;
+  color: inherit;
+  font: inherit;
+  font-size: 15px;
+  resize: none;
+  box-sizing: border-box;
+}
+.ask .actions { display: flex; justify-content: flex-end; }
+.ask .actions button { border: 0; border-radius: 14px; padding: 7px 16px; font-size: 15px; background: var(--send); color: #fff; cursor: pointer; }
+.ask .actions button:disabled { opacity: 0.4; cursor: default; }
+.ask.done { opacity: 0.6; }
+.ask.done .actions { display: none; }
+.ask.done .ask-options button:disabled { cursor: default; }
+
 .load-more {
   align-self: center;
   margin: 4px 0 12px;

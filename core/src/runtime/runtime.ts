@@ -21,10 +21,9 @@ import type { AgentNode, AgentTree } from '../agents/loader.js';
 import {
   AGENT_MESSAGING_GUIDANCE,
   MESSAGE_USER_GUIDANCE,
-  MessageAgentTool,
+  MessageTool,
   THREAD_MESSAGING_GUIDANCE,
-  createMessageUserTool,
-  createWaitTool,
+  USER,
   mailText,
   type AgentMessenger,
   type ChildRun,
@@ -154,12 +153,23 @@ function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
 }
 
 /** Whether the agent's shell has `sf-artifact` (it then gets the artifact guidance). */
+/** A message to another agent (these run in parallel). */
+function toAgent(call: ParsedToolCall): boolean {
+  return call.name === ToolNames.MESSAGE && typeof call.args['to'] === 'string' && call.args['to'] !== USER;
+}
+
+/** What the system prompt explains, from the tools an agent has. */
+function features(tools: ReadonlyMap<string, AnyDeclarativeTool>): { artifacts: boolean; toUser: boolean } {
+  const message = tools.get(ToolNames.MESSAGE);
+  return { artifacts: hasArtifactCommand(tools), toUser: message instanceof MessageTool && message.canMessageUser };
+}
+
 function hasArtifactCommand(tools: ReadonlyMap<string, AnyDeclarativeTool>): boolean {
   const shell = tools.get(ToolNames.SHELL);
   return shell instanceof ShellTool && shell.commandNames.includes(ARTIFACT_COMMAND);
 }
 
-export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean } = {}): string {
+export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean; toUser?: boolean } = {}): string {
   const d = node.definition;
   const env = [
     `Agent id: ${node.id}`,
@@ -171,13 +181,12 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
     `Tools available to you: ${toolNames.length ? toolNames.join(', ') : '(none)'}`,
   ];
   const partner = link?.partner?.id;
-  if (toolNames.includes(ToolNames.MESSAGE_AGENT)) {
-    env.push(`Agents you can message with ${ToolNames.MESSAGE_AGENT}: ${[...new Set([...node.grants.keys(), ...(partner ? [partner] : [])])].join(', ')}`);
-  }
+  const agents = [...new Set([...node.grants.keys(), ...(partner ? [partner] : [])])];
+  if (toolNames.includes(ToolNames.MESSAGE) && agents.length) env.push(`Agents you can message with ${ToolNames.MESSAGE}: ${agents.join(', ')}`);
   let guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
-  if (toolNames.includes(ToolNames.MESSAGE_AGENT) && node.grants.size > 0) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
-  if (partner && toolNames.includes(ToolNames.MESSAGE_AGENT)) guidance += `\n\n${THREAD_MESSAGING_GUIDANCE}`;
-  if (toolNames.includes(ToolNames.MESSAGE_USER)) guidance += `\n\n${MESSAGE_USER_GUIDANCE}`;
+  if (toolNames.includes(ToolNames.MESSAGE) && node.grants.size > 0) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
+  if (partner && toolNames.includes(ToolNames.MESSAGE)) guidance += `\n\n${THREAD_MESSAGING_GUIDANCE}`;
+  if (features.toUser && toolNames.includes(ToolNames.MESSAGE)) guidance += `\n\n${MESSAGE_USER_GUIDANCE}`;
   if (features.artifacts) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
   if (toolNames.includes(ChatToolNames.REACT)) guidance += `\n\n${CHAT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
@@ -299,12 +308,9 @@ export class AgentRuntime implements AgentMessenger {
       }
     }
 
-    if (node.grants.size > 0 || link.partner) {
-      tools.set(ToolNames.MESSAGE_AGENT, new MessageAgentTool(this, node, this.tree.byId, agentPath, emit, conversation, link));
-      tools.set(ToolNames.WAIT_FOR_MESSAGES, createWaitTool(link));
-    }
-    // The agent replying to the person can talk with them mid-turn.
-    if (role === 'main' && conversation && conversation === this.conversation) tools.set(ToolNames.MESSAGE_USER, createMessageUserTool(link));
+    // The agent replying to the person can talk with them mid-turn (and ask them questions).
+    const toUser = role === 'main' && !!conversation && conversation === this.conversation;
+    if (toUser || node.grants.size > 0 || link.partner) tools.set(ToolNames.MESSAGE, new MessageTool(this, node, this.tree.byId, agentPath, emit, conversation, link, toUser));
     // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
     if (conversation?.file) {
       for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
@@ -472,7 +478,7 @@ export class AgentRuntime implements AgentMessenger {
     let systemExtra: string | undefined = deferredNote;
     if (params.prepareContext) {
       try {
-        const base = buildSystemPrompt(node, activeNames(), deferredNote, link, { artifacts: hasArtifactCommand(tools) });
+        const base = buildSystemPrompt(node, activeNames(), deferredNote, link, features(tools));
         const prepared = params.prepareContext(base + JSON.stringify(declarations()));
         messages.splice(0, messages.length, ...prepared.messages);
         systemExtra = [deferredNote, prepared.systemExtra].filter(Boolean).join('\n\n') || undefined;
@@ -489,7 +495,7 @@ export class AgentRuntime implements AgentMessenger {
     }
     // Tools called earlier in the conversation stay loaded (their calls are in the history).
     for (const name of calledToolNames(messages)) if (deferred.has(name)) loadedTools.add(name);
-    const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link, { artifacts: hasArtifactCommand(tools) });
+    const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link, features(tools));
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
     const maxTurns = d.limits?.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -630,8 +636,8 @@ export class AgentRuntime implements AgentMessenger {
         // Consecutive messages to other agents run in parallel; everything
         // else runs one at a time, in order. Results are recorded in order.
         const batch = [pending.shift()!];
-        if (batch[0]!.name === ToolNames.MESSAGE_AGENT) {
-          while (pending[0]?.name === ToolNames.MESSAGE_AGENT) batch.push(pending.shift()!);
+        if (toAgent(batch[0]!)) {
+          while (pending[0] && toAgent(pending[0])) batch.push(pending.shift()!);
         }
         const outcomes = await Promise.all(
           batch.map((call) =>
@@ -905,13 +911,13 @@ export class AgentSession {
     if (deferred.size) tools.set(TOOL_SEARCH, new ToolSearchTool(deferred, new Set()));
     const list: ContextTool[] = [...tools.entries()].map(([name, tool]) => ({
       name,
-      group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.MESSAGE_AGENT ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
+      group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.MESSAGE ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
       ...(tool instanceof DiscoveredMcpTool ? { server: tool.serverName } : {}),
       schema: tool.schema,
     }));
     const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
     const index = conversation.file && artifactAccess(definition, 0) !== 'none' ? artifactIndex(conversation) : undefined;
-    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined, undefined, { artifacts: hasArtifactCommand(tools) }), list, {
+    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined, undefined, features(tools)), list, {
       retrievable,
       resolveAttachment: (ref) => conversation.readAttachment(ref),
       ...(index ? { extraSystem: index } : {}),

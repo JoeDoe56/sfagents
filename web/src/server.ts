@@ -72,7 +72,7 @@ import type { LhmReader } from './lhm.js';
 import type { Privileges } from './privileges.js';
 import { runningVersion } from './version.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
-import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, messageUserText, replyRoots, type DisplayApproval, type DisplayItem } from './display.js';
+import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, messageToUser, replyRoots, type DisplayApproval, type DisplayQuestion, type DisplayItem } from './display.js';
 import { isEmoji, ReactionStore } from './reactions.js';
 import { LogBook } from './logs.js';
 import { changedRepos, repoDiff, type RepoChanges } from './diffs.js';
@@ -156,6 +156,9 @@ interface LiveSegment {
   artifact?: string;
   /** A step the pages show as something else: a message to the person is its text segment. */
   hidden?: boolean;
+  /** Questions for the person (a card); answered once they write. */
+  questions?: DisplayQuestion[];
+  answered?: boolean;
 }
 
 interface LiveRun {
@@ -1910,6 +1913,8 @@ export class WebServer {
 
   private deliver(p: PendingInput): string {
     if (!this.live) return this.startRun(p);
+    // Writing answers the questions the agent asked so far.
+    for (const seg of this.live.segments) if (seg.questions) seg.answered = true;
     this.pending.push(p);
     this.publishPending();
     const wake = this.inputWaiters.splice(0);
@@ -2108,26 +2113,29 @@ export class WebServer {
         // keep_section only confirms the topic; it is not worth a line in the chat.
         if (event.name === 'keep_section') return;
         // A message to the person mid-turn: a finished bubble now (the hidden step after it ends the text, so later text starts a new one).
-        const said = root && event.name === 'message_user' ? messageUserText(JSON.stringify(event.args)) : undefined;
-        if (said !== undefined) {
+        const said = root ? messageToUser(event.name, JSON.stringify(event.args)) : undefined;
+        if (said) {
           // Hidden steps on both sides keep it apart from text streamed before or after.
           const id = `${event.agentPath.join('/')}:${event.callId}`;
           const before: LiveSegment = { kind: 'activity', id: `${id}:before`, text: '', status: 'ok', hidden: true };
           live.segments.push(before);
           this.broadcast('activity', { run: live.id, segment: before });
-          live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said });
-          this.broadcast('delta', { run: live.id, text: said });
-          const step: LiveSegment = { kind: 'activity', id, text: 'Sent a message', status: 'running', hidden: true };
+          if (said.text) {
+            live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said.text });
+            this.broadcast('delta', { run: live.id, text: said.text });
+          }
+          const step: LiveSegment = { kind: 'activity', id, text: 'Sent a message', status: 'running', hidden: true, ...(said.questions ? { questions: said.questions } : {}) };
           live.segments.push(step);
           this.broadcast('activity', { run: live.id, segment: step });
           return;
         }
         const prefix = root ? '' : `${event.agentPath.slice(1).join(' › ')}: `;
         const seg: LiveSegment = { kind: 'activity', id: `${event.agentPath.join('/')}:${event.callId}`, text: prefix + describeCall(event.name, JSON.stringify(event.args)), status: 'running' };
-        if (event.name === 'message_agent' && typeof event.args['agent'] === 'string') {
+        const to = event.name === 'message' ? event.args['to'] : event.name === 'message_agent' ? event.args['agent'] : undefined;
+        if (typeof to === 'string' && to !== 'user') {
           // A message to another agent: the chat can open their thread, live.
-          seg.agent = event.args['agent'];
-          seg.thread = threadKey(event.agentPath[event.agentPath.length - 1]!, event.args['agent'], typeof event.args['thread'] === 'number' ? event.args['thread'] : 1);
+          seg.agent = to;
+          seg.thread = threadKey(event.agentPath[event.agentPath.length - 1]!, to, typeof event.args['thread'] === 'number' ? event.args['thread'] : 1);
         }
         if ((event.name === 'update_artifact' || event.name === 'create_artifact') && typeof event.args['id'] === 'string') seg.artifact = event.args['id'];
         live.segments.push(seg);
@@ -2162,7 +2170,7 @@ export class WebServer {
         this.refreshDiffs();
         this.publishArtifacts();
         this.publishSections();
-        if (event.name === 'message_agent') this.publishThreads();
+        if (event.name === 'message') this.publishThreads();
         // The agent's 👍 shows on the message at once (the result is recorded just after this event).
         if (event.name === 'react_to_message') setTimeout(() => this.broadcast('agent_reactions', { reactions: chatEffects(this.conversation.state).reactions }), 20);
         return;

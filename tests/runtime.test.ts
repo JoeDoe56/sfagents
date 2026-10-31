@@ -65,12 +65,12 @@ describe('single agent loop', () => {
 
   test('rejects a tool the agent was never given, even if the model asks for it', async () => {
     const { dir, runtime } = runtimeWith({ tools: { allow: ['shell'] } }, (req, n) =>
-      n === 0 ? { toolCalls: [{ name: 'write_file', args: { file_path: 'pwn.txt', content: 'x' } }, { name: 'message_agent', args: { agent: 'main', message: 'hi' } }] } : { text: lastToolContent(req) ?? '' },
+      n === 0 ? { toolCalls: [{ name: 'write_file', args: { file_path: 'pwn.txt', content: 'x' } }, { name: 'message', args: { to: 'main', text: 'hi' } }] } : { text: lastToolContent(req) ?? '' },
     );
     const result = await runtime.createSession().run('go');
     assert.equal(result.toolCalls.length, 2);
     assert.ok(result.toolCalls.every((c) => !c.ok && c.errorType === ToolErrorType.TOOL_NOT_REGISTERED));
-    assert.match(result.text, /Tool "message_agent" is not available to agent "main"\. Available tools: shell/);
+    assert.match(result.text, /Tool "message" is not available to agent "main"\. Available tools: shell/);
     assert.equal(fs.existsSync(path.join(dir, 'work', 'pwn.txt')), false);
   });
 

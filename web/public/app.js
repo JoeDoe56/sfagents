@@ -338,6 +338,7 @@ function entries() {
     if (it.kind === 'user') push(msgEntry(it, 'out'));
     else if (it.kind === 'assistant') push(msgEntry(it, 'in'));
     else if (it.kind === 'activity') pushActivity(push, it.id, it);
+    else if (it.kind === 'questions') push({ key: it.id, type: 'questions', questions: it.questions, answered: it.answered });
     else push({ key: it.id, type: 'notice', text: it.text, level: /^Error/.test(it.text) ? 'error' : '' });
   }
   for (const p of state.pending) push({ ...msgEntry(p, 'out'), key: p.id });
@@ -451,6 +452,7 @@ function decorate(out) {
 
 /** A tool call: a line, a link to a thread between agents, and an artifact's card after the call that made it. */
 function pushActivity(push, key, it) {
+  if (it.questions) push({ key: `${key}:q`, type: 'questions', questions: it.questions, answered: it.answered });
   if (it.hidden) return; // a step that shows as something else (a message to the person)
   if (it.thread) push({ key, type: 'threadlink', text: it.text, status: it.status, thread: it.thread, agent: it.agent });
   else push({ key, type: 'activity', text: it.text, status: it.status });
@@ -597,6 +599,11 @@ function buildEntry(e) {
     case 'approval':
       el = buildApproval(e.approval, e.decision);
       break;
+    case 'questions':
+      el = document.createElement('div');
+      el.className = 'msg in first tail-room';
+      el.append(buildQuestions(e));
+      break;
   }
   return el;
 }
@@ -620,6 +627,8 @@ function signature(e) {
       return `typing|${e.first}|${e.threaded}|${e.threadEnd}`;
     case 'approval':
       return `approval|${e.decision || ''}`;
+    case 'questions':
+      return `ask|${e.answered || answeredAsks.has(e.key) ? 1 : 0}|${askKey(e.questions)}`;
     case 'stamp':
       return `stamp|${e.time}`;
     default:
@@ -948,6 +957,110 @@ function buildApproval(a, decision) {
     actions.append(b);
   }
   card.append(actions);
+  return card;
+}
+
+// Questions an agent asked (message with "questions"): a card to tap the
+// answers on. Picks are kept by the questions themselves, so they survive the
+// card being rebuilt (the run ending); sending answers them all at once as
+// the person's next message.
+const askDrafts = new Map(); // askKey → [{ picked: Set<string>, other: string | null }]
+const answeredAsks = new Set(); // cards (entry keys) answered from this page
+const askKey = (questions) => String(hashText(JSON.stringify(questions)));
+
+function buildQuestions(e) {
+  const key = askKey(e.questions);
+  const done = e.answered || answeredAsks.has(e.key);
+  if (!askDrafts.has(key)) askDrafts.set(key, e.questions.map(() => ({ picked: new Set(), other: null })));
+  const draft = askDrafts.get(key);
+  const card = document.createElement('div');
+  card.className = `ask${done ? ' done' : ''}`;
+  const send = document.createElement('button');
+  send.type = 'button';
+  send.className = 'primary';
+  send.textContent = 'Send';
+  const update = () => (send.disabled = !draft.some((d) => d.picked.size || d.other?.trim()));
+  e.questions.forEach((q, i) => {
+    const d = draft[i];
+    const group = document.createElement('fieldset');
+    group.className = 'ask-q';
+    const legend = document.createElement('legend');
+    legend.textContent = q.question;
+    group.append(legend);
+    if (q.multiple) {
+      const hint = document.createElement('div');
+      hint.className = 'ask-hint';
+      hint.textContent = 'Choose any';
+      group.append(hint);
+    }
+    const choices = document.createElement('div');
+    choices.className = 'ask-options';
+    const other = document.createElement('textarea');
+    other.className = 'ask-other';
+    other.rows = 1;
+    other.placeholder = 'Type your answer';
+    other.hidden = d.other === null;
+    other.value = d.other ?? '';
+    other.disabled = done;
+    other.addEventListener('input', () => {
+      d.other = other.value;
+      other.style.height = 'auto';
+      other.style.height = `${other.scrollHeight}px`;
+      update();
+    });
+    const buttons = [];
+    const option = (label, isOther) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.disabled = done;
+      b.setAttribute('role', q.multiple ? 'checkbox' : 'radio');
+      const sync = () => b.setAttribute('aria-checked', String(isOther ? d.other !== null : d.picked.has(label)));
+      sync();
+      b.addEventListener('click', () => {
+        if (isOther) {
+          if (d.other === null) {
+            d.other = '';
+            if (!q.multiple) d.picked.clear();
+          } else d.other = null;
+        } else if (d.picked.has(label)) d.picked.delete(label);
+        else {
+          if (!q.multiple) {
+            d.picked.clear();
+            d.other = null;
+          }
+          d.picked.add(label);
+        }
+        other.hidden = d.other === null;
+        if (!other.hidden) other.focus();
+        for (const s of buttons) s();
+        update();
+      });
+      buttons.push(sync);
+      choices.append(b);
+    };
+    for (const o of q.options) option(o, false);
+    option(q.options.length ? 'Other…' : 'Answer…', true);
+    group.append(choices, other);
+    card.append(group);
+  });
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  actions.append(send);
+  card.append(actions);
+  update();
+  send.addEventListener('click', () => {
+    const text = e.questions
+      .map((q, i) => {
+        const d = draft[i];
+        const answer = [...d.picked, ...(d.other?.trim() ? [d.other.trim()] : [])].join(', ') || '(no answer)';
+        return e.questions.length === 1 ? answer : `**${q.question}**\n${answer}`;
+      })
+      .join('\n\n');
+    answeredAsks.add(e.key);
+    render();
+    submit({ text, jobs: [] });
+  });
   return card;
 }
 

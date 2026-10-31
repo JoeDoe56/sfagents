@@ -20,7 +20,9 @@ export type DisplayItem =
   | { kind: 'user'; id: string; seq: number; time: string; text: string; attachments: DisplayAttachment[]; /** In a thread: the agent that wrote it. */ agent?: string; /** An inline reply: the first message of its reply thread. */ replyTo?: string }
   | { kind: 'assistant'; id: string; seq: number; time: string; text: string; agent: string; /** The answer to an inline reply: the first message of its reply thread. */ replyTo?: string }
   | { kind: 'activity'; id: string; seq: number; time: string; text: string; status?: string; /** A message to another agent: the thread it went to. */ thread?: string; agent?: string; /** The artifact a call created or updated. */ artifact?: string }
-  | { kind: 'notice'; id: string; seq: number; time: string; text: string };
+  | { kind: 'notice'; id: string; seq: number; time: string; text: string }
+  /** Questions an agent asked the person; answered once the person has written since. */
+  | { kind: 'questions'; id: string; seq: number; time: string; agent: string; questions: DisplayQuestion[]; answered: boolean };
 
 export interface DisplayArtifact {
   id: string;
@@ -116,6 +118,12 @@ export function describeCall(name: string, argsJson: string): string {
     }
     case 'invoke_child':
       return `Asked ${str(args['agent']) ?? str(args['child']) ?? 'a child agent'}${str(args['task']) ? `: ${clip(String(args['task']), 60)}` : ''}`;
+    case 'message': {
+      const to = str(args['to']);
+      if (!to) return 'Waited for messages';
+      if (to === 'user') return Array.isArray(args['questions']) ? 'Asked you' : 'Sent a message';
+      return `Messaged ${to}${str(args['text']) ? `: ${clip(String(args['text']), 60)}` : ''}`;
+    }
     case 'message_agent':
       return `Messaged ${str(args['agent']) ?? 'an agent'}${str(args['message']) ? `: ${clip(String(args['message']), 60)}` : ''}`;
     case 'wait_for_messages':
@@ -158,14 +166,35 @@ export function describeCall(name: string, argsJson: string): string {
   }
 }
 
-/** The text of a message_user call. */
-export function messageUserText(argsJson: string): string | undefined {
+/** A question for the person, as a card shows it. */
+export interface DisplayQuestion {
+  question: string;
+  options: string[];
+  multiple?: boolean;
+}
+
+/** What a message to the person says (and asks): message with "to": "user", or the older message_user. */
+export function messageToUser(name: string, argsJson: string): { text?: string; questions?: DisplayQuestion[] } | undefined {
+  if (name !== 'message' && name !== 'message_user') return undefined;
+  let args: { to?: unknown; text?: unknown; questions?: unknown };
   try {
-    const text = (JSON.parse(argsJson) as { text?: unknown }).text;
-    return typeof text === 'string' && text.trim() ? text : undefined;
+    args = JSON.parse(argsJson) as typeof args;
   } catch {
     return undefined;
   }
+  if (name === 'message' && args.to !== 'user') return undefined;
+  const text = typeof args.text === 'string' && args.text.trim() ? args.text : undefined;
+  const questions = Array.isArray(args.questions)
+    ? (args.questions as Array<{ question?: unknown; options?: unknown; multiple?: unknown }>)
+        .filter((q) => q && typeof q.question === 'string' && q.question.trim())
+        .map((q) => ({
+          question: String(q.question),
+          options: Array.isArray(q.options) ? q.options.filter((o): o is string => typeof o === 'string' && !!o.trim()).slice(0, 6) : [],
+          ...(q.multiple === true ? { multiple: true } : {}),
+        }))
+    : [];
+  if (!text && !questions.length) return undefined;
+  return { ...(text ? { text } : {}), ...(questions.length ? { questions } : {}) };
 }
 
 /** The thread a mid-run message from another agent came through: the one the receiving agent shares with it. */
@@ -179,11 +208,12 @@ function agentThread(content: string, from: string, run: string, state: Conversa
 /** Display items for messages with seq > `afterSeq`, at most `limit` from the end. */
 /** A message_agent call: which agent, and the key of their thread 1 (the usual one). */
 function threadOf(name: string, argsJson: string, from: string): { thread?: string; agent?: string } {
-  if (name !== 'message_agent') return {};
+  if (name !== 'message_agent' && name !== 'message') return {};
   try {
-    const args = JSON.parse(argsJson) as { agent?: unknown; thread?: unknown };
-    if (typeof args.agent !== 'string') return {};
-    return { agent: args.agent, thread: threadKey(from, args.agent, typeof args.thread === 'number' ? args.thread : 1) };
+    const args = JSON.parse(argsJson) as { agent?: unknown; to?: unknown; thread?: unknown };
+    const agent = name === 'message' ? args.to : args.agent;
+    if (typeof agent !== 'string' || agent === 'user') return {};
+    return { agent, thread: threadKey(from, agent, typeof args.thread === 'number' ? args.thread : 1) };
   } catch {
     return {};
   }
@@ -269,9 +299,10 @@ export function displayItems(
           }
           if (c.name === ChatToolNames.REPLY_INLINE) continue;
           // A message to the person mid-turn: a bubble like any reply.
-          const said = c.name === 'message_user' ? messageUserText(c.arguments) : undefined;
-          if (said !== undefined) {
-            items.push({ kind: 'assistant', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: said, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
+          const said = messageToUser(c.name, c.arguments);
+          if (said) {
+            if (said.text) items.push({ kind: 'assistant', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: said.text, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
+            if (said.questions) items.push({ kind: 'questions', id: `${m.id}:${c.id}:q`, seq: m.seq, time: m.time, agent: m.agent, questions: said.questions, answered: false });
             continue;
           }
           items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
@@ -285,6 +316,13 @@ export function displayItems(
     } else if (record.kind === 'interrupted') {
       items.push({ kind: 'notice', id: `n${record.seq}`, seq: record.seq, time: record.time, text: 'A previous run was interrupted; nothing was retried' });
     }
+  }
+  // A question card is answered by the person's next message.
+  let wroteSince = false;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]!;
+    if (it.kind === 'user') wroteSince = true;
+    else if (it.kind === 'questions') it.answered = wroteSince;
   }
   const limit = options.limit ?? 300;
   const more = items.length > limit;

@@ -29,6 +29,8 @@ export class EventRenderer {
   /** Whether the answer stream is mid-line (needs a newline before activity). */
   private midLine = false;
   private reasoningOpen = false;
+  /** Calls shown some other way (messages), whose results print nothing. */
+  private readonly quietCalls = new Set<string>();
 
   constructor(private readonly options: RenderOptions) {
     this.outStyle = createStyle(options.out as NodeJS.WriteStream);
@@ -79,17 +81,28 @@ export class EventRenderer {
         return;
       }
       case 'tool_request':
-        if (event.name === 'message_agent') return; // shown by agent_start
-        if (event.name === 'message_user' && depth === 0 && typeof event.args['text'] === 'string') {
-          // A message to the person mid-turn: printed like the reply.
+        if (event.name === 'message' && typeof event.args['to'] === 'string' && event.args['to'] !== 'user') {
+          this.quietCalls.add(event.callId);
+          return; // shown by agent_start
+        }
+        if (event.name === 'message' && event.args['to'] === 'user' && depth === 0) {
+          this.quietCalls.add(event.callId);
+          // A message to the person mid-turn: printed like the reply, with any questions numbered.
           if (this.midLine) this.breakLine();
-          this.options.out.write(`${stripAnsiAndControl(event.args['text'])}\n`);
+          if (typeof event.args['text'] === 'string') this.options.out.write(`${stripAnsiAndControl(event.args['text'])}\n`);
+          const questions = Array.isArray(event.args['questions']) ? (event.args['questions'] as Array<{ question?: unknown; options?: unknown }>) : [];
+          for (const [i, q] of questions.entries()) {
+            this.options.out.write(`${s.bold(`${questions.length > 1 ? `${i + 1}. ` : ''}${stripAnsiAndControl(String(q.question ?? ''))}`)}\n`);
+            const options = Array.isArray(q.options) ? q.options : [];
+            options.forEach((o, j) => this.options.out.write(`   ${String.fromCharCode(97 + j)}) ${stripAnsiAndControl(String(o))}\n`));
+          }
+          if (questions.length) this.options.out.write(s.dim('Answer in your next message (or type something else).\n'));
           return;
         }
         this.activityLine(depth, `${who}${s.cyan('⚙')} ${s.bold(event.name)} ${s.dim(oneLine(event.description))}`);
         return;
       case 'tool_result':
-        if (event.name === 'message_agent' || (event.name === 'message_user' && depth === 0)) return; // shown by agent_end, or printed
+        if (this.quietCalls.delete(event.callId)) return; // shown by agent_end, or printed
         this.activityLine(
           depth,
           `${who}${event.ok ? s.green('  ✓') : s.red('  ✗')} ${s.dim(oneLine(event.display || (event.ok ? 'done' : 'failed')))}`,
