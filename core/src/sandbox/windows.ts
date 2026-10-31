@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { prepareRules, probe, type Sandbox, type SandboxCommand, type SandboxPolicy, type SandboxStatus, type WrappedCommand } from './sandbox.js';
+import { GIT_IDENTITY_VARS, prepareRules, probe, type Sandbox, type SandboxCommand, type SandboxPolicy, type SandboxStatus, type WrappedCommand } from './sandbox.js';
 import { spawnSync } from 'node:child_process';
 
 export function windowsSandboxPath(): string {
@@ -24,7 +24,7 @@ export class WindowsSandbox implements Sandbox {
         rules: prepareRules(policy.rules),
         cwd: command.cwd,
         // The helper merges only an explicit allowlist into the account's own environment.
-        env: Object.fromEntries(Object.entries(command.env).filter(([k, v]) => v !== undefined && ['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM'].includes(k.toUpperCase()))),
+        env: Object.fromEntries(Object.entries(command.env).filter(([k, v]) => v !== undefined && ['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', ...GIT_IDENTITY_VARS].includes(k.toUpperCase()))),
       }), { mode: 0o600, flag: 'wx' });
     } catch (error) {
       fs.rmSync(dir, { recursive: true, force: true });

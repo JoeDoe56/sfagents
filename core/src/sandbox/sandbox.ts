@@ -72,6 +72,12 @@ export interface Sandbox {
 
 export type SandboxStatus = { ok: true; sandbox: Sandbox } | { ok: false; reason: string };
 
+/**
+ * The person's Git name and email, passed to commands so commits work in the
+ * sandbox's empty home folder (nothing else of their Git configuration is).
+ */
+export const GIT_IDENTITY_VARS = ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'];
+
 /** Where the host channel and helper tools appear inside a sandbox that can remap paths. */
 export const SANDBOX_RUN_DIR = '/run/sfagents';
 /** Environment variable naming the host channel inside the sandbox. */

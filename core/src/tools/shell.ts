@@ -15,7 +15,7 @@
  * refused.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import path from 'node:path';
@@ -31,7 +31,7 @@ import { ToolErrorType } from './tool-error.js';
 import type { ToolContext } from './tool-context.js';
 import { stripAnsiAndControl, truncateForModel } from '../utils/text-utils.js';
 import { sanitizeChildEnv } from '../utils/child-env.js';
-import { detectSandbox, type Sandbox, type SandboxPolicy } from '../sandbox/sandbox.js';
+import { detectSandbox, GIT_IDENTITY_VARS, type Sandbox, type SandboxPolicy } from '../sandbox/sandbox.js';
 import { hostCommandTools, openHostChannel } from '../sandbox/host-channel.js';
 import { availableHostCommands, runHostCommand, splitCommandLine } from './host-commands.js';
 import { getJob, listJobs, readNewOutput, startJob, stopJob, waitForJob, type BackgroundJob } from './background-jobs.js';
@@ -39,6 +39,34 @@ import type { ToolCallContext } from './tools.js';
 
 /** Raw output kept in memory per stream before head/tail truncation. */
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
+
+let gitIdentity: Record<string, string> | undefined;
+
+/** The person's Git user.name and user.email (read once), as GIT_AUTHOR_* and GIT_COMMITTER_* variables. */
+function gitIdentityEnv(): Record<string, string> {
+  if (gitIdentity) return gitIdentity;
+  const read = (key: string) => {
+    try {
+      const r = spawnSync('git', ['config', '--global', key], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+      return r.status === 0 ? r.stdout.trim() : '';
+    } catch {
+      return '';
+    }
+  };
+  const name = read('user.name');
+  const email = read('user.email');
+  const [authorName, authorEmail, committerName, committerEmail] = GIT_IDENTITY_VARS as [string, string, string, string];
+  gitIdentity = {
+    ...(name ? { [authorName]: name, [committerName]: name } : {}),
+    ...(email ? { [authorEmail]: email, [committerEmail]: email } : {}),
+  };
+  return gitIdentity;
+}
+
+/** The environment shell commands get: the host's, without secrets, plus the Git identity. */
+function commandEnv(secretEnvNames: readonly string[]): NodeJS.ProcessEnv {
+  return { ...gitIdentityEnv(), ...sanitizeChildEnv(process.env, secretEnvNames) };
+}
 
 export interface ShellConfiguration {
   executable: string;
@@ -429,7 +457,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
     const policy = channel ? { ...this.ctx.sandbox, hostChannel: { path: channel.path }, tools: hostCommandTools() } : this.ctx.sandbox;
     let job: BackgroundJob;
     try {
-      job = startJob(this.params.command!, owner, { cwd, env: sanitizeChildEnv(process.env, this.ctx.secretEnvNames), sandbox: { sandbox, policy } }, async () => {
+      job = startJob(this.params.command!, owner, { cwd, env: commandEnv(this.ctx.secretEnvNames), sandbox: { sandbox, policy } }, async () => {
         channelControl.abort();
         await channel?.close();
       });
@@ -477,7 +505,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
         cwd,
         timeoutMs,
         signal,
-        env: sanitizeChildEnv(process.env, this.ctx.secretEnvNames),
+        env: commandEnv(this.ctx.secretEnvNames),
         sandbox: { sandbox: status.sandbox, policy },
       });
     } finally {

@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import {
   AgentRuntime,
@@ -118,6 +119,14 @@ describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () =>
     assert.match(stopped.result!.llmContent, /State: exited \(stopped\)/);
     const done = await call(f, 'shell', { command: `"${process.execPath}" -e "console.log('quick')"`, background: true });
     assert.match(done.result!.llmContent, /State: exited with code 0[\s\S]*quick/);
+  });
+
+  test("commands get the person's Git name and email, so commits work in the empty home", async (t) => {
+    const name = spawnSync('git', ['config', '--global', 'user.name'], { encoding: 'utf8' }).stdout?.trim();
+    if (!name) return t.skip('no global Git user.name here');
+    const f = await fixture(['shell']);
+    const r = await call(f, 'shell', { command: isWin ? 'echo %GIT_AUTHOR_NAME%' : 'echo "$GIT_AUTHOR_NAME"' });
+    assert.match(r.result!.llmContent, new RegExp(`Stdout: ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   });
 
   test('does not leak the provider API key into commands', async () => {

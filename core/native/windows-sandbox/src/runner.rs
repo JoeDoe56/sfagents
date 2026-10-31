@@ -754,6 +754,35 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
 }
 
+/// Git repositories (folders with a .git) below @p dir, at most @p depth levels
+/// down, skipping dependency folders and hidden paths. Bounded: 256 entries.
+fn find_repos(dir: &Path, rules: &[Rule], depth: u32, out: &mut Vec<String>) {
+    if depth == 0 || out.len() >= 256 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name.starts_with('.') || name == "node_modules" || name == "target" {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        let text = path.to_string_lossy().into_owned();
+        if access_at(rules, &text) == Access::None {
+            continue;
+        }
+        if path.join(".git").exists() && out.len() < 256 {
+            out.push(text);
+        }
+        find_repos(&path, rules, depth - 1, out);
+    }
+}
+
 fn parent_process() -> Result<Handle> {
     unsafe {
         let snapshot = Handle::new(
@@ -1128,7 +1157,19 @@ pub fn worker(args: &[String]) -> Result<i32> {
     // Only locale and usable PATH directories cross from the host. Never
     // propagate NODE_OPTIONS, Git config, Python hooks, proxies or credentials.
     for (k, v) in &payload.policy.env {
-        if ["LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM"].contains(&k.to_uppercase().as_str())
+        if [
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "COLORTERM",
+            // The person's Git name and email, so commits work in the empty home.
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ]
+        .contains(&k.to_uppercase().as_str())
         {
             env.insert(k.to_uppercase(), v.clone());
         }
@@ -1179,10 +1220,19 @@ pub fn worker(args: &[String]) -> Result<i32> {
         .iter()
         .filter(|r| r.access != Access::None)
         .collect();
-    env.insert("GIT_CONFIG_COUNT".into(), readable.len().to_string());
-    for (i, r) in readable.iter().enumerate() {
+    // safe.directory matches a repository's exact top folder (Git 2.46+ also
+    // takes "root/*"), so list the repositories inside each root too.
+    let mut trusted = vec![];
+    for r in &readable {
+        trusted.push(r.path.clone());
+        trusted.push(format!("{}\\*", r.path));
+        find_repos(Path::new(&r.path), &payload.policy.rules, 3, &mut trusted);
+    }
+    trusted.dedup();
+    env.insert("GIT_CONFIG_COUNT".into(), trusted.len().to_string());
+    for (i, p) in trusted.iter().enumerate() {
         env.insert(format!("GIT_CONFIG_KEY_{i}"), "safe.directory".into());
-        env.insert(format!("GIT_CONFIG_VALUE_{i}"), r.path.replace('\\', "/"));
+        env.insert(format!("GIT_CONFIG_VALUE_{i}"), p.replace('\\', "/"));
     }
     if let Some(channel) = &payload.policy.host_channel {
         env.insert("SFAGENTS_HOST".into(), channel.path.clone());
