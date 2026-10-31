@@ -32,8 +32,11 @@ machine accounts, not an installation to share between different Windows users.
 
 Setup adds per-user firewall rules and persistent Windows Filtering Platform
 blocks for the offline account. The filters cover IPv4, IPv6 and loopback,
-independently of an executable's name. `workspace.network: true` chooses the
-second account. It does not lift the offline account's rules.
+independently of an executable's name. Connections the offline account accepts
+over loopback are allowed, so a dev server an agent runs can be opened on this
+computer (a port artifact, the browser); it still cannot connect anywhere
+itself, loopback included, or accept connections from the network.
+`workspace.network: true` chooses the second account. It does not lift the offline account's rules.
 
 The sandbox accounts cannot list or read file contents in personal profiles, ProgramData and
 other fixed/removable drives. `C:\ProgramData\Git` is the only ProgramData
