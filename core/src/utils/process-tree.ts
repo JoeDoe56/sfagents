@@ -4,7 +4,9 @@
  * helper, sensor workers, terminals, shell commands, MCP servers, the sandbox.
  *
  * Each part closes its own processes first (the server's close()); this is
- * the backstop for whatever is still alive after that. On Windows,
+ * the backstop for whatever is still alive after that, and it also takes
+ * sandboxed commands an earlier SF Agents left behind (on Windows their
+ * sfagents-sandbox.exe stays locked, and the next build fails with EBUSY). On Windows,
  * `taskkill /T /F` takes each process with its tree. Elsewhere, SIGTERM and,
  * after a moment, SIGKILL for anything left.
  */
@@ -41,6 +43,20 @@ export function descendantsOf(rows: ProcessEntry[], root: number, keep?: (comman
     }
   }
   return out;
+}
+
+/**
+ * Processes whose command line matches @p match and whose parent is gone: left
+ * behind by an SF Agents that crashed or was killed, so not under this one.
+ */
+export function orphansOf(rows: ProcessEntry[], match: (command: string) => boolean): ProcessEntry[] {
+  const pids = new Set(rows.map((r) => r.pid));
+  return rows.filter((r) => match(r.command) && !pids.has(r.ppid));
+}
+
+/** A sandboxed shell command's helper (sfagents-sandbox.exe run --policy …), which locks the helper's file while it runs. */
+export function isSandboxRun(command: string): boolean {
+  return /sfagents-sandbox(?:\.exe)?"?\s+run\s/i.test(command);
 }
 
 /** `pid ppid command` per line, as printed by listProcesses' commands. */
@@ -83,10 +99,11 @@ function alive(pid: number): boolean {
 
 /**
  * Kills what is still running under this process. Resolves with the processes
- * it stopped. @p keep spares a process by its command line (and its children).
+ * it stopped. @p keep spares a process by its command line (and its children);
+ * @p orphans also takes processes it matches whose parent is gone (with their trees).
  */
 export async function killProcessTree(
-  options: { root?: number; keep?: (command: string) => boolean; graceMs?: number } = {},
+  options: { root?: number; keep?: (command: string) => boolean; orphans?: (command: string) => boolean; graceMs?: number } = {},
 ): Promise<ProcessEntry[]> {
   const root = options.root ?? process.pid;
   const { rows, lister } = await listProcesses();
@@ -94,6 +111,13 @@ export async function killProcessTree(
   const skip = new Set<number>();
   for (const r of rows) if (r.pid === lister) for (const d of [r, ...descendantsOf(rows, r.pid)]) skip.add(d.pid);
   let targets = descendantsOf(rows, root, options.keep).filter((p) => !skip.has(p.pid));
+  if (options.orphans) {
+    const mine = new Set(targets.map((p) => p.pid));
+    for (const o of orphansOf(rows, options.orphans)) {
+      if (mine.has(o.pid) || skip.has(o.pid) || o.pid === root) continue;
+      for (const p of [o, ...descendantsOf(rows, o.pid)]) if (!mine.has(p.pid)) (mine.add(p.pid), targets.push(p));
+    }
+  }
   // Processes that were asked to quit get a moment to do it themselves.
   const grace = Date.now() + (options.graceMs ?? 0);
   while (Date.now() < grace && targets.some((p) => alive(p.pid))) await new Promise((r) => setTimeout(r, 100));

@@ -9,6 +9,7 @@
  *   sfagents web                   serve the web interface (default http://127.0.0.1:8093)
  */
 
+import { spawnSync } from 'node:child_process';
 import readline from 'node:readline';
 import { parseArgs } from 'node:util';
 import {
@@ -27,7 +28,9 @@ import {
   ensureProject,
   getErrorMessage,
   KeyringUnavailableError,
+  isSandboxRun,
   killProcessTree,
+  windowsSandboxPath,
   mcpGrants,
   MissingCredentialError,
   stripAnsiAndControl,
@@ -569,9 +572,12 @@ async function stopEverything(code: number, streams: Streams): Promise<never> {
   await runExitCleanup();
   try {
     // Turning off screen mirroring's virtual display is left to finish on its own.
-    const stopped = await killProcessTree({ graceMs: 2_000, keep: (command) => command.includes('--vdisplay-off') });
+    // Sandboxed commands an earlier SF Agents left behind go too (they lock the helper's file).
+    const stopped = await killProcessTree({ graceMs: 2_000, keep: (command) => command.includes('--vdisplay-off'), orphans: isSandboxRun });
     if (stopped.length) {
       streams.stderr.write(`Stopped ${stopped.length} process${stopped.length === 1 ? '' : 'es'} left running.\n`);
+      // A sandboxed command killed this way skipped the helper's own cleanup: put its permission changes back.
+      if (process.platform === 'win32' && stopped.some((p) => isSandboxRun(p.command))) spawnSync(windowsSandboxPath(), ['recover'], { windowsHide: true, timeout: 30_000 });
       // Lets exit handlers that were waiting on them run (the virtual display's).
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
