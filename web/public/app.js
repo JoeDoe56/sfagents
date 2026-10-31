@@ -272,6 +272,56 @@ function openDiff(repo, pill) {
   });
 }
 
+/** One step of the agent's: the command (or call) in full and its output, in a window over the chat. */
+function openStep(id, from) {
+  openSheet({
+    title: 'Step',
+    from,
+    className: 'step-sheet',
+    detents: ['medium', 'large'],
+    build: (ctx) => {
+      const body = document.createElement('div');
+      body.className = 'step-detail';
+      body.textContent = 'Loading…';
+      ctx.body.append(body);
+      const show = (d) => {
+        body.textContent = '';
+        const part = (label, text, cls) => {
+          const h = document.createElement('h3');
+          h.textContent = label;
+          const pre = document.createElement('pre');
+          pre.className = cls;
+          pre.textContent = text;
+          body.append(h, pre);
+        };
+        const status = { ok: '', error: ' · failed', denied: ' · not allowed', cancelled: ' · cancelled', running: ' · running', not_started: ' · not run' }[d.status] ?? ` · ${d.status}`;
+        const sub = document.createElement('p');
+        sub.className = 'step-tool';
+        sub.textContent = `${d.tool}${status}`;
+        body.append(sub);
+        if (d.command !== undefined) {
+          part('Command', d.command, 'step-command');
+          const rest = Object.fromEntries(Object.entries(d.args).filter(([k]) => k !== 'command'));
+          if (Object.keys(rest).length) part('Options', JSON.stringify(rest, null, 2), 'step-args');
+        } else part('Arguments', JSON.stringify(d.args, null, 2), 'step-args');
+        part('Output', d.output || '(no output)', 'step-output');
+        ctx.refresh();
+      };
+      const load = () =>
+        getJson(`/api/activity/${encodeURIComponent(id)}`)
+          .then((d) => {
+            show(d);
+            // A step still running: look again until it ends.
+            if (d.status === 'running' && body.isConnected) setTimeout(load, 1500);
+          })
+          .catch((error) => {
+            body.textContent = error.message;
+          });
+      load();
+    },
+  });
+}
+
 // ------------------------------------------------------------------ time stamps
 
 function sameDay(a, b) {
@@ -480,7 +530,7 @@ function pushActivity(push, key, it) {
   if (it.questions) push({ key: `${key}:q`, type: 'questions', questions: it.questions, answered: it.answered });
   if (it.hidden) return; // a step that shows as something else (a message to the person)
   if (it.thread) push({ key, type: 'threadlink', text: it.text, status: it.status, thread: it.thread, agent: it.agent });
-  else push({ key, type: 'activity', text: it.text, status: it.status });
+  else push({ key, type: 'activity', text: it.text, status: it.status, call: it.id });
   if (it.artifact && it.status !== 'error' && it.status !== 'denied') {
     const a = state.artifacts.find((x) => x.id === it.artifact);
     if (a) push({ key: `${key}:art`, type: 'artifact', artifact: a });
@@ -592,9 +642,16 @@ function buildEntry(e) {
       break;
     }
     case 'activity':
-      el = document.createElement('div');
-      el.className = `activity ${e.status || ''}`;
+      // A step opens a window with the whole command and what it gave back.
+      el = document.createElement(e.call ? 'button' : 'div');
+      el.className = `activity ${e.status || ''}${e.call ? ' step' : ''}`;
       el.textContent = e.text;
+      if (e.call) {
+        el.type = 'button';
+        el.setAttribute('aria-label', `${e.text}. Show the whole command and its output`);
+        const call = e.call;
+        el.addEventListener('click', () => openStep(call, el));
+      }
       break;
     case 'threadlink': {
       el = document.createElement('button');

@@ -21,6 +21,8 @@ import type { LogBook, LogLine, WebServer } from '@sfagents/web';
 import { bar, bytesText, clean, color, durationText, esc, percentText, stampText, timeText } from './ansi.js';
 import {
   artifactPane,
+  genuiPane,
+  stepPane,
   artifactsPane,
   contextPane,
   diffsPane,
@@ -48,6 +50,7 @@ import {
   type UsageInfo,
 } from './panes.js';
 import { fit, textWidth, truncate, wrap } from './width.js';
+import { drawView, ViewModel, type ViewDoc } from './genui-text.js';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -81,10 +84,18 @@ interface Pick {
   text: string;
   thread?: string;
   artifact?: string;
+  /** A step of the agent's: its id for GET /api/activity (the whole command and its output). */
+  step?: string;
   questions?: Question[];
   agent?: string;
   /** A message others replied to inline. */
   replies?: number;
+}
+
+interface ViewCache {
+  rev: number;
+  model?: ViewModel;
+  errors?: string[];
 }
 
 /** The web interface's quick reactions (emoji.js). */
@@ -139,7 +150,7 @@ const HELP = [
   '  /speak [stop]      speak the latest reply aloud on this computer (or stop)',
   '  /exit              quit SF Agents (the web interface stops too)',
   'Keys: Tab or F1–F3 switch tabs · the mouse wheel, PgUp/PgDn or Shift+↑↓ scroll (Shift+drag selects text) · Esc stops the reply · y/a/n answer an approval (with an empty composer) · Ctrl+K quits SF Agents (and the web interface) · Ctrl+C twice also quits',
-  'Messages: Ctrl+↑ (or Alt+↑) picks one, then r replies, e reacts, s speaks it, c copies it, Enter opens its thread, artifact or questions, Esc goes back to typing',
+  'Messages: Ctrl+↑ (or Alt+↑) picks one, then r replies, e reacts, s speaks it, c copies it, Enter opens its thread, artifact, view or questions (on a step: the whole command and its output), Esc goes back to typing',
   'Not here: screen mirroring and remote desktop (they need a picture) and terminal tabs (this is a terminal). Speak with push to talk: it types into this window too.',
 ];
 
@@ -169,6 +180,8 @@ export class Tui {
   private agentReactions: Record<string, string> = {};
   private lastPresence = 0;
   private artifacts: ArtifactInfo[] = [];
+  /** GenUI views read for the chat, by artifact id. */
+  private viewDocs = new Map<string, ViewCache>();
   private diffs: RepoInfo[] = [];
   private sections: SectionInfo[] = [];
 
@@ -383,6 +396,8 @@ export class Tui {
       case 'activity_end': {
         const seg = this.live && this.live.id === data.run ? this.live.segments.find((s) => s.id === data.id) : undefined;
         if (seg) seg.status = String(data.status);
+        // The artifact or view it made shows under it, as on the pages.
+        if (seg && typeof data.artifact === 'string') seg.artifact = data.artifact;
         break;
       }
       case 'approval': {
@@ -715,6 +730,7 @@ export class Tui {
       this.confirming = { question, yes };
       this.schedule();
     },
+    copy: (text) => this.copy(text),
     attach: (a) => {
       if (!this.attachments.some((x) => x.id === a.id)) this.attachments.push(a);
       this.schedule();
@@ -820,8 +836,9 @@ export class Tui {
       if (pick.thread) this.openPane(threadPane(this.host, pick.thread));
       else if (pick.artifact) {
         const a = this.artifacts.find((x) => x.id === pick.artifact);
-        if (a) this.openPane(artifactPane(this.host, a));
-      } else if (pick.questions) this.openPane(questionsPane(this.host, pick.agent ?? 'The agent', pick.questions));
+        if (a) this.openPane(a.type === 'genui' ? genuiPane(this.host, a) : artifactPane(this.host, a));
+      } else if (pick.step) this.openPane(stepPane(this.host, pick.step, truncate(clean(pick.text).replace(/\s+/g, ' '), 60)));
+      else if (pick.questions) this.openPane(questionsPane(this.host, pick.agent ?? 'The agent', pick.questions));
       else if (pick.replies) this.openPane(this.replyPane(pick.id));
       else if (message) this.startReply(pick);
       return done();
@@ -852,6 +869,9 @@ export class Tui {
         return done();
       case 'c':
         this.copy(pick.text);
+        return done();
+      case 'd':
+        if (pick.step) this.openPane(stepPane(this.host, pick.step, truncate(clean(pick.text).replace(/\s+/g, ' '), 60)));
         return done();
       default:
         this.picked = null;
@@ -1219,7 +1239,11 @@ export class Tui {
     above.push(...notes);
     if (this.prompt) above.push(color.yellow(truncate(` ${this.prompt.label}`, width - 1)));
     else {
-      if (this.picked) above.push(color.dim(truncate(' r reply · e react · s speak · c copy · Enter opens · ↑↓ move · Esc back to typing', width)));
+      if (this.picked) {
+        const pick = this.picks.find((p) => p.id === this.picked);
+        const keys = pick?.kind === 'activity' ? ` Enter opens · d shows the command and output · c copy · ↑↓ move · Esc back to typing` : ' r reply · e react · s speak · c copy · Enter opens · ↑↓ move · Esc back to typing';
+        above.push(color.dim(truncate(keys, width)));
+      }
       if (this.replyTo) above.push(`${color.cyan(' ↳ ')}${color.dim(truncate(`Replying to ${this.replyTo.who}: ${clean(this.replyTo.text).replace(/\s+/g, ' ')}`, width - 18))}${color.dim(' · Esc cancels')}`);
       if (this.attachments.length) above.push(color.dim(truncate(` 📎 ${this.attachments.map((a) => `${clean(a.name)} (${bytesText(a.size)})`).join(' · ')} · /detach drops them`, width)));
     }
@@ -1315,9 +1339,10 @@ export class Tui {
         mark({ id: it.id, kind: 'assistant', text: it.text, agent: it.agent, replies: replies.get(it.id) }, at);
       } else if (it.kind === 'activity') {
         out.push(this.activityLine(it, w));
-        if (it.status !== 'error' && it.status !== 'denied') out.push(...this.viewLine(it.artifact, w));
+        if (it.status !== 'error' && it.status !== 'denied') out.push(...this.viewLines(it.artifact, w));
         if (it.thread) out.push(`    ${color.dim(truncate(`↪ a thread with ${clean(it.agent ?? 'another agent')}: Ctrl+↑, then Enter, opens it`, w - 4))}`);
-        if (it.thread || (it.artifact && this.artifacts.some((a) => a.id === it.artifact))) mark({ id: it.id, kind: 'activity', text: it.text, thread: it.thread, artifact: it.thread ? undefined : it.artifact }, from);
+        const art = !it.thread && it.artifact && this.artifacts.some((a) => a.id === it.artifact) ? it.artifact : undefined;
+        mark({ id: it.id, kind: 'activity', text: it.text, thread: it.thread, artifact: art, step: it.id }, from);
       } else if (it.kind === 'questions') {
         out.push(...questionLines(it.agent, it.questions, it.answered, w));
         mark({ id: it.id, kind: 'questions', text: it.questions.map((q) => q.question).join('\n'), questions: it.answered ? undefined : it.questions, agent: it.agent }, from);
@@ -1347,10 +1372,10 @@ export class Tui {
         } else if (!seg.hidden) {
           const at = out.length;
           out.push(this.activityLine(seg, w));
-          if (seg.thread) {
-            out.push(`    ${color.dim('↪ a thread between agents: Ctrl+↑, then Enter, opens it')}`);
-            mark({ id: `live:${seg.id}`, kind: 'activity', text: seg.text, thread: seg.thread }, at);
-          }
+          if (seg.status !== 'error' && seg.status !== 'denied') out.push(...this.viewLines(seg.artifact, w));
+          if (seg.thread) out.push(`    ${color.dim('↪ a thread between agents: Ctrl+↑, then Enter, opens it')}`);
+          const art = !seg.thread && seg.artifact && this.artifacts.some((a) => a.id === seg.artifact) ? seg.artifact : undefined;
+          mark({ id: `live:${seg.id}`, kind: 'activity', text: seg.text, thread: seg.thread, artifact: art, step: seg.id }, at);
         }
       });
       if (!this.approvals.length) out.push('', color.dim(`  ${this.agent?.id ?? 'The agent'} is working…`));
@@ -1384,10 +1409,37 @@ export class Tui {
     this.views = new Map(list.filter((a) => a?.type === 'genui').map((a) => [String(a.id), String(a.title)]));
   }
 
-  /** A GenUI view the agent showed: it works in the web interface only. */
-  private viewLine(id: string | undefined, w: number): string[] {
+  /** A GenUI view the agent showed, drawn as text (Ctrl+↑, then Enter, uses it). */
+  private viewLines(id: string | undefined, w: number): string[] {
     const title = id ? this.views.get(id) : undefined;
-    return title === undefined ? [] : [`    ${color.dim(truncate(`▦ ${clean(title)}: an interactive view. Open it in the web interface.`, w - 4))}`];
+    if (!id || title === undefined) return [];
+    const a = this.artifacts.find((x) => x.id === id);
+    let v = this.viewDocs.get(id);
+    if (a && (!v || v.rev !== a.rev)) {
+      // Read (again) once; the chat draws it when it arrives.
+      const next: ViewCache = { rev: a.rev, model: v?.model };
+      this.viewDocs.set(id, next);
+      v = next;
+      this.api<{ doc?: ViewDoc; errors?: string[] }>('GET', `artifacts/${encodeURIComponent(id)}/view`).then(
+        (r) => {
+          next.model = r.doc ? new ViewModel(r.doc) : undefined;
+          next.errors = r.doc ? undefined : (r.errors ?? ['The view could not be read.']);
+          this.schedule();
+        },
+        () => undefined,
+      );
+    }
+    const out = [`    ${color.cyan('▦')} ${color.bold(truncate(clean(v?.model?.doc.title || title), w - 8))}`];
+    const bar = color.dim('│');
+    if (v?.errors) out.push(`    ${bar} ${color.red(truncate('This view has a mistake the agent has to fix.', w - 8))}`);
+    else if (v?.model) {
+      const lines = drawView(v.model, w - 8).flatMap((l) => l.lines);
+      const MAX = 40;
+      out.push(...lines.slice(0, MAX).map((l) => `    ${bar} ${l}`));
+      if (lines.length > MAX) out.push(`    ${bar} ${color.dim(`… ${lines.length - MAX} more lines`)}`);
+    } else out.push(`    ${bar} ${color.dim('Reading…')}`);
+    out.push(`    ${color.dim(truncate('Ctrl+↑, then Enter, uses it', w - 4))}`);
+    return out;
   }
 
   private activityLine(seg: { text: string; status?: string; thread?: string }, w: number): string {

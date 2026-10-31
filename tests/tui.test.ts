@@ -7,6 +7,7 @@ import { ConversationService, loadAgentTree } from '@sfagents/core';
 import { LogBook, WebServer } from '@sfagents/web';
 import { Tui } from '@sfagents/cli/dist/terminal/tui.js';
 import { answerText, numberedAnswer } from '@sfagents/cli/dist/terminal/panes.js';
+import { drawView, ViewModel } from '@sfagents/cli/dist/terminal/genui-text.js';
 import { baseAgent, makeTempDir, scriptedFactory, writeAgent, type Script } from './helpers.js';
 
 /** A terminal for the interface: keys go in, frames come out (the last one is the screen). */
@@ -195,6 +196,110 @@ describe('terminal interface', () => {
 
       await term.type('/help');
       assert.match(term.screen(), /\/attach <path>/);
+    } finally {
+      tui.quit();
+      await done;
+      await server.close();
+      conversation.close();
+    }
+  });
+
+  test('a GenUI view is drawn as text: values, controls, a table and a chart', () => {
+    const m = new ViewModel({
+      title: 'Plans',
+      state: { plan: 'b', agree: true, n: 3 },
+      data: { rows: [{ name: 'Basic', price: 5 }, { name: 'Pro', price: 12 }] },
+      view: {
+        type: 'layout',
+        kind: 'card',
+        title: 'Pick a plan',
+        children: [
+          { type: 'text', value: { $op: 'concat', args: ['You picked ', { $: 'state.plan' }] } },
+          { type: 'control', kind: 'radio', label: 'Plan', bind: { $: 'state.plan' }, options: [{ label: 'Basic', value: 'a' }, { label: 'Pro', value: 'b' }] },
+          { type: 'control', kind: 'checkbox', label: 'I agree', bind: { $: 'state.agree' } },
+          { type: 'control', kind: 'button', label: 'Go', when: { $: 'state.agree' } },
+          { type: 'table', columns: [{ key: 'name', label: 'Name' }, { key: 'price', label: 'Price', format: 'number' }], rows: { $: 'data.rows' } },
+          { type: 'chart', kind: 'bar', data: { $: 'data.rows' }, x: 'name', series: [{ y: 'price' }] },
+        ],
+      },
+    });
+    const text = drawView(m, 70)
+      .flatMap((l) => l.lines)
+      .join('\n')
+      .replace(/\u001b\[[0-9;]*m/g, '');
+    assert.match(text, /Pick a plan/);
+    assert.match(text, /You picked b/);
+    assert.match(text, /\( \) Basic  \(•\) Pro/);
+    assert.match(text, /\[x\] I agree/);
+    assert.match(text, /\[ Go \]/);
+    assert.match(text, /Name +Price/);
+    assert.match(text, /Pro +12/);
+    assert.match(text, /Pro +█+ 12/);
+    assert.equal(drawView(m, 70).filter((l) => l.control).length, 3); // radio, checkbox, button
+  });
+
+  test('a view works from its pane, and a step shows its whole command and output', async () => {
+    const dir = makeTempDir('sfagents-tui-');
+    writeAgent(dir, { ...baseAgent('main') });
+    const tree = loadAgentTree(dir);
+    const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
+    fs.mkdirSync(conversation.genuiDir, { recursive: true });
+    const file = path.join(conversation.genuiDir, 'pick.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        title: 'Pick',
+        state: { agree: false },
+        view: {
+          type: 'layout',
+          kind: 'column',
+          children: [
+            { type: 'control', kind: 'checkbox', label: 'I agree', bind: { $: 'state.agree' } },
+            { type: 'control', kind: 'button', label: 'Send it', on: { click: [{ do: 'send', text: { $op: 'concat', args: ['agreed: ', { $: 'state.agree' }] } }] } },
+          ],
+        },
+      }),
+    );
+    const view = conversation.linkArtifact({ title: 'Pick', file });
+    assert.equal(view.type, 'genui');
+    const long = `echo ${'x'.repeat(150)} && echo done`;
+    const script: Script = (_req, call) => {
+      if (call === 0) return { toolCalls: [{ name: 'no_such_tool', args: { command: long } }] };
+      return { text: call === 1 ? 'Tried it.' : 'Thanks.' };
+    };
+    const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(script).factory, watchAgents: false, auth: false });
+    const url = await server.start();
+    const term = new Terminal();
+    const tui = new Tui({ server, logs: new LogBook(), url, input: term.input, output: term.output, captureOutput: false });
+    const done = tui.run();
+    try {
+      // A step: the chat shows a line; d shows all of it, with what came back.
+      await term.type('try it');
+      await until('the reply', () => term.screen().includes('Tried it.') && term.screen().includes('● idle'));
+      const step = conversation.state.messages.find((m) => m.toolCalls?.length)!;
+      const detail = await server.request('GET', `/api/activity/${encodeURIComponent(`${step.id}:${step.toolCalls![0]!.id}`)}`);
+      assert.equal(detail.status, 200);
+      assert.equal(detail.json.command, long);
+      assert.equal(detail.json.tool, 'no_such_tool');
+      assert.match(String(detail.json.output), /no_such_tool/);
+      await term.keys(CTRL_UP, CTRL_UP);
+      assert.match(term.screen(), /d shows the command and output/);
+      await term.keys('d');
+      await until('the step', () => term.screen().includes('Command') && term.screen().includes('Output') && term.screen().includes('echo done'));
+      await term.keys('\u001b');
+
+      // The view: Enter toggles the checkbox (written to the file), then the button sends from the view.
+      await term.type('/artifacts');
+      await until('the views', () => term.screen().includes('Pick'));
+      for (let i = 0; i < 6 && !/› +.*Pick/.test(term.screen()); i++) await term.keys(DOWN);
+      await term.keys('\r');
+      await until('the view pane', () => term.screen().includes('[ ] I agree'));
+      await term.keys('\r');
+      await until('the change', () => term.screen().includes('[x] I agree'));
+      await until('the saved state', () => JSON.parse(fs.readFileSync(file, 'utf8')).state?.agree === true);
+      await term.keys(DOWN, '\r');
+      await until('the message from the view', () => conversation.state.messages.some((m) => m.role === 'user' && m.content === 'agreed: true' && m.view === view.id));
     } finally {
       tui.quit();
       await done;

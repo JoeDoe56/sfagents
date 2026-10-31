@@ -342,6 +342,8 @@ export class WebServer {
   readonly logs: LogBook;
   private readonly approvals = new Map<string, PendingApproval>();
   private live: LiveRun | undefined;
+  /** The steps of recent runs, by chat id: what each call asked for and what came back (GET /api/activity). */
+  private readonly calls = new Map<string, { name: string; args: Record<string, unknown>; agentPath: readonly string[]; callId: string; display?: string; status?: string }>();
   private artifactSignature = '';
   private readonly publicDir: string;
   /** Changes when the page's files do: an open page from an older build reloads itself. */
@@ -857,6 +859,9 @@ export class WebServer {
     switch (route) {
       case 'GET state':
         return sendJson(res, 200, this.snapshot());
+      case 'GET activity':
+        // One step in the chat: the whole command (or call) and what it gave back.
+        return sendJson(res, 200, this.activityDetail(parts[1] ?? ''));
       case 'GET messages': {
         const before = Number(url.searchParams.get('before'));
         return sendJson(res, 200, displayItems(this.conversation.state, { before: Number.isFinite(before) && before > 0 ? before : undefined, limit: 200 }));
@@ -2282,6 +2287,74 @@ export class WebServer {
     this.broadcast('read', this.read);
   }
 
+  /**
+   * A step in the chat, by its id: the tool, its arguments (a shell command in
+   * full) and its output. Ids are "<assistant message id>:<call id>" for steps
+   * the conversation holds, or "<agent path>:<call id>" for a step of the run
+   * now (whose output may not be written yet).
+   */
+  activityDetail(id: string): { id: string; tool: string; command?: string; args: Record<string, unknown>; output: string; status: string } {
+    const cut = id.lastIndexOf(':');
+    if (cut <= 0) throw new HttpError(404, 'No such step.');
+    const owner = id.slice(0, cut);
+    const callId = id.slice(cut + 1);
+    const messages = this.conversation.state.messages;
+    const parse = (json: string): Record<string, unknown> => {
+      try {
+        const v = JSON.parse(json) as unknown;
+        return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : { value: v };
+      } catch {
+        return { arguments: json };
+      }
+    };
+    let tool: string | undefined;
+    let args: Record<string, unknown> = {};
+    let run: string | undefined;
+    let at = -1;
+    const live = this.calls.get(id);
+    const asked = messages.findIndex((m) => m.id === owner && m.role === 'assistant');
+    if (asked >= 0) {
+      const m = messages[asked]!;
+      const c = m.toolCalls?.find((t) => t.id === callId);
+      if (c) {
+        tool = c.name;
+        args = parse(c.arguments);
+        run = m.run;
+        at = asked;
+      }
+    } else {
+      // The latest assistant message that made this call (the run now writes its steps as it goes).
+      for (let i = messages.length - 1; i >= 0 && tool === undefined; i--) {
+        const m = messages[i]!;
+        const c = m.role === 'assistant' ? m.toolCalls?.find((t) => t.id === callId) : undefined;
+        if (c && (!live || c.name === live.name)) {
+          tool = c.name;
+          args = parse(c.arguments);
+          run = m.run;
+          at = i;
+        }
+      }
+    }
+    if (tool === undefined && live) {
+      tool = live.name;
+      args = live.args;
+    }
+    if (tool === undefined) throw new HttpError(404, 'No such step.');
+    let output: string | undefined;
+    let status = live?.status ?? 'running';
+    for (let i = Math.max(at, 0); i < messages.length && at >= 0; i++) {
+      const m = messages[i]!;
+      if (m.role === 'tool' && m.callId === callId && (run === undefined || m.run === run)) {
+        output = m.content;
+        status = m.status ?? status;
+        break;
+      }
+    }
+    output ??= live?.display ?? (live?.status ? '' : '(still running)');
+    const command = typeof args['command'] === 'string' ? args['command'] : undefined;
+    return { id, tool, ...(command !== undefined ? { command } : {}), args, output, status };
+  }
+
   private onEvent(live: LiveRun, event: RuntimeEvent): void {
     const root = event.agentPath.length === 1;
     if ((event.type === 'text' || event.type === 'tool_request') && !live.read) {
@@ -2318,6 +2391,8 @@ export class WebServer {
           return;
         }
         const prefix = root ? '' : `${event.agentPath.slice(1).join(' › ')}: `;
+        this.calls.set(`${event.agentPath.join('/')}:${event.callId}`, { name: event.name, args: event.args, agentPath: event.agentPath, callId: event.callId });
+        if (this.calls.size > 400) this.calls.delete(this.calls.keys().next().value!);
         const seg: LiveSegment = { kind: 'activity', id: `${event.agentPath.join('/')}:${event.callId}`, text: prefix + describeCall(event.name, JSON.stringify(event.args)), status: 'running' };
         const to = event.name === 'message' ? event.args['to'] : event.name === 'message_agent' ? event.args['agent'] : undefined;
         if (typeof to === 'string' && to !== 'user') {
@@ -2337,6 +2412,8 @@ export class WebServer {
         const seg = live.segments.find((s) => s.id === id);
         const status = event.ok ? 'ok' : event.errorType === 'execution_denied' ? 'denied' : 'error';
         if (seg) seg.status = status;
+        const call = this.calls.get(id);
+        if (call) Object.assign(call, { display: event.display, status });
         // A new or changed artifact shows in the chat where it was made.
         let artifact: string | undefined;
         if (seg && event.ok && (event.name === 'shell' || event.name === 'create_artifact' || event.name === 'update_artifact' || event.name === 'create_app_artifact')) {

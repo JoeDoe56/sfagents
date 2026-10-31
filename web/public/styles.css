@@ -195,6 +195,9 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 .activity.running::after { content: "…"; display: inline-block; animation: pulse 1.2s ease-in-out infinite; }
 .activity.error, .activity.denied { color: #ff6961; }
+.activity.step { border: 0; background: none; padding: 2px 6px; font-family: inherit; cursor: pointer; border-radius: 6px; }
+.activity.step:hover { background: rgba(120, 120, 128, 0.16); }
+.activity.step:focus-visible { outline: 2px solid var(--accent, #0a84ff); outline-offset: 1px; }
 .notice {
   align-self: center;
   margin: 10px 0 4px;
@@ -992,6 +995,12 @@ button { -webkit-tap-highlight-color: transparent; }
 @media (prefers-reduced-motion: reduce) {
   .chat-dock { transition: none; }
 }
+
+/* A step's window: the whole command and its output */
+.step-detail { padding: 0 16px 40px; }
+.step-tool { margin: 4px 4px 10px; color: var(--ink-2); font-size: 13px; }
+.step-detail h3 { margin: 14px 4px 6px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); }
+.step-detail pre { margin: 0; padding: 10px 12px; border-radius: 10px; background: #1c1c1e; color: #f2f2f7; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; user-select: text; }
 
 /* The diff sheet */
 .diff-summary { margin: 4px 20px 12px; color: var(--ink-2); font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }

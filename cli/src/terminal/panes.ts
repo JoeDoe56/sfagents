@@ -8,6 +8,7 @@
 
 import { bar, bytesText, clean, color, percentText, stampText, timeText } from './ansi.js';
 import { textWidth, truncate, wrap } from './width.js';
+import { controlOptions, drawView, lookup, ViewModel, type ViewControl, type ViewDoc, type ViewEffects } from './genui-text.js';
 
 /** One entry of a pane: a heading, some text, or something to pick. */
 export interface Row {
@@ -117,6 +118,8 @@ export interface PaneHost {
   /** Asks yes or no. */
   confirm(question: string, yes: () => void): void;
   attach(a: Attachment): void;
+  /** Copies text to the clipboard (the terminal's escape). */
+  copy(text: string): void;
   /** Shows a message in the chat (loading earlier messages if needed). */
   jump(id: string, seq: number): void;
   send(text: string): void;
@@ -486,6 +489,8 @@ export function artifactsPane(host: PaneHost): Pane {
 
 /** One artifact: its text, or what it is and where. */
 export function artifactPane(host: PaneHost, a: ArtifactInfo): Pane {
+  // A view opens to be used.
+  if (a.type === 'genui' && !a.missing) return genuiPane(host, a);
   const info = (w: number): Row[] =>
     [
       `${color.dim('Type')}     ${a.type}${a.mime ? color.dim(` (${a.mime})`) : ''}`,
@@ -499,11 +504,6 @@ export function artifactPane(host: PaneHost, a: ArtifactInfo): Pane {
     hint: '↑↓ PgUp PgDn scroll · p pins or unpins · Esc goes back',
     load: async (): Promise<string[] | null> => {
       if (a.missing) return null;
-      if (a.type === 'genui') {
-        const r = await host.api<{ doc?: { title?: string; state?: unknown }; errors?: string[] }>('GET', `artifacts/${encodeURIComponent(a.id)}/view`);
-        if (r.errors) return ['This view has problems the agent has to fix:', ...r.errors];
-        return ['An interactive view: its buttons and fields work in the web interface.', '', 'What it holds now:', ...JSON.stringify(r.doc?.state ?? {}, null, 2).split('\n')];
-      }
       if (a.type === 'app' || a.type === 'image') return null;
       if (a.mime && !TEXT_MIME.test(a.mime) && !/markdown|html|svg/.test(a.mime)) return null;
       const r = await host.raw(`artifacts/${encodeURIComponent(a.id)}/raw`);
@@ -1003,5 +1003,216 @@ export function filesPane(host: PaneHost, start?: string): Pane {
       host.notice(`“${e.name}” was added to your message.`);
     }, host.fail);
   }
+  return p;
+}
+
+// ------------------------------------------------------------------ GenUI views
+
+/** A GenUI view to use: ↑↓ move between its controls, Enter presses, toggles, chooses or types. */
+export function genuiPane(host: PaneHost, a: ArtifactInfo): Pane {
+  let model: ViewModel | undefined;
+  let errors: string[] | undefined;
+  let failed: string | undefined;
+  let rev = a.rev;
+  let saving = 0;
+  const load = () =>
+    host.api<{ doc?: ViewDoc; errors?: string[] }>('GET', `artifacts/${encodeURIComponent(a.id)}/view`).then(
+      (r) => {
+        errors = r.doc ? undefined : r.errors?.length ? r.errors : ['The view could not be read.'];
+        const ui = model?.ui;
+        model = r.doc ? new ViewModel(r.doc) : undefined;
+        if (model && ui) for (const [k, v] of ui) model.ui.set(k, v);
+        failed = undefined;
+        host.redraw();
+      },
+      (e: unknown) => {
+        failed = e instanceof Error ? e.message : String(e);
+        host.redraw();
+      },
+    );
+  void load();
+  const fx: ViewEffects = {
+    send: (text) => {
+      host.api('POST', 'messages', { text, view: a.id }).then(() => host.notice(`Sent from the view: ${truncate(text, 60)}`), host.fail);
+    },
+    copy: (text) => host.copy(text),
+    open: (url) => host.notice(`The view links to ${url}`),
+  };
+  const save = () => {
+    if (!model) return;
+    saving++;
+    host
+      .api('POST', `artifacts/${encodeURIComponent(a.id)}/state`, { state: model.state })
+      .catch(host.fail)
+      .finally(() => saving--);
+  };
+  const changed = (touched: boolean) => {
+    if (touched) save();
+    host.redraw();
+  };
+  const ui = (c: ViewControl) => model!.ui.get(c.path) ?? {};
+  const setUi = (c: ViewControl, patch: Record<string, unknown>) => {
+    model!.ui.set(c.path, { ...ui(c), ...patch });
+    host.redraw();
+  };
+  const current = (c: ViewControl) => (c.node.bind?.$ ? lookup(c.node.bind.$, c.scope as unknown as Record<string, unknown>) : undefined);
+  /** Moves a control by one: the next tab, slide or page, or a step of a number. */
+  const step = (c: ViewControl, by: number) => {
+    const n = c.node;
+    if (c.kind === 'tabs') return setUi(c, { tab: ((ui(c).tab ?? 0) + by + c.count!) % c.count! });
+    if (c.kind === 'carousel') return setUi(c, { slide: ((ui(c).slide ?? 0) + by + c.count!) % c.count! });
+    if (c.kind === 'pages') return setUi(c, { page: ((ui(c).page ?? 0) + by + c.count!) % c.count! });
+    if (c.kind === 'control' && (n.kind === 'slider' || n.kind === 'number')) {
+      const min = typeof n.min === 'number' ? n.min : n.kind === 'slider' ? 0 : -Infinity;
+      const max = typeof n.max === 'number' ? n.max : n.kind === 'slider' ? 100 : Infinity;
+      const d = typeof n.step === 'number' && n.step > 0 ? n.step : 1;
+      const now = Number(current(c));
+      const next = Math.min(max, Math.max(min, (Number.isFinite(now) ? now : Number.isFinite(min) ? min : 0) + by * d));
+      return changed(model!.setBound(n, c.scope, Number(next.toFixed(10)), fx));
+    }
+    if (c.kind === 'control' && (n.kind === 'radio' || n.kind === 'segmented' || n.kind === 'select')) {
+      const opts = controlOptions(n, c.scope);
+      if (!opts.length) return;
+      const at = opts.findIndex((o) => o.value === current(c) || String(o.value) === String(current(c)));
+      return changed(model!.setBound(n, c.scope, opts[(at + by + opts.length) % opts.length]!.value, fx));
+    }
+  };
+  const use = (c: ViewControl) => {
+    const n = c.node;
+    switch (c.kind) {
+      case 'tabs':
+      case 'carousel':
+      case 'pages':
+        return step(c, 1);
+      case 'popover':
+        return setUi(c, { open: !ui(c).open });
+      case 'submit':
+        return changed(model!.run(n, 'submit', c.scope, { value: JSON.parse(JSON.stringify(model!.state)) }, fx));
+      case 'row': {
+        const { key, value } = c.row!;
+        let touched = false;
+        if (n.bind?.$) {
+          model!.setBound({ bind: n.bind }, c.scope, key, fx);
+          touched = true;
+        } else setUi(c, { selected: key });
+        if (n.on?.select) touched = model!.run(n, 'select', c.scope, { value: key, id: key, row: value }, fx) || touched;
+        return changed(touched);
+      }
+    }
+    switch (n.kind) {
+      case 'button':
+        return changed(model!.run(n, 'click', c.scope, { value: current(c) }, fx));
+      case 'checkbox':
+      case 'switch':
+        return changed(model!.setBound(n, c.scope, !current(c), fx));
+      case 'select':
+      case 'radio':
+      case 'segmented': {
+        const opts = controlOptions(n, c.scope);
+        host.open(
+          pane({
+            title: String(n.label ?? 'Choose'),
+            hint: '↑↓ move · Enter chooses · Esc goes back',
+            selected: Math.max(0, opts.findIndex((o) => String(o.value) === String(current(c)))),
+            rows: (w) => opts.map((o) => ({ pick: true, value: o.value, lines: [`  ${String(o.value) === String(current(c)) ? color.green('(•)') : color.dim('( )')} ${truncate(clean(o.label), w - 8)}`] })),
+            enter: (row) => {
+              host.back();
+              changed(model!.setBound(n, c.scope, row.value, fx));
+            },
+          }),
+        );
+        return;
+      }
+      default: {
+        // text, textarea, number, date, slider: typed in the composer.
+        const now = current(c);
+        const label = String(n.label ?? (n.kind === 'date' ? 'Date (YYYY-MM-DD)' : 'Value'));
+        host.ask(`${truncate(clean(label), 40)}:`, now === undefined || now === null ? '' : String(now), (typed) => {
+          const numeric = n.kind === 'number' || n.kind === 'slider';
+          if (numeric && typed.trim() !== '' && !Number.isFinite(Number(typed))) return host.notice('That is not a number.', 'error');
+          const value = numeric ? (typed.trim() === '' ? null : Number(typed)) : typed;
+          changed(model!.setBound(n, c.scope, value, fx));
+        });
+      }
+    }
+  };
+  return pane({
+    title: a.title,
+    hint: '↑↓ move · Enter uses it · + − change by a step · r reloads · Esc goes back',
+    rows: (w) => {
+      if (failed) return [note(`Couldn’t read the view: ${failed}`, w)];
+      if (errors) return [note('This view has a mistake the agent has to fix:', w), ...errors.slice(0, 12).map((e) => ({ lines: [`  ${color.red('•')} ${truncate(clean(e), w - 6)}`] }))];
+      if (!model) return [note('Reading…', w)];
+      const lines = drawView(model, w - 4);
+      return [blank, ...lines.map((l) => ({ lines: l.lines.map((x) => `  ${x}`), ...(l.control ? { pick: true, value: l.control } : {}) })), blank];
+    },
+    enter: (row) => row.value && model && use(row.value as ViewControl),
+    key: (ch, row) => {
+      if (ch === 'r') {
+        void load();
+        return true;
+      }
+      const c = row?.value as ViewControl | undefined;
+      if (!c || !model) return false;
+      if (ch === '+' || ch === '=' || ch === 'l') return (step(c, 1), true);
+      if (ch === '-' || ch === 'h') return (step(c, -1), true);
+      if (ch === ' ') return (use(c), true);
+      return false;
+    },
+    event: (name, data) => {
+      if (name !== 'artifacts' || !Array.isArray(data.artifacts)) return;
+      const now = (data.artifacts as ArtifactInfo[]).find((x) => x.id === a.id);
+      // The file changed (the agent rewrote it): read it again, unless this pane is saving.
+      if (now && now.rev !== rev) {
+        rev = now.rev;
+        if (!saving) void load();
+      }
+    },
+  });
+}
+
+// ------------------------------------------------------------------ one step
+
+interface StepDetail {
+  tool: string;
+  command?: string;
+  args: Record<string, unknown>;
+  output: string;
+  status: string;
+}
+
+const STATUS: Record<string, string> = { ok: '', error: ' · failed', denied: ' · not allowed', cancelled: ' · cancelled', running: ' · running', not_started: ' · not run' };
+
+/** One of the agent's steps: the whole command (or call) and its output. */
+export function stepPane(host: PaneHost, id: string, title = 'Step'): Pane {
+  const p = loading(host, {
+    title,
+    hint: '↑↓ PgUp PgDn scroll · c copies the command · Esc goes back',
+    load: () => host.api<StepDetail>('GET', `activity/${encodeURIComponent(id)}`),
+    view: (d, w) => {
+      const width = Math.max(10, w - 6);
+      const block = (label: string, text: string): Row[] => [
+        heading(label),
+        ...text.split(/\r?\n/).flatMap((l) => (l ? wrap(clean(l), width) : [''])).map((l) => ({ lines: [`    ${l}`] })),
+      ];
+      const rest = Object.fromEntries(Object.entries(d.args).filter(([k]) => k !== 'command'));
+      return [
+        { lines: [`  ${color.dim(`${d.tool}${STATUS[d.status] ?? ` · ${d.status}`}`)}`] },
+        ...(d.command !== undefined ? block('Command', d.command) : []),
+        ...(Object.keys(rest).length ? block(d.command !== undefined ? 'Options' : 'Arguments', JSON.stringify(rest, null, 2)) : []),
+        ...block('Output', d.output || '(no output)'),
+        blank,
+      ];
+    },
+    key: (ch) => {
+      if (ch !== 'c' || !p.data) return false;
+      host.copy(p.data.command ?? JSON.stringify(p.data.args, null, 2));
+      return true;
+    },
+    event: (name) => {
+      // A step still running: read it again when one ends.
+      if (name === 'activity_end' && p.data?.status === 'running') p.reload();
+    },
+  });
   return p;
 }
