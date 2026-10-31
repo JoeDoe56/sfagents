@@ -634,11 +634,11 @@ describe('web server', () => {
       assert.deepEqual(before.map((i) => i.kind), ['user', 'assistant', 'questions', 'assistant']);
       assert.equal(before[1]!.text, 'Two things first.');
       assert.equal(before[2]!.answered, false);
-      await postJson(s.base, '/api/messages', { text: '**Which color?**\nblue' });
+      await postJson(s.base, '/api/messages', { text: 'Which color?\nblue' });
       const second = await ev.wait((e) => e.event === 'run_end' && e !== first);
       const after = second.data['items'] as Item[];
       assert.equal(after.find((i) => i.kind === 'questions')!.answered, true);
-      assert.match(after[after.length - 1]!.text!, /Got: \*\*Which color\?\*\*\nblue/);
+      assert.match(after[after.length - 1]!.text!, /Got: Which color\?\nblue/);
       assert.equal(describeCall('message', JSON.stringify({ to: 'helper', text: 'go' })), 'Messaged helper: go');
       assert.equal(describeCall('message', JSON.stringify({ wait: true })), 'Waited for messages');
     } finally {

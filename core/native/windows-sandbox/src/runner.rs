@@ -171,8 +171,8 @@ fn validate(policy: &mut Policy) -> Result<()> {
         return Err("command directory is not in the sandbox policy".into());
     }
     if let Some(channel) = &policy.host_channel {
-        if !channel.path.starts_with("\\\\.\\pipe\\sfagents-web-")
-            || channel.path["\\\\.\\pipe\\sfagents-web-".len()..].contains(['\\', '/', ':'])
+        if !channel.path.starts_with("\\\\.\\pipe\\sfagents-host-")
+            || channel.path["\\\\.\\pipe\\sfagents-host-".len()..].contains(['\\', '/', ':'])
         {
             return Err("invalid host pipe".into());
         }
@@ -184,7 +184,7 @@ fn protect_helper(policy: &mut Policy, helper: &str) {
     // A source checkout can itself be the workspace. Never let a command
     // replace the trusted executable used by the host's next invocation.
     // The normal guard-ancestor logic also prevents renaming its parents.
-    if access_at(&policy.rules, helper) == Access::Write {
+    if access_at(&policy.rules, helper).writable() {
         policy.rules.push(Rule {
             path: helper.into(),
             access: Access::Read,
@@ -309,6 +309,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         let dir = Path::new(&r.path).is_dir();
         let mask = match r.access {
             Access::Write => MODIFY,
+            Access::Edit => EDIT,
             Access::Read => READ,
             Access::None => FILE_ALL_ACCESS,
         };
@@ -324,16 +325,28 @@ pub fn run(args: &[String]) -> Result<i32> {
             mask,
             inherit: dir,
         }];
-        if r.access == Access::Write {
+        if r.access.writable() {
             batch.push(Ace {
                 path: r.path.clone(),
                 sid: restricted.clone(),
                 mode: "allow".into(),
-                mask: MODIFY,
+                mask,
                 inherit: dir,
             });
         }
-        if r.access != Access::Write {
+        if r.access == Access::Edit {
+            // Explicit, so a writable parent's inherited DELETE does not apply.
+            for principal in [&sid, &restricted] {
+                batch.push(Ace {
+                    path: r.path.clone(),
+                    sid: principal.clone(),
+                    mode: "deny".into(),
+                    mask: DELETE | FILE_DELETE_CHILD,
+                    inherit: dir,
+                });
+            }
+        }
+        if !r.access.writable() {
             for principal in [&sid, &restricted] {
                 batch.push(Ace {
                     path: r.path.clone(),

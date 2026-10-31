@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadAgentTree, describeTree, ConfigError, ensureProject, locateProject, withRoot } from '@sfagents/core';
+import { loadAgentTree, describeTree, ConfigError, ensureProject, locateProject, withRoot, buildSandboxPolicy, accessFor } from '@sfagents/core';
 import { baseAgent, makeTempDir, writeJson, stdioServerConfig } from './helpers.js';
 
 /** A project: files are relative to it (agents go in "agents/"). */
@@ -140,6 +140,60 @@ describe('agents folder', () => {
     skippedError(dir, /providerOptions\]: is required/, { 'agents/a.json': baseAgent('a', { provider: 'openai-compatible' }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
     skippedError(dir, /workspace.roots\[0\]\]: Directory does not exist/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['does-not-exist'] } }), 'agents/ok.json': baseAgent('ok') });
+  });
+
+  test('workspace.paths: absolute folders with r/w/d letters; the outermost granted ones are the roots, in order', () => {
+    const outside = makeTempDir();
+    fs.mkdirSync(path.join(outside, 'a', 'sensitive'), { recursive: true });
+    fs.mkdirSync(path.join(outside, 'b', 'project'), { recursive: true });
+    const dir = setup({});
+    const real = (p: string) => fs.realpathSync(p);
+    writeJson(path.join(dir, 'agents', 'main.json'), baseAgent('main', {
+      workspace: {
+        paths: {
+          [path.join(outside, 'b')]: 'rw',
+          [path.join(outside, 'a')]: 'r',
+          [path.join(outside, 'a', 'sensitive')]: '',
+          [path.join(outside, 'b', 'project')]: 'rwd',
+          [dir]: 'rwd',
+        },
+      },
+    }));
+    const tree = loadAgentTree(dir);
+    const main = tree.byId.get('main')!;
+    assert.deepEqual(main.roots, [real(path.join(outside, 'b')), real(path.join(outside, 'a')), real(dir)]);
+    assert.deepEqual(main.access.map((r) => [path.relative(real(outside), r.path) || '.', r.access]).slice(0, 4), [
+      ['b', 'edit'],
+      ['a', 'read'],
+      [path.join('a', 'sensitive'), 'none'],
+      [path.join('b', 'project'), 'write'],
+    ]);
+    if (process.platform === 'linux') assert.ok(tree.warnings.some((w) => /cannot let commands write without deleting/.test(w)));
+    const policy = buildSandboxPolicy({ roots: main.roots, access: main.access });
+    const at = (...p: string[]) => accessFor(policy.rules, path.join(real(outside), ...p));
+    assert.deepEqual([at('a', 'sensitive', 'x'), at('a', 'notes.md'), at('b', 'x.md'), at('b', 'project', 'x.md'), at('c')], ['none', 'read', 'edit', 'write', 'none']);
+
+    const bad = (paths: unknown, pattern: RegExp) => {
+      const d = setup({});
+      skippedError(d, pattern, { 'agents/a.json': baseAgent('a', { workspace: { paths } }), 'agents/ok.json': baseAgent('ok') });
+    };
+    bad({ work: 'rw' }, /must be an absolute path/);
+    bad({ [outside]: 'wr' + 'x' }, /may only use the letters r \(read\), w \(write\) and d \(delete\)/);
+    bad({ [outside]: 'w' }, /"w" needs "r" too/);
+    bad({ [outside]: 'rd' }, /"d" needs "w" too/);
+    bad({ [outside]: '' }, /must give at least one folder a permission/);
+    bad({ [path.join(outside, 'missing')]: 'r' }, /Directory does not exist/);
+    bad(['x'], /must be an object of folder/);
+    const both = setup({});
+    skippedError(both, /replaces roots and access/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], paths: { [outside]: 'r' } } }), 'agents/ok.json': baseAgent('ok') });
+  });
+
+  test('a new project\'s agent gets the project folder by absolute path, with every permission', () => {
+    const dir = makeTempDir();
+    ensureProject(dir);
+    const def = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'main.json'), 'utf8')) as { workspace: unknown };
+    assert.deepEqual(def.workspace, { paths: { [fs.realpathSync(dir)]: 'rwd' } });
+    assert.deepEqual(loadAgentTree(dir).root.roots, [fs.realpathSync(dir)]);
   });
 
   test('validates mcp.json, leaving out invalid servers', () => {

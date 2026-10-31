@@ -5,8 +5,17 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "lowercase")]
 pub enum Access {
     Read,
+    /// Read and write, without deleting (or renaming) anything.
+    Edit,
     Write,
     None,
+}
+
+impl Access {
+    /// Write or Edit: commands may change files.
+    pub fn writable(&self) -> bool {
+        matches!(self, Access::Write | Access::Edit)
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Rule {

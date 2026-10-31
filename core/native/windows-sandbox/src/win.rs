@@ -180,6 +180,8 @@ pub fn lookup(name: &str) -> Result<Sid> {
 }
 // Modify excludes DELETE_CHILD: a parent must not be able to delete a guard.
 pub const MODIFY: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+// Edit is Modify without DELETE: files can be created and changed, not deleted or renamed.
+pub const EDIT: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
 pub const WRITE_BITS: u32 = FILE_WRITE_DATA
     | FILE_APPEND_DATA
     | FILE_WRITE_EA

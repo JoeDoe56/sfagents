@@ -16,7 +16,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isPathWithinRoot } from '../permissions/workspace.js';
 
-export type SandboxAccess = 'read' | 'write' | 'none';
+/**
+ * What commands may do under a path: "write" is read, write and delete;
+ * "edit" is read and write without deleting (or renaming) anything, which
+ * Linux cannot enforce (there it is "write").
+ */
+export type SandboxAccess = 'read' | 'edit' | 'write' | 'none';
+
+/** Commands may change files under it ("edit" or "write"). */
+export function isWritable(access: SandboxAccess): boolean {
+  return access === 'write' || access === 'edit';
+}
 
 export interface SandboxRule {
   /** Canonical absolute path. */
@@ -85,7 +95,7 @@ export function prepareRules(rules: readonly SandboxRule[]): SandboxRule[] {
   for (const rule of rules) byPath.set(rule.path, rule);
   const out: SandboxRule[] = [];
   for (const rule of byPath.values()) {
-    if (!fs.existsSync(rule.path) && rule.ensure && accessFor([...byPath.values()], path.dirname(rule.path)) === 'write') {
+    if (!fs.existsSync(rule.path) && rule.ensure && isWritable(accessFor([...byPath.values()], path.dirname(rule.path)))) {
       try {
         if (rule.ensure.kind === 'dir') fs.mkdirSync(rule.path, { recursive: true, mode: 0o700 });
         else fs.writeFileSync(rule.path, rule.ensure.content ?? '', { flag: 'wx', mode: 0o600 });

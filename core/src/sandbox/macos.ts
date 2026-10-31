@@ -98,7 +98,8 @@ export function seatbeltProfile(policy: SandboxPolicy, tempDir: string, rules: r
   for (const rule of rules) {
     if (rule.access === 'none') continue;
     const s = scope(rule, rules);
-    lines.push(rule.access === 'write' ? `(allow file-read* file-write* ${s})` : `(allow file-read* ${s})`);
+    lines.push(rule.access === 'read' ? `(allow file-read* ${s})` : `(allow file-read* file-write* ${s})`);
+    if (rule.access === 'edit') lines.push(`(deny file-write-unlink ${s})`);
   }
   if (policy.tools?.length) lines.push(`(allow file-read* ${policy.tools.map((t) => `(literal ${sbString(t.path)})`).join(' ')})`);
   if (policy.hostChannel) {

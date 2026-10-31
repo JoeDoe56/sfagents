@@ -10,7 +10,7 @@ describe('Windows sandbox adapter (any host)', () => {
   test('wrap serializes prepared policy, preserves argv, and omits host secrets', () => {
     const dir = makeTempDir('sfagents-windows-policy-');
     fs.mkdirSync(path.join(dir, '.git'));
-    const policy = buildSandboxPolicy({ roots: [dir], secretFiles: [path.join(dir, '.env')], protectedFiles: [path.join(dir, 'mcp.json')], agentsDir: path.join(dir, 'agents'), network: true, hostChannel: { path: String.raw`\\.\pipe\sfagents-web-test` } });
+    const policy = buildSandboxPolicy({ roots: [dir], secretFiles: [path.join(dir, '.env')], protectedFiles: [path.join(dir, 'mcp.json')], agentsDir: path.join(dir, 'agents'), network: true, hostChannel: { path: String.raw`\\.\pipe\sfagents-host-test` } });
     const wrapped = new WindowsSandbox('helper with spaces.exe').wrap({ executable: 'shell with spaces.exe', args: ['-Command', 'echo "quoted" > "a b.txt"'], cwd: dir, env: { Path: 'C:\\Windows', LANG: 'en_US.UTF-8', USERPROFILE: 'host-profile', NODE_OPTIONS: '--require=evil', PRIVATE_TOKEN: 'host-secret' } }, policy);
     const file = wrapped.args[2]!;
     try {

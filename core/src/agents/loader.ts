@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { ConfigError, artifactAccess, conversationAccess, mcpGrants, parseAgentDefinition, type AgentDefinition } from './definition.js';
-import { WorkspaceContext, resolveWorkspacePath } from '../permissions/workspace.js';
+import { WorkspaceContext, isPathWithinRoot, resolveWorkspacePath } from '../permissions/workspace.js';
 import type { SandboxRule } from '../sandbox/sandbox.js';
 import { loadMcpConfig, type McpConfigFile } from '../mcp/config.js';
 import { PROMPTS_DIR_NAME, PromptReferenceError, ensurePrompts, expandPrompt } from './prompts.js';
@@ -111,7 +111,8 @@ export function ensureProject(projectDir: string): string[] {
   const file = path.join(agentsDir, `${DEFAULT_AGENT_NAME}.json`);
   // With the default prompt files at hand, the new agent uses them.
   const shared = DEFAULT_AGENT_PROMPTS.every((name) => fs.existsSync(path.join(projectDir, PROMPTS_DIR_NAME, name)));
-  const agent = shared ? { ...DEFAULT_AGENT, systemPrompt: DEFAULT_AGENT_PROMPTS.map((name) => `@${name}`) } : DEFAULT_AGENT;
+  // Its workspace is the project folder, by absolute path, with every permission.
+  const agent = { ...DEFAULT_AGENT, ...(shared ? { systemPrompt: DEFAULT_AGENT_PROMPTS.map((name) => `@${name}`) } : {}), workspace: { paths: { [fs.realpathSync(projectDir)]: 'rwd' } } };
   fs.writeFileSync(file, `${JSON.stringify(agent, null, 2)}\n`, { flag: 'wx' });
   created.push(file);
   return created;
@@ -228,17 +229,52 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
           );
         }
       }
-      // Workspace roots are relative to the project directory ("." is the
-      // project, and the default).
-      const specs = def.workspace?.roots ?? ['.'];
+      const home = (p: string) => (p === '~' || p.startsWith('~/') || p.startsWith('~\\') ? path.join(os.homedir(), p.slice(1)) : p);
       const roots: string[] = [];
-      specs.forEach((spec, i) => {
-        try {
-          roots.push(WorkspaceContext.resolveAndValidateDir(path.resolve(configDir, spec)));
-        } catch (error) {
-          throw new ConfigError(shown, `workspace.roots[${i}]`, error instanceof Error ? error.message : String(error));
+      let access: SandboxRule[];
+      const paths = def.workspace?.paths;
+      if (paths) {
+        // workspace.paths: absolute folders with their letters. The granted
+        // ones not inside another granted one are the roots, in order; every
+        // entry is also a rule (the longest matching path decides).
+        access = paths.map((entry): SandboxRule => {
+          try {
+            return { path: resolveWorkspacePath(path.resolve(home(entry.path))), access: entry.access };
+          } catch (error) {
+            throw new ConfigError(shown, `workspace.paths["${entry.path}"]`, error instanceof Error ? error.message : String(error));
+          }
+        });
+        const granted = access.filter((r) => r.access !== 'none');
+        access.forEach((rule, i) => {
+          if (rule.access === 'none' || granted.some((other) => other.path !== rule.path && isPathWithinRoot(rule.path, other.path))) return;
+          try {
+            roots.push(WorkspaceContext.resolveAndValidateDir(rule.path));
+          } catch (error) {
+            throw new ConfigError(shown, `workspace.paths["${paths[i]!.path}"]`, error instanceof Error ? error.message : String(error));
+          }
+        });
+        if (process.platform === 'linux' && paths.some((e) => e.access === 'edit')) {
+          warnings.push(`${shown}: on Linux the sandbox cannot let commands write without deleting, so "rw" folders allow deleting too (as "rwd").`);
         }
-      });
+      } else {
+        // Workspace roots are relative to the project directory ("." is the
+        // project, and the default).
+        const specs = def.workspace?.roots ?? ['.'];
+        specs.forEach((spec, i) => {
+          try {
+            roots.push(WorkspaceContext.resolveAndValidateDir(path.resolve(configDir, spec)));
+          } catch (error) {
+            throw new ConfigError(shown, `workspace.roots[${i}]`, error instanceof Error ? error.message : String(error));
+          }
+        });
+        access = (def.workspace?.access ?? []).map((entry, i): SandboxRule => {
+          try {
+            return { path: resolveWorkspacePath(path.resolve(configDir, home(entry.path))), access: entry.mode };
+          } catch (error) {
+            throw new ConfigError(shown, `workspace.access[${i}].path`, error instanceof Error ? error.message : String(error));
+          }
+        });
+      }
       const legacy = def.tools?.legacy;
       if (legacy) {
         warnings.push(
@@ -247,14 +283,6 @@ export function loadAgentTree(target: string, options: LoadOptions = {}): AgentT
       }
       // Agents that only had read tools keep a read-only workspace.
       const legacyAccess = legacy?.access === 'read' ? roots.map((root): SandboxRule => ({ path: root, access: 'read' })) : [];
-      const access = (def.workspace?.access ?? []).map((entry, i): SandboxRule => {
-        const expanded = entry.path === '~' || entry.path.startsWith('~/') || entry.path.startsWith('~\\') ? path.join(os.homedir(), entry.path.slice(1)) : entry.path;
-        try {
-          return { path: resolveWorkspacePath(path.resolve(configDir, expanded)), access: entry.mode };
-        } catch (error) {
-          throw new ConfigError(shown, `workspace.access[${i}].path`, error instanceof Error ? error.message : String(error));
-        }
-      });
       if (loaded.has(agentName)) throw new ConfigError(shown, undefined, `another file is already named "${agentName}"`);
       loaded.set(agentName, { file, definition: def, roots: [...new Set(roots)], access: [...legacyAccess, ...access] });
     } catch (error) {
@@ -334,7 +362,9 @@ export function describeTree(tree: AgentTree): string {
     lines.push(`      tools: ${tools.length ? tools.join(', ') : '(none)'}`);
     if (d.tools?.autoApprove?.length) lines.push(`      auto-approve: ${d.tools.autoApprove.join(', ')}`);
     if (d.prompts?.length) lines.push(`      prompts: ${d.prompts.join(', ')}`);
-    lines.push(`      roots: ${node.roots.length ? node.roots.join(', ') : '(no filesystem access)'}`);
+    const paths = node.definition.workspace?.paths;
+    if (paths) lines.push(`      paths: ${paths.map((e) => `${e.path} (${e.letters || 'blocked'})`).join(', ')}`);
+    else lines.push(`      roots: ${node.roots.length ? node.roots.join(', ') : '(no filesystem access)'}`);
   }
   for (const s of tree.skipped) lines.push(`  skipped ${s.file}: ${s.error}`);
   for (const w of tree.warnings) lines.push(`  note: ${w}`);

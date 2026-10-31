@@ -66,7 +66,8 @@ export function bubblewrapCommand(bwrap: string, command: SandboxCommand, policy
   if (!LINUX_SYSTEM_PATHS.some((s) => home === s || home.startsWith(s + '/'))) args.push('--tmpfs', home);
 
   for (const rule of prepareRules(policy.rules)) {
-    if (rule.access === 'write') args.push('--bind', rule.path, rule.path);
+    // A bind mount cannot allow writing but not deleting: "edit" is "write" here (the loader warns).
+    if (rule.access === 'write' || rule.access === 'edit') args.push('--bind', rule.path, rule.path);
     else if (rule.access === 'read') args.push('--ro-bind', rule.path, rule.path);
     else if (fs.statSync(rule.path).isDirectory()) args.push('--tmpfs', rule.path, '--remount-ro', rule.path);
     else args.push('--ro-bind', '/dev/null', rule.path);

@@ -5,6 +5,7 @@
  * instead of silently granting or dropping permissions.
  */
 
+import path from 'node:path';
 import { BUILTIN_TOOL_IDS, LEGACY_FILE_TOOL_IDS, LEGACY_WRITE_TOOL_IDS, MCP_TOOL_PREFIX, ToolNames } from '../tools/tool-names.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../providers/types.js';
 
@@ -30,6 +31,30 @@ export interface McpServerGrant {
 export interface WorkspaceAccess {
   path: string;
   mode: 'read' | 'write' | 'none';
+}
+
+/** One entry of workspace.paths: a folder and what commands may do in it. */
+export interface WorkspacePath {
+  /** Absolute, or under the home folder ("~/..."). */
+  path: string;
+  /** "" (none), "r", "rw" (no deleting) or "rwd". */
+  letters: string;
+  access: 'none' | 'read' | 'edit' | 'write';
+}
+
+/** What workspace.paths letters mean (r read, w write, d delete), or why they are wrong. */
+export function parsePathLetters(letters: string): { access: WorkspacePath['access'] } | { error: string } {
+  if (!/^[rwd]*$/.test(letters)) return { error: 'may only use the letters r (read), w (write) and d (delete), e.g. "r", "rw" or "rwd"; "" blocks the folder' };
+  if (new Set(letters).size !== letters.length) return { error: 'lists a letter twice' };
+  const has = (c: string) => letters.includes(c);
+  if (has('w') && !has('r')) return { error: '"w" needs "r" too ("rw")' };
+  if (has('d') && !has('w')) return { error: '"d" needs "w" too ("rwd")' };
+  return { access: has('d') ? 'write' : has('w') ? 'edit' : has('r') ? 'read' : 'none' };
+}
+
+/** An absolute path, or one under the home folder ("~", "~/x"). */
+export function isAbsoluteSpec(p: string): boolean {
+  return p === '~' || p.startsWith('~/') || p.startsWith('~\\') || path.posix.isAbsolute(p) || path.win32.isAbsolute(p);
 }
 
 export interface AgentGrant {
@@ -78,6 +103,13 @@ export interface AgentDefinition {
   temperature?: number;
   maxOutputTokens?: number;
   workspace?: {
+    /**
+     * The folders this agent may use, in order (the first is where commands
+     * start), each with its permission letters. A folder inside another
+     * narrows or widens it, and "" blocks it. Replaces roots and access.
+     */
+    paths?: WorkspacePath[];
+    /** Older form: read-write folders relative to the project (empty with paths). */
     roots: string[];
     /** Whether shell commands may use the network (default false: offline). */
     network?: boolean;
@@ -350,27 +382,43 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
 
   let workspace: AgentDefinition['workspace'];
   if (raw['workspace'] !== undefined) {
-    const ws = c.object(raw['workspace'], 'workspace', ['roots', 'network', 'access']);
-    const roots = c.stringArray(ws['roots'], 'workspace.roots', { unique: true, nonEmptyItems: true });
-    if (!roots) c.fail('workspace.roots', 'is required when workspace is given');
-    if (roots.length === 0) c.fail('workspace.roots', 'must list at least one directory');
+    const ws = c.object(raw['workspace'], 'workspace', ['paths', 'roots', 'network', 'access']);
     const network = c.boolean(ws['network'], 'workspace.network');
-    let access: WorkspaceAccess[] | undefined;
-    if (ws['access'] !== undefined) {
-      if (!Array.isArray(ws['access'])) c.fail('workspace.access', 'must be an array of { "path": "...", "mode": "read" | "write" | "none" }');
-      const seen = new Set<string>();
-      access = (ws['access'] as unknown[]).map((entry, i) => {
-        const field = `workspace.access[${i}]`;
-        const o = c.object(entry, field, ['path', 'mode']);
-        const p = c.string(o['path'], `${field}.path`, { nonEmpty: true, maxLength: 4096 });
-        const mode = c.string(o['mode'], `${field}.mode`);
-        if (!['read', 'write', 'none'].includes(mode)) c.fail(`${field}.mode`, 'must be "read", "write" or "none"');
-        if (seen.has(p)) c.fail(`${field}.path`, `"${p}" is listed twice`);
-        seen.add(p);
-        return { path: p, mode: mode as WorkspaceAccess['mode'] };
+    if (ws['paths'] !== undefined) {
+      if (ws['roots'] !== undefined || ws['access'] !== undefined) c.fail('workspace.paths', 'replaces roots and access: use one form or the other');
+      if (!ws['paths'] || typeof ws['paths'] !== 'object' || Array.isArray(ws['paths'])) c.fail('workspace.paths', 'must be an object of folder → permission letters, e.g. { "C:/work/site": "rwd", "~/notes": "r" }');
+      const paths = Object.entries(ws['paths'] as Record<string, unknown>).map(([p, letters]): WorkspacePath => {
+        const field = `workspace.paths["${p}"]`;
+        if (!p.trim() || p.length > 4096) c.fail(field, 'needs a folder path');
+        if (!isAbsoluteSpec(p)) c.fail(field, 'must be an absolute path (or start with ~ for the home folder)');
+        if (typeof letters !== 'string') c.fail(field, 'must be a string of permission letters ("r", "rw", "rwd" or "")');
+        const parsed = parsePathLetters(letters);
+        if ('error' in parsed) c.fail(field, parsed.error);
+        return { path: p, letters, access: parsed.access };
       });
+      if (!paths.some((e) => e.access !== 'none')) c.fail('workspace.paths', 'must give at least one folder a permission ("r", "rw" or "rwd")');
+      workspace = { paths, roots: [], ...(network !== undefined ? { network } : {}) };
+    } else {
+      const roots = c.stringArray(ws['roots'], 'workspace.roots', { unique: true, nonEmptyItems: true });
+      if (!roots) c.fail('workspace.roots', 'is required when workspace is given');
+      if (roots.length === 0) c.fail('workspace.roots', 'must list at least one directory');
+      let access: WorkspaceAccess[] | undefined;
+      if (ws['access'] !== undefined) {
+        if (!Array.isArray(ws['access'])) c.fail('workspace.access', 'must be an array of { "path": "...", "mode": "read" | "write" | "none" }');
+        const seen = new Set<string>();
+        access = (ws['access'] as unknown[]).map((entry, i) => {
+          const field = `workspace.access[${i}]`;
+          const o = c.object(entry, field, ['path', 'mode']);
+          const p = c.string(o['path'], `${field}.path`, { nonEmpty: true, maxLength: 4096 });
+          const mode = c.string(o['mode'], `${field}.mode`);
+          if (!['read', 'write', 'none'].includes(mode)) c.fail(`${field}.mode`, 'must be "read", "write" or "none"');
+          if (seen.has(p)) c.fail(`${field}.path`, `"${p}" is listed twice`);
+          seen.add(p);
+          return { path: p, mode: mode as WorkspaceAccess['mode'] };
+        });
+      }
+      workspace = { roots, ...(network !== undefined ? { network } : {}), ...(access ? { access } : {}) };
     }
-    workspace = { roots, ...(network !== undefined ? { network } : {}), ...(access ? { access } : {}) };
   }
 
   let tools: AgentDefinition['tools'];

@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveWorkspacePath } from '../permissions/workspace.js';
-import { accessFor, type SandboxAccess, type SandboxPolicy, type SandboxRule } from './sandbox.js';
+import { accessFor, isWritable, type SandboxAccess, type SandboxPolicy, type SandboxRule } from './sandbox.js';
 
 export interface SandboxPolicyInput {
   roots: readonly string[];
@@ -47,7 +47,7 @@ export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
   // What is taken back inside that: SF Agents' own files and git's hooks.
   const guards: SandboxRule[] = [];
   for (const rule of granted) {
-    if (rule.access !== 'write') continue;
+    if (!isWritable(rule.access)) continue;
     const git = path.join(rule.path, '.git');
     if (fs.existsSync(git) && fs.statSync(git).isDirectory()) {
       for (const name of GIT_PROTECTED) guards.push({ path: path.join(git, name), access: 'read', ensure: name === 'config' ? { kind: 'file' } : { kind: 'dir' } });
@@ -79,5 +79,5 @@ export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
 }
 
 function rank(access: SandboxAccess): number {
-  return access === 'write' ? 2 : access === 'read' ? 1 : 0;
+  return access === 'write' ? 3 : access === 'edit' ? 2 : access === 'read' ? 1 : 0;
 }

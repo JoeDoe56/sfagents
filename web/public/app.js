@@ -971,7 +971,8 @@ const askKey = (questions) => String(hashText(JSON.stringify(questions)));
 function buildQuestions(e) {
   const key = askKey(e.questions);
   const done = e.answered || answeredAsks.has(e.key);
-  if (!askDrafts.has(key)) askDrafts.set(key, e.questions.map(() => ({ picked: new Set(), other: null })));
+  // A question without options is answered by typing.
+  if (!askDrafts.has(key)) askDrafts.set(key, e.questions.map((q) => ({ picked: new Set(), other: q.options.length ? null : '' })));
   const draft = askDrafts.get(key);
   const card = document.createElement('div');
   card.className = `ask${done ? ' done' : ''}`;
@@ -1040,8 +1041,11 @@ function buildQuestions(e) {
       choices.append(b);
     };
     for (const o of q.options) option(o, false);
-    option(q.options.length ? 'Other…' : 'Answer…', true);
-    group.append(choices, other);
+    if (q.options.length) {
+      option('Other…', true);
+      group.append(choices);
+    }
+    group.append(other);
     card.append(group);
   });
   const actions = document.createElement('div');
@@ -1054,7 +1058,7 @@ function buildQuestions(e) {
       .map((q, i) => {
         const d = draft[i];
         const answer = [...d.picked, ...(d.other?.trim() ? [d.other.trim()] : [])].join(', ') || '(no answer)';
-        return e.questions.length === 1 ? answer : `**${q.question}**\n${answer}`;
+        return e.questions.length === 1 ? answer : `${q.question}\n${answer}`;
       })
       .join('\n\n');
     answeredAsks.add(e.key);

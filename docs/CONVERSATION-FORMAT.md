@@ -101,7 +101,7 @@ Sections form a tree that the model maintains with tools; the CLI can inspect it
 
 ## Runs and threads between agents
 
-Every agent invocation has a run ID (`r` + 10 random base-36 characters). Runs of the agent replying to the user write to the main conversation. When an agent messages another with `message_agent`:
+Every agent invocation has a run ID (`r` + 10 random base-36 characters). Runs of the agent replying to the user write to the main conversation. When an agent messages another with `message` (`message_agent` in older conversations):
 
 1. The pair's thread is `threads/<a>--<b>.md` (the two agent names sorted, so it is the same file whoever writes; `--N` is appended for a second or later parallel thread). Its `conversation` header has `kind: "thread"` and `agent: "<a>,<b>"`.
 2. The writer's message is appended to the thread as a `user` message whose `agent` is the writer. The replier's `run_start`, messages and `run_end` follow, with `agent` set to the replier.
@@ -119,9 +119,9 @@ File artifacts record `file`: the user's file the artifact shows, relative to th
 - A missing backing file is reported as a missing artifact. The conversation still loads.
 - Artifact records grant no filesystem or execution permissions.
 
-The runtime writes `agent_transcript` artifacts for child runs. Model-created artifacts (`create_artifact`) store their content under `artifacts/<id>/r1/<file name>` and use a display `type` derived from the file extension: `document` (Markdown), `html`, `image` (SVG and raster images), `code`, `data` or `text`. Readers accept any `type` string.
+The runtime writes `agent_transcript` artifacts for child runs. Model-created artifacts (`create_artifact` in older conversations; now `sf-artifact`, which links the file instead) store their content under `artifacts/<id>/r1/<file name>` and use a display `type` derived from the file extension: `document` (Markdown), `html`, `image` (SVG and raster images), `code`, `data` or `text`. Readers accept any `type` string.
 
-Retitling or repointing an artifact (`create_artifact` with its `id`; `update_artifact` in older conversations) writes the next revision to `artifacts/<id>/r<rev>/<file name>` and appends an `artifact_update`; earlier revision files are kept. `artifact_pin` records are written by clients when the user pins or unpins. The current view of an artifact (latest path, title, revision, pin state) is the `artifact` record with every later `artifact_update` and `artifact_pin` for it applied in order. An update that skips a revision, or an update or pin naming an unknown artifact, is a semantic error.
+Retitling or repointing an artifact (`sf-artifact --id`; `create_artifact` with its `id` or `update_artifact` in older conversations) writes the next revision to `artifacts/<id>/r<rev>/<file name>` and appends an `artifact_update`; earlier revision files are kept. `artifact_pin` records are written by clients when the user pins or unpins. The current view of an artifact (latest path, title, revision, pin state) is the `artifact` record with every later `artifact_update` and `artifact_pin` for it applied in order. An update that skips a revision, or an update or pin naming an unknown artifact, is a semantic error.
 
 `artifact_update` and `artifact_pin` were added after the first release of version 1. Older SF Agents builds report them as unknown record kinds.
 

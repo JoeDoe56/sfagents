@@ -271,5 +271,8 @@ describe('policy', () => {
     assert.doesNotMatch(profile, /\(subpath "\/Users"\)|\(subpath "\/Users\/me"\)/);
     assert.match(profile, /\(path-literal "\/private\/tmp\/sf \\"host\\"\.sock"\)/);
     assert.doesNotMatch(profile, /\(allow network-outbound\)/);
+    // "rw" without "d": writes, but no deleting or renaming.
+    const edit = seatbeltProfile({ rules: [{ path: '/Users/me/notes', access: 'edit' }], network: false }, '/private/var/folders/x/T/sfagents-sandbox-2');
+    assert.match(edit, /\(allow file-read\* file-write\* \(subpath "\/Users\/me\/notes"\)\)\n\(deny file-write-unlink \(subpath "\/Users\/me\/notes"\)\)/);
   });
 });
