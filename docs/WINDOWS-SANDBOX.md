@@ -37,8 +37,10 @@ second account. It does not lift the offline account's rules.
 
 The sandbox accounts cannot list or read file contents in personal profiles, ProgramData and
 other fixed/removable drives. `C:\ProgramData\Git` is the only ProgramData
-exception. New drives, profile folders or extra folders at `C:\` cause commands
-to refuse until setup refreshes those protections. Workspaces must be on C:;
+exception. Python's all-users installs at `C:\PythonNNN` are runtimes, not
+personal data, and stay readable (Windows grants Users read there), so virtual
+environments that point at them work. New drives, profile folders or extra
+folders at `C:\` cause commands to refuse until setup refreshes those protections. Workspaces must be on C:;
 system folders and the collection of user profiles cannot be workspace roots.
 Metadata and traversal permissions let runtimes resolve explicitly granted
 paths without opening personal file contents. A dedicated restricting SID has
@@ -51,7 +53,11 @@ the grant. Reboot persistence has not been verified.
 ## Commands and recovery
 
 The helper applies the canonical policy's file permissions before starting a
-command. Workspace roots can be changed; `read` rules deny changes and `none`
+command, and leaves them in place afterwards: the next command with the same
+policy (the same agent's folders) starts at once instead of re-applying
+recursive permissions to the whole workspace. A command with a different policy
+first revokes them (once no command of the old policy is running) and applies
+its own. Workspace roots can be changed; `read` rules deny changes and `none`
 rules deny access. More specific rules override inherited parent permissions.
 Guard ancestors cannot be renamed to replace a protected path. Modify grants
 exclude the permission to delete arbitrary children regardless of their ACLs.
@@ -59,7 +65,9 @@ If a workspace contains the native helper, the helper is always read-only and
 its ancestors are protected against replacement.
 
 A worker logs on as the selected account and creates the command with a
-write-restricted token, with privileges disabled and a fresh restricting SID.
+write-restricted token, with privileges disabled, a fresh restricting SID for
+the run's own objects and the policy's restricting SID, which the workspace
+write grants name.
 It runs on a private window station/desktop. The unrestricted worker's process
 and token DACLs deny access from the command, including owner rights.
 The session's named-object directory receives a non-inheriting grant for the
@@ -69,19 +77,29 @@ setup entries when a temporary entry shares a path and account SID.
 
 A Job Object contains the worker and all command descendants. Closing the
 broker or ending the command kills its background processes before permission
-cleanup. The run has an empty disposable home and temp directory. Only usable
+cleanup. Processes meant to outlive a command (dev servers, watchers) are run
+with the shell tool's `background: true`: the command's broker then stays
+alive with it, and stopping the job or quitting SF Agents ends it. The run has an empty disposable home and temp directory. Only usable
 PATH entries and locale variables cross from the host; provider credentials,
 host profile paths and runtime injection variables do not. Git trusts the
 granted roots for that process only, so status/commits work under a different
 account without changing global Git configuration.
 
-Commands share one machine-wide mutex. A second command waits up to 25 seconds
-then reports that the sandbox is busy; it must be retried. This prevents two
-policies from combining the dedicated account's permissions. Permission changes
-are journaled in `%LOCALAPPDATA%\SF Agents\sandbox`. A canceled/killed broker's
-Job Object kills its descendants; `recover` replays cleanup. The TypeScript
-adapter invokes recovery after every run, and the next run also recovers before
-applying permissions. An incomplete cleanup retains the journal and refuses
+A machine-wide mutex is held while permissions change, not while commands run.
+Commands with the same policy run side by side. A command with a different
+policy waits up to 25 seconds for the running ones (background jobs included)
+to end, then reports that the sandbox is busy. This prevents two policies from
+combining the dedicated account's permissions. The policy's standing
+permissions are journaled in `%LOCALAPPDATA%\SF Agents\sandbox\standing.json`
+and each run's own (its temp folder, pipe, namespace grant) in
+`runs\run-<id>.json`, next to a lock file the live broker holds open. A
+canceled/killed broker's Job Object kills its descendants; `recover` replays the
+cleanup of every run whose broker is gone, and `recover --all` (or uninstall)
+also revokes the standing permissions. The TypeScript adapter invokes recovery
+after every run, and the next run also recovers before applying permissions.
+The broker writes a marker line to stderr when the command starts; the shell
+tool's timeout counts from there, so a slow first permission setup does not
+use up a short timeout. An incomplete cleanup retains the journal and refuses
 later commands. Do not delete that journal to bypass a cleanup error.
 
 `sf-web` uses a unique local named pipe. Only the selected sandbox account and
@@ -89,8 +107,10 @@ the run's restricting SID are granted access. The native broker creates the
 Windows command shims; the host still holds the web provider key and enforces
 the existing quota, argument, size and time limits.
 
-Permission inheritance is recursive. First setup and commands in very large
-workspaces can take time; keep roots as narrow as practical.
+Permission inheritance is recursive. First setup, and the first command after
+switching to another agent's policy, can take a while in very large workspaces
+(about 30-50 seconds for a folder of many projects); keep roots as narrow as
+practical.
 
 ## Runtime compatibility
 

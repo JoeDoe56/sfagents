@@ -48,6 +48,8 @@ export interface SandboxPolicy {
   hostChannel?: { path: string };
   /** Host files a command may run inside the sandbox (read-only), e.g. the `sf-web` helper. */
   tools?: readonly { path: string; name: string }[];
+  /** Windows: a line the helper writes to stderr when the command starts (after its setup). */
+  startedMarker?: string;
 }
 
 export interface SandboxCommand {

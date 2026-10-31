@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     mem::zeroed,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     ptr::{null, null_mut},
 };
@@ -25,6 +25,14 @@ const COMMENT: &str = "SF Agents sandbox v1 (managed; remove with sfagents-sandb
 const TARGETS: [&str; 2] = ["sfagents/sandbox", "sfagents/sandbox-net"];
 // The only readable ProgramData subtree. Keep tool exceptions in one place.
 pub const PROGRAM_DATA_ALLOW: [&str; 1] = ["C:\\ProgramData\\Git"];
+/// Folders at C:\ that are language runtimes, not personal data: Python's
+/// all-users installer puts itself in C:\PythonNNN (venvs point there). They
+/// stay readable (Windows' own permissions: read for Users), like Program Files.
+pub fn is_runtime_root(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.strip_prefix("python")
+        .is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
+}
 // Metadata and traversal let runtimes resolve granted paths without allowing
 // directory listing or reading any personal file's contents.
 const HIDDEN: u32 =
@@ -328,6 +336,32 @@ pub fn install() -> Result<()> {
     crate::network::install(offline)?;
     powershell(&format!("$ErrorActionPreference='Stop'; Get-NetFirewallRule -Name 'SF-Agents-Sandbox-Offline-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule; foreach($d in @('Inbound','Outbound')) {{ New-NetFirewallRule -Name ('SF-Agents-Sandbox-Offline-'+$d) -DisplayName ('SF Agents sandbox offline '+$d) -Direction $d -Action Block -Profile Any -Enabled True -LocalUser 'D:(A;;CC;;;{offline})' | Out-Null }}"))?;
     let paths = hidden_paths()?;
+    // An earlier setup hid runtime folders; give them back.
+    let stale: Vec<Ace> = state
+        .aces
+        .iter()
+        .filter(|a| {
+            let p = Path::new(&a.path);
+            p.parent()
+                .is_some_and(|d| d.to_string_lossy().eq_ignore_ascii_case("C:\\"))
+                && p.file_name()
+                    .is_some_and(|n| is_runtime_root(&n.to_string_lossy()))
+        })
+        .cloned()
+        .collect();
+    let mut stale_paths: Vec<String> = stale.iter().map(|a| a.path.to_lowercase()).collect();
+    stale_paths.dedup();
+    for p in stale_paths {
+        let group: Vec<Ace> = stale
+            .iter()
+            .filter(|a| a.path.to_lowercase() == p)
+            .cloned()
+            .collect();
+        println!("Unhiding runtime folder {}", group[0].path);
+        acl_batch(&group, true)?;
+        state.aces.retain(|a| a.path.to_lowercase() != p);
+        save(&state)?;
+    }
     let mut batches: Vec<Vec<Ace>> = paths
         .iter()
         .map(|(p, mask, inherit)| {
@@ -477,6 +511,9 @@ fn hidden_paths() -> Result<Vec<(String, u32, bool)>> {
         if entry.file_type().map_err(|e| e.to_string())?.is_symlink() {
             continue;
         }
+        if is_runtime_root(&name) && entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            continue;
+        }
         paths.push((entry.path().to_string_lossy().into(), HIDDEN, true));
     }
     for drive in b'A'..=b'Z' {
@@ -568,6 +605,7 @@ pub fn uninstall() -> Result<()> {
     }
     let mut state = read_state()?;
     crate::runner::recover_locked()?;
+    crate::runner::revoke_standing_locked()?;
     state.ready = false;
     save(&state)?;
     let mut failures = vec![];
@@ -657,6 +695,15 @@ pub fn uninstall() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_installs_at_the_drive_root_are_runtimes() {
+        assert!(is_runtime_root("Python314"));
+        assert!(is_runtime_root("python27"));
+        assert!(!is_runtime_root("Python"));
+        assert!(!is_runtime_root("Python314-backup"));
+        assert!(!is_runtime_root("Peace backup"));
+    }
 
     #[test]
     fn partial_setup_pipe_alias_is_revoked_as_the_actual_device() {

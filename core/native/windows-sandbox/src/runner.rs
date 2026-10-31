@@ -25,13 +25,32 @@ struct Journal {
     aces: Vec<Ace>,
     temp: String,
 }
-fn journal_file() -> Result<PathBuf> {
+/// The permissions a run's policy needs on shared paths (workspace rules,
+/// guard anchors, the helper, the session namespace). They stay in place
+/// between runs while the policy is unchanged, so a large workspace is not
+/// re-permissioned for every command. `want` uses POLICY_SID for the policy's
+/// restricting SID; `aces` is what was applied, with the real SID.
+#[derive(Serialize, Deserialize)]
+struct Standing {
+    want: Vec<Vec<Ace>>,
+    sid: String,
+    aces: Vec<Ace>,
+    applied: bool,
+}
+const POLICY_SID: &str = "POLICY";
+/// A pre-concurrency journal: one run at a time, under the machine lock.
+fn legacy_journal_file() -> Result<PathBuf> {
     Ok(setup::state_dir()?.join("run.json"))
 }
-fn write_journal(j: &Journal) -> Result<()> {
-    let p = journal_file()?;
+fn standing_file() -> Result<PathBuf> {
+    Ok(setup::state_dir()?.join("standing.json"))
+}
+fn runs_dir() -> Result<PathBuf> {
+    Ok(setup::state_dir()?.join("runs"))
+}
+fn write_json<T: Serialize>(p: &Path, value: &T) -> Result<()> {
     let tmp = p.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_vec(j).unwrap()).map_err(|e| e.to_string())?;
+    fs::write(&tmp, serde_json::to_vec(value).unwrap()).map_err(|e| e.to_string())?;
     unsafe {
         check(
             MoveFileExW(
@@ -43,21 +62,89 @@ fn write_journal(j: &Journal) -> Result<()> {
         )
     }
 }
-pub fn recover() -> Result<()> {
-    let _lock = Lock::acquire()?;
-    recover_locked()
-}
-pub fn recover_locked() -> Result<()> {
-    let p = journal_file()?;
+fn read_standing() -> Result<Option<Standing>> {
+    let p = standing_file()?;
     if !p.exists() {
-        return Ok(());
+        return Ok(None);
     }
-    let j: Journal = serde_json::from_slice(&fs::read(&p).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    serde_json::from_slice(&fs::read(&p).map_err(|e| e.to_string())?)
+        .map(Some)
+        .map_err(|e| format!("invalid standing permissions journal: {e}"))
+}
+/// `recover --all`: also revoke the standing policy permissions.
+pub fn recover(all: bool) -> Result<()> {
+    let _lock = Lock::acquire()?;
+    recover_locked()?;
+    if all {
+        revoke_standing_locked()?;
+    }
+    Ok(())
+}
+/// Cleans up every run whose broker is gone; live runs keep their permissions.
+pub fn recover_locked() -> Result<()> {
+    let mut failures = vec![];
+    let legacy = legacy_journal_file()?;
+    if legacy.exists() {
+        if let Err(e) = recover_run(&legacy) {
+            failures.push(e);
+        }
+    }
+    let dir = runs_dir()?;
+    if dir.exists() {
+        for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let p = entry.map_err(|e| e.to_string())?.path();
+            if p.extension().is_some_and(|x| x == "json") && !run_is_live(&p) {
+                if let Err(e) = recover_run(&p) {
+                    failures.push(e);
+                }
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+/// A live broker holds its run's lock file open without sharing, so it
+/// cannot be deleted. Deleting a dead run's lock file proves it is dead.
+fn run_is_live(journal: &Path) -> bool {
+    let lock = journal.with_extension("lock");
+    lock.exists() && fs::remove_file(&lock).is_err()
+}
+fn live_runs() -> Result<usize> {
+    let dir = runs_dir()?;
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let p = entry.map_err(|e| e.to_string())?.path();
+        if p.extension().is_some_and(|x| x == "json") && run_is_live(&p) {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+pub fn revoke_standing_locked() -> Result<()> {
+    if let Some(standing) = read_standing()? {
+        if live_runs()? > 0 {
+            return Err(
+                "a sandbox command is still running; stop it before revoking its permissions"
+                    .into(),
+            );
+        }
+        revoke(&standing.aces)?;
+        fs::remove_file(standing_file()?).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+/// Removes our entries for each journaled path/SID, restoring setup's own.
+fn revoke(aces: &[Ace]) -> Result<()> {
     let mut failures = vec![];
     let installed = setup::read_state().ok();
     let mut batches = BTreeMap::<String, Vec<Ace>>::new();
-    for ace in j.aces.iter().rev() {
+    for ace in aces.iter().rev() {
         let group = batches.entry(ace.path.to_lowercase()).or_default();
         if !group.iter().any(|a| a.sid == ace.sid) {
             group.push(ace.clone());
@@ -102,8 +189,14 @@ pub fn recover_locked() -> Result<()> {
             failures.join("; ")
         ));
     }
+    Ok(())
+}
+fn recover_run(p: &Path) -> Result<()> {
+    let j: Journal = serde_json::from_slice(&fs::read(p).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    revoke(&j.aces)?;
     // Refuse recursive cleanup of anything except a run directory we created.
-    let root = setup::state_dir()?.join("runs");
+    let root = runs_dir()?;
     let temp = PathBuf::from(&j.temp);
     if temp.parent() != Some(root.as_path())
         || !temp
@@ -116,6 +209,7 @@ pub fn recover_locked() -> Result<()> {
         fs::remove_dir_all(&temp).map_err(|e| format!("remove run directory: {e}"))?;
     }
     fs::remove_file(p).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(p.with_extension("lock"));
     Ok(())
 }
 
@@ -195,6 +289,9 @@ fn protect_helper(policy: &mut Policy, helper: &str) {
 
 struct Permissions {
     journal: Journal,
+    file: PathBuf,
+    /// Held open (unshared) while the run lives; see run_is_live.
+    lock: Option<fs::File>,
 }
 impl Permissions {
     fn add(&mut self, p: &str, sid: &str, mask: u32, deny: bool, inherit: bool) -> Result<()> {
@@ -210,15 +307,178 @@ impl Permissions {
     fn add_batch(&mut self, aces: Vec<Ace>) -> Result<()> {
         // Journal before changing anything, including a partially applied DACL.
         self.journal.aces.extend(aces.iter().cloned());
-        write_journal(&self.journal)?;
+        write_json(&self.file, &self.journal)?;
         acl_batch(&aces, false)
     }
 }
 impl Drop for Permissions {
     fn drop(&mut self) {
-        if let Err(e) = recover_locked() {
+        // Mark this run dead, then clean it (and any other dead run) up.
+        self.lock.take();
+        let cleaned = Lock::acquire().and_then(|_lock| recover_locked());
+        if let Err(e) = cleaned {
             eprintln!("sfagents-sandbox cleanup: {e}");
         }
+    }
+}
+
+/// Grants for the policy's shared paths, in per-path batches. `policy_sid` is
+/// the restricting SID that write access goes through.
+fn policy_aces(
+    policy: &Policy,
+    sid: &str,
+    policy_sid: &str,
+    namespace: &str,
+    helper: &str,
+) -> Result<Vec<Vec<Ace>>> {
+    let ace = |path: &str, principal: &str, deny: bool, mask: u32, inherit: bool| Ace {
+        path: path.into(),
+        sid: principal.into(),
+        mode: if deny { "deny" } else { "allow" }.into(),
+        mask,
+        inherit,
+    };
+    let mut batches = vec![vec![ace(namespace, sid, false, 0x0f, false)]];
+    for r in &policy.rules {
+        let dir = Path::new(&r.path).is_dir();
+        let mask = match r.access {
+            Access::Write => MODIFY,
+            Access::Edit => EDIT,
+            Access::Read => READ,
+            Access::None => FILE_ALL_ACCESS,
+        };
+        let mut batch = vec![ace(&r.path, sid, r.access == Access::None, mask, dir)];
+        if r.access.writable() {
+            batch.push(ace(&r.path, policy_sid, false, mask, dir));
+        }
+        if r.access == Access::Edit {
+            // Explicit, so a writable parent's inherited DELETE does not apply.
+            for principal in [sid, policy_sid] {
+                batch.push(ace(
+                    &r.path,
+                    principal,
+                    true,
+                    DELETE | FILE_DELETE_CHILD,
+                    dir,
+                ));
+            }
+        }
+        if !r.access.writable() {
+            for principal in [sid, policy_sid] {
+                batch.push(ace(&r.path, principal, true, WRITE_BITS, dir));
+            }
+        }
+        batches.push(batch);
+    }
+    // Anchor guards and their parents so rename/delete cannot remove a guard's
+    // ACL and replace it with a newly writable path (e.g. rename .git).
+    let mut anchors = BTreeMap::new();
+    for r in &policy.rules {
+        let mut p = Path::new(&r.path).parent();
+        while let Some(parent) = p {
+            let text = parent.to_string_lossy().into_owned();
+            if access_at(&policy.rules, &text) == Access::None {
+                break;
+            }
+            if parent.is_dir() {
+                anchors.insert(text, ());
+            }
+            p = parent.parent();
+        }
+    }
+    for (p, _) in anchors {
+        batches.push(vec![ace(
+            &p,
+            sid,
+            true,
+            DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER,
+            false,
+        )]);
+    }
+    batches.push(vec![ace(helper, sid, false, READ, false)]);
+    for tool in policy.tools.iter().filter(|t| t.name == "sf-node") {
+        let p = canonical(&tool.path)?;
+        if ![
+            r"C:\Windows",
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+        ]
+        .iter()
+        .any(|system| within(&p, system))
+        {
+            batches.push(vec![ace(&p, sid, false, READ, false)]);
+        }
+    }
+    Ok(batches)
+}
+
+/// Makes the standing permissions match `want` (called with the machine lock
+/// held, which it may release while it waits). Unchanged permissions are kept,
+/// so only the first command of a policy pays for a large workspace. Commands
+/// with another policy wait until the running ones (including background
+/// processes) end, so two policies never combine the account's permissions.
+fn ensure_standing(lock: &mut Option<Lock>, want: Vec<Vec<Ace>>) -> Result<String> {
+    let started = std::time::Instant::now();
+    let key = serde_json::to_string(&want).unwrap();
+    loop {
+        let current = read_standing()?;
+        if let Some(s) = &current {
+            if s.applied && serde_json::to_string(&s.want).unwrap() == key {
+                return Ok(s.sid.clone());
+            }
+        }
+        if live_runs()? > 0 {
+            if started.elapsed().as_secs() >= 25 {
+                return Err("another sandbox command with different folder permissions (another agent's, or a background process) is still running; retry after it finishes or stop it".into());
+            }
+            lock.take();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            *lock = Some(Lock::acquire()?);
+            recover_locked()?;
+            continue;
+        }
+        if let Some(s) = current {
+            revoke(&s.aces)?;
+            fs::remove_file(standing_file()?).map_err(|e| e.to_string())?;
+        }
+        let nonce = random()?;
+        let sid = format!(
+            "S-1-5-21-{}-{}-{}-{}",
+            u32::from_str_radix(&nonce[0..8], 16).unwrap(),
+            u32::from_str_radix(&nonce[8..16], 16).unwrap(),
+            u32::from_str_radix(&nonce[16..24], 16).unwrap(),
+            u32::from_str_radix(&nonce[24..32], 16).unwrap()
+        );
+        let real: Vec<Vec<Ace>> = want
+            .iter()
+            .map(|batch| {
+                batch
+                    .iter()
+                    .map(|a| Ace {
+                        sid: if a.sid == POLICY_SID {
+                            sid.clone()
+                        } else {
+                            a.sid.clone()
+                        },
+                        ..a.clone()
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut standing = Standing {
+            want,
+            sid: sid.clone(),
+            aces: real.concat(),
+            applied: false,
+        };
+        // Journal before changing anything, including a partially applied DACL.
+        write_json(&standing_file()?, &standing)?;
+        for batch in &real {
+            acl_batch(batch, false)?;
+        }
+        standing.applied = true;
+        write_json(&standing_file()?, &standing)?;
+        return Ok(sid);
     }
 }
 
@@ -227,6 +487,9 @@ struct Payload {
     owner: String,
     account: String,
     restricted: String,
+    /// The restricting SID the standing workspace grants use.
+    #[serde(default)]
+    policy_sid: String,
     policy: Policy,
     exe: String,
     args: Vec<String>,
@@ -253,7 +516,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         &mut policy,
         &canonical(helper.to_str().ok_or("non-Unicode helper path")?)?,
     );
-    let _lock = Lock::acquire()?;
+    let mut lock = Some(Lock::acquire()?);
     recover_locked()?;
     let state = setup::read_state()?;
     if state.version != 1 || !state.ready || state.owner != current_sid()? || state.sids.len() != 2
@@ -269,6 +532,20 @@ pub fn run(args: &[String]) -> Result<i32> {
     if !policy.network {
         crate::network::probe(&sid)?;
     }
+    for tool in &policy.tools {
+        if !HOST_TOOLS.contains(&tool.name.as_str()) {
+            return Err("unknown host helper tool".into());
+        }
+    }
+    let namespace = namespace_path()?;
+    let want = policy_aces(
+        &policy,
+        &sid,
+        POLICY_SID,
+        &namespace,
+        &canonical(helper.to_str().ok_or("non-Unicode helper path")?)?,
+    )?;
+    let policy_sid = ensure_standing(&mut lock, want)?;
     let nonce = random()?;
     let restricted = format!(
         "S-1-5-21-{}-{}-{}-{}",
@@ -277,135 +554,37 @@ pub fn run(args: &[String]) -> Result<i32> {
         u32::from_str_radix(&nonce[16..24], 16).unwrap(),
         u32::from_str_radix(&nonce[24..32], 16).unwrap()
     );
-    let temp = setup::state_dir()?
-        .join("runs")
-        .join(format!("run-{nonce}"));
+    let runs = runs_dir()?;
+    let temp = runs.join(format!("run-{nonce}"));
     fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
     let temp_text = temp
         .to_str()
         .ok_or("non-Unicode run directory")?
         .to_string();
+    let run_lock = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(runs.join(format!("run-{nonce}.lock")))
+            .map_err(|e| format!("create run lock: {e}"))?
+    };
     let mut perms = Permissions {
         journal: Journal {
             aces: vec![],
             temp: temp_text.clone(),
         },
+        file: runs.join(format!("run-{nonce}.json")),
+        lock: Some(run_lock),
     };
-    write_journal(&perms.journal)?;
-    let namespace = namespace_path()?;
-    perms.add_batch(
-        [&sid, &restricted]
-            .iter()
-            .map(|principal| Ace {
-                path: namespace.clone(),
-                sid: (*principal).clone(),
-                mode: "allow".into(),
-                mask: 0x0f,
-                inherit: false,
-            })
-            .collect(),
-    )?;
-    for r in &policy.rules {
-        let dir = Path::new(&r.path).is_dir();
-        let mask = match r.access {
-            Access::Write => MODIFY,
-            Access::Edit => EDIT,
-            Access::Read => READ,
-            Access::None => FILE_ALL_ACCESS,
-        };
-        let mut batch = vec![Ace {
-            path: r.path.clone(),
-            sid: sid.clone(),
-            mode: if r.access == Access::None {
-                "deny"
-            } else {
-                "allow"
-            }
-            .into(),
-            mask,
-            inherit: dir,
-        }];
-        if r.access.writable() {
-            batch.push(Ace {
-                path: r.path.clone(),
-                sid: restricted.clone(),
-                mode: "allow".into(),
-                mask,
-                inherit: dir,
-            });
-        }
-        if r.access == Access::Edit {
-            // Explicit, so a writable parent's inherited DELETE does not apply.
-            for principal in [&sid, &restricted] {
-                batch.push(Ace {
-                    path: r.path.clone(),
-                    sid: principal.clone(),
-                    mode: "deny".into(),
-                    mask: DELETE | FILE_DELETE_CHILD,
-                    inherit: dir,
-                });
-            }
-        }
-        if !r.access.writable() {
-            for principal in [&sid, &restricted] {
-                batch.push(Ace {
-                    path: r.path.clone(),
-                    sid: principal.clone(),
-                    mode: "deny".into(),
-                    mask: WRITE_BITS,
-                    inherit: dir,
-                });
-            }
-        }
-        perms.add_batch(batch)?;
-    }
-    // Anchor guards and their parents so rename/delete cannot remove a guard's
-    // ACL and replace it with a newly writable path (e.g. rename .git).
-    let mut anchors = BTreeMap::new();
-    for r in &policy.rules {
-        let mut p = Path::new(&r.path).parent();
-        while let Some(parent) = p {
-            let text = parent.to_string_lossy().into_owned();
-            if access_at(&policy.rules, &text) == Access::None {
-                break;
-            }
-            if parent.is_dir() {
-                anchors.insert(text, ());
-            }
-            p = parent.parent();
-        }
-    }
-    for (p, _) in anchors {
-        perms.add(
-            &p,
-            &sid,
-            DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER,
-            true,
-            false,
-        )?;
-    }
+    write_json(&perms.file, &perms.journal)?;
+    perms.add(&namespace, &restricted, 0x0f, false, false)?;
     // A per-command empty home/temp. Never inherit the host's profile or keys.
     perms.add(&temp_text, &sid, MODIFY, false, true)?;
     perms.add(&temp_text, &restricted, MODIFY, false, true)?;
     let tool_dir = temp.join("bin");
     fs::create_dir(&tool_dir).map_err(|e| e.to_string())?;
-    for tool in &policy.tools {
-        if !HOST_TOOLS.contains(&tool.name.as_str()) {
-            return Err("unknown host helper tool".into());
-        }
-        let p = canonical(&tool.path)?;
-        if tool.name == "sf-node"
-            && ![
-                "C:\\Windows",
-                "C:\\Program Files",
-                "C:\\Program Files (x86)",
-            ]
-            .iter()
-            .any(|system| within(&p, system))
-        {
-            perms.add(&p, &sid, READ, false, false)?;
-        }
-    }
     if let Some(node) = policy.tools.iter().find(|t| t.name == "sf-node") {
         // Node's path is host-generated. Do not expose a shell-generated script
         // containing an unescaped percent sign or quote.
@@ -457,6 +636,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         owner: state.owner.clone(),
         account: sid.clone(),
         restricted,
+        policy_sid,
         policy,
         exe,
         args: args[4..].to_vec(),
@@ -471,7 +651,12 @@ pub fn run(args: &[String]) -> Result<i32> {
         true,
         false,
     )?;
-    perms.add(helper.to_str().unwrap(), &sid, READ, false, false)?;
+    if let Some(marker) = &payload.policy.started_marker {
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        let _ = writeln!(err, "{marker}");
+        let _ = err.flush();
+    }
     let pass = setup::password(index)?;
     let mut account_token = null_mut();
     unsafe {
@@ -545,6 +730,9 @@ pub fn run(args: &[String]) -> Result<i32> {
             TerminateProcess(process.0, 125);
             return Err(last("resume worker"));
         }
+        // Permissions are in place: commands with the same policy may now run
+        // alongside this one (and this one may keep running in the background).
+        lock.take();
         let wait = WaitForMultipleObjects(2, [process.0, parent.0].as_ptr(), 0, INFINITE);
         if wait != WAIT_OBJECT_0 && wait != WAIT_OBJECT_0 + 1 {
             return Err(last("wait for command or SF Agents exit"));
@@ -788,6 +976,12 @@ pub fn worker(args: &[String]) -> Result<i32> {
     }
     let mut group_data = vec![0u64; (group_size as usize + 7) / 8];
     let mut restricting_sids = vec![sid];
+    // Writes to the workspace go through the policy's standing SID.
+    let policy_sid = Sid::parse(&payload.policy_sid)?;
+    restricting_sids.push(SID_AND_ATTRIBUTES {
+        Sid: policy_sid.ptr(),
+        Attributes: 0,
+    });
     let runtime_sid = Sid::parse(setup::RUNTIME_SID)?;
     restricting_sids.push(SID_AND_ATTRIBUTES {
         Sid: runtime_sid.ptr(),
@@ -1145,6 +1339,7 @@ mod tests {
             env: BTreeMap::new(),
             host_channel: None,
             tools: vec![],
+            started_marker: None,
         }
     }
     #[test]

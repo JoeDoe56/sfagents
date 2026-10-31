@@ -74,7 +74,8 @@ describe('removed file tools', () => {
 
   test('schema validation rejects bad arguments', async () => {
     const f = await fixture(['shell']);
-    assert.throws(() => f.tools.get('shell')!.build({}), /must have required property 'command'/);
+    assert.throws(() => f.tools.get('shell')!.build({}), /Command cannot be empty/);
+    assert.throws(() => f.tools.get('shell')!.build({ job_action: 'restart' }), /job_action|must be equal to one of/);
   });
 });
 
@@ -96,6 +97,27 @@ describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () =>
     const r = await call(f, 'shell', { command: isWin ? 'ping -n 30 127.0.0.1' : 'sleep 30' });
     assert.equal(r.result!.error?.type, ToolErrorType.EXECUTION_TIMEOUT);
     assert.ok(Date.now() - started < 10_000);
+  });
+
+  test('runs a command in the background, reads its new output and stops it', async () => {
+    const f = await fixture(['shell']);
+    // Inline: Node cannot resolve a script file's path under the temp folder inside the Windows sandbox.
+    const started = await call(f, 'shell', { command: `"${process.execPath}" -e "let n = 0; console.log('ready'); setInterval(() => console.log('tick ' + ++n), 200)"`, background: true, timeout_seconds: 2 });
+    assert.equal(started.result!.error, undefined, started.result!.llmContent);
+    const id = /Job: (job-\d+)/.exec(started.result!.llmContent)?.[1];
+    assert.ok(id, started.result!.llmContent);
+    assert.match(started.result!.llmContent, /State: running/);
+    assert.match(started.result!.llmContent, /New output: ready/);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const output = await call(f, 'shell', { job_action: 'output', job_id: id });
+    // Only output not read before.
+    assert.match(output.result!.llmContent, /New output: tick \d+/);
+    const list = await call(f, 'shell', { job_action: 'list' });
+    assert.match(list.result!.llmContent, new RegExp(`Job: ${id}[\\s\\S]*State: running`));
+    const stopped = await call(f, 'shell', { job_action: 'stop', job_id: id });
+    assert.match(stopped.result!.llmContent, /State: exited \(stopped\)/);
+    const done = await call(f, 'shell', { command: `"${process.execPath}" -e "console.log('quick')"`, background: true });
+    assert.match(done.result!.llmContent, /State: exited with code 0[\s\S]*quick/);
   });
 
   test('does not leak the provider API key into commands', async () => {

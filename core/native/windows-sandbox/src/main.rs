@@ -36,7 +36,7 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
             Ok(0)
         }
         "help" | "--help" => {
-            println!("sfagents-sandbox setup | uninstall | probe | recover | run --policy <file> -- <exe> [args...]\nsetup/uninstall require an administrator terminal. run/probe never elevate.");
+            println!("sfagents-sandbox setup | uninstall | probe | recover [--all] | run --policy <file> -- <exe> [args...]\nsetup/uninstall require an administrator terminal. run/probe never elevate.");
             Ok(0)
         }
         #[cfg(windows)]
@@ -56,7 +56,7 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
         }
         #[cfg(windows)]
         "recover" => {
-            runner::recover()?;
+            runner::recover(args.get(1).is_some_and(|a| a == "--all"))?;
             Ok(0)
         }
         #[cfg(windows)]

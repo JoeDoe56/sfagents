@@ -43,6 +43,10 @@ pub struct Policy {
     pub host_channel: Option<Channel>,
     #[serde(default)]
     pub tools: Vec<Tool>,
+    /// Written to stderr (with a newline) once permissions are in place, just
+    /// before the command starts, so the host can time the command alone.
+    #[serde(default)]
+    pub started_marker: Option<String>,
 }
 /// CRT quoting, including empty arguments, embedded quotes and trailing slashes.
 pub fn quote(arg: &str) -> String {
