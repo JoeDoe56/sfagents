@@ -11,6 +11,7 @@ coverage/
 # Personal project configuration; generic starting points live in examples/.
 /agents/
 /prompts/
+/artifacts/
 /mcp.json
 /brightdata-mcp-example.json
 
