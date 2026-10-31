@@ -528,6 +528,28 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     }
   }
 
+  // Tool families the person opened stay open when the numbers refresh.
+  const openFamilies = new Set();
+
+  /** A tool's definition exactly as the model receives it. */
+  function showTool(item) {
+    const schema = item.schema ?? {};
+    openSheet({
+      title: item.name,
+      detents: ['large'],
+      className: 'ag-tool-sheet',
+      build(sheet) {
+        const meta = el('p', 'ag-tool-meta', `${tokensText(item.tokens)} tokens${item.detail ? ` · ${item.detail}` : ''}`);
+        const desc = el('p', 'ag-tool-desc', schema.description || 'No description.');
+        const label = el('h3', 'ag-tool-label', 'Parameters');
+        const pre = el('pre', 'ag-tool-json', JSON.stringify(schema.parameters ?? {}, null, 2));
+        const rawLabel = el('h3', 'ag-tool-label', 'As sent');
+        const raw = el('pre', 'ag-tool-json', JSON.stringify(schema));
+        sheet.body.append(meta, desc, label, pre, rawLabel, raw);
+      },
+    });
+  }
+
   function render() {
     const c = context;
     if (!c) return;
@@ -584,12 +606,12 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       const group = createGroup();
       for (const cat of families) {
         const kids = cat.items.map((it) =>
-          createRow({ title: it.name, value: `${it.detail ? `${it.detail} · ` : ''}${tokensText(it.tokens)}` }),
+          createRow({ title: it.name, value: `${it.detail ? `${it.detail} · ` : ''}${tokensText(it.tokens)}`, accessory: 'chevron', onTap: () => showTool(it) }),
         );
         for (const k of kids) k.el.classList.add('nested');
         const chevron = sfIcon('chevron.right', 12);
         chevron.classList.add('sf-row-chevron');
-        let openFamily = false;
+        let openFamily = openFamilies.has(cat.id);
         const head = createRow({
           leadingNode: key(CATEGORY_COLORS[cat.id]),
           title: `${cat.label} (${cat.items.length})`,
@@ -597,6 +619,8 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
           accessoryNode: chevron,
           onTap: () => {
             openFamily = !openFamily;
+            if (openFamily) openFamilies.add(cat.id);
+            else openFamilies.delete(cat.id);
             chevron.classList.toggle('open', openFamily);
             if (openFamily) {
               let after = head.el;
@@ -609,6 +633,10 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
           },
         });
         group.add(head);
+        if (openFamily) {
+          chevron.classList.add('open');
+          for (const k of kids) group.add(k);
+        }
       }
       sections.push(createSection({ title: 'Tools', group }).el);
     }

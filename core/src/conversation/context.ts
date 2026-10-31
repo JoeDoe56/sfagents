@@ -223,7 +223,7 @@ export interface ContextBreakdown {
     id: 'system' | 'builtin' | 'mcp' | 'agents' | 'conversation' | 'index' | 'messages';
     label: string;
     tokens: number;
-    items?: Array<{ name: string; tokens: number; detail?: string }>;
+    items?: Array<{ name: string; tokens: number; detail?: string; schema?: unknown }>;
   }>;
   exchanges: { included: number; omitted: number; recentLimit: number; sinceReset: number };
   sections: { shown: number; total: number };
@@ -258,7 +258,7 @@ export function contextBreakdown(
   }
   const toolTokens = (t: ContextTool) => estimateTokens(JSON.stringify(t.schema));
   const family = (group: ContextTool['group']) => tools.filter((t) => t.group === group);
-  const itemsOf = (list: readonly ContextTool[]) => list.map((t) => ({ name: t.name, tokens: toolTokens(t), ...(t.server ? { detail: t.server } : {}) })).sort((a, b) => b.tokens - a.tokens);
+  const itemsOf = (list: readonly ContextTool[]) => list.map((t) => ({ name: t.name, tokens: toolTokens(t), ...(t.server ? { detail: t.server } : {}), schema: t.schema })).sort((a, b) => b.tokens - a.tokens);
   const sum = (list: Array<{ tokens: number }>) => list.reduce((a, x) => a + x.tokens, 0);
   const builtin = itemsOf(family('builtin'));
   const mcp = itemsOf(family('mcp'));

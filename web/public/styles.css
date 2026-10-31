@@ -1077,3 +1077,9 @@ button.tree-card:active { transform: scale(0.97); background: #3a3a3c; }
   0%, 100% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0); }
   25% { box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.8); }
 }
+
+/* A tool's definition (agent sheet → Tools) */
+.ag-tool-meta { margin: 4px 4px 8px; color: var(--ink-2); font-size: 13px; }
+.ag-tool-desc { margin: 0 4px 16px; font-size: 15px; line-height: 21px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ag-tool-label { margin: 0 4px 6px; color: var(--ink-2); font-size: 13px; font-weight: 600; }
+.ag-tool-json { margin: 0 0 18px; padding: 12px 14px; border-radius: 12px; background: #2c2c2e; font: 12px/17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
