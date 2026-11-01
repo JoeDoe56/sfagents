@@ -9,9 +9,10 @@
 import { ArtifactError, ARTIFACT_COMMAND, ARTIFACT_USAGE, type ArtifactCommand } from '../conversation/artifacts.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { WebGrant } from '../sandbox/host-channel.js';
+import { GIT_COMMAND, GIT_USAGE, runGit, type GitGrant } from './host-git.js';
 
 export const WEB_COMMAND = 'sf-web';
-export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND];
+export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, GIT_COMMAND];
 
 export const MAX_WEB_RESULT_BYTES = 1024 * 1024;
 export const WEB_REQUEST_TIMEOUT_MS = 90_000;
@@ -24,10 +25,13 @@ export interface HostCommands {
   web?: WebGrant;
   /** Artifacts (artifacts.access "create"). */
   artifact?: ArtifactCommand;
+  /** Git push/fetch with the person's credentials (agents with a general shell). */
+  git?: GitGrant;
 }
 
 /** How a command is described where tools are listed (the agent sheet): what it does, and its usage. */
 export function hostCommandSchema(name: string): { name: string; description: string; usage: string } {
+  if (name === GIT_COMMAND) return { name, description: "Git push, fetch and ls-remote, run by SF Agents on the host with the person's credentials (no force pushes or deletes, hooks off, logged). A command in the shell tool.", usage: GIT_USAGE };
   if (name === WEB_COMMAND) return { name, description: 'Web search and pages, fetched by SF Agents on the host (Bright Data). A command in the shell tool, explained in its description; agents without "shell" get a shell that runs only these commands.', usage: WEB_USAGE };
   return { name, description: 'Shows a file, a folder or a web app running on this computer as an artifact, or changes one. A command in the shell tool, explained in its description; agents without "shell" get a shell that runs only these commands.', usage: ARTIFACT_USAGE };
 }
@@ -36,7 +40,7 @@ export type HostCommandReply = { ok: true; text: string; truncated?: boolean } |
 
 /** The commands this agent has, by name. */
 export function availableHostCommands(cmds: HostCommands): string[] {
-  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : [])];
+  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.git ? [GIT_COMMAND] : [])];
 }
 
 async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
@@ -80,6 +84,10 @@ export async function runHostCommand(
       if (!cmds.artifact) return { ok: false, error: 'This agent may not create artifacts (artifacts.access).' };
       if (args.includes('-h') || args.includes('--help')) return { ok: true, text: ARTIFACT_USAGE };
       return { ok: true, text: cmds.artifact(args, { cwd: o.cwd, callId: o.callId, stdin: o.stdin }) };
+    }
+    if (name === GIT_COMMAND) {
+      if (!cmds.git) return { ok: false, error: 'This agent has no general shell, so no sf-git.' };
+      return await runGit(cmds.git, args, { cwd: o.cwd, signal: o.signal });
     }
     return { ok: false, error: `Unknown command ${name}.` };
   } catch (error) {

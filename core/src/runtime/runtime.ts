@@ -271,6 +271,8 @@ export class AgentRuntime implements AgentMessenger {
     // "shell" in tools.allow is the general shell (in the sandbox); without it, an agent
     // with web access or artifacts gets a shell that runs only those commands.
     const fullShell = allow.includes(ToolNames.SHELL) && !!workspace;
+    // Pushing (and fetching private repositories) with the person's Git credentials, on the host.
+    if (fullShell && workspace) commands.git = { agent: node.id, workspace };
     if (fullShell || availableHostCommands(commands).length) {
       const ctx: ToolContext = {
         ...(workspace ? { workspace } : {}),

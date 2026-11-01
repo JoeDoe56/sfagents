@@ -18,7 +18,7 @@ use windows_sys::Win32::{
 };
 
 /// The host commands a sandboxed shell may be given (see host-commands.ts).
-const HOST_TOOLS: &[&str] = &["sf-node", "sf-web", "sf-artifact"];
+const HOST_TOOLS: &[&str] = &["sf-node", "sf-web", "sf-artifact", "sf-git"];
 
 #[derive(Serialize, Deserialize)]
 struct Journal {
@@ -1260,10 +1260,20 @@ pub fn worker(args: &[String]) -> Result<i32> {
         find_repos(Path::new(&r.path), &payload.policy.rules, 3, &mut trusted);
     }
     trusted.dedup();
-    env.insert("GIT_CONFIG_COUNT".into(), trusted.len().to_string());
-    for (i, p) in trusted.iter().enumerate() {
-        env.insert(format!("GIT_CONFIG_KEY_{i}"), "safe.directory".into());
-        env.insert(format!("GIT_CONFIG_VALUE_{i}"), p.replace('\\', "/"));
+    let mut git_config: Vec<(String, String)> = trusted
+        .iter()
+        .map(|p| ("safe.directory".to_string(), p.replace('\\', "/")))
+        .collect();
+    // No credential helpers in here: Git for Windows' (the Credential Manager,
+    // started through msys sh) cannot run in the sandbox, and the person's
+    // credentials stay on the host (SF Agents pushes for agents). An empty
+    // value resets the list. Never prompt on a terminal that is not there.
+    git_config.push(("credential.helper".into(), String::new()));
+    env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    env.insert("GIT_CONFIG_COUNT".into(), git_config.len().to_string());
+    for (i, (k, v)) in git_config.iter().enumerate() {
+        env.insert(format!("GIT_CONFIG_KEY_{i}"), k.clone());
+        env.insert(format!("GIT_CONFIG_VALUE_{i}"), v.clone());
     }
     if let Some(channel) = &payload.policy.host_channel {
         env.insert("SFAGENTS_HOST".into(), channel.path.clone());

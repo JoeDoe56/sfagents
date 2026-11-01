@@ -128,6 +128,11 @@ export class PackageProxy {
     return agent ? this.log.filter((e) => e.agent === agent) : [...this.log];
   }
 
+  /** Logs network use that does not go through the proxy (sf-git on the host). */
+  add(entry: Omit<NetworkLogEntry, 'time'>): void {
+    this.push({ time: new Date().toISOString(), ...entry });
+  }
+
   onEntry(listener: (entry: NetworkLogEntry) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -163,6 +168,10 @@ export class PackageProxy {
       allowed,
       ...(reason ? { reason } : {}),
     };
+    this.push(entry);
+  }
+
+  private push(entry: NetworkLogEntry) {
     this.log.push(entry);
     if (this.log.length > MAX_LOG) this.log.splice(0, this.log.length - MAX_LOG);
     for (const l of this.listeners) l(entry);

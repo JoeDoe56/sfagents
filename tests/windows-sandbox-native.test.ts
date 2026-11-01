@@ -143,12 +143,24 @@ describe('Windows sandbox native isolation', { skip: !enabled && 'requires appro
     assert.equal(fs.readFileSync(path.join(workspace, 'shared', 'read.txt'), 'utf8'), 'writable again', 'recovery removes the previous policy\'s deny ACEs');
   });
 
-  test('offline blocks loopback and Internet; network opt-in permits loopback', async () => {
+  test('offline blocks fixed-port loopback and Internet, allows dynamic-port loopback; network opt-in permits loopback', async () => {
     const sockets = new Set<net.Socket>();
-    const server = net.createServer(s => { sockets.add(s); s.on('close', () => sockets.delete(s)); s.on('error', () => s.destroy()); s.end('connected'); });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const listen = async (want: number) => {
+      const server = net.createServer(s => { sockets.add(s); s.on('close', () => sockets.delete(s)); s.on('error', () => s.destroy()); s.end('connected'); });
+      await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(want, '127.0.0.1', resolve); });
+      return server;
+    };
+    // A fixed service port (below the dynamic range) stays unreachable offline.
+    let server: net.Server | undefined;
+    for (let tries = 0; !server && tries < 20; tries++) server = await listen(20000 + Math.floor(Math.random() * 20000)).catch(() => undefined);
+    assert.ok(server, 'no free fixed port');
+    const dynamic = await listen(0);
     const port = (server.address() as net.AddressInfo).port;
+    const dynamicPort = (dynamic.address() as net.AddressInfo).port;
+    assert.ok(dynamicPort >= 49152, `dynamic port ${dynamicPort}`);
+    const connectTo = (p: number) => `const s=require('node:net').connect(${p},'127.0.0.1');s.setTimeout(3000,()=>{console.error('connection timed out');process.exit(1)});s.on('error',e=>{console.error(e.code);process.exit(1)});s.on('connect',()=>{console.log('connected');s.destroy()});`;
     try {
+      assert.match(success(await js(connectTo(dynamicPort))), /connected/);
       const script = `const s=require('node:net').connect(${port},'127.0.0.1');s.setTimeout(3000,()=>{console.error('connection timed out');process.exit(1)});s.on('error',e=>{console.error(e.code);process.exit(1)});s.on('connect',()=>{console.log('connected');s.destroy()});`;
       const offline = await js(script);
       assert.equal(offline.exitCode, 1, offline.stderr);
@@ -156,7 +168,7 @@ describe('Windows sandbox native isolation', { skip: !enabled && 'requires appro
       assert.match(success(await js(script, { ...policy, network: true })), /connected/);
       assert.notEqual((await command('curl.exe --max-time 5 -I https://example.com')).exitCode, 0);
       assert.match(success(await js(`const request=require('node:https').get('https://example.com',r=>{console.log('https '+r.statusCode);r.resume()});request.setTimeout(15000,()=>{request.destroy(new Error('HTTPS timed out'))});request.on('error',e=>{console.error(e);process.exit(1)});`, { ...policy, network: true })), /https 200/);
-    } finally { for (const s of sockets) s.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+    } finally { for (const s of sockets) s.destroy(); await new Promise<void>(resolve => server!.close(() => resolve())); await new Promise<void>(resolve => dynamic.close(() => resolve())); }
   });
 
   test('offline sf-web uses only the host pipe and enforces quota', async () => {
