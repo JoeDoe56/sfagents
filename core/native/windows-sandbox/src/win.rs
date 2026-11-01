@@ -483,6 +483,149 @@ fn change_acl(aces: &[Ace], remove: bool, baseline: &[Ace]) -> Result<()> {
     }
 }
 
+/// One entry for set_explicit_here: deny or allow `mask`, with raw ACE `flags`
+/// (0 for this object only; OBJECT|CONTAINER|INHERIT_ONLY for new children).
+pub struct Entry {
+    pub deny: bool,
+    pub mask: u32,
+    pub flags: u8,
+}
+
+/// Replaces the explicit (not inherited) allow/deny entries for @p sids on
+/// @p path with @p entries, keeping every other entry, and writes the DACL
+/// with SetFileSecurityW, which changes only this object: nothing is
+/// propagated to (or re-walked through) its children. For folders whose trees
+/// are large or not ours (C:\, C:\Users, a profile).
+pub fn set_explicit_here(path: &str, sids: &[String], entries: &[Entry]) -> Result<()> {
+    let parsed: Vec<Sid> = sids.iter().map(|s| Sid::parse(s)).collect::<Result<_>>()?;
+    unsafe {
+        let wpath = wide(path);
+        let mut needed = 0u32;
+        GetFileSecurityW(
+            wpath.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            0,
+            &mut needed,
+        );
+        if needed == 0 {
+            return Err(last(&format!("read permissions on {path}")));
+        }
+        let mut old_sd = vec![0u64; (needed as usize + 7) / 8];
+        check(
+            GetFileSecurityW(
+                wpath.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                old_sd.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            ),
+            &format!("read permissions on {path}"),
+        )?;
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut old: *mut ACL = null_mut();
+        check(
+            GetSecurityDescriptorDacl(
+                old_sd.as_mut_ptr().cast(),
+                &mut present,
+                &mut old,
+                &mut defaulted,
+            ),
+            "read DACL",
+        )?;
+        if present == 0 || old.is_null() {
+            return Err(format!("refusing null DACL on {path}"));
+        }
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        check(
+            GetSecurityDescriptorControl(old_sd.as_mut_ptr().cast(), &mut control, &mut revision),
+            "read DACL control",
+        )?;
+        let ours = |raw: *mut c_void| -> bool {
+            let header = &*(raw as *const ACE_HEADER);
+            [0, 1].contains(&header.AceType)
+                && header.AceFlags & INHERITED_ACE as u8 == 0
+                && parsed.iter().any(|sid| {
+                    let ace = &*(raw as *const ACCESS_ALLOWED_ACE);
+                    EqualSid((&ace.SidStart as *const u32).cast_mut().cast(), sid.ptr()) != 0
+                })
+        };
+        let extra: u32 = parsed
+            .iter()
+            .map(|s| {
+                (size_of::<ACCESS_ALLOWED_ACE>() as u32 + GetLengthSid(s.ptr()))
+                    * entries.len() as u32
+            })
+            .sum();
+        let size = (*old).AclSize as u32 + extra + 64;
+        let mut acl = vec![0u64; (size as usize + 7) / 8];
+        let new: *mut ACL = acl.as_mut_ptr().cast();
+        check(InitializeAcl(new, size, ACL_REVISION_DS), "initialize ACL")?;
+        // Canonical order: explicit denies, explicit allows, then inherited.
+        for e in entries.iter().filter(|e| e.deny) {
+            for sid in &parsed {
+                check(
+                    AddAccessDeniedAceEx(new, ACL_REVISION_DS, e.flags as _, e.mask, sid.ptr()),
+                    "add deny entry",
+                )?;
+            }
+        }
+        let copy = |inherited: bool| -> Result<()> {
+            for i in 0..(*old).AceCount {
+                let mut raw = null_mut();
+                check(GetAce(old, i as u32, &mut raw), "read ACE")?;
+                let header = &*(raw as *const ACE_HEADER);
+                if (header.AceFlags & INHERITED_ACE as u8 != 0) != inherited || ours(raw) {
+                    continue;
+                }
+                check(
+                    AddAce(new, ACL_REVISION_DS, u32::MAX, raw, header.AceSize as u32),
+                    "keep entry",
+                )?;
+            }
+            Ok(())
+        };
+        copy(false)?;
+        for e in entries.iter().filter(|e| !e.deny) {
+            for sid in &parsed {
+                check(
+                    AddAccessAllowedAceEx(new, ACL_REVISION_DS, e.flags as _, e.mask, sid.ptr()),
+                    "add allow entry",
+                )?;
+            }
+        }
+        copy(true)?;
+        let mut sd: SECURITY_DESCRIPTOR = zeroed();
+        check(
+            InitializeSecurityDescriptor(
+                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+                windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
+            ),
+            "initialize security descriptor",
+        )?;
+        check(
+            SetSecurityDescriptorDacl((&mut sd as *mut SECURITY_DESCRIPTOR).cast(), 1, new, 0),
+            "set DACL",
+        )?;
+        // Keep whether the DACL was protected from (or inherits) its parent.
+        let keep = control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED);
+        check(
+            SetSecurityDescriptorControl((&mut sd as *mut SECURITY_DESCRIPTOR).cast(), keep, keep),
+            "keep DACL control",
+        )?;
+        check(
+            SetFileSecurityW(
+                wpath.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+            ),
+            &format!("set permissions on {path}"),
+        )
+    }
+}
+
 pub fn has_ace(ace: &Ace) -> Result<bool> {
     let sid = Sid::parse(&ace.sid)?;
     let mut dacl = null_mut();
@@ -626,6 +769,50 @@ impl Drop for Lock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_entries_change_only_the_folder_itself() {
+        let dir = std::env::temp_dir().join(format!("sfagents-here-test-{}", random().unwrap()));
+        std::fs::create_dir_all(dir.join("child")).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        let child = dir.join("child").to_string_lossy().into_owned();
+        let sid = format!("S-1-5-21-{}-1-1-9998", std::process::id());
+        let probe = |p: &str, mode: &str, mask: u32| Ace {
+            path: p.into(),
+            sid: sid.clone(),
+            mode: mode.into(),
+            mask,
+            inherit: false,
+        };
+        let entries = [
+            Entry {
+                deny: true,
+                mask: FILE_WRITE_DATA,
+                flags: 0,
+            },
+            Entry {
+                deny: true,
+                mask: FILE_ALL_ACCESS,
+                flags: (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE) as u8,
+            },
+            Entry {
+                deny: false,
+                mask: FILE_LIST_DIRECTORY,
+                flags: 0,
+            },
+        ];
+        set_explicit_here(&path, std::slice::from_ref(&sid), &entries).unwrap();
+        assert!(has_ace(&probe(&path, "deny", FILE_WRITE_DATA)).unwrap());
+        assert!(has_ace(&probe(&path, "allow", FILE_LIST_DIRECTORY)).unwrap());
+        // Not propagated: the existing child has no entry for the SID.
+        assert!(!has_ace(&probe(&child, "any", 0)).unwrap());
+        // Replaced, not added to: a second call leaves one set.
+        set_explicit_here(&path, std::slice::from_ref(&sid), &entries[..1]).unwrap();
+        assert!(!has_ace(&probe(&path, "allow", FILE_LIST_DIRECTORY)).unwrap());
+        set_explicit_here(&path, std::slice::from_ref(&sid), &[]).unwrap();
+        assert!(!has_ace(&probe(&path, "any", 0)).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn recovery_preserves_permanent_allow_and_deny_entries_on_the_same_sid() {

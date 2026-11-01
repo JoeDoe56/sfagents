@@ -205,8 +205,20 @@ fn recover_run(p: &Path) -> Result<()> {
     {
         return Err("invalid cleanup directory in journal".into());
     }
-    if temp.exists() {
-        fs::remove_dir_all(&temp).map_err(|e| format!("remove run directory: {e}"))?;
+    if temp.exists() && fs::remove_dir_all(&temp).is_err() {
+        // What is left is private to the sandbox account (a killed command's
+        // owner-only files). Its permissions are already revoked; set it
+        // aside so it never blocks later commands. Nothing else reads it.
+        let trash = root.join("trash");
+        fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
+        fs::rename(&temp, trash.join(temp.file_name().unwrap()))
+            .map_err(|e| format!("set aside run directory: {e}"))?;
+    }
+    // Earlier leftovers that have become removable.
+    if let Ok(entries) = fs::read_dir(root.join("trash")) {
+        for entry in entries.flatten() {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
     fs::remove_file(p).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(p.with_extension("lock"));
@@ -1411,6 +1423,23 @@ pub fn worker(args: &[String]) -> Result<i32> {
             GetExitCodeProcess(process.0, &mut code),
             "command exit code",
         )?;
+        // Files the command made in its home/temp can be private to this
+        // account (Python 3.13+ gives mkdir(mode=0o700) an owner-only ACL), so
+        // the broker could not remove them. Remove them here, as their owner.
+        if let Ok(entries) = fs::read_dir(&payload.temp) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name == "bin" || name == "worker.json" {
+                    continue;
+                }
+                let path = entry.path();
+                let _ = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+            }
+        }
         Ok(code as i32)
     }
 }

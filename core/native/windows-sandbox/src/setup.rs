@@ -367,9 +367,51 @@ pub fn install() -> Result<()> {
         state.aces.retain(|a| a.path.to_lowercase() != p);
         save(&state)?;
     }
+    // C:\, C:\Users and the owner's profile: change only the folder itself.
+    // An older setup denied listing C:\ and C:\Users; they are listable now.
+    let owner = owner_profile();
+    for path in here_paths() {
+        let is_owner = owner
+            .as_deref()
+            .is_some_and(|o| o.eq_ignore_ascii_case(&path));
+        let entries: Vec<Entry> = if is_owner {
+            owner_profile_entries().into()
+        } else {
+            vec![]
+        };
+        println!(
+            "{} {path}",
+            if is_owner {
+                "Listing names only in"
+            } else {
+                "Allowing names to be listed in"
+            }
+        );
+        // Journal first: uninstall removes whatever is recorded for these paths.
+        state.aces.retain(|a| !a.path.eq_ignore_ascii_case(&path));
+        if is_owner {
+            for sid in &state.sids {
+                for (mode, mask) in [
+                    ("deny", HIDDEN & !FILE_LIST_DIRECTORY),
+                    ("allow", FILE_LIST_DIRECTORY),
+                ] {
+                    state.aces.push(Ace {
+                        path: path.clone(),
+                        sid: sid.clone(),
+                        mode: mode.into(),
+                        mask,
+                        inherit: false,
+                    });
+                }
+            }
+        }
+        save(&state)?;
+        set_explicit_here(&path, &state.sids, &entries)?;
+    }
     let mut batches: Vec<Vec<Ace>> = paths
         .iter()
-        .map(|(p, mask, inherit)| {
+        .filter(|(p, ..)| !here_paths().iter().any(|h| h.eq_ignore_ascii_case(p)))
+        .map(|(p, mask, inherit, _)| {
             state
                 .sids
                 .iter()
@@ -493,12 +535,63 @@ pub fn install() -> Result<()> {
     Ok(())
 }
 
-fn hidden_paths() -> Result<Vec<(String, u32, bool)>> {
-    let mut paths = vec![
-        ("C:\\".into(), FILE_LIST_DIRECTORY, false),
-        ("C:\\Users".into(), FILE_LIST_DIRECTORY, false),
-        ("C:\\ProgramData".into(), HIDDEN, true),
-    ];
+/// A path setup hides: (path, denied rights, inherited, required). A required
+/// one must stay protected or commands refuse (check_coverage).
+type Hidden = (String, u32, bool, bool);
+
+/// The installing person's profile. Its top level can be listed (names only)
+/// so tools that read every parent folder (esbuild) work in workspaces inside
+/// it; what is in it stays hidden.
+pub fn owner_profile() -> Option<String> {
+    std::env::var("USERPROFILE").ok().filter(|p| {
+        Path::new(p)
+            .parent()
+            .is_some_and(|d| d.to_string_lossy().eq_ignore_ascii_case("C:\\Users"))
+    })
+}
+
+/// Folders whose permissions setup changes only on the folder itself
+/// (set_explicit_here), never walking their trees.
+pub fn here_paths() -> Vec<String> {
+    let mut paths = vec!["C:\\".to_string(), "C:\\Users".to_string()];
+    paths.extend(owner_profile());
+    paths
+}
+
+/// What the owner's profile root gets: listing (names) but nothing else on the
+/// folder itself, and full hiding inherited by anything created in it later.
+/// Existing entries keep the denial they already inherited.
+fn owner_profile_entries() -> [Entry; 4] {
+    let inherit_only = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE) as u8;
+    let pass = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE;
+    [
+        Entry {
+            deny: true,
+            mask: HIDDEN & !FILE_LIST_DIRECTORY,
+            flags: 0,
+        },
+        Entry {
+            deny: true,
+            mask: HIDDEN,
+            flags: inherit_only,
+        },
+        Entry {
+            deny: false,
+            mask: pass | FILE_LIST_DIRECTORY,
+            flags: 0,
+        },
+        Entry {
+            deny: false,
+            mask: pass,
+            flags: inherit_only,
+        },
+    ]
+}
+
+fn hidden_paths() -> Result<Vec<Hidden>> {
+    // C:\ and C:\Users can be listed (names): the folders in them are hidden.
+    let mut paths: Vec<Hidden> = vec![("C:\\ProgramData".into(), HIDDEN, true, true)];
+    let owner = owner_profile();
     for entry in fs::read_dir("C:\\Users").map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         if ACCOUNTS
@@ -510,7 +603,15 @@ fn hidden_paths() -> Result<Vec<(String, u32, bool)>> {
         if entry.file_type().map_err(|e| e.to_string())?.is_symlink() {
             continue;
         }
-        paths.push((entry.path().to_string_lossy().into(), HIDDEN, true));
+        let path: String = entry.path().to_string_lossy().into();
+        if owner
+            .as_deref()
+            .is_some_and(|o| o.eq_ignore_ascii_case(&path))
+        {
+            paths.push((path, HIDDEN & !FILE_LIST_DIRECTORY, false, true));
+            continue;
+        }
+        paths.push((path, HIDDEN, true, true));
     }
     for entry in fs::read_dir("C:\\").map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -547,7 +648,7 @@ fn hidden_paths() -> Result<Vec<(String, u32, bool)>> {
         if is_runtime_root(&name) && entry.file_type().map_err(|e| e.to_string())?.is_dir() {
             continue;
         }
-        paths.push((entry.path().to_string_lossy().into(), HIDDEN, true));
+        paths.push((entry.path().to_string_lossy().into(), HIDDEN, true, true));
     }
     for drive in b'A'..=b'Z' {
         if drive == b'C' {
@@ -556,7 +657,7 @@ fn hidden_paths() -> Result<Vec<(String, u32, bool)>> {
         let root = format!("{}:\\", drive as char);
         let kind = unsafe { GetDriveTypeW(wide(&root).as_ptr()) };
         if kind == DRIVE_FIXED || kind == DRIVE_REMOVABLE {
-            paths.push((root, HIDDEN, true));
+            paths.push((root, HIDDEN, true, true));
         }
     }
     Ok(paths)
@@ -566,7 +667,10 @@ fn hidden_paths() -> Result<Vec<(String, u32, bool)>> {
 /// setup protection. Fail closed until setup is refreshed instead of silently
 /// exposing a folder created after installation.
 pub fn check_coverage(state: &State) -> Result<()> {
-    for (p, mask, _) in hidden_paths()? {
+    for (p, mask, _, required) in hidden_paths()? {
+        if !required {
+            continue;
+        }
         for sid in &state.sids {
             if !state.aces.iter().any(|a| {
                 a.path.eq_ignore_ascii_case(&p)
@@ -655,7 +759,17 @@ pub fn uninstall() -> Result<()> {
             || PathBuf::from(&batch[0].path).exists()
         {
             println!("Removing sandbox permissions from {}", batch[0].path);
-            if let Err(e) = acl_batch(&batch, true) {
+            let here = here_paths()
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(&batch[0].path));
+            let removed = if here {
+                // Only the folder itself (see set_explicit_here).
+                let sids: Vec<String> = batch.iter().map(|a| a.sid.clone()).collect();
+                set_explicit_here(&batch[0].path, &sids, &[])
+            } else {
+                acl_batch(&batch, true)
+            };
+            if let Err(e) = removed {
                 failures.push(e);
                 continue;
             }
