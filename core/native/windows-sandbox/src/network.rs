@@ -20,6 +20,13 @@ const KEYS: [GUID; 4] = [
     GUID::from_u128(0xbb80ba17_698a_46ef_a670_8c204d893483),
     GUID::from_u128(0xbb80ba17_698a_46ef_a670_8c204d893484),
 ];
+/// Permits for outgoing loopback to dynamic ports (connect v4, v6).
+const PERMIT_KEYS: [GUID; 2] = [
+    GUID::from_u128(0xbb80ba17_698a_46ef_a670_8c204d893485),
+    GUID::from_u128(0xbb80ba17_698a_46ef_a670_8c204d893486),
+];
+/// Windows' default dynamic (ephemeral) port range.
+pub const DYNAMIC_PORTS: (u16, u16) = (49152, 65535);
 const LAYERS: [GUID; 4] = [
     FWPM_LAYER_ALE_AUTH_CONNECT_V4,
     FWPM_LAYER_ALE_AUTH_CONNECT_V6,
@@ -78,8 +85,8 @@ pub fn install(sid: &str) -> Result<()> {
             "begin network filter transaction",
         )?;
         let result = (|| -> Result<()> {
-            for key in KEYS {
-                let code = FwpmFilterDeleteByKey0(e.0, &key);
+            for key in KEYS.iter().chain(&PERMIT_KEYS) {
+                let code = FwpmFilterDeleteByKey0(e.0, key);
                 if !absent(code) {
                     status(code, "refresh offline network filter")?;
                 }
@@ -144,6 +151,48 @@ pub fn install(sid: &str) -> Result<()> {
                 status(
                     FwpmFilterAdd0(e.0, &filter, security, null_mut()),
                     "add offline user network block",
+                )?;
+            }
+            // Outgoing loopback connections to dynamic ports are permitted (a
+            // heavier filter, so it wins in this sublayer): runtimes connect
+            // to their own listeners (Python asyncio's socketpair), and SF
+            // Agents' package/Git proxy listens on one. Fixed service ports
+            // (SF Agents' web server, local proxies) stay unreachable.
+            let mut loopback: FWPM_FILTER_CONDITION0 = zeroed();
+            loopback.fieldKey = FWPM_CONDITION_FLAGS;
+            loopback.matchType = FWP_MATCH_FLAGS_ALL_SET;
+            loopback.conditionValue.r#type = FWP_UINT32;
+            loopback.conditionValue.Anonymous.uint32 = FWP_CONDITION_FLAG_IS_LOOPBACK;
+            let mut ports = FWP_RANGE0 {
+                valueLow: zeroed(),
+                valueHigh: zeroed(),
+            };
+            ports.valueLow.r#type = FWP_UINT16;
+            ports.valueLow.Anonymous.uint16 = DYNAMIC_PORTS.0;
+            ports.valueHigh.r#type = FWP_UINT16;
+            ports.valueHigh.Anonymous.uint16 = DYNAMIC_PORTS.1;
+            let mut port: FWPM_FILTER_CONDITION0 = zeroed();
+            port.fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+            port.matchType = FWP_MATCH_RANGE;
+            port.conditionValue.r#type = FWP_RANGE_TYPE;
+            port.conditionValue.Anonymous.rangeValue = &mut ports;
+            let mut permit_conditions = [condition, loopback, port];
+            let mut permit_name = wide("SF Agents offline sandbox: loopback to dynamic ports");
+            for i in 0..2 {
+                let mut filter: FWPM_FILTER0 = zeroed();
+                filter.filterKey = PERMIT_KEYS[i];
+                filter.displayData.name = permit_name.as_mut_ptr();
+                filter.flags = FWPM_FILTER_FLAG_PERSISTENT;
+                filter.layerKey = LAYERS[i];
+                filter.subLayerKey = SUBLAYER;
+                filter.weight.r#type = FWP_UINT8;
+                filter.weight.Anonymous.uint8 = 16;
+                filter.numFilterConditions = 3;
+                filter.filterCondition = permit_conditions.as_mut_ptr();
+                filter.action.r#type = FWP_ACTION_PERMIT;
+                status(
+                    FwpmFilterAdd0(e.0, &filter, security, null_mut()),
+                    "add offline user loopback permit",
                 )?;
             }
             Ok(())
@@ -234,8 +283,8 @@ pub fn probe(sid: &str) -> Result<()> {
 pub fn uninstall() -> Result<()> {
     let e = Engine::open()?;
     unsafe {
-        for key in KEYS {
-            let code = FwpmFilterDeleteByKey0(e.0, &key);
+        for key in KEYS.iter().chain(&PERMIT_KEYS) {
+            let code = FwpmFilterDeleteByKey0(e.0, key);
             if !absent(code) {
                 status(code, "remove offline network filter")?;
             }

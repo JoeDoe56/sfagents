@@ -34,8 +34,12 @@ Setup adds per-user firewall rules and persistent Windows Filtering Platform
 blocks for the offline account. The filters cover IPv4, IPv6 and loopback,
 independently of an executable's name. Connections the offline account accepts
 over loopback are allowed, so a dev server an agent runs can be opened on this
-computer (a port artifact, the browser); it still cannot connect anywhere
-itself, loopback included, or accept connections from the network.
+computer (a port artifact, the browser). Its own outgoing loopback connections
+are allowed only to dynamic ports (49152-65535): runtimes connect to their own
+listeners (Python asyncio's socketpair). Fixed-port local services, such as SF
+Agents' web server, stay unreachable; a host program listening on a dynamic
+port could be reached. It cannot connect off this computer or accept
+connections from the network.
 `workspace.network: true` chooses the second account. It does not lift the offline account's rules.
 
 The sandbox accounts cannot list or read file contents in personal profiles, ProgramData and
