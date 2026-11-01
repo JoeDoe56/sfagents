@@ -28,6 +28,8 @@ export interface ToolContext {
    * access or artifacts but no general shell).
    */
   readonly shellMode?: 'full' | 'helpers';
+  /** The agent's id, for the package proxy's log. */
+  readonly agentId?: string;
 }
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 30_000;

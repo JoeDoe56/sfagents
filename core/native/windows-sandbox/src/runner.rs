@@ -1195,6 +1195,10 @@ pub fn worker(args: &[String]) -> Result<i32> {
             "GIT_AUTHOR_EMAIL",
             "GIT_COMMITTER_NAME",
             "GIT_COMMITTER_EMAIL",
+            // SF Agents' package and Git proxy (offline agents).
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "NO_PROXY",
         ]
         .contains(&k.to_uppercase().as_str())
         {

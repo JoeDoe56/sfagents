@@ -24,7 +24,7 @@ export class WindowsSandbox implements Sandbox {
         rules: prepareRules(policy.rules),
         cwd: command.cwd,
         // The helper merges only an explicit allowlist into the account's own environment.
-        env: Object.fromEntries(Object.entries(command.env).filter(([k, v]) => v !== undefined && ['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', ...GIT_IDENTITY_VARS].includes(k.toUpperCase()))),
+        env: Object.fromEntries(Object.entries(command.env).filter(([k, v]) => v !== undefined && ['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', ...GIT_IDENTITY_VARS].includes(k.toUpperCase()))),
       }), { mode: 0o600, flag: 'wx' });
     } catch (error) {
       fs.rmSync(dir, { recursive: true, force: true });

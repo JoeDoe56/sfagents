@@ -31,7 +31,8 @@ import { ToolErrorType } from './tool-error.js';
 import type { ToolContext } from './tool-context.js';
 import { stripAnsiAndControl, truncateForModel } from '../utils/text-utils.js';
 import { sanitizeChildEnv } from '../utils/child-env.js';
-import { detectSandbox, GIT_IDENTITY_VARS, type Sandbox, type SandboxPolicy } from '../sandbox/sandbox.js';
+import { detectSandbox, GIT_IDENTITY_VARS, PROXY_ENV_VARS, type Sandbox, type SandboxPolicy } from '../sandbox/sandbox.js';
+import { packageProxy } from '../sandbox/package-proxy.js';
 import { hostCommandTools, openHostChannel } from '../sandbox/host-channel.js';
 import { availableHostCommands, runHostCommand, splitCommandLine } from './host-commands.js';
 import { getJob, listJobs, readNewOutput, startJob, stopJob, waitForJob, type BackgroundJob } from './background-jobs.js';
@@ -63,9 +64,21 @@ function gitIdentityEnv(): Record<string, string> {
   return gitIdentity;
 }
 
-/** The environment shell commands get: the host's, without secrets, plus the Git identity. */
-function commandEnv(secretEnvNames: readonly string[]): NodeJS.ProcessEnv {
-  return { ...gitIdentityEnv(), ...sanitizeChildEnv(process.env, secretEnvNames) };
+/**
+ * The environment shell commands get: the host's, without secrets, plus the
+ * Git identity. On Windows, an agent whose network is off also gets the
+ * package and Git proxy (registries and Git hosts only, logged).
+ */
+async function commandEnv(ctx: ToolContext, command: string | undefined): Promise<NodeJS.ProcessEnv> {
+  const env: NodeJS.ProcessEnv = { ...gitIdentityEnv(), ...sanitizeChildEnv(process.env, ctx.secretEnvNames) };
+  if (process.platform === 'win32' && !ctx.sandbox.network && ctx.agentId) {
+    const proxy = packageProxy();
+    const url = await proxy.urlFor(ctx.agentId);
+    proxy.setCommand(ctx.agentId, command);
+    for (const name of PROXY_ENV_VARS) delete env[name];
+    Object.assign(env, { HTTPS_PROXY: url, HTTP_PROXY: url, NO_PROXY: '' });
+  }
+  return env;
 }
 
 export interface ShellConfiguration {
@@ -457,7 +470,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
     const policy = channel ? { ...this.ctx.sandbox, hostChannel: { path: channel.path }, tools: hostCommandTools() } : this.ctx.sandbox;
     let job: BackgroundJob;
     try {
-      job = startJob(this.params.command!, owner, { cwd, env: commandEnv(this.ctx.secretEnvNames), sandbox: { sandbox, policy } }, async () => {
+      job = startJob(this.params.command!, owner, { cwd, env: await commandEnv(this.ctx, this.params.command), sandbox: { sandbox, policy } }, async () => {
         channelControl.abort();
         await channel?.close();
       });
@@ -505,7 +518,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
         cwd,
         timeoutMs,
         signal,
-        env: commandEnv(this.ctx.secretEnvNames),
+        env: await commandEnv(this.ctx, this.params.command),
         sandbox: { sandbox: status.sandbox, policy },
       });
     } finally {

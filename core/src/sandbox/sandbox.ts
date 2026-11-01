@@ -78,6 +78,9 @@ export type SandboxStatus = { ok: true; sandbox: Sandbox } | { ok: false; reason
  */
 export const GIT_IDENTITY_VARS = ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'];
 
+/** The proxy variables commands get (see package-proxy.ts); the host's own are not passed on. */
+export const PROXY_ENV_VARS = ['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy', 'ALL_PROXY', 'all_proxy'];
+
 /** Where the host channel and helper tools appear inside a sandbox that can remap paths. */
 export const SANDBOX_RUN_DIR = '/run/sfagents';
 /** Environment variable naming the host channel inside the sandbox. */

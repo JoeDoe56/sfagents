@@ -309,6 +309,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
   if (current) return current;
   let info = agent ?? null;
   let context = null;
+  let network = null;
   let slider = null;
   let bar = null;
   let plan = null;
@@ -492,7 +493,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
   async function loadContext() {
     loadUsage();
     try {
-      context = await getJson('/api/agent/context');
+      [context, network] = await Promise.all([getJson('/api/agent/context'), getJson('/api/agent/network').catch(() => null)]);
       render();
     } catch (error) {
       parts.details.replaceChildren(el('p', 'sf-section-note', error.message));
@@ -644,6 +645,25 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
         }
       }
       sections.push(createSection({ title: 'Tools', group }).el);
+    }
+
+    // What the shell reached through the package and Git proxy (offline agents).
+    if (network) {
+      const entries = network.entries.slice(0, 30);
+      const rows = entries.map((e) => createRow({
+        icon: e.allowed ? 'checkmark.circle' : 'xmark.octagon',
+        iconTint: e.allowed ? '#34c759' : '#ff3b30',
+        title: e.host + (e.port && e.port !== 443 ? `:${e.port}` : ''),
+        subtitle: [new Date(e.time).toLocaleTimeString(), e.agent, e.command ? (e.command.length > 60 ? `${e.command.slice(0, 59)}…` : e.command) : '', e.reason ?? ''].filter(Boolean).join(' · '),
+        value: e.allowed ? 'Allowed' : 'Blocked',
+        wrap: true,
+      }));
+      if (!rows.length) rows.push(createRow({ title: 'No requests yet', disabled: true }));
+      sections.push(createSection({
+        title: 'Network',
+        rows,
+        note: `With the network off, shell commands can reach only package registries and Git hosts over HTTPS (${network.hosts.join(', ')}); everything else is blocked. Newest first.`,
+      }).el);
     }
 
     // The window itself.

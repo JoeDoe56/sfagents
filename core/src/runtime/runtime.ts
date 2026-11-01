@@ -281,6 +281,7 @@ export class AgentRuntime implements AgentMessenger {
         askShell: d.tools?.ask === true,
         commands,
         shellMode: fullShell ? 'full' : 'helpers',
+        agentId: node.id,
       };
       tools.set(ToolNames.SHELL, new ShellTool(ctx));
     }

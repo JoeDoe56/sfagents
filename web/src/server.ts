@@ -21,6 +21,8 @@ import { fileURLToPath } from 'node:url';
 import { Readable, Writable } from 'node:stream';
 import {
   AgentRuntime,
+  packageProxy,
+  PACKAGE_HOSTS,
   AgentTerminateMode,
   ArtifactError,
   genuiStateSummary,
@@ -1045,6 +1047,11 @@ export class WebServer {
         this.checkFetchSite(req);
         if (parts[1] === 'context') return sendJson(res, 200, await this.contextInfo());
         if (parts[1] === 'usage') return sendJson(res, 200, await this.usageInfo(url.searchParams.get('refresh') === '1'));
+        if (parts[1] === 'network') {
+          // The package and Git proxy's log for this agent (offline agents on Windows).
+          const node = this.session.node;
+          return sendJson(res, 200, { agent: node.id, hosts: PACKAGE_HOSTS, entries: packageProxy().entries().slice(-200).reverse() });
+        }
         if (parts[1]) throw new HttpError(404, 'Not found.');
         return sendJson(res, 200, this.agentInfo());
       case 'POST agent': {

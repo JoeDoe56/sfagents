@@ -188,6 +188,7 @@ export { findPython, landlockCommand } from './sandbox/landlock.js';
 export { SeatbeltSandbox, seatbeltProfile } from './sandbox/macos.js';
 export { WindowsSandbox, detectWindowsSandbox, windowsSandboxPath } from './sandbox/windows.js';
 export { openHostChannel, hostCommandTools, hostCommandScript, DEFAULT_WEB_REQUESTS } from './sandbox/host-channel.js';
+export { packageProxy, PackageProxy, PACKAGE_HOSTS, hostAllowed, parseTarget, type NetworkLogEntry } from './sandbox/package-proxy.js';
 export type { HostChannel, WebGrant } from './sandbox/host-channel.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
 export type { WebAccess, WebOperation } from './web/brightdata.js';

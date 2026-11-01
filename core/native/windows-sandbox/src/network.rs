@@ -139,7 +139,8 @@ pub fn install(sid: &str) -> Result<()> {
                 filter.layerKey = LAYERS[i];
                 filter.subLayerKey = SUBLAYER;
                 filter.weight.r#type = FWP_UINT8;
-                filter.weight.Anonymous.uint8 = 15;
+                // 0-15. Connect blocks sit one below the loopback permit (15), so it wins.
+                filter.weight.Anonymous.uint8 = if i < 2 { 14 } else { 15 };
                 if i < 2 {
                     filter.numFilterConditions = 1;
                     filter.filterCondition = &mut condition;
@@ -186,7 +187,7 @@ pub fn install(sid: &str) -> Result<()> {
                 filter.layerKey = LAYERS[i];
                 filter.subLayerKey = SUBLAYER;
                 filter.weight.r#type = FWP_UINT8;
-                filter.weight.Anonymous.uint8 = 16;
+                filter.weight.Anonymous.uint8 = 15;
                 filter.numFilterConditions = 3;
                 filter.filterCondition = permit_conditions.as_mut_ptr();
                 filter.action.r#type = FWP_ACTION_PERMIT;
