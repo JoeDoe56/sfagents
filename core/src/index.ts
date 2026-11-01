@@ -189,6 +189,7 @@ export { SeatbeltSandbox, seatbeltProfile } from './sandbox/macos.js';
 export { WindowsSandbox, detectWindowsSandbox, windowsSandboxPath } from './sandbox/windows.js';
 export { openHostChannel, hostCommandTools, hostCommandScript, DEFAULT_WEB_REQUESTS } from './sandbox/host-channel.js';
 export { packageProxy, PackageProxy, PACKAGE_HOSTS, hostAllowed, parseTarget, type NetworkLogEntry } from './sandbox/package-proxy.js';
+export { applyPatch, applyPatchScript, APPLY_PATCH_COMMAND } from './sandbox/apply-patch.js';
 export { GIT_COMMAND, GIT_USAGE, refusal as gitRefusal, httpsHost as httpsGitHost } from './tools/host-git.js';
 export type { HostChannel, WebGrant } from './sandbox/host-channel.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';

@@ -205,6 +205,8 @@ export interface ShellSpawnOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   sandbox?: { sandbox: Sandbox; policy: SandboxPolicy };
+  /** Text for the command's standard input (none: it gets no input). */
+  stdin?: string;
 }
 
 export interface ShellProcess {
@@ -239,11 +241,15 @@ export function spawnShell(command: string, options: ShellSpawnOptions, onOutput
       // cmd uses a raw command line, but a native sandbox helper uses argv.
       windowsVerbatimArguments: shell.shell === 'cmd' && !options.sandbox,
       detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [options.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
   } catch (error) {
     cleanup?.();
     throw error;
+  }
+  if (options.stdin !== undefined && child.stdin) {
+    child.stdin.on('error', () => {}); // the command may exit without reading it
+    child.stdin.end(options.stdin);
   }
   child.stdout?.on('data', (c: Buffer) => onOutput('stdout', c));
   if (!marker) {
@@ -343,6 +349,7 @@ export interface ShellToolParams {
   description?: string;
   directory?: string;
   timeout_seconds?: number;
+  stdin?: string;
   background?: boolean;
   job_action?: 'list' | 'output' | 'stop';
   job_id?: string;
@@ -470,7 +477,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
     const policy = channel ? { ...this.ctx.sandbox, hostChannel: { path: channel.path }, tools: hostCommandTools() } : this.ctx.sandbox;
     let job: BackgroundJob;
     try {
-      job = startJob(this.params.command!, owner, { cwd, env: await commandEnv(this.ctx, this.params.command), sandbox: { sandbox, policy } }, async () => {
+      job = startJob(this.params.command!, owner, { cwd, ...(this.params.stdin !== undefined ? { stdin: this.params.stdin } : {}), env: await commandEnv(this.ctx, this.params.command), sandbox: { sandbox, policy } }, async () => {
         channelControl.abort();
         await channel?.close();
       });
@@ -515,6 +522,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
     let result: ShellRunResult;
     try {
       result = await runShellCommand(this.params.command!, {
+        ...(this.params.stdin !== undefined ? { stdin: this.params.stdin } : {}),
         cwd,
         timeoutMs,
         signal,
@@ -574,7 +582,7 @@ function shellDescription(ctx: ToolContext): string {
   }
   const shell = getShellConfiguration();
   const helpers = helperText(ctx);
-  return `Executes a command with ${shell.shell === 'cmd' ? 'cmd.exe /c' : shell.shell === 'powershell' ? 'PowerShell -Command' : 'bash -c'} and returns stdout, stderr and the exit code. Runs in the primary workspace folder unless 'directory' is given, inside an OS sandbox: you can reach only your workspace folders, with the access each one gives (read, write, delete), system folders are read-only, your home folder is empty${ctx.sandbox.network ? '' : ', and there is no network'}. Use it to read, search and edit files (${shell.shell === 'cmd' ? 'type, dir, findstr, git, node' : 'cat, sed, grep, find, git'}).${process.platform === 'win32' ? ' PowerShell startup and Node subprocesses with captured output can fail under the restricted token. Use cmd for direct tool commands and Node for file operations; permissions are never relaxed.' : ''}${helpers ? ` ${helpers} Pipe or redirect their output like any command's.` : ''} Commands are killed after a timeout, and anything a command starts ends with it: run servers and other long-running processes with background: true, then read their output with job_action. Interactive commands are not supported.`;
+  return `Executes a command with ${shell.shell === 'cmd' ? 'cmd.exe /c' : shell.shell === 'powershell' ? 'PowerShell -Command' : 'bash -c'} and returns stdout, stderr and the exit code. Runs in the primary workspace folder unless 'directory' is given, inside an OS sandbox: you can reach only your workspace folders, with the access each one gives (read, write, delete), system folders are read-only, your home folder is empty${ctx.sandbox.network ? '' : ', and there is no network'}. Use it to read and search files (${shell.shell === 'cmd' ? 'type, dir, findstr, git, node' : 'cat, sed, grep, find, git'}). To create, change or delete files, run apply_patch with a patch in the stdin parameter (*** Begin Patch, then *** Add File: <path> with +lines, *** Update File: <path> with @@ hunks of ' ' context, '-' removed and '+' added lines, or *** Delete File: <path>, then *** End Patch); it prints what it changed.${process.platform === 'win32' ? ' PowerShell does not run in the sandbox; use cmd and Node.' : ''}${helpers ? ` ${helpers} Pipe or redirect their output like any command's.` : ''} Commands are killed after a timeout, and anything a command starts ends with it: run servers and other long-running processes with background: true, then read their output with job_action. Interactive commands are not supported.`;
 }
 
 export class ShellTool extends BaseDeclarativeTool<ShellToolParams, ToolResult> {
@@ -601,6 +609,10 @@ export class ShellTool extends BaseDeclarativeTool<ShellToolParams, ToolResult> 
             description: `Optional timeout in seconds (maximum ${Math.round(ctx.shellTimeoutMs / 1000)}). With background: how long to wait for first output before returning (default ${DEFAULT_BACKGROUND_WAIT_S}).`,
           },
           ...(ctx.shellMode === 'helpers' ? {} : {
+            stdin: {
+              type: 'string',
+              description: 'Text sent to the command\'s standard input. Use it to edit files: run `apply_patch` with the patch as stdin (*** Begin Patch / *** Update File: path / @@ / -old / +new / *** Add File: path / *** Delete File: path / *** End Patch), instead of writing file contents through shell quoting.',
+            },
             background: {
               type: 'boolean',
               description: 'Start the command and leave it running (a dev server, a watcher, a long build): returns its first output and a job id. Do not use start, &, nohup or similar for this; they are stopped when the command returns.',

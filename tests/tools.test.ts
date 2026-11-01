@@ -121,6 +121,16 @@ describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () =>
     assert.match(done.result!.llmContent, /State: exited with code 0[\s\S]*quick/);
   });
 
+  test('edits files with apply_patch and a patch on stdin', async () => {
+    const f = await fixture(['shell']);
+    const patch = '*** Begin Patch\n*** Update File: src/a.txt\n@@\n alpha\n-beta\n+beta with "quotes" || pipes & ampersands\n*** Add File: src/c.txt\n+new file\n*** End Patch\n';
+    const r = await call(f, 'shell', { command: 'apply_patch', stdin: patch });
+    assert.equal(r.result!.error, undefined, r.result!.llmContent);
+    assert.match(r.result!.llmContent, /M src\/a\.txt/);
+    assert.equal(fs.readFileSync(path.join(f.work, 'src', 'a.txt'), 'utf8'), 'alpha\nbeta with "quotes" || pipes & ampersands\ngamma\n');
+    assert.equal(fs.readFileSync(path.join(f.work, 'src', 'c.txt'), 'utf8'), 'new file\n');
+  });
+
   test("commands get the person's Git name and email, so commits work in the empty home", async (t) => {
     const name = spawnSync('git', ['config', '--global', 'user.name'], { encoding: 'utf8' }).stdout?.trim();
     if (!name) return t.skip('no global Git user.name here');

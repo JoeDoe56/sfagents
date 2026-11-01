@@ -18,7 +18,7 @@ use windows_sys::Win32::{
 };
 
 /// The host commands a sandboxed shell may be given (see host-commands.ts).
-const HOST_TOOLS: &[&str] = &["sf-node", "sf-web", "sf-artifact", "sf-git"];
+const HOST_TOOLS: &[&str] = &["sf-node", "sf-web", "sf-artifact", "sf-git", "apply_patch"];
 
 #[derive(Serialize, Deserialize)]
 struct Journal {

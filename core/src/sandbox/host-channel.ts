@@ -21,6 +21,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import type { WebAccess } from '../web/brightdata.js';
 import { HOST_COMMAND_NAMES, runHostCommand, type HostCommandReply, type HostCommands } from '../tools/host-commands.js';
 import type { SandboxPolicy } from './sandbox.js';
+import { APPLY_PATCH_COMMAND, applyPatchScript } from './apply-patch.js';
 
 export const DEFAULT_WEB_REQUESTS = 25;
 /** Largest request line (an artifact's --content or --stdin is the big one). */
@@ -157,10 +158,11 @@ export function hostCommandTools(): NonNullable<SandboxPolicy['tools']> {
   const dir = path.join(sfagentsHome(), 'sandbox');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tools: Array<{ path: string; name: string }> = [{ path: fs.realpathSync(process.execPath), name: 'sf-node' }];
-  for (const name of HOST_COMMAND_NAMES) {
+  // The host commands, and apply_patch, which runs in the sandbox itself.
+  for (const name of [...HOST_COMMAND_NAMES, APPLY_PATCH_COMMAND]) {
     // .cjs: Node then needs no package.json lookup to know how to load it.
     const script = path.join(dir, `${name}.cjs`);
-    const content = hostCommandScript(name);
+    const content = name === APPLY_PATCH_COMMAND ? applyPatchScript() : hostCommandScript(name);
     let current = '';
     try {
       current = fs.readFileSync(script, 'utf8');
