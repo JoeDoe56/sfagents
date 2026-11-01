@@ -18,6 +18,11 @@ use windows_sys::Win32::{
 pub const ACCOUNTS: [&str; 2] = ["sfagents_sandbox", "sfagents_sandbox_net"];
 pub const NULL_DEVICE: &str = "\\\\.\\NUL";
 pub const RUNTIME_DEVICES: [&str; 2] = [NULL_DEVICE, "\\\\.\\pipe"];
+/// Kernel crypto devices bcrypt.dll opens; granted like RUNTIME_DEVICES, but optional.
+pub const CRYPTO_DEVICES: [&str; 2] = [
+    "\\\\.\\GLOBALROOT\\Device\\KsecDD",
+    "\\\\.\\GLOBALROOT\\Device\\CNG",
+];
 // Grants read/write access only to the null and named-pipe devices, never to
 // filesystem trees. Individual named pipes still enforce their own DACLs.
 pub const RUNTIME_SID: &str = "S-1-5-21-3325558138-2469722210-2860911687-9000";
@@ -454,6 +459,34 @@ pub fn install() -> Result<()> {
         println!("Protecting {}", batch[0].path);
         acl_batch(&batch, false)?;
     }
+    // bcrypt.dll opens these when it loads; without write access through the
+    // restricting SIDs its startup fails (0xC0000142) in every program that
+    // links it: Python, curl, PowerShell 7. Best effort: a missing device or
+    // a refused change leaves commands working, just without those programs.
+    for device in CRYPTO_DEVICES {
+        let ace = Ace {
+            path: device.into(),
+            sid: RUNTIME_SID.into(),
+            mode: "allow".into(),
+            mask: FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            inherit: false,
+        };
+        if has_ace(&ace).unwrap_or(false) {
+            continue;
+        }
+        if !state
+            .aces
+            .iter()
+            .any(|a| a.path == ace.path && a.sid == ace.sid)
+        {
+            state.aces.push(ace.clone());
+            save(&state)?;
+        }
+        match acl_batch(std::slice::from_ref(&ace), false) {
+            Ok(()) => println!("Allowed cryptography device {device}"),
+            Err(e) => println!("warning: could not allow cryptography device {device}: {e}"),
+        }
+    }
     state.ready = true;
     save(&state)?;
     println!("Windows sandbox setup complete. Undo: sfagents-sandbox uninstall");
@@ -618,6 +651,7 @@ pub fn uninstall() -> Result<()> {
     }
     for batch in batches.into_values() {
         if RUNTIME_DEVICES.contains(&batch[0].path.as_str())
+            || CRYPTO_DEVICES.contains(&batch[0].path.as_str())
             || PathBuf::from(&batch[0].path).exists()
         {
             println!("Removing sandbox permissions from {}", batch[0].path);
