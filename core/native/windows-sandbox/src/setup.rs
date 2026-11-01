@@ -42,6 +42,9 @@ pub fn is_runtime_root(name: &str) -> bool {
 // directory listing or reading any personal file's contents.
 const HIDDEN: u32 =
     FILE_ALL_ACCESS & !(FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE);
+// What listing a folder's names takes: Go and others open a folder for
+// GENERIC_READ (which includes reading its extended attributes) to list it.
+const LISTING: u32 = FILE_LIST_DIRECTORY | FILE_READ_EA;
 
 #[derive(Serialize, Deserialize)]
 pub struct State {
@@ -391,10 +394,7 @@ pub fn install() -> Result<()> {
         state.aces.retain(|a| !a.path.eq_ignore_ascii_case(&path));
         if is_owner {
             for sid in &state.sids {
-                for (mode, mask) in [
-                    ("deny", HIDDEN & !FILE_LIST_DIRECTORY),
-                    ("allow", FILE_LIST_DIRECTORY),
-                ] {
+                for (mode, mask) in [("deny", HIDDEN & !LISTING), ("allow", FILE_LIST_DIRECTORY)] {
                     state.aces.push(Ace {
                         path: path.clone(),
                         sid: sid.clone(),
@@ -567,7 +567,7 @@ fn owner_profile_entries() -> [Entry; 4] {
     [
         Entry {
             deny: true,
-            mask: HIDDEN & !FILE_LIST_DIRECTORY,
+            mask: HIDDEN & !LISTING,
             flags: 0,
         },
         Entry {
@@ -577,7 +577,7 @@ fn owner_profile_entries() -> [Entry; 4] {
         },
         Entry {
             deny: false,
-            mask: pass | FILE_LIST_DIRECTORY,
+            mask: pass | LISTING,
             flags: 0,
         },
         Entry {
@@ -608,7 +608,7 @@ fn hidden_paths() -> Result<Vec<Hidden>> {
             .as_deref()
             .is_some_and(|o| o.eq_ignore_ascii_case(&path))
         {
-            paths.push((path, HIDDEN & !FILE_LIST_DIRECTORY, false, true));
+            paths.push((path, HIDDEN & !LISTING, false, true));
             continue;
         }
         paths.push((path, HIDDEN, true, true));
