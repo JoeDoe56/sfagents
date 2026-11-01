@@ -103,7 +103,15 @@ export async function runGit(grant: GitGrant, args: readonly string[], o: { cwd?
   }
   const dir = cwd.resolvedPath ?? o.cwd!;
   const top = await run(['rev-parse', '--show-toplevel'], dir, o.signal);
-  if (top.code !== 0) return { ok: false, error: `Not a Git repository: ${dir}` };
+  if (top.code !== 0) {
+    // Git on the host trusts only repositories the person owns: one the agent
+    // created (a new repository or worktree) is the sandbox account's, and its
+    // config could make Git run programs on the host.
+    if (/dubious ownership/.test(top.out)) {
+      return { ok: false, error: `${dir} was created in the sandbox, so sf-git does not run Git in it on the host. For a worktree, run sf-git in the repository it belongs to (sf-git push <remote> <branch>): the branch is the same.` };
+    }
+    return { ok: false, error: `Not a Git repository: ${dir}` };
+  }
   const repo = path.resolve(top.out.trim());
   if (!grant.workspace.check(repo, 'write').ok) return { ok: false, error: 'The repository is not inside your workspace.' };
   // The remote: the first word that is not an option, or the branch's / "origin".
