@@ -991,6 +991,22 @@ pub fn worker(args: &[String]) -> Result<i32> {
         return Err("worker must run as the selected standard sandbox account".into());
     }
     let primary = token()?;
+    // The command's token can write where this account is named (see the
+    // restricting SIDs below). Keep it out of the account's own profile, so no
+    // command leaves something there for a later one: deny writes to
+    // restricted tokens (S-1-5-12), which only commands carry. Done once.
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let guard = Ace {
+            path: profile,
+            sid: "S-1-5-12".into(),
+            mode: "deny".into(),
+            mask: WRITE_BITS,
+            inherit: true,
+        };
+        if !has_ace(&guard).unwrap_or(false) {
+            acl_batch(std::slice::from_ref(&guard), false)?;
+        }
+    }
     let restricting = Sid::parse(&payload.restricted)?;
     let sid = SID_AND_ATTRIBUTES {
         Sid: restricting.ptr(),
@@ -1005,6 +1021,17 @@ pub fn worker(args: &[String]) -> Result<i32> {
     }
     let mut group_data = vec![0u64; (group_size as usize + 7) / 8];
     let mut restricting_sids = vec![sid];
+    // The account itself: objects created without a security descriptor get a
+    // default that gives only their creator (the token owner, this account)
+    // write access, such as the anonymous pipes runtimes use for a child's
+    // stdio (libuv, Python). Without it those writes fail (EPERM). It adds
+    // writes only where the account itself is named: its own profile, and
+    // grants the broker made for this policy or run (protected paths deny it).
+    let account = Sid::parse(&payload.account)?;
+    restricting_sids.push(SID_AND_ATTRIBUTES {
+        Sid: account.ptr(),
+        Attributes: 0,
+    });
     // Writes to the workspace go through the policy's standing SID.
     let policy_sid = Sid::parse(&payload.policy_sid)?;
     restricting_sids.push(SID_AND_ATTRIBUTES {
