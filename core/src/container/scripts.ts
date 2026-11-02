@@ -232,6 +232,12 @@ export const EXEC_SOURCE = String.raw`#!/bin/sh
 # The command arrives in SFA_COMMAND, not as an argument, so it never shows in
 # the process list (where "pkill -f <pattern>" would match and kill it).
 job="$1"
+# The folder is checked here: docker exec -w with a missing folder fails
+# before anything runs, with only exit code 127.
+if [ -n "$SFA_CWD" ]; then
+  cd "$SFA_CWD" 2>/dev/null || { echo "The directory $SFA_CWD does not exist in the container (create it first, e.g. mkdir -p, or run from /workspaces)." >&2; exit 1; }
+fi
+unset SFA_CWD
 exec setsid -w bash -c '
   echo $$ > "/run/sfa/exec/$0.pid"
   trap "rm -f /run/sfa/exec/$0.pid" EXIT

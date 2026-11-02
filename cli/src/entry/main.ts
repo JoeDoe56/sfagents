@@ -413,6 +413,9 @@ async function runOnce(
     providerFactory: providers().factory,
   });
   registerCleanup(() => runtime.dispose());
+  // The bridge to the agents' containers keeps a docker exec open; end it so
+  // the process can exit. The containers keep running for the next request.
+  if (containersEnabled()) registerCleanup(() => containerManager().bridge.stop());
   if (opts.conversation) {
     const conversation = opts.conversation;
     registerCleanup(() => conversation.close());

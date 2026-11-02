@@ -240,7 +240,7 @@ function spawnInContainer(command: string, options: ShellSpawnOptions, onOutput:
   const target = options.container!;
   const job = randomUUID();
   const env = Object.entries(options.env).filter(([k, v]) => v !== undefined && CONTAINER_ENV.has(k)).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-  const { executable, args } = target.cli.argv(['exec', ...(options.stdin !== undefined ? ['-i'] : []), '-u', 'agent', '-w', options.cwd, ...env, '-e', `SFA_COMMAND=${command}`, target.name, '/run/sfa/bin/sfa-exec', job]);
+  const { executable, args } = target.cli.argv(['exec', ...(options.stdin !== undefined ? ['-i'] : []), '-u', 'agent', '-w', '/', ...env, '-e', `SFA_CWD=${options.cwd}`, '-e', `SFA_COMMAND=${command}`, target.name, '/run/sfa/bin/sfa-exec', job]);
   const child = spawn(executable, args, { windowsHide: true, detached: process.platform !== 'win32', stdio: [options.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   if (options.stdin !== undefined && child.stdin) {
     child.stdin.on('error', () => {});
