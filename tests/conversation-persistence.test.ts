@@ -203,13 +203,13 @@ describe('persistent conversation (runtime)', () => {
     assert.ok(state.lastResetSeq > 0);
   });
 
-  test('"always allow" approvals do not survive a restart', async () => {
+  test('"always allow" approvals do not survive a restart', { skip: NO_CONTAINER_TESTS }, async () => {
     const { dir } = project({ tools: { mcpServers: ['local'] } }, { 'mcp.json': { mcpServers: { local: stdioServerConfig() } } });
     let asked = 0;
     for (let round = 0; round < 2; round++) {
       const tree = loadAgentTree(dir);
       const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
-      const { factory } = scriptedFactory((_req, n) => (n === 0 ? { toolCalls: [{ name: 'mcp__local__echo', args: { text: `r${round}` } }] } : { text: 'ok' }));
+      const { factory } = scriptedFactory((_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: `sfa-mcp call local echo '{"text":"r${round}"}'` } }] } : { text: 'ok' }));
       const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation, confirm: async () => (asked++, 'allow_always') });
       await runtime.createSession().run('write');
       await runtime.dispose();

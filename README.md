@@ -144,9 +144,8 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | `reasoning` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Sent as OpenRouter's `reasoning.effort` (or `reasoning_effort` for other endpoints). Reasoning blocks are passed back across tool calls. |
 | `network` | **Required.** What the agent's shell can reach: `off` (nothing), `pkg` (package registries such as npm, PyPI, crates.io, apt), `git` (also GitHub, GitLab and Bitbucket), `on` (the whole Internet, and `sfa-web`). Each level includes the ones before it. Addresses on your own computer and network are always refused. See [Agent containers](#agent-containers). |
 | `agents` | The agents this one may message: `"N-name.json"` lets it message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
-| `tools.mcpServers` | Server names from `mcp.json`, optionally limited to listed tools. |
+| `tools.mcpServers` | Server names from `mcp.json`, optionally limited to listed tools. The agent reaches them with the `sfa-mcp` command in its shell (see [MCP servers](#mcp-servers)). |
 | `tools.autoApprove` | MCP tools that skip the confirmation prompt: `mcp__<server>__<tool>` or `mcp__<server>__*`. Shell commands never ask: the container is the boundary. |
-| `tools.defer` | Tools left out of requests until the agent loads them with `tool_search` (see [Deferred tools](#deferred-tools)). `"auto"` (default) defers the MCP tools once the agent has more than 10; `true` defers all of them; `false` none; or a list of tool names and patterns, such as `["mcp__github__*"]`. |
 | `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Default: `organize` when the agent replies in the conversation, `none` when it replies in a thread. |
 | `artifacts.access` | Artifacts: `create` (the `sfa-artifact` command, and the index of recent artifacts), `read` (the index only) or `none`. Same defaults as `conversation.access`. |
 | `context` | Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
@@ -304,10 +303,6 @@ sfa-web html https://example.com/glazes                      # a page as HTML
 
 `sfa-web` asks SF Agents, which makes the request with [Bright Data](https://brightdata.com)'s hosted MCP server (`search_engine`, `scrape_as_markdown`, `scrape_as_html`). Add the Bright Data API key in **Settings → Providers → Web Access**, or with `sfagents providers web-key`. It is kept in the system keyring and never enters a container. Each run may make `limits.webRequests` requests (default 25); a result is cut at 1 MB, and a request times out after 90 seconds. Bright Data includes 5,000 free requests a month, then bills per request: set a spend limit in its control panel.
 
-## Deferred tools
-
-An agent with many MCP tools need not send every tool's definition with every request. Deferred tools are left out of the request's tool list; the system prompt names each one with a one-line description, and the agent loads what it needs with `tool_search`: `"select:mcp__github__create_issue,mcp__github__list_issues"` loads those, and keywords (`"issue create"`, `"+github issue"` to require a word in the name) load the best matches. The search result carries the tools' definitions, and they are in the tool list from the agent's next step until the turn ends; tools the conversation has already called stay loaded in later turns. `tools.defer` chooses what is deferred (see [Agent definition](#agent-definition)); by default, an agent's MCP tools are deferred once it has more than 10. The agent sheet's context breakdown counts only what is sent.
-
 ## MCP servers
 
 ```json
@@ -319,7 +314,18 @@ An agent with many MCP tools need not send every tool's definition with every re
 }
 ```
 
-Transports: **stdio** (`command`) and **Streamable HTTP** (`httpUrl`). Legacy SSE is not supported. `${VAR}` values are read from the environment when the server connects; an undefined variable is an error rather than being sent literally. Server names may be at most 24 characters and must not contain `__`. The model sees tools as `mcp__<server>__<tool>`. A server connects the first time an agent that may use it starts a turn. Connection failures become warnings, and the agent continues without those tools. Failed tool calls are never retried automatically.
+Transports: **stdio** (`command`) and **Streamable HTTP** (`httpUrl`). Legacy SSE is not supported. `${VAR}` values are read from the environment when the server connects; an undefined variable is an error rather than being sent literally. Server names may be at most 24 characters and must not contain `__`.
+
+MCP tools are not in the agent's tool list (it has only `shell` and `message`). The shell tool's description names the agent's servers, and the agent uses them with a command, which SF Agents answers (the servers run in SF Agents, not in the container):
+
+```sh
+sfa-mcp list                                   # servers and their tools
+sfa-mcp list github                            # the tools' descriptions and input schemas
+sfa-mcp call github create_issue '{"title":"Kiln log","body":"..."}'
+jq -n '{query: "cone 6"}' | sfa-mcp call notes search --stdin
+```
+
+A call asks you first unless the server has `"trust": true` in `mcp.json`, the tool is in `tools.autoApprove` (approval names are `mcp__<server>__<tool>`), you chose "allow always" earlier in the session, or the run uses `--yes`. A server starts the first time an agent uses it; one that fails to start is listed as unavailable. Failed calls are never retried automatically. `tools.defer` was removed: it no longer has anything to do.
 
 ## Development
 

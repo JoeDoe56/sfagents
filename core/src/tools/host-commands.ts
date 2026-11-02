@@ -1,16 +1,17 @@
 /**
- * SF Agents' own shell commands: `sfa-web` (web access) and `sfa-artifact`
- * (artifacts). They run in SF Agents, not in the agent's container: a small
- * client in the container sends each call over the agent's proxy socket
+ * SF Agents' own shell commands: `sfa-web` (web access), `sfa-artifact`
+ * (artifacts) and `sfa-mcp` (MCP servers). They run in SF Agents, not in
+ * the agent's container: a small client in the container sends each call over the agent's proxy socket
  * (see ../container), and this handler answers with the agent's own grants.
  */
 
 import { ArtifactError, ARTIFACT_COMMAND, ARTIFACT_USAGE, type ArtifactCommand, type ArtifactContainer } from '../conversation/artifacts.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { WebAccess } from '../web/brightdata.js';
+import { MCP_COMMAND, MCP_USAGE, runMcpCommand, type McpGrant } from '../mcp/sfa-mcp.js';
 
 export const WEB_COMMAND = 'sfa-web';
-export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND];
+export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, MCP_COMMAND];
 
 /** Web requests an agent may make per run, unless limits.webRequests says otherwise. */
 export const DEFAULT_WEB_REQUESTS = 25;
@@ -32,10 +33,13 @@ export interface HostCommands {
   web?: WebGrant;
   /** Artifacts (artifacts.access "create"). */
   artifact?: ArtifactCommand;
+  /** MCP servers (tools.mcpServers). */
+  mcp?: McpGrant;
 }
 
 /** How a command is described where tools are listed (the agent sheet): what it does, and its usage. */
 export function hostCommandSchema(name: string): { name: string; description: string; usage: string } {
+  if (name === MCP_COMMAND) return { name, description: 'The agent\'s MCP servers: lists their tools and calls them. A command in the shell tool.', usage: MCP_USAGE };
   if (name === WEB_COMMAND) return { name, description: 'Web search and pages, fetched by SF Agents (Bright Data). A command in the shell tool, for agents at network level "on".', usage: WEB_USAGE };
   return { name, description: 'Shows a file, a folder or a web app running in the agent\'s container as an artifact, or changes one. A command in the shell tool.', usage: ARTIFACT_USAGE };
 }
@@ -44,7 +48,7 @@ export type HostCommandReply = { ok: true; text: string; truncated?: boolean } |
 
 /** The commands this agent has, by name. */
 export function availableHostCommands(cmds: HostCommands): string[] {
-  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : [])];
+  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : [])];
 }
 
 async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
@@ -89,6 +93,7 @@ export async function runHostCommand(
       if (args.includes('-h') || args.includes('--help')) return { ok: true, text: ARTIFACT_USAGE };
       return { ok: true, text: cmds.artifact(args, { cwd: o.cwd, callId: o.callId, stdin: o.stdin, ...(o.container ? { container: o.container } : {}) }) };
     }
+    if (name === MCP_COMMAND) return await runMcpCommand(cmds.mcp, args, { ...(o.stdin !== undefined ? { stdin: o.stdin } : {}), signal: o.signal });
     return { ok: false, error: `Unknown command ${name}.` };
   } catch (error) {
     return { ok: false, error: error instanceof ArtifactError ? error.message : getErrorMessage(error) };

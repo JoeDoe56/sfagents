@@ -12,7 +12,7 @@ import {
   type AgentReplyPayload,
   type ModelRequest,
 } from '@sfagents/core';
-import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script } from './helpers.js';
+import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, mcpCall, shellStdout } from './helpers.js';
 
 
 const runtimes: AgentRuntime[] = [];
@@ -63,8 +63,8 @@ describe('agents messaging each other in threads', () => {
       }
       const toolCount = req.messages.filter((m) => m.role === 'tool').length;
       if (toolCount === 0) return { toolCalls: [{ name: 'shell', args: { command: catFile('data.txt') } }] };
-      if (toolCount === 1) return { toolCalls: [{ name: 'mcp__local__echo', args: { text: '7' } }] };
-      return { text: `number is ${lastToolContent(req)}` };
+      if (toolCount === 1) return { toolCalls: [mcpCall('local', 'echo', { text: '7' })] };
+      return { text: `number is ${shellStdout(lastToolContent(req))}` };
     };
     const { runtime, providers } = start(tree, script, conversation);
     const { events, onEvent } = collectEvents();
@@ -81,7 +81,7 @@ describe('agents messaging each other in threads', () => {
     assert.equal(lastUser(req), 'Read data.txt; echo the number.');
     assert.doesNotMatch(JSON.stringify(req.messages), /Ask the worker/);
     // It can talk back to main while it works.
-    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['mcp__local__echo', 'message', 'shell']);
+    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['message', 'shell']);
     // The writer's prompt says how to talk to agents.
     assert.match(systemOf(providers.get('main')!.requests[0]!.request), /<agent_messaging>[\s\S]*terse, structured/);
     assert.deepEqual(events.filter((e) => e.type === 'agent_start').map((e) => e.agentPath.join('/')), ['main', 'main/worker']);

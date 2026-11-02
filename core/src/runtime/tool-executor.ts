@@ -14,7 +14,6 @@ import type { AnyDeclarativeTool, AnyToolInvocation, ToolResult } from '../tools
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ParsedToolCall, ToolMessage } from '../providers/types.js';
-import { DiscoveredMcpTool } from '../mcp/mcp-tool.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { PersistenceFailure } from './recorder.js';
 import type { ToolMessageStatus } from '../conversation/types.js';
@@ -62,9 +61,6 @@ function isAutoApproved(tool: AnyDeclarativeTool, ctx: ToolExecutionContext): bo
   if (ctx.approveAll) return true;
   if (ctx.sessionApprovals.has(tool.name)) return true;
   if (ctx.autoApprove.includes(tool.name)) return true;
-  if (tool instanceof DiscoveredMcpTool) {
-    return ctx.autoApprove.includes(tool.approvalKey) || ctx.autoApprove.includes(`mcp__${tool.serverName}__*`);
-  }
   return false;
 }
 

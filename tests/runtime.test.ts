@@ -13,7 +13,7 @@ import {
   type ConfirmationRequest,
   type RuntimeEvent,
 } from '@sfagents/core';
-import { NO_CONTAINER_TESTS, baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeFileCommand, writeJson, type Script, writeAgent } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeFileCommand, writeJson, type Script, writeAgent, mcpCall, shellStdout } from './helpers.js';
 
 
 const ECHO = 'mcp__local__echo';
@@ -93,22 +93,25 @@ describe('single agent loop', () => {
     assert.match(result.text, /Invalid parameters for shell/);
   });
 
-  test('calls needing approval are denied without a handler, and the model is told why', async () => {
+  test('calls needing approval are denied without a handler, and the model is told why', { skip: NO_CONTAINER_TESTS }, async () => {
     const { runtime } = runtimeWith({ tools: { mcpServers: ['local'] } }, (req, n) =>
-      n === 0 ? { toolCalls: [{ name: ECHO, args: { text: 'hi' } }] } : { text: lastToolContent(req) ?? '' },
+      n === 0 ? { toolCalls: [mcpCall('local', 'echo', { text: 'hi' })] } : { text: lastToolContent(req) ?? '' },
     );
     const result = await runtime.createSession().run('echo');
-    assert.equal(result.toolCalls[0]!.errorType, ToolErrorType.EXECUTION_DENIED);
-    assert.match(result.text, /requires approval/);
+    assert.match(result.text, /needs approval, and no approval is possible in this non-interactive run/);
     await runtime.dispose();
   });
 
   test('confirmation handler: deny, allow once, allow always; autoApprove and approveAll skip prompts; the shell never asks', { skip: NO_CONTAINER_TESTS }, async () => {
     const asked: ConfirmationRequest[] = [];
     const decisions = ['deny', 'allow_once', 'allow_always'] as const;
+    const outputs: string[] = [];
     const { runtime } = runtimeWith(
       { tools: { mcpServers: ['local'] } },
-      (_req, n) => (n < 4 ? { toolCalls: [{ name: ECHO, args: { text: `m${n}` } }, { name: 'shell', args: { command: 'true' } }] } : { text: 'done' }),
+      (req, n) => {
+        if (n > 0) outputs.push(lastToolContent(req) ?? '');
+        return n < 4 ? { toolCalls: [mcpCall('local', 'echo', { text: `m${n}` })] } : { text: 'done' };
+      },
       {
         confirm: async (r) => {
           asked.push(r);
@@ -116,29 +119,27 @@ describe('single agent loop', () => {
         },
       },
     );
-    const result = await runtime.createSession().run('echo four times');
+    await runtime.createSession().run('echo four times');
     assert.equal(asked.length, 3, 'the fourth call reuses "allow always"');
     assert.equal(asked[0]!.details.type, 'mcp');
+    assert.equal(asked[0]!.toolName, ECHO);
     assert.deepEqual(asked[0]!.agentPath, ['main']);
-    assert.deepEqual(result.toolCalls.filter((c) => c.name === ECHO).map((c) => c.ok), [false, true, true, true]);
-    assert.ok(result.toolCalls.filter((c) => c.name === 'shell').every((c) => c.ok));
+    assert.deepEqual(outputs.map((o) => shellStdout(o)), ['(empty)', 'echo:m1', 'echo:m2', 'echo:m3']);
+    assert.match(outputs[0]!, /did not allow local echo/);
     await runtime.dispose();
 
     let prompts = 0;
-    const auto = runtimeWith(
-      { tools: { mcpServers: ['local'], autoApprove: [ECHO] } },
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: ECHO, args: { text: 'a' } }] } : { text: 'ok' }),
-      { confirm: async () => (prompts++, 'deny') },
-    );
-    assert.equal((await auto.runtime.createSession().run('w')).toolCalls[0]!.ok, true);
-    await auto.runtime.dispose();
-    const all = runtimeWith(
-      { tools: { mcpServers: ['local'] } },
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: ECHO, args: { text: 'a' } }] } : { text: 'ok' }),
-      { approveAll: true, confirm: async () => (prompts++, 'deny') },
-    );
-    assert.equal((await all.runtime.createSession().run('w')).toolCalls[0]!.ok, true);
-    await all.runtime.dispose();
+    for (const [agent, opts] of [
+      [{ tools: { mcpServers: ['local'], autoApprove: [ECHO] } }, {}],
+      [{ tools: { mcpServers: ['local'] } }, { approveAll: true }],
+    ] as const) {
+      const r = runtimeWith(agent, (req, n) => (n === 0 ? { toolCalls: [mcpCall('local', 'echo', { text: 'a' })] } : { text: shellStdout(lastToolContent(req)) }), {
+        ...opts,
+        confirm: async () => (prompts++, 'deny'),
+      });
+      assert.equal((await r.runtime.createSession().run('w')).text, 'echo:a');
+      await r.runtime.dispose();
+    }
     assert.equal(prompts, 0);
   });
 

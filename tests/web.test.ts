@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree, parseSetting } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
-import { NO_CONTAINER_TESTS, baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, writeAgent } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, writeAgent, mcpCall } from './helpers.js';
 
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
@@ -524,9 +524,9 @@ describe('web server', () => {
   test('approvals are asked in the browser; denial and cancellation work', async () => {
     const s = await startServer(
       (req, call) => {
-        if (call === 0) return { toolCalls: [{ name: 'mcp__local__echo', args: { text: 'approved-run' } }] };
+        if (call === 0) return { toolCalls: [mcpCall('local', 'echo', { text: 'approved-run' })] };
         if (call === 1) return { text: `result: ${lastToolContent(req)}` };
-        if (call === 2) return { toolCalls: [{ name: 'mcp__local__echo', args: { text: 'nope' } }] };
+        if (call === 2) return { toolCalls: [mcpCall('local', 'echo', { text: 'nope' })] };
         if (call === 3) return { text: `second: ${lastToolContent(req)}` };
         return { text: 'slow', delayMs: 5000 };
       },
@@ -550,7 +550,8 @@ describe('web server', () => {
       await postJson(s.base, '/api/messages', { text: 'again' });
       const ask2 = await ev.wait((e) => e.event === 'approval' && (e.data['approval'] as { id: string }).id !== approval.id);
       await postJson(s.base, `/api/approvals/${(ask2.data['approval'] as { id: string }).id}`, { decision: 'deny' });
-      await ev.wait((e) => e.event === 'run_end' && e !== end1);
+      const end2 = await ev.wait((e) => e.event === 'run_end' && e !== end1);
+      assert.match(JSON.stringify(end2.data['items']), /did not allow local echo/);
 
       await postJson(s.base, '/api/messages', { text: 'slow one' });
       await ev.wait((e) => e.event === 'run_start' && ev.received.filter((x) => x.event === 'run_start').length === 3);
@@ -558,7 +559,6 @@ describe('web server', () => {
       const end3 = await ev.wait((e) => e.event === 'run_end' && e.data['status'] === 'CANCELLED');
       assert.ok(end3);
       const items = end3.data['items'] as Array<{ kind: string; text: string; status?: string }>;
-      assert.ok(items.some((i) => i.kind === 'activity' && i.status === 'denied'));
       assert.ok(items.some((i) => i.kind === 'notice' && i.text === 'Stopped'));
     } finally {
       ev.close();

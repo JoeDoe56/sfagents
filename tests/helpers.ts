@@ -176,6 +176,16 @@ export function scriptedFactory(script: Script, options: ScriptOptions = {}) {
 }
 
 /** Last tool message content in a request, if any. */
+/** A shell call that runs one MCP tool through sfa-mcp. */
+export function mcpCall(server: string, tool: string, args: Record<string, unknown> = {}): { name: string; args: Record<string, unknown> } {
+  return { name: 'shell', args: { command: `sfa-mcp call ${server} ${tool} '${JSON.stringify(args).replace(/'/g, "'\\''")}'` } };
+}
+
+/** The stdout part of a shell result ("" when there is none). */
+export function shellStdout(content: string | undefined): string {
+  return /Stdout: ([\s\S]*?)\nStderr:/.exec(content ?? '')?.[1]?.trim() ?? '';
+}
+
 export function lastToolContent(request: ModelRequest): string | undefined {
   for (let i = request.messages.length - 1; i >= 0; i--) {
     const m = request.messages[i]!;

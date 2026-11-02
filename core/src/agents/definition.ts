@@ -86,12 +86,6 @@ export interface AgentDefinition {
     mcpServers?: Array<string | McpServerGrant>;
     /** MCP tools that skip the confirmation prompt ("mcp__srv__tool", "mcp__srv__*"). */
     autoApprove?: string[];
-    /**
-     * Tools left out of requests until the agent loads them with tool_search:
-     * "auto" (default: MCP tools, once there are more than 10), true (all MCP
-     * tools), false (none), or tool names and patterns ("mcp__github__*").
-     */
-    defer?: boolean | 'auto' | string[];
   };
   /**
    * Access to the main persistent conversation's sections and history:
@@ -361,13 +355,8 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     if (isPlainObject(t) && (t['allow'] !== undefined || t['ask'] !== undefined)) {
       c.fail(t['allow'] !== undefined ? 'tools.allow' : 'tools.ask', 'was removed: every agent has the shell and the message tool, sfa-web needs "network": "on", and other agents go in "agents" ("N-name.json")');
     }
-    const tt = c.object(t, 'tools', ['mcpServers', 'autoApprove', 'defer']);
-    let defer: boolean | 'auto' | string[] | undefined;
-    if (tt['defer'] === 'auto' || typeof tt['defer'] === 'boolean') defer = tt['defer'] as boolean | 'auto';
-    else if (tt['defer'] !== undefined) {
-      if (!Array.isArray(tt['defer'])) c.fail('tools.defer', 'must be "auto", true, false, or a list of tool names and patterns like "mcp__github__*"');
-      defer = c.stringArray(tt['defer'], 'tools.defer', { unique: true, nonEmptyItems: true });
-    }
+    if (isPlainObject(t) && t['defer'] !== undefined) c.fail('tools.defer', 'was removed: MCP tools are no longer in the tool list, the agent reaches them with the sfa-mcp command');
+    const tt = c.object(t, 'tools', ['mcpServers', 'autoApprove']);
     let mcpServers: Array<string | McpServerGrant> | undefined;
     if (tt['mcpServers'] !== undefined) {
       if (!Array.isArray(tt['mcpServers'])) c.fail('tools.mcpServers', 'must be an array');
@@ -406,11 +395,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
         c.fail(field, `refers to MCP server "${parts[0]}", which is not in tools.mcpServers`);
       }
     });
-    tools = {
-      mcpServers,
-      autoApprove,
-      ...(defer !== undefined ? { defer } : {}),
-    };
+    tools = { mcpServers, autoApprove };
   }
 
   let conversation: AgentDefinition['conversation'];

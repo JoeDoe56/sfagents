@@ -94,16 +94,15 @@ describe('sfagents CLI', () => {
     assert.equal(lastRequest.messages[1]!.content, 'read hello.txt');
   });
 
-  test('run --json returns the structured result; a denied call in non-interactive mode is explained', async () => {
+  test('run --json returns the structured result; a denied call in non-interactive mode is explained', { skip: NO_CONTAINER_TESTS }, async () => {
     handler = (body) =>
-      lastTool(body) === undefined ? { toolCalls: [{ name: 'mcp__local__echo', args: { text: 'ping' } }] } : { text: lastTool(body)! };
+      lastTool(body) === undefined ? { toolCalls: [{ name: 'shell', args: { command: `sfa-mcp call local echo '{"text":"ping"}'` } }] } : { text: lastTool(body)! };
     const dir = project({ tools: { mcpServers: ['local'] } }, (d) => writeJson(path.join(d, 'mcp.json'), { mcpServers: { local: stdioServerConfig() } }));
     const r = await runCli(['run', '--json', 'echo something'], { cwd: dir });
     assert.equal(r.code, 0, r.stderr);
     const result = JSON.parse(r.stdout);
     assert.equal(result.status, 'GOAL');
-    assert.equal(result.toolCalls[0].errorType, 'execution_denied');
-    assert.match(result.text, /no approval is possible in this non-interactive run/);
+    assert.match(result.text, /local echo needs approval, and no approval is possible in this non-interactive run/);
 
     const yes = await runCli(['run', '--yes', 'echo something'], { cwd: dir });
     assert.equal(yes.code, 0);

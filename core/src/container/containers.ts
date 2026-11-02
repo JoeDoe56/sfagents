@@ -40,7 +40,7 @@ export const CONTAINER_WORKSPACES = '/workspaces';
 export const CONTAINER_ROOTS = '/roots';
 /** SF Agents' commands inside containers, and the names they run as on the host. */
 /** SF Agents' commands in every container; each hands its call to SF Agents. */
-export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact'];
+export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact', 'sfa-mcp'];
 /** Capabilities sudo and apt need; everything else (NET_RAW, NET_ADMIN, SYS_*) stays dropped. */
 export const CONTAINER_CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID', 'KILL', 'AUDIT_WRITE'];
 export const DEFAULT_MEMORY_MB = 4096;

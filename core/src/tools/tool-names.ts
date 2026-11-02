@@ -12,8 +12,6 @@ export const ToolNames = {
   SHELL: 'shell',
   /** SF Agents: messages the person or another agent, or waits for messages. */
   MESSAGE: 'message',
-  /** SF Agents: loads deferred tools (see tools.defer). */
-  TOOL_SEARCH: 'tool_search',
 } as const;
 
 /** Prefix for namespaced MCP tools: mcp__<server>__<tool>. */
