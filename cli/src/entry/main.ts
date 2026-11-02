@@ -32,6 +32,8 @@ import {
   KeyringUnavailableError,
   isLeftover,
   isSandboxRun,
+  containerManager,
+  containersEnabled,
   killProcessTree,
   sfagentsHome,
   windowsSandboxPath,
@@ -59,6 +61,7 @@ import type { ConversationService } from '@sfagents/core';
 import { DEFAULT_HOST, DEFAULT_PORT, LogBook, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
 import { startTui } from '../terminal/tui.js';
 import { providersCommand, settingsCommand } from './providers.js';
+import { containersCommand } from './containers.js';
 
 export const VERSION = '0.1.0';
 
@@ -84,6 +87,8 @@ Usage:
                                         App settings (web port and address, sensors, terminal output)
   sfagents conversation [info|sections|show <id>|search <words>|artifacts|unlock]
                                         Inspect the stored conversation (or remove a stale lock)
+  sfagents containers [status|setup]    Agent containers: check them, or set them up (Windows: the sfagents
+                                        WSL distro; everywhere: the agent image)
 
 Options:
   -c, --config <dir|file>   Project directory (holding the agents folder), or one agent file in it (default: .)
@@ -112,7 +117,7 @@ Environment:
   SFAGENTS_HOME             Folder for settings.json and providers.json (default: the per-user app folder)
   SFAGENTS_DEBUG=1          Debug logging to stderr`;
 
-interface Streams {
+export interface Streams {
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
 }
@@ -187,6 +192,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
   // Provider and settings commands don't need a project.
   if (command === 'providers') return providersCommand(positionals.slice(1), streams, { name: values.name, url: values.url });
   if (command === 'settings') return settingsCommand(positionals.slice(1), streams);
+  if (command === 'containers') return containersCommand(positionals.slice(1), streams);
   const appSettings = new AppSettings();
   let stored: ReturnType<AppSettings['stored']> = {};
   try {
@@ -522,6 +528,8 @@ async function serveWeb(
   });
   // Cleanups run in reverse: stop the server (and any run) before closing the conversation.
   registerCleanup(() => conversation.close());
+  // Quitting stops the agents' containers (after the server and any run).
+  if (containersEnabled()) registerCleanup(() => containerManager().stopAll());
   registerCleanup(() => server.close());
   let url: string;
   try {

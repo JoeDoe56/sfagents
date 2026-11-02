@@ -180,9 +180,14 @@ export async function setupDistro(o: { report(line: string): void; rootfs?: stri
     if (!tar) {
       tar = path.join(os.tmpdir(), `sfagents-wsl-${process.pid}.tar.gz`);
       o.report(`Downloading the distro (${WSL_ROOTFS_URL})…`);
-      const res = await fetch(WSL_ROOTFS_URL);
+      const [res, sum] = await Promise.all([fetch(WSL_ROOTFS_URL), fetch(`${WSL_ROOTFS_URL}.sha256`)]);
       if (!res.ok || !res.body) throw new Error(`Download failed: HTTP ${res.status}`);
-      fs.writeFileSync(tar, Buffer.from(await res.arrayBuffer()));
+      if (!sum.ok) throw new Error(`Download of the checksum failed: HTTP ${sum.status}`);
+      const bytes = Buffer.from(await res.arrayBuffer());
+      const expected = (await sum.text()).trim().split(/\s+/)[0]!.toLowerCase();
+      const actual = createHash('sha256').update(bytes).digest('hex');
+      if (actual !== expected) throw new Error(`The downloaded distro does not match its checksum (expected ${expected}, got ${actual}).`);
+      fs.writeFileSync(tar, bytes);
     }
     fs.mkdirSync(installDir, { recursive: true });
     o.report(`Importing it into ${installDir}…`);

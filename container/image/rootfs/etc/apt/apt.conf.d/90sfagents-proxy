@@ -1,3 +1,5 @@
 // Agent containers reach the network only through SF Agents' proxy.
 Acquire::http::Proxy "http://sfa-proxy:3128";
 Acquire::https::Proxy "http://sfa-proxy:3128";
+// The proxy answers one request per connection; no pipelining.
+Acquire::http::Pipeline-Depth "0";

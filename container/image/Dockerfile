@@ -233,7 +233,7 @@ ENV HTTP_PROXY=http://sfa-proxy:3128 \
     YARN_HTTP_PROXY=http://sfa-proxy:3128 \
     YARN_HTTPS_PROXY=http://sfa-proxy:3128 \
     npm_config_prefix=/home/agent/.local \
-    PATH=/home/agent/.local/bin:/home/agent/.local/share/pnpm:/home/agent/go/bin:/opt/cargo/bin:/home/agent/.dotnet/tools:/usr/local/go/bin:/opt/gradle/bin:/opt/maven/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/run/sfa/bin:/home/agent/.local/bin:/home/agent/.local/share/pnpm:/home/agent/go/bin:/opt/cargo/bin:/home/agent/.dotnet/tools:/usr/local/go/bin:/opt/gradle/bin:/opt/maven/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 USER agent
 WORKDIR /workspaces

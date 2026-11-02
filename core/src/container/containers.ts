@@ -401,7 +401,9 @@ export class ContainerManager {
     this.bridge.stop();
     const list = await this.cli.run(['ps', '-q', '--filter', 'label=sfagents.role=agent']);
     const ids = list.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
-    if (ids.length) await this.cli.run(['stop', '-t', '2', ...ids], { timeoutMs: 60_000 });
+    // Quitting has a few seconds for everything; kill instead of a graceful stop.
+    if (ids.length) await this.cli.run(['kill', ...ids], { timeoutMs: 15_000 });
+    this.agents.clear();
   }
 }
 
