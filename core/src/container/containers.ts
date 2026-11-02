@@ -25,7 +25,7 @@ import type { Duplex } from 'node:stream';
 import { sfagentsHome } from '../settings/home.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { isPathWithinRoot } from '../utils/paths.js';
-import { applyPatchScript, APPLY_PATCH_COMMAND } from '../tools/apply-patch.js';
+import { sfaPatchScript, SFA_PATCH_COMMAND, APPLY_PATCH_COMMAND } from '../tools/sfa-patch.js';
 import { runHostCommand, type HostCommands } from '../tools/host-commands.js';
 import { networkLog } from './network-log.js';
 import { ContainerBridge, RUN_VOLUME, type BridgeFile } from './bridge.js';
@@ -242,7 +242,8 @@ export class ContainerManager {
       'sfa-client.cjs': { content: CLIENT_SOURCE, mode: 0o644 },
       'sfa-exec': { content: EXEC_SOURCE },
       'sfa-kill': { content: KILL_SOURCE },
-      [APPLY_PATCH_COMMAND]: { content: applyPatchScript().replace(/^#!.*\n/, '#!/usr/bin/env node\n') },
+      [SFA_PATCH_COMMAND]: { content: sfaPatchScript() },
+      [APPLY_PATCH_COMMAND]: { content: sfaPatchScript(APPLY_PATCH_COMMAND) },
     };
     for (const name of CONTAINER_COMMANDS) files[name] = { content: clientLauncher(name) };
     return files;

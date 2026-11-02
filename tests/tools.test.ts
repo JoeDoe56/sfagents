@@ -99,10 +99,10 @@ describe('shell (in the agent container)', { skip: NO_CONTAINER_TESTS }, () => {
     assert.match(done.result!.llmContent, /State: exited with code 0[\s\S]*quick/);
   });
 
-  test('edits files with apply_patch and a patch on stdin', async () => {
+  test('edits files with sfa-patch (apply_patch format) on stdin', async () => {
     const f = await fixture();
     const patch = '*** Begin Patch\n*** Update File: src/a.txt\n@@\n alpha\n-beta\n+beta with "quotes" || pipes & ampersands\n*** Add File: src/c.txt\n+new file\n*** End Patch\n';
-    const r = await call(f, 'shell', { command: 'apply_patch', stdin: patch, directory: path.basename(f.work) });
+    const r = await call(f, 'shell', { command: 'sfa-patch', stdin: patch, directory: path.basename(f.work) });
     assert.equal(r.result!.error, undefined, r.result!.llmContent);
     assert.match(r.result!.llmContent, /M src\/a\.txt/);
     assert.equal(fs.readFileSync(path.join(f.work, 'src', 'a.txt'), 'utf8'), 'alpha\nbeta with "quotes" || pipes & ampersands\ngamma\n');

@@ -180,7 +180,7 @@ export {
 } from './conversation/attachments.js';
 export { estimateMessages } from './conversation/context.js';
 export { NetworkLog, networkLog, type NetworkLogEntry } from './container/network-log.js';
-export { applyPatch, applyPatchScript, APPLY_PATCH_COMMAND } from './tools/apply-patch.js';
+export { sfaPatch, sfaPatchScript, patchFormatFor, patchGuidance, SFA_PATCH_COMMAND, APPLY_PATCH_COMMAND, type PatchFormat } from './tools/sfa-patch.js';
 export { GIT_IDENTITY_VARS } from './tools/shell.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
 export type { WebAccess, WebOperation } from './web/brightdata.js';

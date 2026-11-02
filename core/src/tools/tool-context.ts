@@ -1,5 +1,6 @@
 import type { NetworkLevel } from '../container/network.js';
 import type { HostCommands } from './host-commands.js';
+import type { PatchFormat } from './sfa-patch.js';
 
 /**
  * Everything a built-in tool needs from its owning agent. Replaces upstream's
@@ -21,6 +22,8 @@ export interface ToolContext {
    * (secrets, SF Agents' own data).
    */
   readonly container: { readonly level: NetworkLevel; readonly roots: readonly string[]; readonly hidden: readonly string[] };
+  /** The edit format the shell's description teaches (from the model's family). */
+  readonly patchFormat?: PatchFormat;
   /** SF Agents' own commands this agent may run (`sfa-web`, `sfa-artifact`). */
   readonly commands?: HostCommands;
 }

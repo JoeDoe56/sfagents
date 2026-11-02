@@ -45,10 +45,11 @@ import { AppSettings } from '../settings/settings.js';
 import { sfagentsHome } from '../settings/home.js';
 import { BrightDataWeb, type WebAccess } from '../web/brightdata.js';
 import { ProviderRegistry } from '../providers/registry.js';
+import { patchFormatFor, type PatchFormat } from '../tools/sfa-patch.js';
 import { McpManager } from '../mcp/manager.js';
 import { DiscoveredMcpTool, mcpFunctionName } from '../mcp/mcp-tool.js';
 import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
-import { createDefaultProviderFactory, credentialEnvNames, type ProviderFactory } from '../providers/factory.js';
+import { createDefaultProviderFactory, credentialEnvNames, providerChoices, type ProviderFactory } from '../providers/factory.js';
 import { executeToolCall, type ToolExecutionOutcome } from './tool-executor.js';
 import {
   AgentTerminateMode,
@@ -271,6 +272,7 @@ export class AgentRuntime implements AgentMessenger {
       secretEnvNames: this.secretEnvNames,
       shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
       container: { level: d.network, roots: this.projectFolders(), hidden: this.hiddenPaths() },
+      patchFormat: this.patchFormat(d),
       commands,
     };
     tools.set(ToolNames.SHELL, new ShellTool(ctx));
@@ -344,6 +346,18 @@ export class AgentRuntime implements AgentMessenger {
       ...(this.conversation?.protectedPaths() ?? []),
       sfagentsHome(),
     ].map((p) => path.resolve(p)))];
+  }
+
+  /** The edit format for the model an agent replies with: apply_patch for GPT and Codex, search/replace for the rest. */
+  private patchFormat(d: Readonly<AgentDefinition>): PatchFormat {
+    try {
+      const registry = new ProviderRegistry();
+      const choice = providerChoices(d, registry)[0];
+      const record = choice ? registry.find(choice.provider) : undefined;
+      return patchFormatFor(choice?.model ?? d.model, record?.kind === 'openai' ? 'codex' : undefined);
+    } catch {
+      return patchFormatFor(d.model);
+    }
   }
 
   private provider(definition: Readonly<AgentDefinition>): ModelProvider {
