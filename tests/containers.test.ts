@@ -58,6 +58,8 @@ describe('network levels', () => {
     assert.equal(levelAllows('pkg', 'github.com', 443).allowed, false);
     assert.equal(levelAllows('git', 'github.com', 443).allowed, true);
     assert.equal(levelAllows('git', 'registry.npmjs.org', 443).allowed, true);
+    assert.equal(levelAllows('pkg', 'raw.githubusercontent.com', 443).allowed, false, 'serves anyone\'s files');
+    assert.equal(levelAllows('git', 'raw.githubusercontent.com', 443).allowed, true);
     assert.equal(levelAllows('git', 'example.com', 443).allowed, false);
     assert.equal(levelAllows('on', 'example.com', 8443).allowed, true);
   });
@@ -72,7 +74,15 @@ describe('network levels', () => {
     for (const a of ['127.0.0.1', '10.1.2.3', '192.168.1.10', '172.20.0.1', '100.100.1.1', '169.254.1.1', '::1', 'fd00::1', 'fe80::1', '::ffff:192.168.0.1', '0.0.0.0']) {
       assert.equal(isPrivateAddress(a), true, a);
     }
-    for (const a of ['104.16.0.1', '140.82.112.3', '2606:4700::1111']) assert.equal(isPrivateAddress(a), false, a);
+    for (const a of ['104.16.0.1', '140.82.112.3', '2606:4700::1111', '2a00:1450:4001:80b::200e']) assert.equal(isPrivateAddress(a), false, a);
+  });
+
+  test('other spellings of local IPv6 addresses are refused too', () => {
+    for (const a of ['0:0:0:0:0:0:0:1', '::ffff:7f00:1', '::ffff:c0a8:101', '::127.0.0.1', '::ffff:0:7f00:1', '64:ff9b::c0a8:101',
+      '64:ff9b::8.8.8.8', '2002:c0a8:101::1', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:db8::1', 'fe80::1%eth0', '0::0:1', 'not-an-ip']) {
+      assert.equal(isPrivateAddress(a), true, a);
+    }
+    assert.equal(levelAllows('on', '::ffff:c0a8:101', 80).allowed, true, 'the level allows it; the address check refuses it');
   });
 
   test('older agent files map to levels', () => {

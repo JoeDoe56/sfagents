@@ -52,7 +52,7 @@ export const PACKAGE_HOSTS: readonly string[] = [
   // Rust
   'crates.io', 'index.crates.io', 'static.crates.io', 'static.rust-lang.org', 'sh.rustup.rs',
   // Go
-  'proxy.golang.org', 'sum.golang.org', 'index.golang.org', 'go.dev', 'dl.google.com', 'storage.googleapis.com',
+  'proxy.golang.org', 'sum.golang.org', 'index.golang.org', 'go.dev', 'dl.google.com',
   // .NET
   'api.nuget.org', 'globalcdn.nuget.org', '.nuget.org', 'dotnetcli.azureedge.net', 'builds.dotnet.microsoft.com', 'dot.net', 'dotnet.microsoft.com',
   // Java
@@ -65,13 +65,13 @@ export const PACKAGE_HOSTS: readonly string[] = [
   'deb.debian.org', 'security.debian.org', 'dl.winehq.org',
   // Playwright browsers
   'playwright.azureedge.net', 'playwright-akamai.azureedge.net', 'playwright-verizon.azureedge.net', 'cdn.playwright.dev',
-  // Release downloads that installers use
-  'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'raw.githubusercontent.com',
 ];
 
 export const GIT_HOSTS: readonly string[] = [
   'github.com', 'codeload.github.com', 'api.github.com', 'gist.github.com',
   'gitlab.com', 'codeberg.org', 'bitbucket.org',
+  // They serve anyone's files, so they are not at level pkg.
+  'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'raw.githubusercontent.com', 'storage.googleapis.com',
 ];
 
 /** The name SF Agents' own commands connect to. */
@@ -102,19 +102,48 @@ export function levelAllows(level: NetworkLevel, host: string, port: number): De
  * Addresses no agent may reach at any level: this computer, the local
  * network, link-local, carrier-grade NAT (Tailscale) and the like.
  */
+/** The eight 16-bit groups of an IPv6 address, or undefined if it is not one. */
+export function ipv6Groups(address: string): number[] | undefined {
+  if (net.isIP(address) !== 6 || address.includes('%')) return undefined;
+  let x = address.toLowerCase();
+  // A trailing dotted IPv4 part becomes two groups.
+  const v4 = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(x);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number) as [number, number, number, number];
+    x = `${x.slice(0, v4.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [left, right] = x.split('::') as [string, string | undefined];
+  const parse = (part: string) => (part ? part.split(':').map((g) => parseInt(g, 16)) : []);
+  const head = parse(left);
+  const tail = right === undefined ? [] : parse(right);
+  const groups = right === undefined ? head : [...head, ...new Array(8 - head.length - tail.length).fill(0), ...tail];
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : undefined;
+}
+
+/**
+ * Whether an address is this computer, the local network or anything else
+ * that is not an ordinary public address. Agents never reach those. IPv6 is
+ * judged on its expanded form, and only global unicast (2000::/3) counts as
+ * public, minus the ranges that carry an IPv4 address (6to4, Teredo) or are
+ * reserved; IPv4-mapped, -compatible and NAT64 forms are therefore refused
+ * too. Anything that does not parse is treated as private.
+ */
 export function isPrivateAddress(address: string): boolean {
   const v = net.isIP(address);
   if (v === 4) {
-    const [a, b] = address.split('.').map(Number) as [number, number];
+    const [a, b, c] = address.split('.').map(Number) as [number, number, number];
     return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || a >= 224;
+      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+      (a === 198 && (b === 18 || b === 19)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113) || a >= 224;
   }
   if (v === 6) {
-    const x = address.toLowerCase();
-    if (x === '::' || x === '::1') return true;
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(x);
-    if (mapped) return isPrivateAddress(mapped[1]!);
-    return /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(x);
+    const g = ipv6Groups(address);
+    if (!g) return true;
+    if ((g[0]! & 0xe000) !== 0x2000) return true; // not global unicast
+    if (g[0] === 0x2002) return true; // 6to4
+    if (g[0] === 0x2001 && (g[1] === 0 || g[1] === 0xdb8)) return true; // Teredo, documentation
+    if (g[0] === 0x2001 && g[1]! < 0x200) return true; // other IETF special purpose
+    return false;
   }
   return true;
 }

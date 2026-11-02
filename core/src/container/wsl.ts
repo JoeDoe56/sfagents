@@ -20,7 +20,6 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sfagentsHome } from '../settings/home.js';
 import { windowsWslExe, WSL_DISTRO } from './docker.js';
 
 /** Inside the distro: the shared workspaces folder (bind-mounted as /workspaces). */
@@ -174,7 +173,8 @@ export async function setupDistro(o: { report(line: string): void; rootfs?: stri
     o.report('The sfagents WSL distro is already set up.');
     return;
   }
-  const installDir = o.installDir ?? path.join(sfagentsHome(), 'wsl');
+  // One distro per Windows account, wherever SF Agents' own data lives.
+  const installDir = o.installDir ?? path.join(process.env['LOCALAPPDATA'] ?? path.join(os.homedir(), 'AppData', 'Local'), 'SF Agents', 'wsl');
   if (status.state === 'no-distro') {
     let tar = o.rootfs;
     if (!tar) {
