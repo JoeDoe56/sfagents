@@ -413,7 +413,7 @@ export class ConversationService {
     return genuiDirFor(this.configDir);
   }
 
-  /** Where sf-artifact keeps files an agent made but has no workspace folder for (userdata/artifacts). */
+  /** Where sfa-artifact keeps files an agent made but has no workspace folder for (userdata/artifacts). */
   get artifactsDir(): string {
     return path.join(path.dirname(this.genuiDir), 'artifacts');
   }

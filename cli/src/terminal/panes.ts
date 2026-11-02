@@ -748,7 +748,7 @@ export function settingsPane(host: PaneHost): Pane {
         { pick: true, value: { add: 'anthropic' }, lines: [`  ${color.cyan('+')} Sign in with Claude`] },
         { pick: true, value: { add: 'openrouter' }, lines: [`  ${color.cyan('+')} Add an OpenRouter key`] },
         { pick: true, value: { add: 'custom' }, lines: [`  ${color.cyan('+')} Add an OpenAI-compatible endpoint`] },
-        { pick: true, value: { web: true }, lines: [`  ${color.bold('Bright Data key')} ${color.dim(d.providers.web.brightData ? 'set (for sf-web)' : 'not set (sf-web needs it)')}`] },
+        { pick: true, value: { web: true }, lines: [`  ${color.bold('Bright Data key')} ${color.dim(d.providers.web.brightData ? 'set (for sfa-web)' : 'not set (sfa-web needs it)')}`] },
       );
       rows.push(heading('Speech'));
       const s = d.speech;
@@ -805,9 +805,10 @@ export function settingsPane(host: PaneHost): Pane {
   const editSetting = (st: Setting) => {
     if (st.type === 'boolean') return void save(st.key, st.value !== true);
     const current = Array.isArray(st.value) ? st.value.join(', ') : st.value === null || st.value === undefined ? '' : String(st.value);
-    host.ask(`${st.label}${st.type === 'origins' ? ' (separate with commas)' : ''}:`, current, (text) => {
+    const shown = st.type === 'folders' && Array.isArray(st.value) ? st.value.join('; ') : current;
+    host.ask(`${st.label}${st.type === 'origins' ? ' (separate with commas)' : st.type === 'folders' ? ' (separate with semicolons)' : ''}:`, shown, (text) => {
       const t = text.trim();
-      const value = st.type === 'origins' ? (t ? t.split(/[\s,]+/).filter(Boolean) : []) : st.type === 'number' || st.type === 'port' ? Number(t) : t;
+      const value = st.type === 'origins' ? (t ? t.split(/[\s,]+/).filter(Boolean) : []) : st.type === 'folders' ? (t ? t.split(';').map((f) => f.trim()).filter(Boolean) : []) : st.type === 'number' || st.type === 'port' ? Number(t) : t;
       void save(st.key, value);
     });
   };

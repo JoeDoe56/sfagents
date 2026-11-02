@@ -7,6 +7,7 @@ SF Agents started as an extraction of the minimal runtime from Qwen Code's `pack
 ## Requirements
 
 - Node.js 20.12 or newer (developed and tested on Node 22).
+- Docker, for the agents' containers: on Windows SF Agents installs its own engine in a WSL distro (`sfagents containers setup`, see [Agent containers](#agent-containers)); on Linux and macOS, the `docker` command with a running engine.
 - A model provider: an OpenRouter API key, a ChatGPT plan, a Claude plan, or an OpenAI-compatible endpoint.
 - An operating-system keyring for provider keys and sign-ins: Windows Credential Manager and the macOS Keychain are built in; on Linux, a Secret Service (GNOME Keyring, KWallet or KeePassXC). Without one, providers can't be added (environment-variable keys still work).
 - The terminal uses node-pty: Windows and macOS get prebuilt binaries; on Linux `npm install` compiles it (needs `make`, a C++ compiler and Python).
@@ -46,7 +47,7 @@ Add providers in the web interface (**Settings → Providers → Add Provider**)
 
 Both sign-ins happen on the computer SF Agents runs on: the sign-in page opens in a new tab of its browser, you sign in and close the tab, and the sheet shows the provider was added and closes. (The page returns to a listener on that computer, so it can't be finished from a phone.)
 
-ChatGPT requests run through `codex app-server` with Codex's own tools switched off (shell, web search, images, sub-agents, plans, questions to the user); the model gets only SF Agents' tools, which run in SF Agents' sandbox. Codex always offers its file-patching tool: it runs in Codex's read-only sandbox and every patch is declined, so nothing it writes lands. Codex keeps the ChatGPT sign-in in the OS keyring itself, under each provider's own folder (`codex/<id>` in your user folder); if it can only write a file, the sign-in is refused and the file deleted. Providers added before this change were signed in another way: remove them and add them again.
+ChatGPT requests run through `codex app-server` with Codex's own tools switched off (shell, web search, images, sub-agents, plans, questions to the user); the model gets only SF Agents' tools, which run in the agent's container. Codex always offers its file-patching tool: it runs in Codex's read-only sandbox and every patch is declined, so nothing it writes lands. Codex keeps the ChatGPT sign-in in the OS keyring itself, under each provider's own folder (`codex/<id>` in your user folder); if it can only write a file, the sign-in is refused and the file deleted. Providers added before this change were signed in another way: remove them and add them again.
 
 Keys and sign-in tokens go only to the system keyring, never to a file, a model, or an agent's tools or shell. The list of providers (names, kinds, addresses) is `providers.json` in your user folder (`%APPDATA%\SF Agents`, `~/Library/Application Support/SF Agents`, or `~/.config/sfagents`; `SFAGENTS_HOME` overrides it).
 
@@ -100,7 +101,7 @@ userdata/                     everything of yours; the only folder Git ignores
     uploads/                  files attached in the web interface (and partial uploads)
 ```
 
-The configurations in `examples/` provide `main` with the shell, which may message a `worker` whose workspace is read-only (two at once), and a demo MCP server. After copying them as described above, run `npx sfagents agents validate` to see them.
+The configurations in `examples/` provide `main` (network level `pkg`), which may message a `worker` (network `off`, two at once), and a demo MCP server. After copying them as described above, run `npx sfagents agents validate` to see them.
 
 ## Agent definition
 
@@ -115,9 +116,9 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
   "reasoning": "low",
   "temperature": 0.2,
   "maxOutputTokens": 4000,
-  "workspace": { "paths": { "C:/Users/me/projects/site": "rwd", "C:/Users/me/notes": "r" } },
+  "network": "pkg",
+  "agents": ["2-worker.json"],
   "tools": {
-    "allow": ["shell", "2-worker.json"],
     "mcpServers": ["local-tools", { "server": "github", "tools": ["search_issues"] }],
     "autoApprove": ["mcp__local-tools__*"]
   },
@@ -141,20 +142,30 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | `provider` | The name of a provider you added ("Claude 1"), or a list of them in failover order (entries may be `{ "provider": "…", "model": "…" }` with their own model). Also `openrouter` (key from `OPENROUTER_API_KEY`) or `openai-compatible` with `"providerOptions": { "baseUrl": "...", "apiKeyEnv": "MY_KEY_VAR" }`. Optional: without it the agent replies with the provider picked for it in the web interface, else the first one added. |
 | `model` | Any model ID the provider accepts. Optional only when `provider` is left out: then the provider's default is used (Claude Sonnet 5.5 for Claude and OpenRouter, the plan's default for ChatGPT; a custom endpoint needs `model`). |
 | `reasoning` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Sent as OpenRouter's `reasoning.effort` (or `reasoning_effort` for other endpoints). Reasoning blocks are passed back across tool calls. |
-| `workspace.paths` | The folders the agent may use, anywhere on the computer, each with its permissions: `r` read, `w` write, `d` delete, combined as `"r"`, `"rw"` or `"rwd"` (`w` needs `r`, `d` needs `w`). `""` blocks a folder. A folder inside another gets its own permissions, and the longest matching path wins: `{ "/home/me/b": "rw", "/home/me/a": "r", "/home/me/a/sensitive": "", "/home/me/b/project": "rwd" }`. Paths are absolute (`~` is your home folder). The first folder is where commands start. Applies to shell commands and to artifact files alike; SF Agents' own files stay protected whatever an entry says. `"rw"` without `d` also blocks renaming (a rename deletes the old name). Windows enforces it with file permissions, macOS with the Seatbelt profile, and Linux with Landlock (Linux 5.13 or later; commands with an `"rw"` folder start through a short `python3` launcher that enables it, and are refused with the reason when it is unavailable). One Linux limit: an `"rw"` folder inside an `"rwd"` one still allows deleting there (Landlock only adds rights down a folder tree), and the agent loads with a warning. **Default: none.** An agent reaches only the folders listed here; the folder SF Agents is installed in and the folder it was started from give it nothing. A new project's `main.json` lists no folders, so add the ones it should work in. |
-| `workspace.roots`, `workspace.access` | The older form, still read: `roots` are read-write folders relative to the project directory (no default: an agent without `roots` has no folders), and `access` lists exceptions (`[{ "path": "secrets", "mode": "none" }]`, modes `read`, `write`, `none`). Use `paths` or these, not both. |
-| `workspace.network` | `true` lets shell commands use the network (`npm install`, `git push`). Default `false`: commands are offline. |
-| `tools.allow` | `"web"` adds the `sf-web` command (see Web access); with `artifacts.access: "create"` the agent also has `sf-artifact` (see Artifacts). An agent without `"shell"` still gets these two, through a `shell` tool that runs only them, one plain command at a time (no pipes or redirection), without general shell access. The built-in tool `shell`, which reads, searches and edits files too (in the sandbox). Older files that list `read_file`, `write_file`, `edit`, `glob`, `grep` or `list_directory` still load: those entries become `shell`, with the workspace read-only when none of them could write. And **grants**: `"N-name.json"` lets this agent message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
+| `network` | **Required.** What the agent's shell can reach: `off` (nothing), `pkg` (package registries such as npm, PyPI, crates.io, apt), `git` (also GitHub, GitLab and Bitbucket), `on` (the whole Internet, and `sfa-web`). Each level includes the ones before it. Addresses on your own computer and network are always refused. See [Agent containers](#agent-containers). |
+| `agents` | The agents this one may message: `"N-name.json"` lets it message the agent in `agents/name.json`, with up to N threads to it running at once (1–999). |
 | `tools.mcpServers` | Server names from `mcp.json`, optionally limited to listed tools. |
-| `tools.autoApprove` | Tools that skip the confirmation prompt. Built-in IDs, `mcp__<server>__<tool>` or `mcp__<server>__*`. |
-| `tools.ask` | `true` asks before each shell command. Default `false`: the sandbox is the boundary. |
+| `tools.autoApprove` | MCP tools that skip the confirmation prompt: `mcp__<server>__<tool>` or `mcp__<server>__*`. Shell commands never ask: the container is the boundary. |
 | `tools.defer` | Tools left out of requests until the agent loads them with `tool_search` (see [Deferred tools](#deferred-tools)). `"auto"` (default) defers the MCP tools once the agent has more than 10; `true` defers all of them; `false` none; or a list of tool names and patterns, such as `["mcp__github__*"]`. |
 | `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Default: `organize` when the agent replies in the conversation, `none` when it replies in a thread. |
-| `artifacts.access` | Artifacts: `create` (the `sf-artifact` command, and the index of recent artifacts), `read` (the index only) or `none`. Same defaults as `conversation.access`. |
+| `artifacts.access` | Artifacts: `create` (the `sfa-artifact` command, and the index of recent artifacts), `read` (the index only) or `none`. Same defaults as `conversation.access`. |
 | `context` | Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
 | `limits` | Turn budget, timeouts and `webRequests` (web requests per run, default 25). Defaults are shown above. |
 
-Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. Each agent's permissions are its own. An agent it may message can have wider permissions, or entirely different tools, roots and MCP servers; grants may form any graph, including two agents that may message each other.
+Every agent has the shell (in its own container) and, when it may message others, the message tool. Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. `workspace`, `tools.allow` and `tools.ask` were removed with the old sandbox; a file that still has them is skipped with what to use instead. Each agent's permissions are its own. An agent it may message can have a wider network level or different MCP servers; grants may form any graph, including two agents that may message each other.
+
+## Agent containers
+
+Every agent's shell commands run in its own Linux container (Debian, with the common languages and tools installed), never on your computer directly:
+
+- **`/workspaces`** is where commands start and where agents write. It is one folder shared by all agents and kept between runs (on Windows inside SF Agents' WSL distro, on Linux and macOS in `workspaces/` in SF Agents' folder). Clone or copy a project into its own folder there.
+- **`/roots/<name>`** holds your project folders, read-only. Choose them in **Settings → Agents → Project Folders** (or `agents.folders` in the TUI settings); every agent sees the same ones. Secret files in them (`.env`, keys, credentials) and SF Agents' own files are hidden.
+- **The network** is cut off except through SF Agents' proxy, which allows what the agent's `network` level allows and logs every request (the agent sheet's Network log).
+- **The home folder** (`/home/agent`) is the agent's own and kept; the agent has passwordless `sudo` inside its container.
+- `sfa-artifact` and `sfa-web` are commands in the container that ask SF Agents to show an artifact or fetch a page.
+
+On Windows, `sfagents containers setup` (asks for administrator rights once) installs the WSL distro `sfagents` with SF Agents' own Docker engine, separate from Docker Desktop; `sfagents containers status` shows what is installed. The agent image (about 4 GB) downloads on first use.
+
 
 ## Shared prompts
 
@@ -188,7 +199,7 @@ Threads are listed as artifacts of the conversation (`type: "agent_transcript"`)
 
 `sfagents start` continues one ongoing conversation per project, stored in `userdata/.sfagents/conversation.md` in the project directory. Close the CLI, come back tomorrow, and the agent still has the thread. The file is plain Markdown: opened in an editor or on GitHub it reads as a transcript, with metadata hidden in HTML comments. [docs/CONVERSATION-FORMAT.md](docs/CONVERSATION-FORMAT.md) specifies it.
 
-- **Sections.** The agent replying in the conversation organizes the conversation into topics and subtopics with its section tools. Every turn it must settle the section: `keep_section` (same topic) or `add_section`. Like `sf-artifact`, `add_section` both creates and changes: without `section` it starts a new topic, and with an existing section's ID it returns to that topic (filing the turn there), renames it, moves it, or merges other sections into it (`merge`: their messages and subtopics move into it, and they are gone). Sections are never deleted; every message stays filed. A turn that ends without one is sent back to the agent, at most twice, to choose; the reply it already gave stands, and that reminder round is not stored. New messages are filed under the current section. Renaming, moving or merging sections never changes the stored messages.
+- **Sections.** The agent replying in the conversation organizes the conversation into topics and subtopics with its section tools. Every turn it must settle the section: `keep_section` (same topic) or `add_section`. Like `sfa-artifact`, `add_section` both creates and changes: without `section` it starts a new topic, and with an existing section's ID it returns to that topic (filing the turn there), renames it, moves it, or merges other sections into it (`merge`: their messages and subtopics move into it, and they are gone). Sections are never deleted; every message stays filed. A turn that ends without one is sent back to the agent, at most twice, to choose; the reply it already gave stands, and that reminder round is not stored. New messages are filed under the current section. Renaming, moving or merging sections never changes the stored messages.
 - **Working context.** Each request carries the system prompt, a bounded index of section titles, and the most recent complete exchanges that fit the budget. Older material stays stored; the agent fetches it with `search_conversation` or `fetch_section` when it becomes relevant. `--show-context` prints what each turn sent.
 - **Threads between agents** are stored in `threads/<a>--<b>.md` and linked from the conversation as `agent_transcript` artifacts. An agent replying in a thread cannot see the main conversation unless its definition grants `conversation.access`.
 - **One writer.** A second `start` on the same conversation gets an error naming the process that holds it. A lock left by a crashed process is replaced automatically when that process is provably gone; `sfagents conversation unlock` handles anything else.
@@ -198,24 +209,24 @@ Threads are listed as artifacts of the conversation (`type: "agent_transcript"`)
 
 ## Artifacts
 
-An artifact is something the agent makes for you to keep rather than say in a message: a document, a web page, an SVG drawing, code, data, a PDF, an image, or a running web app. **An artifact is the file itself**, not a copy: the agent writes a file in its workspace and shows it with the `sf-artifact` command, which runs in its shell like `sf-web` (and, like it, works for agents without general shell access):
+An artifact is something the agent makes for you to keep rather than say in a message: a document, a web page, an SVG drawing, code, data, a PDF, an image, or a running web app. **An artifact is the file itself**, not a copy: the agent writes a file in `/workspaces` (or picks one in a project folder) and shows it with the `sfa-artifact` command in its container:
 
 ```sh
-sf-artifact report.md --title "Launch plan"                      # show a file (or a folder)
-sf-artifact --content "# Notes" notes.md --title "Notes"          # write the file first (or --stdin)
-sf-artifact --port 5173 --title "Prototype"                       # a web app running on this computer
-sf-artifact --id a3 --title "Launch plan (final)"                 # change artifact a3
+sfa-artifact report.md --title "Launch plan"                      # show a file (or a folder)
+sfa-artifact --content "# Notes" notes.md --title "Notes"          # write the file first (or --stdin)
+sfa-artifact --port 5173 --title "Prototype"                       # a web app running in the container
+sfa-artifact --id a3 --title "Launch plan (final)"                 # change artifact a3
 ```
 
-From then on the artifact is whatever the file is: edit the file (the agent with its tools, or you in the file manager) and the chat's preview and the tile update. `--id` changes an artifact instead: a new title, another file, new content for its file, or another port; `--print` shows an artifact's file (a view's state, what you picked). Writing a file this way does not ask; the workspace permissions are the boundary, with two exceptions that need no folder at all: `sf-artifact genui/<name>.json --content '…'` writes a view into `userdata/genui/`, and `--content` for a plain file name the agent has no workspace folder for writes it into `userdata/artifacts/`. Nothing else outside the agent's folders can be written, and names with `..` are refused. The agent sees an index of recent artifacts (with their files) in its system prompt and reads them as files with the shell; `artifacts.access: "read"` gives an agent that index and no `sf-artifact`.
+From then on the artifact is whatever the file is: edit the file (the agent with its tools, or you in the file manager) and the chat's preview and the tile update. `--id` changes an artifact instead: a new title, another file, new content for its file, or another port; `--print` shows an artifact's file (a view's state, what you picked). Writing a file this way does not ask: it writes only in `/workspaces`, except `sfa-artifact genui/<name>.json --content '…'`, which writes a view into `userdata/genui/`. The project folders under `/roots` can be shown but not written, and nothing else can be reached. The agent sees an index of recent artifacts (with their files) in its system prompt and reads them as files with the shell; `artifacts.access: "read"` gives an agent that index and no `sfa-artifact`.
 
 Where a file is decides how it is shown:
 
 - `.sfagents/threads/` holds the threads between agents: they open as conversations, also from the file manager.
-- `userdata/genui/` holds GenUI views: small interactive pieces the agent writes as JSON (layouts such as cards, tabs, carousels, popovers, scroll areas and forms; text, Markdown, math and code; buttons, fields, pickers, switches and sliders; sortable tables; bar, line, area and pie charts). They show live in the chat, not as a card. `sf-artifact` checks a view and tells the agent what is wrong with it, and a view cannot run code, load anything or reach the network. What you change in a view is saved into its file's `state`, so it stays after a reload and the agent can read it. A button can send the agent a message, shown as a reply to the view and telling the agent the view's state. A view is kept in the artifacts only when you tap its bookmark; from there you can pin it. The terminal draws views as text in the chat (Ctrl+↑, then Enter, opens one to use: Enter presses, toggles, chooses or types, + and − step a slider, and what you change is saved the same way).
+- `userdata/genui/` holds GenUI views: small interactive pieces the agent writes as JSON (layouts such as cards, tabs, carousels, popovers, scroll areas and forms; text, Markdown, math and code; buttons, fields, pickers, switches and sliders; sortable tables; bar, line, area and pie charts). They show live in the chat, not as a card. `sfa-artifact` checks a view and tells the agent what is wrong with it, and a view cannot run code, load anything or reach the network. What you change in a view is saved into its file's `state`, so it stays after a reload and the agent can read it. A button can send the agent a message, shown as a reply to the view and telling the agent the view's state. A view is kept in the artifacts only when you tap its bookmark; from there you can pin it. The terminal draws views as text in the chat (Ctrl+↑, then Enter, opens one to use: Enter presses, toggles, chooses or types, + and − step a slider, and what you change is saved the same way).
 - Everything else shows by its type, with a preview, and opens in the file manager's Quick Look.
 
-**Application artifacts**: when the agent starts a web app (a dev server on a port of this computer), `sf-artifact --port <port>` makes it an artifact. It opens inside SF Agents, served through SF Agents' own address under `/apps/<id>/`, so you can try a prototype from your phone over whatever already reaches SF Agents (your LAN, Tailscale Serve) without exposing another port. The app's absolute paths (`/src/…`, `/@vite/client`, its own `/api/…`), redirects and live-reload sockets are routed back to it. It works while the app runs.
+**Application artifacts**: when the agent starts a web app (a dev server in its container), `sfa-artifact --port <port>` makes it an artifact; SF Agents reaches it through the container bridge. It opens inside SF Agents, served through SF Agents' own address under `/apps/<id>/`, so you can try a prototype from your phone over whatever already reaches SF Agents (your LAN, Tailscale Serve) without exposing another port. The app's absolute paths (`/src/…`, `/@vite/client`, its own `/api/…`), redirects and live-reload sockets are routed back to it. It works while the app runs.
 
 Artifacts are recorded in the conversation (`artifact`, `artifact_update` and `artifact_pin` records, with the file's path or the app's address), so the list survives restarts. Artifacts from before this version, whose contents were copied into `.sfagents/artifacts/`, still open. You pin artifacts in the web interface; `sfagents conversation artifacts` lists them.
 
@@ -273,25 +284,25 @@ cross-origin writes. The sign-in gate still applies, and the session cookie is m
 
 - **Tool allowlists** are checked when each call is executed. A model asking for a tool it was not given gets an error back; nothing runs.
 - **Each agent has exactly its own permissions.** Messaging another agent never passes on the writer's tools or roots, and the other agent's are not limited by the writer's: grant wider or different ones when you want them. Grants are explicit (`N-name.json`). The loaded definitions are frozen.
-- **Shell runs in an OS sandbox**: bubblewrap on Linux, Seatbelt (`sandbox-exec`) on macOS, and a dedicated standard account with a restricted token and Job Object on Windows. A command can use the agent's workspace folders as their permissions allow and read system folders; personal files are hidden and its home/temp are disposable. There is no network unless the agent sets `"workspace": { "network": true }`. Inside them, `.env` and `.sfagents/` are hidden, and the `agents` folder, `mcp.json`, `.git/hooks`, `.git/config` and `.git/modules` are read-only (missing guarded files/folders are created first so they can be protected). Commands run without asking; set `"tools": { "ask": true }` to approve each one. **Without a sandbox, every command is refused** (install `bubblewrap` on Linux). Windows needs explicit setup: `npm run sandbox:setup`; undo with `npm run sandbox:uninstall`. See [Windows sandbox setup, design and tests](docs/WINDOWS-SANDBOX.md).
-- **Artifacts** are written by the host, not the sandbox, under the same rules: canonical real paths (following `..` and symlinks), `workspace.paths` (or the roots and `workspace.access`), and SF Agents' own files protected. They do not ask.
-- **MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag (which also approves shell commands of agents with `tools.ask`). In `run` mode without a terminal, calls that need approval are denied and the model is told why.
-- **MCP servers are not workspace-confined.** A server can reach anything its own process can. Grant servers per agent, preferably limited to specific tools.
+- **Shell runs in the agent's container** (see [Agent containers](#agent-containers)): no access to your computer beyond `/workspaces` and the read-only project folders, and no network beyond the agent's level. Commands run without asking.
+- **Artifacts** are read and written by SF Agents, under the container's rules: canonical real paths (following `..` and symlinks), writes only in `/workspaces`, reads also in the project folders, and hidden files stay hidden. They do not ask.
+- **MCP calls ask before running.** Exceptions: tools listed in `autoApprove`, MCP servers marked `"trust": true`, and the `--yes` flag. In `run` mode without a terminal, calls that need approval are denied and the model is told why.
+- **MCP servers do not run in containers.** A server can reach anything its own process can. Grant servers per agent, preferably limited to specific tools.
 - **Provider keys and sign-ins** live in the system keyring; no shell command, MCP server or terminal tab gets them in its environment, and they are never sent to a model.
-- **Conversation state** (`.sfagents/`, including threads and uploads) is invisible to shell commands; it changes only through the conversation service and the web server.
-- **Secrets:** the configuration directory's `.env` cannot be read or written by shell commands or artifacts (including through symlinks). Provider key variables are removed from the environment of shell commands and stdio MCP servers, and are never sent to the model.
+- **Conversation state** (`.sfagents/`, including threads and uploads) is never in a container; it changes only through the conversation service and the web server.
+- **Secrets:** `.env` files are hidden in containers and from artifacts (including through symlinks). A container gets none of SF Agents' environment; provider key variables are also removed from stdio MCP servers, and are never sent to the model.
 
 ## Web access
 
-Shell commands are offline, but an agent with `"web"` in `tools.allow` gets an `sf-web` command in its sandbox (or, without `"shell"`, a `shell` tool that runs only `sf-web` and `sf-artifact`):
+An agent with `"network": "on"` also has the `sfa-web` command in its container:
 
 ```sh
-sf-web search kiln firing schedule cone 6 > results.json   # Google results, as JSON
-sf-web markdown https://example.com/glazes > glazes.md      # a page as Markdown
-sf-web html https://example.com/glazes                      # a page as HTML
+sfa-web search kiln firing schedule cone 6 > results.json   # Google results, as JSON
+sfa-web markdown https://example.com/glazes > glazes.md      # a page as Markdown
+sfa-web html https://example.com/glazes                      # a page as HTML
 ```
 
-`sf-web` talks to SF Agents through a socket that exists only while the command runs; SF Agents makes the request with [Bright Data](https://brightdata.com)'s hosted MCP server (`search_engine`, `scrape_as_markdown`, `scrape_as_html`). Add the Bright Data API key in **Settings → Providers → Web Access**, or with `sfagents providers web-key`. It is kept in the system keyring and never enters the sandbox. Each run may make `limits.webRequests` requests (default 25); a result is cut at 1 MB, and a request times out after 90 seconds. Bright Data includes 5,000 free requests a month, then bills per request: set a spend limit in its control panel.
+`sfa-web` asks SF Agents, which makes the request with [Bright Data](https://brightdata.com)'s hosted MCP server (`search_engine`, `scrape_as_markdown`, `scrape_as_html`). Add the Bright Data API key in **Settings → Providers → Web Access**, or with `sfagents providers web-key`. It is kept in the system keyring and never enters a container. Each run may make `limits.webRequests` requests (default 25); a result is cut at 1 MB, and a request times out after 90 seconds. Bright Data includes 5,000 free requests a month, then bills per request: set a spend limit in its control panel.
 
 ## Deferred tools
 
@@ -350,9 +361,8 @@ Core has no terminal or web code; the CLI and the web server use only Core's pub
 - Search is lexical (all query words must appear); there is no semantic or embedding search yet, and no section summaries.
 - Section deletion and merging are not supported yet.
 - Token counts for the context budget are estimates (characters ÷ 4).
-- On Linux and macOS, if SF Agents itself is force-killed, a shell command it started may keep running; the next start reports that call's outcome as unknown. The Windows broker watches SF Agents and closes its Job Object when that parent exits.
-- Windows sandbox commands are serialized while temporary file permissions are applied. A command waiting more than 25 seconds reports that the sandbox is busy; narrow workspace roots also reduce permission propagation time.
-- Windows sandbox runtime limits: PowerShell startup and Node subprocesses with piped output currently fail. Direct Git commands through `cmd` and Node file operations work. See [runtime compatibility](docs/WINDOWS-SANDBOX.md#runtime-compatibility).
+- If SF Agents itself is force-killed, a command running in a container may keep running there; the next start reports that call's outcome as unknown.
+- `git push` from a container (`sfa-git`) is not back yet: agents can clone and commit with `"network": "git"`, but not push.
 - Model output is text only; MCP image and audio results are summarized, not shown to the model. Attached images are shown to the model (if it supports images); other binary attachments are only named.
 - The web interface has one conversation and one user: every signed-in device has the same access. The file manager works with the files of the account SF Agents runs as; any signed-in device can read, change and delete those files.
 - No MCP OAuth flow; use headers with environment variables.

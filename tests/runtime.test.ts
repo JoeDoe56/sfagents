@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   AgentRuntime,
   AgentTerminateMode,
+  hostWorkspacesDir,
   loadAgentTree,
   ProviderError,
   ToolErrorType,
@@ -12,15 +13,18 @@ import {
   type ConfirmationRequest,
   type RuntimeEvent,
 } from '@sfagents/core';
-import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, useAnySandbox, writeFileCommand, writeJson, type Script, writeAgent } from './helpers.js';
+import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeFileCommand, writeJson, type Script, writeAgent } from './helpers.js';
 
-await useAnySandbox();
+
+const ECHO = 'mcp__local__echo';
 
 function setup(agent: Record<string, unknown>) {
   const dir = makeTempDir();
-  fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'work', 'notes.txt'), 'The answer is 42.\n');
-  writeAgent(dir, { ...baseAgent('main'), workspace: { roots: ['work'] }, ...agent });
+  // Commands start in /workspaces.
+  fs.mkdirSync(hostWorkspacesDir(), { recursive: true });
+  fs.writeFileSync(path.join(hostWorkspacesDir(), 'notes.txt'), 'The answer is 42.\n');
+  writeJson(path.join(dir, 'mcp.json'), { mcpServers: { local: stdioServerConfig() } });
+  writeAgent(dir, { ...baseAgent('main'), ...agent });
   return { dir, tree: loadAgentTree(path.join(dir, 'agent.json')) };
 }
 
@@ -43,11 +47,11 @@ describe('single agent loop', () => {
     const req = providers.get('main')!.requests[0]!.request;
     assert.equal(req.messages[0]!.role, 'system');
     assert.match((req.messages[0] as { content: string }).content, /You are main\.[\s\S]*<environment>/);
-    assert.deepEqual(req.tools, [], 'no tools were granted');
+    assert.deepEqual(req.tools?.map((t) => t.name), ['shell'], 'every agent has the shell');
   });
 
   test('executes an allowed tool and feeds the result into the next turn', async () => {
-    const { runtime, providers } = runtimeWith({ tools: { allow: ['shell'] } }, (req, n) =>
+    const { runtime, providers } = runtimeWith({}, (req, n) =>
       n === 0
         ? { toolCalls: [{ name: 'shell', args: { command: catFile('notes.txt') } }] }
         : { text: `The file says: ${/Stdout: (.*)/.exec(lastToolContent(req) ?? '')?.[1]?.trim()}` },
@@ -64,18 +68,18 @@ describe('single agent loop', () => {
   });
 
   test('rejects a tool the agent was never given, even if the model asks for it', async () => {
-    const { dir, runtime } = runtimeWith({ tools: { allow: ['shell'] } }, (req, n) =>
+    const { runtime } = runtimeWith({}, (req, n) =>
       n === 0 ? { toolCalls: [{ name: 'write_file', args: { file_path: 'pwn.txt', content: 'x' } }, { name: 'message', args: { to: 'main', text: 'hi' } }] } : { text: lastToolContent(req) ?? '' },
     );
     const result = await runtime.createSession().run('go');
     assert.equal(result.toolCalls.length, 2);
     assert.ok(result.toolCalls.every((c) => !c.ok && c.errorType === ToolErrorType.TOOL_NOT_REGISTERED));
     assert.match(result.text, /Tool "message" is not available to agent "main"\. Available tools: shell/);
-    assert.equal(fs.existsSync(path.join(dir, 'work', 'pwn.txt')), false);
+    assert.equal(fs.existsSync(path.join(hostWorkspacesDir(), 'pwn.txt')), false);
   });
 
   test('invalid tool arguments are returned to the model as errors', async () => {
-    const { runtime } = runtimeWith({ tools: { allow: ['shell'] } }, (req, n) =>
+    const { runtime } = runtimeWith({}, (req, n) =>
       n === 0 ? { toolCalls: [{ name: 'shell', args: { cmd: 'ls' } }] } : { text: lastToolContent(req) ?? '' },
     );
     const result = await runtime.createSession().run('go');
@@ -84,21 +88,21 @@ describe('single agent loop', () => {
   });
 
   test('calls needing approval are denied without a handler, and the model is told why', async () => {
-    const { dir, runtime } = runtimeWith({ tools: { allow: ['shell'], ask: true } }, (req, n) =>
-      n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('out.txt') } }] } : { text: lastToolContent(req) ?? '' },
+    const { runtime } = runtimeWith({ tools: { mcpServers: ['local'] } }, (req, n) =>
+      n === 0 ? { toolCalls: [{ name: ECHO, args: { text: 'hi' } }] } : { text: lastToolContent(req) ?? '' },
     );
-    const result = await runtime.createSession().run('write');
+    const result = await runtime.createSession().run('echo');
     assert.equal(result.toolCalls[0]!.errorType, ToolErrorType.EXECUTION_DENIED);
     assert.match(result.text, /requires approval/);
-    assert.equal(fs.existsSync(path.join(dir, 'work', 'out.txt')), false);
+    await runtime.dispose();
   });
 
-  test('confirmation handler: deny, allow once, allow always; autoApprove and approveAll skip prompts', async () => {
+  test('confirmation handler: deny, allow once, allow always; autoApprove and approveAll skip prompts; the shell never asks', async () => {
     const asked: ConfirmationRequest[] = [];
     const decisions = ['deny', 'allow_once', 'allow_always'] as const;
-    const { dir, runtime } = runtimeWith(
-      { tools: { allow: ['shell'], ask: true } },
-      (_req, n) => (n < 4 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand(`f${n}.txt`) } }] } : { text: 'done' }),
+    const { runtime } = runtimeWith(
+      { tools: { mcpServers: ['local'] } },
+      (_req, n) => (n < 4 ? { toolCalls: [{ name: ECHO, args: { text: `m${n}` } }, { name: 'shell', args: { command: 'true' } }] } : { text: 'done' }),
       {
         confirm: async (r) => {
           asked.push(r);
@@ -106,31 +110,34 @@ describe('single agent loop', () => {
         },
       },
     );
-    const result = await runtime.createSession().run('write four files');
+    const result = await runtime.createSession().run('echo four times');
     assert.equal(asked.length, 3, 'the fourth call reuses "allow always"');
-    assert.equal(asked[0]!.details.type, 'exec');
+    assert.equal(asked[0]!.details.type, 'mcp');
     assert.deepEqual(asked[0]!.agentPath, ['main']);
-    assert.deepEqual(result.toolCalls.map((c) => c.ok), [false, true, true, true]);
-    assert.deepEqual(['f0.txt', 'f1.txt', 'f2.txt', 'f3.txt'].map((f) => fs.existsSync(path.join(dir, 'work', f))), [false, true, true, true]);
+    assert.deepEqual(result.toolCalls.filter((c) => c.name === ECHO).map((c) => c.ok), [false, true, true, true]);
+    assert.ok(result.toolCalls.filter((c) => c.name === 'shell').every((c) => c.ok));
+    await runtime.dispose();
 
     let prompts = 0;
     const auto = runtimeWith(
-      { tools: { allow: ['shell'], autoApprove: ['shell'], ask: true } },
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('a.txt') } }] } : { text: 'ok' }),
+      { tools: { mcpServers: ['local'], autoApprove: [ECHO] } },
+      (_req, n) => (n === 0 ? { toolCalls: [{ name: ECHO, args: { text: 'a' } }] } : { text: 'ok' }),
       { confirm: async () => (prompts++, 'deny') },
     );
     assert.equal((await auto.runtime.createSession().run('w')).toolCalls[0]!.ok, true);
+    await auto.runtime.dispose();
     const all = runtimeWith(
-      { tools: { allow: ['shell'], ask: true } },
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('a.txt') } }] } : { text: 'ok' }),
+      { tools: { mcpServers: ['local'] } },
+      (_req, n) => (n === 0 ? { toolCalls: [{ name: ECHO, args: { text: 'a' } }] } : { text: 'ok' }),
       { approveAll: true, confirm: async () => (prompts++, 'deny') },
     );
     assert.equal((await all.runtime.createSession().run('w')).toolCalls[0]!.ok, true);
+    await all.runtime.dispose();
     assert.equal(prompts, 0);
   });
 
   test('stops at the turn budget', async () => {
-    const { runtime } = runtimeWith({ tools: { allow: ['shell'] }, limits: { maxTurns: 3 } }, () => ({
+    const { runtime } = runtimeWith({ limits: { maxTurns: 3 } }, () => ({
       toolCalls: [{ name: 'shell', args: { command: catFile('notes.txt') } }],
     }));
     const result = await runtime.createSession().run('loop forever');
@@ -157,7 +164,7 @@ describe('single agent loop', () => {
   });
 
   test('tool exceptions are surfaced, not fatal', async () => {
-    const { runtime } = runtimeWith({ tools: { allow: ['shell'] } }, (req, n) =>
+    const { runtime } = runtimeWith({}, (req, n) =>
       n === 0 ? { toolCalls: [{ name: 'shell', args: { command: catFile('notes.txt') } }] } : { text: lastToolContent(req) ?? '' },
     );
     // Make the registered tool throw at execution time.
@@ -190,7 +197,7 @@ describe('single agent loop', () => {
   });
 
   test('cancellation mid-stream and mid-tool keeps the conversation valid', async () => {
-    const { runtime } = runtimeWith({ tools: { allow: ['shell'] }, workspace: { roots: ['work'] } }, (_req, n) =>
+    const { runtime } = runtimeWith({}, (_req, n) =>
       n === 0 ? { toolCalls: [{ name: 'shell', args: { command: process.platform === 'win32' ? 'ping -n 30 127.0.0.1' : 'sleep 30' } }, { name: 'shell', args: { command: 'echo never' } }] } : { text: 'after' },
       { approveAll: true },
     );

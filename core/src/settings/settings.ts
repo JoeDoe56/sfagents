@@ -16,8 +16,8 @@ export interface SettingSpec {
   label: string;
   /** One line shown under the control. */
   hint: string;
-  group: 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'STT & TTS' | 'Terminal output';
-  type: 'port' | 'host' | 'boolean' | 'hotkey' | 'number' | 'text' | 'origins';
+  group: 'Agents' | 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'STT & TTS' | 'Terminal output';
+  type: 'port' | 'host' | 'boolean' | 'hotkey' | 'number' | 'text' | 'origins' | 'folders';
   default: SettingValue;
   /** Applies on the next start of `sfagents web` (or `start`), not at once. */
   restart: boolean;
@@ -30,6 +30,15 @@ export interface SettingSpec {
 }
 
 export const SETTINGS: readonly SettingSpec[] = [
+  {
+    key: 'agents.folders',
+    label: 'Project Folders',
+    hint: 'Folders on this computer every agent can read, at /roots/<name> in its container. Agents never write here: they work in /workspaces. Secret files (.env, keys) and SF Agents\' own data stay hidden.',
+    group: 'Agents',
+    type: 'folders',
+    default: [],
+    restart: false,
+  },
   { key: 'web.port', label: 'Port', hint: 'The port the web interface listens on.', group: 'Web server', type: 'port', default: 8093, restart: true },
   {
     key: 'web.host',
@@ -132,6 +141,21 @@ export function parseSetting(key: string, value: unknown): SettingValue {
         if (!out.includes(origin)) out.push(origin);
       }
       if (out.length > 32) throw new SettingsError(`${spec.label}: at most 32 addresses.`);
+      return out;
+    }
+    case 'folders': {
+      // A list, or (from the command line) folders separated by semicolons or new lines.
+      const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[;\r\n]+/) : null;
+      if (!list || list.some((v) => typeof v !== 'string')) throw new SettingsError(`${spec.label} must be a list of folders.`);
+      const out: string[] = [];
+      for (const raw of list as string[]) {
+        const v = raw.trim().replace(/^"(.*)"$/, '$1');
+        if (!v) continue;
+        if (!path.isAbsolute(v)) throw new SettingsError(`${spec.label}: "${v}" is not a full path, such as C:\\Users\\you\\projects.`);
+        const folder = path.resolve(v);
+        if (!out.some((o) => o.toLowerCase() === folder.toLowerCase())) out.push(folder);
+      }
+      if (out.length > 64) throw new SettingsError(`${spec.label}: at most 64 folders.`);
       return out;
     }
     case 'hotkey': {

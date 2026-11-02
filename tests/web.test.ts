@@ -8,18 +8,18 @@ import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree, parseSetting } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
-import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, useAnySandbox, writeJson, type Script, writeAgent } from './helpers.js';
+import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, writeAgent } from './helpers.js';
 
-await useAnySandbox();
 
-function project(agent: Record<string, unknown> = {}) {
+function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
   const dir = makeTempDir('sfagents-web-');
   writeAgent(dir, { ...baseAgent('main'), ...agent });
+  for (const [f, v] of Object.entries(files)) writeJson(path.join(dir, f), v);
   return dir;
 }
 
-async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string; publicOrigins?: string[] } = {}) {
-  const dir = project(agent);
+async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string; publicOrigins?: string[] } = {}, files: Record<string, unknown> = {}) {
+  const dir = project(agent, files);
   const tree = loadAgentTree(dir);
   const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
   const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(script).factory, watchAgents: false, auth: false, ...extra });
@@ -348,7 +348,7 @@ describe('web server', () => {
 
   test('a message streams over SSE, creates an artifact, and the artifact can be pinned and served sandboxed', async () => {
     const script: Script = (req, call) => {
-      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'shell', args: { command: 'sf-artifact --title Page --content "<h1>hi</h1>" index.html' } }] };
+      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'shell', args: { command: 'sfa-artifact --title Page --content "<h1>hi</h1>" index.html' } }] };
       return { text: `Done (${lastToolContent(req)?.slice(0, 20)})` };
     };
     const s = await startServer(script);
@@ -524,13 +524,15 @@ describe('web server', () => {
   test('approvals are asked in the browser; denial and cancellation work', async () => {
     const s = await startServer(
       (req, call) => {
-        if (call === 0) return { toolCalls: [{ name: 'shell', args: { command: 'echo approved-run' } }] };
+        if (call === 0) return { toolCalls: [{ name: 'mcp__local__echo', args: { text: 'approved-run' } }] };
         if (call === 1) return { text: `result: ${lastToolContent(req)}` };
-        if (call === 2) return { toolCalls: [{ name: 'shell', args: { command: 'echo nope' } }] };
+        if (call === 2) return { toolCalls: [{ name: 'mcp__local__echo', args: { text: 'nope' } }] };
         if (call === 3) return { text: `second: ${lastToolContent(req)}` };
         return { text: 'slow', delayMs: 5000 };
       },
-      { tools: { allow: ['shell'], ask: true } },
+      { tools: { mcpServers: ['local'] } },
+      {},
+      { 'mcp.json': { mcpServers: { local: stdioServerConfig() } } },
     );
     const ev = events(s.base);
     try {
@@ -538,8 +540,8 @@ describe('web server', () => {
       await postJson(s.base, '/api/messages', { text: 'run it' });
       const ask = await ev.wait((e) => e.event === 'approval');
       const approval = ask.data['approval'] as { id: string; detail: string; tool: string };
-      assert.equal(approval.tool, 'shell');
-      assert.match(approval.detail, /echo approved-run/);
+      assert.equal(approval.tool, 'mcp__local__echo');
+      assert.match(approval.detail, /approved-run/);
       assert.equal((await postJson(s.base, `/api/approvals/${approval.id}`, { decision: 'maybe' })).status, 400);
       assert.equal((await postJson(s.base, `/api/approvals/${approval.id}`, { decision: 'allow_once' })).status, 200);
       const end1 = await ev.wait((e) => e.event === 'run_end');
@@ -789,11 +791,11 @@ describe('agent settings and context', () => {
       assert.ok(byId.system.tokens > 0);
       assert.ok(byId.messages.tokens > 0);
       assert.ok(byId.conversation.items.some((t: { name: string }) => t.name === 'search_conversation'));
-      // sf-artifact is listed with the tools, as a command in the shell (its tokens are the shell's).
+      // sfa-artifact is listed with the tools, as a command in the shell (its tokens are the shell's).
       type Item = { name: string; tokens: number; partOf?: string; schema: { usage?: string } };
-      const art = (byId.builtin.items as Item[]).find((t) => t.name === 'sf-artifact')!;
+      const art = (byId.builtin.items as Item[]).find((t) => t.name === 'sfa-artifact')!;
       assert.equal(art.partOf, 'shell');
-      assert.match(art.schema.usage!, /sf-artifact --port/);
+      assert.match(art.schema.usage!, /sfa-artifact --port/);
       assert.equal(byId.builtin.tokens, (byId.builtin.items as Item[]).filter((t) => !t.partOf).reduce((a, t) => a + t.tokens, 0));
       assert.equal(c.exchanges.included, 1);
       assert.equal(c.modelWindow, null);

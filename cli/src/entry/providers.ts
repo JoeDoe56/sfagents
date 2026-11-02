@@ -171,7 +171,7 @@ export async function providersCommand(
         await registry.secrets.check();
         const key = await prompt('Bright Data API key: ', streams, true);
         await registry.setWebKey(key);
-        streams.stdout.write(`${style.green('✓')} Saved. Agents with "web" in tools.allow can now use sf-web. The key is in the ${registry.secrets.label}.\n`);
+        streams.stdout.write(`${style.green('✓')} Saved. Agents at network level "on" can now use sfa-web. The key is in the ${registry.secrets.label}.\n`);
         return OK;
       }
       default:

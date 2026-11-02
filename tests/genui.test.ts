@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { AgentRuntime, ArtifactError, ConversationService, loadAgentTree, moveUserData, parseConversation, runArtifactRequest, serializeConversation, validateGenui, type ChatMessage } from '@sfagents/core';
+import { AgentRuntime, ArtifactError, hostWorkspacesDir, ConversationService, loadAgentTree, moveUserData, parseConversation, runArtifactRequest, serializeConversation, validateGenui, type ChatMessage } from '@sfagents/core';
 import { WebServer } from '@sfagents/web';
 import { baseAgent, makeTempDir, scriptedFactory, writeAgent, type Script } from './helpers.js';
 
@@ -42,14 +42,9 @@ function open(dir: string) {
   return { tree, conversation: ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir }) };
 }
 
-/** A workspace that allows everything under `dir` (the checks are tested elsewhere). */
-function workspace(dir: string) {
-  return {
-    check: (p: string) => {
-      const resolvedPath = path.resolve(dir, p);
-      return { ok: resolvedPath.startsWith(dir), resolvedPath };
-    },
-  } as unknown as Parameters<typeof runArtifactRequest>[1];
+/** An agent container whose workspace is `dir` (the path rules are tested in artifacts.test.ts). */
+function container(dir: string) {
+  return { appHost: 'x.sfa-agent', writeRoots: [dir], readRoots: [], hidden: [] };
 }
 
 describe('GenUI: the format', () => {
@@ -76,26 +71,26 @@ describe('GenUI: the format', () => {
   });
 });
 
-describe('GenUI: sf-artifact, saving and records', () => {
-  test('sf-artifact checks a view and refuses one with mistakes', () => {
+describe('GenUI: sfa-artifact, saving and records', () => {
+  test('sfa-artifact checks a view and refuses one with mistakes', () => {
     const dir = project();
     const { conversation } = open(dir);
-    const ws = workspace(dir);
+    const ws = container(dir);
     assert.throws(
-      () => runArtifactRequest(conversation, ws, { title: 'Broken', path: 'genui/broken.json', content: '{"version":1,"view":{"type":"map"}}' }, { cwd: dir }),
+      () => runArtifactRequest(conversation, { title: 'Broken', path: 'genui/broken.json', content: '{"version":1,"view":{"type":"map"}}' }, { cwd: dir, container: ws }),
       (e: unknown) => e instanceof ArtifactError && /not a valid GenUI view[\s\S]*view\.type/.test(e.message),
     );
     assert.equal(conversation.artifacts().length, 0, 'nothing is shown until the view is valid');
-    assert.match(runArtifactRequest(conversation, ws, { title: 'Plans', path: 'genui/plans.json', content: JSON.stringify(VIEW) }, { cwd: dir }), /Created artifact/);
+    assert.match(runArtifactRequest(conversation, { title: 'Plans', path: 'genui/plans.json', content: JSON.stringify(VIEW) }, { cwd: dir, container: ws }), /Created artifact/);
     const v = conversation.artifacts()[0]!;
     assert.equal(v.type, 'genui');
     // After an edit, --id alone checks it again.
     fs.writeFileSync(path.join(dir, 'genui', 'plans.json'), '{"version":1,');
-    assert.throws(() => runArtifactRequest(conversation, ws, { id: v.id }, { cwd: dir }), /not valid JSON/);
+    assert.throws(() => runArtifactRequest(conversation, { id: v.id }, { cwd: dir, container: ws }), /not valid JSON/);
     fs.writeFileSync(path.join(dir, 'genui', 'plans.json'), JSON.stringify(VIEW));
-    assert.match(runArtifactRequest(conversation, ws, { id: v.id }, { cwd: dir }), /is a valid GenUI view/);
+    assert.match(runArtifactRequest(conversation, { id: v.id }, { cwd: dir, container: ws }), /is a valid GenUI view/);
     // Files outside genui/ are not views and are not checked.
-    assert.match(runArtifactRequest(conversation, ws, { title: 'Data', path: 'data.json', content: '{"view":1}' }, { cwd: dir }), /Created artifact/);
+    assert.match(runArtifactRequest(conversation, { title: 'Data', path: 'data.json', content: '{"view":1}' }, { cwd: dir, container: ws }), /Created artifact/);
     conversation.close();
   });
 
@@ -144,25 +139,24 @@ function request(base: string, pathname: string, method = 'GET', body?: unknown)
 }
 
 describe('GenUI: SF Agents\' own folders', () => {
-  test('an agent with no workspace still writes views and artifacts with sf-artifact, and reads them back', async () => {
+  test('an agent writes views and artifacts with sfa-artifact, and reads them back', async () => {
     const dir = makeTempDir('sfagents-genui-own-');
-    writeAgent(dir, { ...baseAgent('main'), tools: { allow: [] }, workspace: undefined });
+    writeAgent(dir, baseAgent('main'));
     moveUserData(dir);
     const { tree, conversation } = open(dir);
-    assert.deepEqual(tree.root.roots, [], 'no workspace');
     const json = JSON.stringify({ version: 1, title: 'Demo', state: { n: 1 }, view: { type: 'text', value: 'hi' } });
     const q = (v: string) => `"${v.replace(/[\\"$`]/g, '\\$&')}"`;
     const script: Script = (_req, call) =>
       call === 0
         ? {
             toolCalls: [
-              { name: 'shell', args: { command: `sf-artifact genui/demo.json --title "Demo" --content ${q(json)}` } },
-              { name: 'shell', args: { command: 'sf-artifact notes.md --title "Notes" --content "hello"' } },
-              { name: 'shell', args: { command: 'sf-artifact ../escape.md --title "Out" --content "x"' } },
+              { name: 'shell', args: { command: `sfa-artifact genui/demo.json --title "Demo" --content ${q(json)}` } },
+              { name: 'shell', args: { command: 'sfa-artifact notes.md --title "Notes" --content "hello"' } },
+              { name: 'shell', args: { command: 'sfa-artifact ../escape.md --title "Out" --content "x"' } },
             ],
           }
         : call === 1
-          ? { toolCalls: [{ name: 'shell', args: { command: `sf-artifact --id ${conversation.artifacts().find((a) => a.title === 'Demo')?.id} --print` } }] }
+          ? { toolCalls: [{ name: 'shell', args: { command: `sfa-artifact --id ${conversation.artifacts().find((a) => a.title === 'Demo')?.id} --print` } }] }
           : { text: 'ok' };
     const { factory, providers } = scriptedFactory(script);
     const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
@@ -170,12 +164,13 @@ describe('GenUI: SF Agents\' own folders', () => {
     const demo = conversation.artifacts().find((a) => a.title === 'Demo')!;
     assert.equal(demo.type, 'genui');
     assert.equal(fs.readFileSync(path.join(dir, 'userdata', 'genui', 'demo.json'), 'utf8'), json);
-    assert.equal(fs.readFileSync(path.join(dir, 'userdata', 'artifacts', 'notes.md'), 'utf8'), 'hello');
-    assert.equal(fs.existsSync(path.join(dir, 'escape.md')), false);
+    // Commands start in /workspaces, so that is where a plain file name goes.
+    assert.equal(fs.readFileSync(path.join(hostWorkspacesDir(), 'notes.md'), 'utf8'), 'hello');
+    assert.equal(fs.existsSync(path.join(path.dirname(hostWorkspacesDir()), 'escape.md')), false);
     assert.equal(conversation.artifacts().some((a) => a.title === 'Out'), false);
     const printed = providers.get('main')!.requests.flatMap((r) => r.messages).filter((m) => (m as { role: string }).role === "tool").map((m) => String((m as { content: unknown }).content));
     assert.ok(printed.some((t) => t.includes('"title":"Demo"')), 'the view printed back');
-    assert.ok(printed.some((t) => /no workspace folders|must be a file name|outside/.test(t)), 'an escaping name is refused');
+    assert.ok(printed.some((t) => /not a place you can write|must be a file name|outside/.test(t)), 'an escaping name is refused');
     await runtime.dispose();
     conversation.close();
   });

@@ -14,24 +14,32 @@ import {
   readConversation,
   safeFilename,
   serializeConversation,
-  splitCommandLine,
+  hostWorkspacesDir,
   type ChatMessage,
   type FunctionDeclaration,
 } from '@sfagents/core';
-import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent, catFile, useAnySandbox } from './helpers.js';
+import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
 
-const realSandbox = await useAnySandbox();
 
-/** A shell call running `sf-artifact` with these options (and a path). */
+/** The test's own folder in /workspaces, where its commands run. */
+let workIn = '';
+function workspace(): string {
+  fs.mkdirSync(hostWorkspacesDir(), { recursive: true });
+  const ws = fs.mkdtempSync(path.join(hostWorkspacesDir(), 'artifacts-'));
+  workIn = path.basename(ws);
+  return ws;
+}
+
+/** A shell call running `sfa-artifact` with these options (and a path), in the test's workspace folder. */
 function sfArtifact(o: { id?: string; title?: string; path?: string; content?: string; port?: number }) {
   const q = (v: string) => `"${v.replace(/[\\"$`]/g, '\\$&')}"`;
-  const words = ['sf-artifact'];
+  const words = ['sfa-artifact'];
   if (o.id) words.push('--id', q(o.id));
   if (o.title) words.push('--title', q(o.title));
   if (o.content !== undefined) words.push('--content', q(o.content));
   if (o.port) words.push('--port', String(o.port));
   if (o.path) words.push(q(o.path));
-  return { name: 'shell', args: { command: words.join(' ') } };
+  return { name: 'shell', args: { command: words.join(' '), ...(workIn ? { directory: workIn } : {}) } };
 }
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
@@ -126,9 +134,10 @@ describe('artifacts: storage and records', () => {
 
 describe('artifacts: model tools and grants', () => {
   test('artifacts are the files themselves: created with or without content, they follow the file', async () => {
-    const dir = project({ tools: { allow: [] } });
-    fs.mkdirSync(path.join(dir, 'docs'));
-    fs.writeFileSync(path.join(dir, 'docs', 'existing.csv'), 'a,b\n1,2\n');
+    const dir = project();
+    const ws = workspace();
+    fs.mkdirSync(path.join(ws, 'docs'));
+    fs.writeFileSync(path.join(ws, 'docs', 'existing.csv'), 'a,b\n1,2\n');
     const { tree, conversation } = open(dir);
     const script: Script = (req, call) => {
       const id = conversation.artifacts().find((v) => v.title.startsWith('Haiku'))?.id;
@@ -144,40 +153,39 @@ describe('artifacts: model tools and grants', () => {
         case 4:
           return { toolCalls: [sfArtifact({ id, title: 'Haiku (two lines)' })] };
         case 5:
-          return { toolCalls: [sfArtifact({ title: 'Outside', path: '../elsewhere.md', content: 'x' })] };
+          return { toolCalls: [sfArtifact({ title: 'Outside', path: '/etc/elsewhere.md', content: 'x' })] };
         default:
           return { text: 'ok' };
       }
     };
     const { factory, providers } = scriptedFactory(script);
-    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
+    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation, folders: () => [] });
     const session = runtime.createSession();
     const r1 = await session.run('Write a haiku and show the numbers');
     assert.match(r1.text, /Created artifact a\d+ "Numbers" shows docs\/existing.csv/);
     // The file is written where the agent said, and nothing is copied.
-    assert.equal(fs.readFileSync(path.join(dir, 'haiku.md'), 'utf8'), 'old pond');
+    assert.equal(fs.readFileSync(path.join(ws, 'haiku.md'), 'utf8'), 'old pond');
     assert.equal(fs.existsSync(path.join(dir, '.sfagents', 'artifacts')), false, 'no managed copies');
     const haiku = conversation.artifacts().find((v) => v.title === 'Haiku')!;
-    assert.deepEqual([haiku.file, haiku.type, haiku.rev], ['haiku.md', 'document', 1]);
+    assert.deepEqual([conversation.resolveArtifactFile(haiku.file!), haiku.type, haiku.rev], [path.join(ws, 'haiku.md'), 'document', 1]);
     const numbers = conversation.artifacts().find((v) => v.title === 'Numbers')!;
-    assert.deepEqual([numbers.file, numbers.type], ['docs/existing.csv', 'data']);
-    // sf-artifact --id writes the artifact's file and retitles it.
+    assert.deepEqual([conversation.resolveArtifactFile(numbers.file!), numbers.type], [path.join(ws, 'docs', 'existing.csv'), 'data']);
+    // sfa-artifact --id writes the artifact's file and retitles it.
     await session.run('Add a second line');
     const requests = providers.get('main')!.requests;
-    assert.equal(fs.readFileSync(path.join(dir, 'haiku.md'), 'utf8'), 'old pond\nfrog jumps in');
+    assert.equal(fs.readFileSync(path.join(ws, 'haiku.md'), 'utf8'), 'old pond\nfrog jumps in');
     assert.match(JSON.stringify(requests[4]!.messages), /Wrote the file of artifact/);
     const v = conversation.artifacts().find((x) => x.id === haiku.id)!;
-    assert.deepEqual([v.title, v.rev, v.file], ['Haiku (two lines)', 2, 'haiku.md']);
+    assert.deepEqual([v.title, v.rev, v.file], ['Haiku (two lines)', 2, haiku.file]);
     const firstTools = (requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name);
-    // No general shell: the shell tool runs only SF Agents' commands.
     assert.deepEqual(firstTools.filter((n) => /shell|artifact/.test(n)), ['shell']);
-    assert.match((requests[0]!.request.tools as FunctionDeclaration[]).find((t) => t.name === 'shell')!.description!, /sf-artifact/);
+    assert.match((requests[0]!.request.tools as FunctionDeclaration[]).find((t) => t.name === 'shell')!.description!, /sfa-artifact/);
     assert.match((requests[0]!.messages[0] as { content: string }).content, /<artifacts_guidance>/);
-    assert.match((requests[3]!.messages[0] as { content: string }).content, new RegExp(`<artifacts>[\\s\\S]*\\[${haiku.id}\\] Haiku — haiku.md, document`));
-    // Outside the agent's workspace: refused.
+    assert.match((requests[3]!.messages[0] as { content: string }).content, new RegExp(`<artifacts>[\\s\\S]*\\[${haiku.id}\\] Haiku — .*haiku.md, document`));
+    // Outside /workspaces: refused.
     await session.run('Write elsewhere');
-    assert.match(JSON.stringify(requests[requests.length - 1]!.messages), /outside this agent's permitted workspace roots/);
-    assert.equal(fs.existsSync(path.join(dir, '..', 'elsewhere.md')), false);
+    assert.match(JSON.stringify(requests[requests.length - 1]!.messages), /is not a place you can write: write files under \/workspaces/);
+    assert.equal(fs.existsSync('/etc/elsewhere.md'), false);
     const record = conversation.state.artifactById.get(haiku.id)!;
     assert.ok(record.callId && record.message, 'artifact records link to the requesting call and message');
     await runtime.dispose();
@@ -185,9 +193,10 @@ describe('artifacts: model tools and grants', () => {
   });
 
   test('a folder is an artifact too: it opens in the file manager and has no content to read', async () => {
-    const dir = project({ tools: { allow: [] } });
-    fs.mkdirSync(path.join(dir, 'site', 'css'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'site', 'index.html'), '<h1>hi</h1>');
+    const dir = project();
+    const ws = workspace();
+    fs.mkdirSync(path.join(ws, 'site', 'css'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'site', 'index.html'), '<h1>hi</h1>');
     const { tree, conversation } = open(dir);
     const script: Script = (req, call) => {
       const id = conversation.artifacts().find((v) => v.title === 'Site')?.id;
@@ -199,7 +208,7 @@ describe('artifacts: model tools and grants', () => {
     const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
     const r = await runtime.createSession().run('show the site folder');
     const site = conversation.artifacts().find((v) => v.title === 'Site')!;
-    assert.deepEqual([site.type, site.file, site.mime], ['folder', 'site', 'inode/directory']);
+    assert.deepEqual([site.type, conversation.resolveArtifactFile(site.file!), site.mime], ['folder', path.join(ws, 'site'), 'inode/directory']);
     assert.match(r.text, /opens the folder in the file manager/);
     // A folder artifact cannot become a file one, and content cannot be written to a folder.
     assert.match(r.text, /shows a folder; make a new artifact/);
@@ -210,8 +219,9 @@ describe('artifacts: model tools and grants', () => {
     conversation.close();
   });
 
-  test('sf-artifact writes without asking, inside the workspace rules; app artifacts record the address', async () => {
-    const dir = project({ tools: { allow: [] } });
+  test('sfa-artifact writes without asking, only in /workspaces; app artifacts record the address', async () => {
+    const dir = project();
+    const ws = workspace();
     const { tree, conversation } = open(dir);
     let asked = 0;
     const script: Script = (_req, call) =>
@@ -220,23 +230,23 @@ describe('artifacts: model tools and grants', () => {
             toolCalls: [
               sfArtifact({ title: 'Plan', path: 'plan.md', content: '# Plan' }),
               sfArtifact({ title: 'Prototype', port: 5173 }),
-              sfArtifact({ title: 'Sneaky', path: 'agents/sneaky.json', content: '{}' }),
+              sfArtifact({ title: 'Sneaky', path: `/roots/${path.basename(dir)}/agents/sneaky.json`, content: '{}' }),
             ],
           }
         : { text: 'ok' };
-    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => (asked++, 'allow_once') });
+    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => (asked++, 'allow_once'), folders: () => [dir] });
     await runtime.createSession().run('go');
-    assert.equal(asked, 0, 'the workspace rules are the boundary');
-    assert.equal(fs.readFileSync(path.join(dir, 'plan.md'), 'utf8'), '# Plan');
-    assert.equal(fs.existsSync(path.join(dir, 'agents', 'sneaky.json')), false, 'the agents folder is read-only');
+    assert.equal(asked, 0, 'the container is the boundary');
+    assert.equal(fs.readFileSync(path.join(ws, 'plan.md'), 'utf8'), '# Plan');
+    assert.equal(fs.existsSync(path.join(dir, 'agents', 'sneaky.json')), false, 'project folders are read-only');
     const app = conversation.artifacts().find((v) => v.type === 'app')!;
-    assert.equal(app.url, 'http://127.0.0.1:5173/');
+    assert.match(app.url!, /^http:\/\/[a-z0-9-]+\.sfa-agent:5173\/$/);
     assert.throws(() => conversation.artifactContent(app.id), /is an application/);
     await runtime.dispose();
     conversation.close();
     // Reopening keeps the file and the address.
     const again = open(dir).conversation;
-    assert.deepEqual(again.artifacts().map((v) => [v.title, v.file ?? v.url]).sort(), [['Plan', 'plan.md'], ['Prototype', 'http://127.0.0.1:5173/']]);
+    assert.deepEqual(again.artifacts().map((v) => [v.title, v.file ? again.resolveArtifactFile(v.file) : v.url]).sort(), [['Plan', path.join(ws, 'plan.md')], ['Prototype', app.url]]);
     again.close();
   });
 
@@ -245,10 +255,11 @@ describe('artifacts: model tools and grants', () => {
     const tree = loadAgentTree(dir);
     const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
     const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation });
+    const shellText = (tools: Map<string, { description: string }>) => tools.get('shell')!.description;
     const inThread = await runtime.buildTools(tree.byId.get('helper')!, ['main', 'helper'], () => {}, undefined, conversation, 'thread');
-    assert.equal(inThread.has('shell'), false);
+    assert.doesNotMatch(shellText(inThread), /sfa-artifact/);
     const asMain = await runtime.buildTools(tree.byId.get('helper')!, ['helper'], () => {}, undefined, conversation, 'main');
-    assert.ok(asMain.has('shell'), 'the same agent replying in the conversation creates artifacts (sf-artifact)');
+    assert.match(shellText(asMain), /sfa-artifact/, 'the same agent replying in the conversation creates artifacts');
     await runtime.dispose();
     conversation.close();
 
@@ -256,8 +267,9 @@ describe('artifacts: model tools and grants', () => {
     const t2 = loadAgentTree(ro);
     const c2 = ConversationService.open(path.join(ro, '.sfagents', 'conversation.md'), { configDir: t2.configDir });
     const rt2 = new AgentRuntime({ tree: t2, providerFactory: scriptedFactory(() => ({ text: 'x' })).factory, conversation: c2 });
-    const names = [...(await rt2.buildTools(t2.root, ['main'], () => {}, undefined, c2)).keys()];
-    assert.equal(names.some((k) => k.includes('artifact') || k === 'shell'), false);
+    const roTools = await rt2.buildTools(t2.root, ['main'], () => {}, undefined, c2);
+    assert.equal([...roTools.keys()].some((k) => k.includes('artifact')), false);
+    assert.doesNotMatch(roTools.get('shell')!.description, /sfa-artifact/);
     // ...but it still sees the index, and reads the files with the shell.
     fs.writeFileSync(path.join(ro, 'notes.md'), '# Notes');
     c2.linkArtifact({ title: 'Notes', file: path.join(ro, 'notes.md') });
@@ -271,48 +283,6 @@ describe('artifacts: model tools and grants', () => {
 
     const bad = project({ artifacts: { access: 'write' } }, { 'agents/ok.json': baseAgent('ok') });
     assert.match(loadAgentTree(bad).skipped[0]!.error, /must be "none", "read" or "create"/);
-  });
-
-  test('without "shell" the shell tool runs only sf-artifact (and sf-web), one plain command at a time', async () => {
-    const dir = project({ tools: { allow: [] } });
-    const { tree, conversation } = open(dir);
-    const script: Script = (req, call) =>
-      call === 0
-        ? {
-            toolCalls: [
-              { name: 'shell', args: { command: 'ls -la' } },
-              { name: 'shell', args: { command: 'sf-artifact --title X x.md | cat' } },
-              { name: 'shell', args: { command: 'sf-web search cats' } },
-              { name: 'shell', args: { command: 'sf-artifact --help' } },
-            ],
-          }
-        : { text: JSON.stringify((req.messages.filter((m) => m.role === 'tool') as Array<{ content: string }>).map((m) => m.content)) };
-    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => 'deny' });
-    const out = JSON.parse((await runtime.createSession().run('go')).text) as string[];
-    assert.match(out[0]!, /can only run sf-artifact, one command at a time/);
-    assert.match(out[1]!, /without pipes or redirection/);
-    assert.match(out[2]!, /can only run sf-artifact/, 'no web access without "web"');
-    assert.match(out[3]!, /Usage:\n\s+sf-artifact/);
-    assert.equal(conversation.artifacts().length, 0);
-    await runtime.dispose();
-    conversation.close();
-
-    assert.deepEqual(splitCommandLine(`sf-artifact --title "A \\"b\\"" 'c d' e\\ f`, false), ['sf-artifact', '--title', 'A "b"', 'c d', 'e f']);
-    assert.deepEqual(splitCommandLine('sf-artifact C:\\x\\y.md', true), ['sf-artifact', 'C:\\x\\y.md']);
-    for (const bad of ['a | b', 'a > f', 'a; b', 'a && b', 'echo $HOME', 'echo "$(id)"', 'a `b`', '"open']) assert.equal(splitCommandLine(bad, false), undefined, bad);
-  });
-
-  test('shell commands cannot reach artifact files', { skip: !realSandbox && 'no OS sandbox on this machine' }, async () => {
-    const dir = project({ tools: { allow: ['shell'] } });
-    const { tree, conversation } = open(dir);
-    const v = conversation.createArtifact({ title: 'secret-ish', filename: 'n.md', content: 'hidden' });
-    const target = path.join(dir, '.sfagents', v.path!);
-    const script: Script = (req, call) => (call === 0 ? { toolCalls: [{ name: 'shell', args: { command: catFile(target) } }] } : { text: lastToolContent(req) ?? '' });
-    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation });
-    const r = await runtime.createSession().run('read it');
-    assert.doesNotMatch(r.text, /hidden/);
-    await runtime.dispose();
-    conversation.close();
   });
 });
 

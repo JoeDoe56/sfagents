@@ -21,8 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { Readable, Writable } from 'node:stream';
 import {
   AgentRuntime,
-  packageProxy,
-  PACKAGE_HOSTS,
+  networkLog,
   AgentTerminateMode,
   ArtifactError,
   genuiStateSummary,
@@ -1048,9 +1047,9 @@ export class WebServer {
         if (parts[1] === 'context') return sendJson(res, 200, await this.contextInfo());
         if (parts[1] === 'usage') return sendJson(res, 200, await this.usageInfo(url.searchParams.get('refresh') === '1'));
         if (parts[1] === 'network') {
-          // The package and Git proxy's log for this agent (offline agents on Windows).
+          // What the agents' containers connected to (allowed and refused), newest first.
           const node = this.session.node;
-          return sendJson(res, 200, { agent: node.id, hosts: PACKAGE_HOSTS, entries: packageProxy().entries().slice(-200).reverse() });
+          return sendJson(res, 200, { agent: node.id, level: node.definition.network, entries: networkLog().entries().slice(-200).reverse() });
         }
         if (parts[1]) throw new HttpError(404, 'Not found.');
         return sendJson(res, 200, this.agentInfo());
@@ -2018,11 +2017,9 @@ export class WebServer {
   }
 
   /** The threads between agents (the chat links to them; the sheet shows them). */
-  /** The folders whose repositories are checked: the project and every agent's workspace roots. */
+  /** The folders whose repositories are checked: the project and the project folders agents read. */
   private diffDirs(): string[] {
-    const dirs = new Set<string>([this.runtime.tree.configDir]);
-    for (const node of this.runtime.tree.byId.values()) for (const root of node.roots) dirs.add(root);
-    return [...dirs];
+    return [...new Set<string>([this.runtime.tree.configDir, ...this.runtime.projectFolders()])];
   }
 
   /** Checks the repositories again (after `delayMs`, coalescing calls) and tells the pages when something changed. */

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { descendantsOf, isLeftover, isSandboxRun, killProcessTree, orphansOf, parseProcessList } from '@sfagents/core';
+import { descendantsOf, isLeftover, killProcessTree, orphansOf, parseProcessList } from '@sfagents/core';
 
 test('descendantsOf walks the whole tree and spares what keep matches', () => {
   const rows = parseProcessList(
@@ -11,27 +11,9 @@ test('descendantsOf walks the whole tree and spares what keep matches', () => {
   assert.deepEqual(descendantsOf(rows, 100, (c) => c.includes('--vdisplay-off')).map((p) => p.pid), [200, 300]);
 });
 
-test('sandboxed commands left behind by an earlier SF Agents are found; ones with a live parent are not', () => {
-  const rows = parseProcessList(
-    [
-      '  1     0 init',
-      '100     1 node sfagents',
-      '200   100 "C:\\sfagents\\core\\native\\bin\\win-x64\\sfagents-sandbox.exe" run --policy C:\\Temp\\sfagents-policy-a\\policy.json -- cmd.exe',
-      '300  9999 "C:\\sfagents\\core\\native\\bin\\win-x64\\sfagents-sandbox.exe" run --policy C:\\Temp\\sfagents-policy-b\\policy.json -- cmd.exe',
-      '310   300 cmd.exe',
-      '400  9999 sfagents-sandbox.exe probe',
-      '500  9999 notepad.exe',
-    ].join('\n'),
-  );
-  assert.deepEqual(orphansOf(rows, isSandboxRun).map((p) => p.pid), [300]);
-  assert.equal(isSandboxRun('/opt/sfagents/sfagents-sandbox run --policy p.json -- sh'), true);
-  assert.equal(isSandboxRun('sfagents-sandbox.exe recover'), false);
-});
-
 test('SF Agents\' own helpers count as leftovers; nothing else does', () => {
   const home = 'C:\\Users\\me\\AppData\\Roaming\\SF Agents';
   for (const c of [
-    '"C:\\sfagents\\core\\native\\bin\\win-x64\\sfagents-sandbox.exe" run --policy p.json -- cmd.exe',
     'C:\\sfagents\\web\\native\\bin\\win-x64\\SfAgents.Input.exe --broker sfagents-input-1',
     'C:\\sfagents\\web\\native\\bin\\win-x64\\SfAgents.Sensors.exe --broker sfagents-sensors-1',
     '/usr/bin/node /opt/sfagents/web/dist/keyboard-worker.js',

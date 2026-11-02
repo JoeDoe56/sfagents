@@ -12,9 +12,8 @@ import {
   type AgentReplyPayload,
   type ModelRequest,
 } from '@sfagents/core';
-import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, useAnySandbox, writeJson, type Script } from './helpers.js';
+import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script } from './helpers.js';
 
-await useAnySandbox();
 
 const runtimes: AgentRuntime[] = [];
 const conversations: ConversationService[] = [];
@@ -53,8 +52,8 @@ const inThread = (req: ModelRequest) => /<thread>/.test(systemOf(req));
 describe('agents messaging each other in threads', () => {
   test('an agent messages another, which works with its own tools and replies', async () => {
     const { tree, dir, conversation } = project({
-      main: { workspace: { roots: ['work'] }, tools: { allow: ['1-worker.json'] } },
-      worker: { description: 'Reads shared files.', workspace: { roots: ['work/shared'] }, tools: { allow: ['shell'], mcpServers: [{ server: 'local', tools: ['echo'] }] } },
+      main: { agents: ['1-worker.json'] },
+      worker: { description: 'Reads shared files.', tools: { mcpServers: [{ server: 'local', tools: ['echo'] }] } },
     });
     const script: Script = (req, _n, agent) => {
       if (agent === 'main') {
@@ -96,7 +95,7 @@ describe('agents messaging each other in threads', () => {
   });
 
   test('a thread persists: both agents see it, whoever writes and whoever replies in the conversation', async () => {
-    const { tree, conversation } = project({ main: { tools: { allow: ['1-worker.json'] } }, worker: { tools: { allow: ['1-main.json'] } } });
+    const { tree, conversation } = project({ main: { agents: ['1-worker.json'] }, worker: { agents: ['1-main.json'] } });
     let mainTurn = 0;
     const script: Script = (req, _n, agent) => {
       if (agent === 'main' && !inThread(req)) {
@@ -127,7 +126,7 @@ describe('agents messaging each other in threads', () => {
   });
 
   test('several messages in one turn run in parallel, across agents and threads', async () => {
-    const { tree, conversation } = project({ main: { tools: { allow: ['2-worker.json', '1-other.json'] } }, worker: {}, other: {} });
+    const { tree, conversation } = project({ main: { agents: ['2-worker.json', '1-other.json'] }, worker: {}, other: {} });
     let running = 0;
     let peak = 0;
     const script: Script = (req, _n, agent) => {
@@ -159,7 +158,7 @@ describe('agents messaging each other in threads', () => {
   });
 
   test('agents talk back and forth while both work, and ungranted agents cannot be messaged', async () => {
-    const { tree, dir, conversation } = project({ main: { tools: { allow: ['1-worker.json'] } }, worker: {}, other: {} });
+    const { tree, dir, conversation } = project({ main: { agents: ['1-worker.json'] }, worker: {}, other: {} });
     const content = (m: unknown) => String((m as { content?: unknown }).content ?? '');
     const script: Script = (req, _n, agent) => {
       const last = req.messages[req.messages.length - 1]!;

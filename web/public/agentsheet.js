@@ -543,7 +543,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
         const meta = el('p', 'ag-tool-meta', item.partOf ? `Counted in ${item.partOf} · ${item.detail}` : `${tokensText(item.tokens)} tokens${item.detail ? ` · ${item.detail}` : ''}`);
         const desc = el('p', 'ag-tool-desc', schema.description || 'No description.');
         if (item.partOf) {
-          // A command run through another tool (sf-web, sf-artifact in the shell).
+          // A command run through another tool (sfa-web, sfa-artifact in the shell).
           sheet.body.append(meta, desc, el('h3', 'ag-tool-label', 'Usage'), el('pre', 'ag-tool-json', schema.usage ?? ''));
           return;
         }
@@ -647,7 +647,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       sections.push(createSection({ title: 'Tools', group }).el);
     }
 
-    // What the shell reached through the package and Git proxy (offline agents).
+    // What the agents' containers connected to, allowed or refused (the Network log).
     if (network) {
       const entries = network.entries.slice(0, 30);
       const rows = entries.map((e) => createRow({
@@ -662,7 +662,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       sections.push(createSection({
         title: 'Network',
         rows,
-        note: `With the network off, shell commands can reach only package registries and Git hosts over HTTPS (${network.hosts.join(', ')}); everything else is blocked. Newest first.`,
+        note: `This agent's network level is "${network.level}": ${{ off: 'no network', pkg: 'package registries only', git: 'package registries and Git hosts', on: 'the internet' }[network.level] ?? network.level}. This computer and the local network are never reachable. Every agent's connections, newest first.`,
       }).el);
     }
 

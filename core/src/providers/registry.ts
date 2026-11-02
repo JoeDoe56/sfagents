@@ -275,7 +275,7 @@ export class ProviderRegistry {
     await this.secrets.set(this.secretKey(id), JSON.stringify(secret));
   }
 
-  /** The Bright Data API key for agents' web access (`sf-web`), or null. */
+  /** The Bright Data API key for agents' web access (`sfa-web`), or null. */
   async webKey(): Promise<string | null> {
     try {
       return await this.secrets.get(WEB_KEY);

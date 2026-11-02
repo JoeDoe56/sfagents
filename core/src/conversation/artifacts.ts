@@ -11,23 +11,22 @@
  *
  * Access (the agent definition's `artifacts.access`):
  *   read:   the agent sees the artifact index and reads files with the shell
- *   create: also the `sf-artifact` shell command (see runArtifactRequest)
+ *   create: also the `sfa-artifact` shell command (see runArtifactRequest)
  */
 
 import path from 'node:path';
 import type { ConversationService } from './service.js';
 import type { ArtifactView } from './state.js';
-import type { WorkspaceContext } from '../permissions/workspace.js';
 import fs from 'node:fs';
 import { genuiErrorText, GENUI_GUIDANCE, parseGenui } from './genui.js';
-import { isPathWithinRoot } from '../permissions/workspace.js';
+import { canonicalPath, isPathWithinRoot } from '../utils/paths.js';
 import { GENUI_DIR_NAME } from './service.js';
 
 export type ArtifactAccess = 'none' | 'read' | 'create';
 export const ARTIFACT_ACCESS_LEVELS: readonly ArtifactAccess[] = ['none', 'read', 'create'];
 
 /** The shell command that makes and changes artifacts. */
-export const ARTIFACT_COMMAND = 'sf-artifact';
+export const ARTIFACT_COMMAND = 'sfa-artifact';
 
 /** Largest artifact revision the tools accept (characters of content). */
 export const MAX_ARTIFACT_CHARS = 1_000_000;
@@ -163,44 +162,74 @@ export function artifactIndex(service: ConversationService, limit = 20): string 
 }
 
 export const ARTIFACT_GUIDANCE = `<artifacts_guidance>
-Artifacts are outputs the user keeps and opens outside the chat: documents (.md), code, web pages (.html), drawings (.svg), data (.json, .csv), PDFs, images, folders, and running web apps. An artifact is a file in your workspace, not a copy: it appears in the chat with a preview where you created it, and always shows the file as it is now.
-You make and change artifacts with the \`sf-artifact\` command in your shell:
-- \`sf-artifact docs/plan.md --title "Launch plan"\` shows a file you wrote (or a folder: it opens in the file manager). Keep your reply short and refer to the artifact by title.
-- \`sf-artifact --port 5173 --title "Dashboard"\` shows a web app you started (a dev server on this computer); \`--page /settings\` opens another page first. The user opens it inside SF Agents, also from their phone.
-- To change an artifact, change its file. \`sf-artifact --id a3 --title "New title"\` retitles it, and \`sf-artifact --id a3 other.md\` points it at another file. Never make a second artifact for the same file.
-- \`--content "..."\` (or \`--stdin\`) writes the file before showing it, for when you have no other way to write files. A relative name you have no workspace folder to write in goes in SF Agents' own artifacts folder, so you can always make an artifact.
-- \`sf-artifact --id a3 --print\` prints an artifact's file.
+Artifacts are outputs the user keeps and opens outside the chat: documents (.md), code, web pages (.html), drawings (.svg), data (.json, .csv), PDFs, images, folders, and running web apps. An artifact is a file in your container (under /workspaces, or a project folder under /roots), not a copy: it appears in the chat with a preview where you created it, and always shows the file as it is now.
+You make and change artifacts with the \`sfa-artifact\` command in your shell:
+- \`sfa-artifact docs/plan.md --title "Launch plan"\` shows a file you wrote (or a folder: it opens in the file manager). Keep your reply short and refer to the artifact by title.
+- \`sfa-artifact --port 5173 --title "Dashboard"\` shows a web app you started (a dev server on this computer); \`--page /settings\` opens another page first. The user opens it inside SF Agents, also from their phone.
+- To change an artifact, change its file. \`sfa-artifact --id a3 --title "New title"\` retitles it, and \`sfa-artifact --id a3 other.md\` points it at another file. Never make a second artifact for the same file.
+- \`--content "..."\` (or \`--stdin\`) writes the file before showing it, for when you have no other way to write files. Write files under /workspaces.
+- \`sfa-artifact --id a3 --print\` prints an artifact's file.
 - To read an artifact, read its file (the index below gives each file).
 - Short answers and small snippets belong in the chat reply, not in an artifact.
 </artifacts_guidance>
 
 ${GENUI_GUIDANCE}`;
 
-/** What `sf-artifact` prints for --help or a usage error. */
+/** What `sfa-artifact` prints for --help or a usage error. */
 export const ARTIFACT_USAGE = `Usage:
-  sf-artifact <file-or-folder> --title "Title"      show a file or folder as an artifact
-  sf-artifact --port <port> [--page /path] --title "Title"   show a web app running on this computer
-  sf-artifact --id <id> [--title T] [<file>] [--port N]     change an artifact
-  sf-artifact --id <id> --print                            print an artifact's file
-  sf-artifact genui/<name>.json --title "Title" --content '<json>'   a GenUI view (SF Agents' view folder)
+  sfa-artifact <file-or-folder> --title "Title"      show a file or folder as an artifact
+  sfa-artifact --port <port> [--page /path] --title "Title"   show a web app running on this computer
+  sfa-artifact --id <id> [--title T] [<file>] [--port N]     change an artifact
+  sfa-artifact --id <id> --print                            print an artifact's file
+  sfa-artifact genui/<name>.json --title "Title" --content '<json>'   a GenUI view (SF Agents' view folder)
 Options: --content "text" or --stdin writes the file first.`;
 
-/** An existing file or folder the agent may read, as an absolute canonical path. */
-function existingFile(workspace: WorkspaceContext | undefined, p: string): string {
-  if (!workspace) throw new ArtifactError('This agent has no workspace folders, so it has no files to show as artifacts.');
-  const check = workspace.check(p, 'read');
-  if (!check.ok || !check.resolvedPath) throw new ArtifactError(check.reason ?? `"${p}" is outside this agent's workspace.`);
-  let st: fs.Stats;
-  try {
-    st = fs.statSync(check.resolvedPath);
-  } catch {
-    throw new ArtifactError(`There is no file at ${p}. Write it first (or give --content).`);
+/**
+ * What an agent may show and write as artifacts: SF Agents' own folders (GenUI
+ * views, and files made without a folder), and its container's files as SF
+ * Agents reads them, the shared workspaces (read-write) and the project
+ * folders (read-only), minus what the container hides. Paths are judged after
+ * following links, so a link in the workspaces cannot reach other files.
+ */
+class ArtifactPaths {
+  private readonly read: string[];
+  private readonly write: string[];
+  private readonly hidden: string[];
+  constructor(service: ConversationService, container: ArtifactContainer | undefined) {
+    const canon = (dirs: readonly string[]) => dirs.map((d) => canonicalPath(d));
+    this.write = canon([service.genuiDir, service.artifactsDir, ...(container?.writeRoots ?? [])]);
+    this.read = [...this.write, ...canon(container?.readRoots ?? [])];
+    this.hidden = canon(container?.hidden ?? []);
   }
-  if (!st.isFile() && !st.isDirectory()) throw new ArtifactError(`${p} is neither a file nor a folder.`);
-  return check.resolvedPath;
+  private allowed(abs: string, dirs: readonly string[]): string | undefined {
+    const real = canonicalPath(abs);
+    if (!dirs.some((d) => isPathWithinRoot(real, d))) return undefined;
+    // What the agent writes is never hidden (the workspaces live in SF Agents' folder on Linux);
+    // in the project folders, what the container hides stays hidden.
+    if (this.write.some((d) => isPathWithinRoot(real, d))) return real;
+    if (this.hidden.some((h) => isPathWithinRoot(real, h))) return undefined;
+    return real;
+  }
+  /** An existing file or folder the agent may show, as its canonical path. */
+  existing(p: string): string {
+    const real = this.allowed(p, this.read);
+    if (!real) throw new ArtifactError(`${p} is not one of your files: artifacts show files in /workspaces or the project folders under /roots.`);
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(real);
+    } catch {
+      throw new ArtifactError(`There is no file at ${p}. Write it first (or give --content).`);
+    }
+    if (!st.isFile() && !st.isDirectory()) throw new ArtifactError(`${p} is neither a file nor a folder.`);
+    return real;
+  }
+  /** Where a file the agent writes with --content goes, or undefined when it may not write there. */
+  writable(p: string): string | undefined {
+    return this.allowed(p, this.write);
+  }
 }
 
-/** One `sf-artifact` call. */
+/** One `sfa-artifact` call. */
 export interface ArtifactRequest {
   id?: string;
   title?: string;
@@ -214,7 +243,7 @@ export interface ArtifactRequest {
   page?: string;
 }
 
-/** Parses `sf-artifact` arguments (after the command name). */
+/** Parses `sfa-artifact` arguments (after the command name). */
 export function parseArtifactArgs(args: readonly string[], stdin?: string): ArtifactRequest {
   const out: ArtifactRequest = {};
   const value = (i: number, flag: string): string => {
@@ -272,23 +301,19 @@ export function parseArtifactArgs(args: readonly string[], stdin?: string): Arti
 }
 
 /**
- * Carries out `sf-artifact` for one agent: shows a file, folder or web app as
+ * Carries out `sfa-artifact` for one agent: shows a file, folder or web app as
  * an artifact, or changes one. `runId` and `callId` are the provenance. The
- * workspace checks (roots, workspace access, SF Agents' own files) are the
- * boundary, as for the shell. Returns the text the command prints.
+ * container's folders (see ArtifactPaths) are the boundary. Returns the text the command prints.
  */
 export function runArtifactRequest(
   service: ConversationService,
-  workspace: WorkspaceContext | undefined,
   p: ArtifactRequest,
   o: { cwd?: string; runId?: string; callId?: string; container?: ArtifactContainer } = {},
 ): string {
   const where = (rel: string) => (o.cwd && !path.isAbsolute(rel) ? path.resolve(o.cwd, rel) : rel);
   const view = p.id !== undefined ? service.state.artifactViews.get(p.id) : undefined;
   if (p.id !== undefined && !view) throw new ArtifactError(`There is no artifact "${p.id}". The <artifacts> index lists the IDs.`);
-  // SF Agents' own folders (the GenUI views, and artifacts made without a workspace) need no workspace access.
-  // So do the folders of the agent's container (its workspaces and read-only roots, as SF Agents reads them).
-  const own = (abs: string) => [service.genuiDir, service.artifactsDir, ...(o.container?.readRoots ?? [])].some((d) => isPathWithinRoot(path.resolve(abs), d));
+  const paths = new ArtifactPaths(service, o.container);
   const inside = (dir: string, rel: string) => {
     const abs = path.resolve(dir, rel);
     if (!isPathWithinRoot(abs, dir) || abs === path.resolve(dir)) throw new ArtifactError(`${rel} must be a file name inside ${path.basename(dir)}/.`);
@@ -302,8 +327,7 @@ export function runArtifactRequest(
   };
   if (p.print) {
     if (!view?.file) throw new ArtifactError('--print needs --id of a file artifact.');
-    const file = service.resolveArtifactFile(view.file);
-    if (!own(file)) existingFile(workspace, file);
+    const file = paths.existing(service.resolveArtifactFile(view.file));
     return fs.readFileSync(file, 'utf8');
   }
   if (p.port !== undefined && (p.path !== undefined || p.content !== undefined)) throw new ArtifactError('An artifact shows either a file or folder, or a web app (--port), not both.');
@@ -334,7 +358,7 @@ export function runArtifactRequest(
   // A file or folder.
   if (view) {
     if (p.title === undefined && p.path === undefined && p.content === undefined) {
-      // `sf-artifact --id` alone checks a GenUI view after the agent edited it.
+      // `sfa-artifact --id` alone checks a GenUI view after the agent edited it.
       if (view.type === 'genui' && view.file) {
         checkGenui(service.resolveArtifactFile(view.file), view.file);
         return `Artifact ${view.id} "${view.title}" is a valid GenUI view.`;
@@ -347,25 +371,15 @@ export function runArtifactRequest(
   if (p.content !== undefined) {
     if (target === undefined) throw new ArtifactError(`Artifact ${view?.id} has no file to write; give one.`);
     if (p.content.length > MAX_ARTIFACT_CHARS) throw new ArtifactError(`The content is too large (${p.content.length} characters; the limit is ${MAX_ARTIFACT_CHARS}).`);
-    let dest: string;
-    if (own(target)) dest = path.resolve(target);
-    else {
-      const check = workspace?.check(target, 'write');
-      if (check?.ok && check.resolvedPath) dest = check.resolvedPath;
-      // No workspace folder to write it in: a new file goes in SF Agents' artifacts folder.
-      else if (p.path !== undefined && !path.isAbsolute(p.path) && !view && !p.path.split(/[\\/]+/).includes('..') && !(workspace?.roots ?? []).some((r) => isPathWithinRoot(path.resolve(target), r))) {
-        dest = inside(service.artifactsDir, p.path);
-      }
-      else throw new ArtifactError(check?.reason ?? 'This agent has no workspace folders to write in.');
-    }
+    let dest = paths.writable(target);
+    // No folder of its own to write it in (no working folder): a new file goes in SF Agents' artifacts folder.
+    if (!dest && p.path !== undefined && !path.isAbsolute(p.path) && !view && !o.cwd && !p.path.split(/[\\/]+/).includes('..')) dest = inside(service.artifactsDir, p.path);
+    if (!dest) throw new ArtifactError(`${p.path ?? target} is not a place you can write: write files under /workspaces.`);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, p.content.replace(/\r\n/g, '\n'), 'utf8');
     file = dest;
   } else if (p.path !== undefined) {
-    if (own(target!)) {
-      if (!fs.existsSync(target!)) throw new ArtifactError(`There is no file at ${p.path}. Write it with --content (or --stdin).`);
-      file = path.resolve(target!);
-    } else file = existingFile(workspace, target!);
+    file = paths.existing(target!);
   }
   const folder = file !== undefined && fs.statSync(file).isDirectory();
   const shown = file ?? (view?.file ? service.resolveArtifactFile(view.file) : undefined);
@@ -399,20 +413,24 @@ function checkGenui(file: string, shownAs: string): void {
 }
 
 /**
- * For an agent whose commands run in a container: the host name its apps are
+ * The agent's container, as SF Agents sees it: the host name its apps are
  * reached by (SF Agents' app proxy connects through the container bridge),
- * and the folders on this computer that hold its container's files.
+ * and the folders on this computer that hold its files: the shared
+ * workspaces (it writes there), the project folders (read-only), and what
+ * the container hides in them.
  */
 export interface ArtifactContainer {
   appHost: string;
+  writeRoots: readonly string[];
   readRoots: readonly string[];
+  hidden: readonly string[];
 }
 
-/** What an agent's `sf-artifact` runs: bound to its conversation, workspace and run. */
+/** What an agent's `sfa-artifact` runs: bound to its conversation and run. */
 export type ArtifactCommand = (args: readonly string[], o: { cwd?: string; callId?: string; stdin?: string; container?: ArtifactContainer }) => string;
 
-/** The `sf-artifact` handler for one agent, or undefined when it may not create artifacts. */
-export function artifactCommand(service: ConversationService, access: ArtifactAccess, runId?: string, workspace?: WorkspaceContext): ArtifactCommand | undefined {
+/** The `sfa-artifact` handler for one agent, or undefined when it may not create artifacts. */
+export function artifactCommand(service: ConversationService, access: ArtifactAccess, runId?: string): ArtifactCommand | undefined {
   if (access !== 'create') return undefined;
-  return (args, o) => runArtifactRequest(service, workspace, parseArtifactArgs(args, o.stdin), { cwd: o.cwd, runId, callId: o.callId, ...(o.container ? { container: o.container } : {}) });
+  return (args, o) => runArtifactRequest(service, parseArtifactArgs(args, o.stdin), { cwd: o.cwd, runId, callId: o.callId, ...(o.container ? { container: o.container } : {}) });
 }

@@ -106,7 +106,7 @@ export function describeCall(name: string, argsJson: string): string {
       const cmd = str(args['command'])?.trim() ?? '';
       if (args['background'] === true) return `Started \`${clip(cmd, 60)}\` in the background`;
       const words = cmd.split(/\s+/);
-      if (words[0] === 'sf-artifact') {
+      if (words[0] === 'sfa-artifact') {
         const flag = (f: string) => {
           const i = words.indexOf(f);
           return i >= 0 && words[i + 1] ? words[i + 1]!.replace(/^["']|["']$/g, '') : undefined;
@@ -117,7 +117,7 @@ export function describeCall(name: string, argsJson: string): string {
         if (flag('--port')) return `Opened ${t ? `“${clip(t, 60)}”` : 'an app'} (port ${flag('--port')})`;
         return `Created ${t ? `“${clip(t, 60)}”` : 'an artifact'}`;
       }
-      if (words[0] === 'sf-web') {
+      if (words[0] === 'sfa-web') {
         const rest = clip(words.slice(2).join(' ').replace(/^["']|["']$/g, ''), 60);
         if (words[1] === 'search') return `Searched the web${rest ? ` for “${rest}”` : ''}`;
         if (words[1] === 'markdown' || words[1] === 'html') return `Read ${rest || 'a page'}`;
@@ -229,7 +229,7 @@ function threadOf(name: string, argsJson: string, from: string): { thread?: stri
 
 /** The artifact a create_artifact (or older update_artifact) call made or changed. */
 function artifactOf(name: string, argsJson: string, created: string | undefined): { artifact?: string } {
-  // The record a call wrote (sf-artifact in a shell call, or the older tools) names its artifact.
+  // The record a call wrote (sfa-artifact in a shell call, or the older tools) names its artifact.
   if (created) return { artifact: created };
   if (name === 'create_app_artifact') return {};
   // update_artifact is from older conversations; create_artifact with "id" replaced it.

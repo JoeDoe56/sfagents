@@ -7,7 +7,7 @@ import {
   BrightDataWeb,
   MemorySecretStore,
   ProviderRegistry,
-  detectSandbox,
+  hostWorkspacesDir,
   loadAgentTree,
   type AnyDeclarativeTool,
   type ToolResult,
@@ -16,7 +16,6 @@ import {
 } from '@sfagents/core';
 import { baseAgent, makeTempDir, writeAgent } from './helpers.js';
 
-const linuxSandbox = process.platform === 'linux' && (await detectSandbox()).ok;
 
 class FakeWeb implements WebAccess {
   calls: Array<[WebOperation, string]> = [];
@@ -43,22 +42,23 @@ async function sh(t: Map<string, AnyDeclarativeTool>, command: string): Promise<
 const stdout = (r: ToolResult) => /Stdout: ([\s\S]*?)\nStderr:/.exec(r.llmContent)?.[1] ?? '';
 const stderr = (r: ToolResult) => /Stderr: ([\s\S]*?)\nExit Code:/.exec(r.llmContent)?.[1] ?? '';
 
-describe('sf-web (Linux, bubblewrap)', { skip: !linuxSandbox && 'bubblewrap is not available' }, () => {
-  test('an offline sandbox reaches the web only through the host, and results can go to files', async () => {
+describe('sfa-web (in the agent container)', { skip: process.platform === 'win32' && 'the fake Docker needs bash' }, () => {
+  test('a container reaches the web through SF Agents, and results can go to files', async () => {
     const web = new FakeWeb();
-    const { dir, tools: t } = await tools({ tools: { allow: ['shell', 'web'] } }, web);
-    const r = await sh(t, 'sf-web search kiln temperatures > results.json && cat results.json; sf-web markdown https://example.com/glaze');
+    const { tools: t } = await tools({ network: 'on' }, web);
+    const out = `results-${Date.now()}.json`;
+    const r = await sh(t, `sfa-web search kiln temperatures > ${out} && cat ${out}; sfa-web markdown https://example.com/glaze`);
     assert.match(stdout(r), /"About kiln temperatures"/);
     assert.match(stdout(r), /# Page https:\/\/example.com\/glaze/);
     assert.deepEqual(web.calls, [['search', 'kiln temperatures'], ['markdown', 'https://example.com/glaze']]);
-    assert.match(fs.readFileSync(path.join(dir, 'results.json'), 'utf8'), /About kiln/);
-    assert.match(t.get('shell')!.description, /sf-web search/);
+    assert.match(fs.readFileSync(path.join(hostWorkspacesDir(), out), 'utf8'), /About kiln/);
+    assert.match(t.get('shell')!.description, /sfa-web search/);
   });
 
   test('errors, bad addresses and the per-run quota are reported to the command', async () => {
     const web = new FakeWeb();
-    const { tools: t } = await tools({ tools: { allow: ['shell', 'web'] }, limits: { webRequests: 2 } }, web);
-    const r = await sh(t, 'sf-web html file:///etc/passwd; echo "exit=$?"; sf-web search please fail; sf-web search one; sf-web search two');
+    const { tools: t } = await tools({ network: 'on', limits: { webRequests: 2 } }, web);
+    const r = await sh(t, 'sfa-web html file:///etc/passwd; echo "exit=$?"; sfa-web search please fail; sfa-web search one; sfa-web search two');
     assert.match(stderr(r), /Only http and https addresses/);
     assert.match(stdout(r), /exit=1/);
     assert.match(stderr(r), /upstream said no/);
@@ -67,33 +67,17 @@ describe('sf-web (Linux, bubblewrap)', { skip: !linuxSandbox && 'bubblewrap is n
     assert.deepEqual(web.calls.map((c) => c[1]), ['please fail', 'one']);
   });
 
-  test('agents without "web" have no sf-web and no channel', async () => {
+  test('agents below network "on" get no web requests', async () => {
     const web = new FakeWeb();
-    const { tools: t } = await tools({ tools: { allow: ['shell'] } }, web);
-    const r = await sh(t, 'command -v sf-web || echo missing; echo "host=${SFAGENTS_HOST:-none}"');
-    assert.match(stdout(r), /missing\nhost=none/);
+    const { tools: t } = await tools({ network: 'pkg' }, web);
+    const r = await sh(t, 'sfa-web search cats; echo "exit=$?"');
+    assert.match(stdout(r), /exit=1/);
     assert.equal(web.calls.length, 0);
-    assert.doesNotMatch(t.get('shell')!.description, /sf-web/);
+    assert.doesNotMatch(t.get('shell')!.description, /sfa-web/);
   });
 });
 
 describe('web access setup', () => {
-  test('"web" works without "shell" (sf-web only, run on the host) and is not something to auto-approve', async () => {
-    const dir = makeTempDir();
-    writeAgent(dir, baseAgent('b', { tools: { allow: ['shell', 'web'], autoApprove: ['web'] } }));
-    writeAgent(dir, baseAgent('main'));
-    assert.match(loadAgentTree(dir).skipped.find((s) => s.file.includes('b.json'))!.error, /not a tool call/);
-
-    const web = new FakeWeb();
-    const { tools: t } = await tools({ tools: { allow: ['web'] } }, web);
-    assert.match(t.get('shell')!.description, /sf-web search/);
-    const ok = await sh(t, 'sf-web search "kiln temperatures"');
-    assert.match(ok.llmContent, /About kiln temperatures/);
-    const no = await sh(t, 'cat /etc/passwd');
-    assert.match(no.llmContent, /can only run sf-web/);
-    assert.deepEqual(web.calls, [['search', 'kiln temperatures']]);
-  });
-
   test('the Bright Data key lives in the keyring; without one the agent is told how to add it', async () => {
     const registry = new ProviderRegistry({ dir: makeTempDir(), secrets: new MemorySecretStore() });
     assert.equal(await registry.webKey(), null);

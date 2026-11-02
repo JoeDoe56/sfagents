@@ -41,8 +41,6 @@ jobs:
         shell: bash
         env:
           SFAGENTS_REQUIRE_SENSORS: ${{ runner.os == 'Windows' && '1' || '0' }}
-        # Without the Windows sandbox build (prepare-sandbox), which this
-        # workflow does not test and which needs more of Rust than the runner has.
         run: |
           npm ci --ignore-scripts
           node scripts/prepare-sensors.mjs

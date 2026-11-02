@@ -53,7 +53,7 @@ describe('MCP', () => {
     assert.equal(result.status, AgentTerminateMode.GOAL);
     assert.equal(result.text, 'Tool said: echo:ping');
     const names = providers.get('main')!.requests[0]!.request.tools!.map((t) => t.name).sort();
-    assert.deepEqual(names, ['add', 'counter', 'echo', 'env_probe', 'fail', 'slow', 'structured', 'throw'].map((t) => `mcp__local__${t}`).sort());
+    assert.deepEqual(names, [...['add', 'counter', 'echo', 'env_probe', 'fail', 'slow', 'structured', 'throw'].map((t) => `mcp__local__${t}`), 'shell'].sort());
   });
 
   test('Streamable HTTP: discovery, invocation, headers with ${VAR} expansion', async () => {
@@ -105,7 +105,7 @@ describe('MCP', () => {
     );
     const result = await runtime.createSession().run('try forbidden');
     const visible = providers.get('main')!.requests[0]!.request.tools!.map((t) => t.name);
-    assert.deepEqual(visible, ['mcp__allowed__add'], 'server includeTools filter applied, forbidden server hidden');
+    assert.deepEqual(visible, ['shell', 'mcp__allowed__add'], 'server includeTools filter applied, forbidden server hidden');
     assert.equal(result.toolCalls[0]!.errorType, ToolErrorType.TOOL_NOT_REGISTERED);
     assert.equal(runtime.mcp.isStarted('allowed'), true);
     assert.equal(runtime.mcp.isStarted('forbidden'), false, 'a server no agent may use is never started');
@@ -120,7 +120,7 @@ describe('MCP', () => {
       { approveAll: true },
     );
     const result = await runtime.createSession().run('x');
-    assert.deepEqual(providers.get('main')!.requests[0]!.request.tools!.map((t) => t.name), ['mcp__local__echo']);
+    assert.deepEqual(providers.get('main')!.requests[0]!.request.tools!.map((t) => t.name), ['shell', 'mcp__local__echo']);
     assert.equal(result.toolCalls[0]!.errorType, ToolErrorType.TOOL_NOT_REGISTERED);
   });
 
@@ -235,14 +235,14 @@ describe('deferred tools', () => {
     assert.equal(result.text, 'Tool said: echo:hi');
     const requests = providers.get('main')!.requests;
     const names = (i: number) => requests[i]!.request.tools!.map((t) => t.name);
-    assert.deepEqual(names(0), ['tool_search']);
+    assert.deepEqual(names(0), ['shell', 'tool_search']);
     const system = String(requests[0]!.request.messages[0]!.content);
     assert.match(system, /<deferred_tools>/);
     assert.match(system, /- mcp__local__echo: /);
     // The search result carries the definition, and the tool is sent from the next request on.
     assert.match(String(requests[1]!.request.messages.at(-1)!.content), /"name":"mcp__local__echo"/);
-    assert.deepEqual(names(1).sort(), ['mcp__local__echo', 'tool_search']);
-    assert.deepEqual(names(2).sort(), ['mcp__local__echo', 'tool_search']);
+    assert.deepEqual(names(1).sort(), ['mcp__local__echo', 'shell', 'tool_search']);
+    assert.deepEqual(names(2).sort(), ['mcp__local__echo', 'shell', 'tool_search']);
   });
 
   test('keyword search, patterns, and no deferral by default for a few tools', async () => {

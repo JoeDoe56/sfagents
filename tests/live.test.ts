@@ -12,6 +12,7 @@ import {
   AgentRuntime,
   AgentTerminateMode,
   ConversationService,
+  hostWorkspacesDir,
   loadAgentTree,
   readConversation,
   type RuntimeEvent,
@@ -41,8 +42,9 @@ function agent(id: string, extra: Record<string, unknown> = {}) {
 
 function project() {
   const dir = makeTempDir('sfagents-live-');
-  fs.mkdirSync(path.join(dir, 'work', 'shared'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'work', 'shared', 'inventory.txt'), 'Item: blue widgets\nCount: 1749\nWarehouse code: ZEPHYR-8\n');
+  // Commands start in /workspaces.
+  fs.mkdirSync(path.join(hostWorkspacesDir(), 'shared'), { recursive: true });
+  fs.writeFileSync(path.join(hostWorkspacesDir(), 'shared', 'inventory.txt'), 'Item: blue widgets\nCount: 1749\nWarehouse code: ZEPHYR-8\n');
   writeJson(path.join(dir, 'mcp.json'), { mcpServers: { local: stdioServerConfig() } });
   return dir;
 }
@@ -63,7 +65,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('tool loop with reasoning: shell result reaches the answer', async () => {
     const dir = project();
-    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['shell'] } }));
+    writeAgent(dir, agent('main', { reasoning: 'medium' }));
     const runtime = track(new AgentRuntime({ tree: loadAgentTree(path.join(dir, 'agent.json')) }));
     const events: RuntimeEvent[] = [];
     const result = await runtime.createSession().run('What is the warehouse code in the inventory file under shared/? Find and read it.', { onEvent: (e) => events.push(e) });
@@ -88,15 +90,13 @@ describe(`live provider (${MODEL})`, { skip }, () => {
       path.join(dir, 'agent.json'),
       agent('main', {
         reasoning: 'low',
-        workspace: { roots: ['work'] },
-        tools: { allow: ['shell'] },
         systemPrompt: 'You are main, a coordinator. You must delegate file lookups to your child agent "clerk" with invoke_child instead of reading files yourself. Keep answers short.',
         spawn: { children: ['agents/1-Subagent-Clerk.json'] },
       }),
     );
     writeJson(
       path.join(dir, 'agents', '1-Subagent-Clerk.json'),
-      agent('clerk', { description: 'Reads files in the shared folder and reports facts.', workspace: { roots: ['../work/shared'] }, tools: { allow: ['shell'] } }),
+      agent('clerk', { description: 'Reads files in the shared folder and reports facts.' }),
     );
     const runtime = track(new AgentRuntime({ tree: loadAgentTree(path.join(dir, 'agent.json')) }));
     const events: RuntimeEvent[] = [];
@@ -124,7 +124,7 @@ describe(`live provider (${MODEL})`, { skip }, () => {
 
   test('persistent conversation: restart replays tool calls and reasoning across processes', async () => {
     const dir = project();
-    writeAgent(dir, agent('main', { reasoning: 'medium', workspace: { roots: ['work'] }, tools: { allow: ['shell'] } }));
+    writeAgent(dir, agent('main', { reasoning: 'medium' }));
     const env = { OPENROUTER_API_KEY: KEY };
     const one = await runCli(['start', '--yes'], { cwd: dir, env, input: 'Read shared/inventory.txt and tell me the item count. Also remember that my badge number is 5521.\n/exit\n', timeoutMs: 150_000 });
     assert.equal(one.code, 0, one.stderr);

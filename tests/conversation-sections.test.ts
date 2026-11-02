@@ -250,7 +250,7 @@ describe('sections: model tools and grants', () => {
 
   test('agents in a thread get no conversation access by default; a read grant cannot organize', async () => {
     const dir = project(
-      { tools: { allow: ['1-reader.json', '1-blind.json'] } },
+      { agents: ['1-reader.json', '1-blind.json'] },
       { 'agents/reader.json': baseAgent('reader', { conversation: { access: 'read' } }), 'agents/blind.json': baseAgent('blind') },
     );
     const { tree, conversation } = open(dir);
@@ -272,8 +272,8 @@ describe('sections: model tools and grants', () => {
     await runtime.createSession().run('delegate');
     const readerTools = (providers.get('reader')!.requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name).sort();
     // Besides talking back to main (which every agent in a thread can), only read access.
-    assert.deepEqual(readerTools, ['fetch_section', 'list_sections', 'message', 'search_conversation', 'search_sections']);
-    assert.deepEqual((providers.get('blind')!.requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name).sort(), ['message']);
+    assert.deepEqual(readerTools, ['fetch_section', 'list_sections', 'message', 'search_conversation', 'search_sections', 'shell']);
+    assert.deepEqual((providers.get('blind')!.requests[0]!.request.tools as FunctionDeclaration[]).map((t) => t.name).sort(), ['message', 'shell']);
     const readerReq = providers.get('reader')!.requests[1]!.messages as ChatMessage[];
     const toolOut = readerReq.filter((m) => m.role === 'tool').map((m) => (m as { content: string }).content);
     assert.match(toolOut[0]!, /OSPREY/);
@@ -345,7 +345,7 @@ describe('sections: model tools and grants', () => {
     const tree = loadAgentTree(path.join(dir, 'agent.json'));
     const { factory, providers } = scriptedFactory(() => ({ text: 'ok' }));
     await new AgentRuntime({ tree, providerFactory: factory }).createSession().run('hi');
-    assert.deepEqual(providers.get('main')!.requests[0]!.request.tools, []);
+    assert.deepEqual(providers.get('main')!.requests[0]!.request.tools!.map((t) => t.name), ['shell']);
   });
 });
 

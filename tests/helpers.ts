@@ -10,7 +10,8 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectSandbox, SECTION_REMINDER, setSandboxForTesting } from '@sfagents/core';
+import { after } from 'node:test';
+import { containerManager, SECTION_REMINDER } from '@sfagents/core';
 import type {
   AgentDefinition,
   AssistantMessage,
@@ -31,6 +32,15 @@ if (!process.env['SFAGENTS_TEST_HOME_SET']) {
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const MCP_SERVER_SCRIPT = path.join(REPO_ROOT, 'tests', 'fixtures', 'test-mcp-server.mjs');
 export const CLI_ENTRY = path.join(REPO_ROOT, 'cli', 'bin', 'sfagents.js');
+
+// Agent commands run through a stand-in for Docker (tests/fixtures/fake-docker.mjs):
+// SF Agents' real bridge and commands, with the command run here by bash.
+if (!process.env['SFAGENTS_DOCKER']) {
+  process.env['SFAGENTS_DOCKER'] = path.join(REPO_ROOT, 'tests', 'fixtures', 'fake-docker.mjs');
+  process.env['SFA_FAKE_DOCKER_STATE'] = fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-docker-'));
+}
+// The container bridge runs until SF Agents stops it.
+after(() => containerManager().bridge.stop());
 
 export interface ScriptStep {
   text?: string;
@@ -180,8 +190,7 @@ export function makeTempDir(prefix = 'sfagents-test-'): string {
 /** Writes an agent definition to <project>/agents/<id>.json (the id defaults to "main"). */
 export function writeAgent(projectDir: string, definition: Record<string, unknown>): string {
   const file = path.join(projectDir, 'agents', `${String(definition['id'] ?? 'main')}.json`);
-  // Agents have no workspace unless their file gives one; most tests grant the project folder.
-  writeJson(file, 'workspace' in definition ? definition : { ...definition, workspace: { roots: ['.'] } });
+  writeJson(file, 'network' in definition ? definition : { network: 'off', ...definition });
   return file;
 }
 
@@ -196,6 +205,7 @@ export function baseAgent(id: string, extra: Record<string, unknown> = {}): Reco
     provider: 'openrouter',
     model: 'test/model',
     systemPrompt: `You are ${id}.`,
+    network: 'off',
     ...extra,
   };
 }
@@ -329,17 +339,6 @@ export function runCli(args: string[], options: { cwd?: string; env?: NodeJS.Pro
     });
     child.stdin.end(options.input ?? '');
   });
-}
-
-/**
- * Lets tests that use the shell as an ordinary tool run on any machine: the
- * real sandbox when there is one, else a stand-in that runs commands as they
- * are. Sandbox behaviour itself is tested against the real one only.
- */
-export async function useAnySandbox(): Promise<boolean> {
-  const real = (await detectSandbox()).ok;
-  if (!real) setSandboxForTesting({ ok: true, sandbox: { name: 'test pass-through', wrap: (command) => command } });
-  return real;
 }
 
 /** A command that prints a file, for the platform's shell. */

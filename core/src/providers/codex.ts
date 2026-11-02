@@ -10,7 +10,7 @@
  * one it always offers, apply_patch, runs in a read-only sandbox with every
  * approval declined, so nothing it writes lands. When the model calls an SF
  * Agents tool, the turn is interrupted once the response is complete and the
- * calls go back to SF Agents to run in its own sandbox.
+ * calls go back to SF Agents to run in the agent's container.
  *
  * Each provider has its own Codex home (state, caches) under the providers
  * folder; Codex keeps the sign-in itself in the OS keyring. Codex also

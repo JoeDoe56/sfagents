@@ -24,9 +24,10 @@ import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { sfagentsHome } from '../settings/home.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { applyPatchScript, APPLY_PATCH_COMMAND } from '../sandbox/apply-patch.js';
+import { isPathWithinRoot } from '../utils/paths.js';
+import { applyPatchScript, APPLY_PATCH_COMMAND } from '../tools/apply-patch.js';
 import { runHostCommand, type HostCommands } from '../tools/host-commands.js';
-import { packageProxy } from '../sandbox/package-proxy.js';
+import { networkLog } from './network-log.js';
 import { ContainerBridge, RUN_VOLUME, type BridgeFile } from './bridge.js';
 import { defaultDockerCli, docker, type DockerCli } from './docker.js';
 import { handleProxyConnection, type NetworkEvent, type NetworkLevel } from './network.js';
@@ -38,7 +39,8 @@ export const CACHE_VOLUME = 'sfagents-cache';
 export const CONTAINER_WORKSPACES = '/workspaces';
 export const CONTAINER_ROOTS = '/roots';
 /** SF Agents' commands inside containers, and the names they run as on the host. */
-export const CONTAINER_COMMANDS: Record<string, string> = { 'sfa-web': 'sf-web', 'sfa-artifact': 'sf-artifact', 'sfa-git': 'sf-git' };
+/** SF Agents' commands in every container; each hands its call to SF Agents. */
+export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact'];
 /** Capabilities sudo and apt need; everything else (NET_RAW, NET_ADMIN, SYS_*) stays dropped. */
 export const CONTAINER_CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID', 'KILL', 'AUDIT_WRITE'];
 export const DEFAULT_MEMORY_MB = 4096;
@@ -176,6 +178,8 @@ interface AgentState {
   agentId: string;
   level: NetworkLevel;
   mounts: RootMount[];
+  /** Files and folders on this computer the container does not see (secrets, SF Agents' data). */
+  hidden: string[];
   /** Commands running now, newest last: their host commands and call. */
   contexts: Array<{ cmds: HostCommands; callId?: string; signal: AbortSignal; command?: string }>;
 }
@@ -237,7 +241,7 @@ export class ContainerManager {
       'sfa-kill': { content: KILL_SOURCE },
       [APPLY_PATCH_COMMAND]: { content: applyPatchScript().replace(/^#!.*\n/, '#!/usr/bin/env node\n') },
     };
-    for (const name of Object.keys(CONTAINER_COMMANDS)) files[name] = { content: clientLauncher(name) };
+    for (const name of CONTAINER_COMMANDS) files[name] = { content: clientLauncher(name) };
     return files;
   }
 
@@ -254,8 +258,9 @@ export class ContainerManager {
     if (state) {
       state.level = spec.level;
       state.mounts = mounts;
+      state.hidden = [...(spec.hidden ?? [])];
     } else {
-      this.agents.set(cid, { agentId: spec.agentId, level: spec.level, mounts, contexts: [] });
+      this.agents.set(cid, { agentId: spec.agentId, level: spec.level, mounts, hidden: [...(spec.hidden ?? [])], contexts: [] });
     }
     const key = `${cid}\0${JSON.stringify([spec.roots, spec.hidden, spec.memoryMb, spec.cpus])}`;
     // Checking a container costs a few wsl.exe calls and a walk for secret
@@ -287,7 +292,9 @@ export class ContainerManager {
     const sources = process.platform === 'win32' ? await mountRootsInDistro(mounts.map((m) => m.hostPath)) : mounts.map((m) => m.hostPath);
     const hidden = new Set<string>();
     for (const m of mounts) for (const f of findSecretFiles(m.hostPath)) hidden.add(f);
-    for (const h of spec.hidden ?? []) if (fs.existsSync(h)) hidden.add(h);
+    for (const h of spec.hidden ?? []) if (fs.existsSync(h) && mounts.some((m) => isPathWithinRoot(path.resolve(h), m.hostPath))) hidden.add(h);
+    const state = this.agents.get(cid);
+    if (state) state.hidden = [...new Set([...state.hidden, ...hidden])];
     const args = this.createArgs(cid, spec, mounts, sources, [...hidden]);
     const hash = createHash('sha256').update(JSON.stringify(args)).digest('hex').slice(0, 16);
     const current = await this.cli.run(['container', 'inspect', '--format', '{{index .Config.Labels "sfagents.spec"}} {{.State.Running}}', name]);
@@ -366,7 +373,7 @@ export class ContainerManager {
     handleProxyConnection(cid, stream, {
       level: () => this.agents.get(cid)?.level ?? 'off',
       command: () => state.contexts.at(-1)?.command,
-      log: (event) => (this.options.onNetwork ?? ((e: NetworkEvent) => packageProxy().add(e)))({ ...event, agent: state.agentId }),
+      log: (event) => (this.options.onNetwork ?? ((e: NetworkEvent) => networkLog().add(e)))({ ...event, agent: state.agentId }),
       hostChannel: (_cid, s, head) => this.hostChannel(state, s, head),
     });
   }
@@ -382,16 +389,15 @@ export class ContainerManager {
         const request = JSON.parse(line) as { argv?: unknown; cwd?: unknown; stdin?: unknown };
         if (!Array.isArray(request.argv) || !request.argv.length || !request.argv.every((a) => typeof a === 'string')) throw new Error('Malformed request.');
         const [name, ...rest] = request.argv as string[];
-        const hostName = CONTAINER_COMMANDS[name!];
-        if (!hostName) throw new Error(`Unknown command ${name}.`);
+        if (!CONTAINER_COMMANDS.includes(name!)) throw new Error(`Unknown command ${name}.`);
         if (!context) throw new Error(`${name} works only while SF Agents runs one of this agent's commands.`);
         const cwd = typeof request.cwd === 'string' ? containerToHostPath(request.cwd, state.mounts) : undefined;
-        reply = await runHostCommand([hostName, ...rest.map((a) => this.argToHost(a, request.cwd as string, state.mounts))], context.cmds, {
+        reply = await runHostCommand([name!, ...rest.map((a) => this.argToHost(a, request.cwd as string, state.mounts))], context.cmds, {
           ...(cwd ? { cwd } : {}),
           ...(typeof request.stdin === 'string' ? { stdin: request.stdin } : {}),
           callId: context.callId,
           signal: context.signal,
-          container: { appHost: `${containerIdOf(state)}${APP_HOST_SUFFIX}`, readRoots: [hostWorkspacesDir(), ...state.mounts.map((m) => m.hostPath)] },
+          container: { appHost: `${containerIdOf(state)}${APP_HOST_SUFFIX}`, writeRoots: [hostWorkspacesDir()], readRoots: state.mounts.map((m) => m.hostPath), hidden: state.hidden },
         });
       } catch (error) {
         reply = { ok: false, error: getErrorMessage(error) };
@@ -446,10 +452,3 @@ export function setContainerManagerForTesting(manager: ContainerManager | undefi
   shared = manager;
 }
 
-/**
- * Whether shell commands run in agent containers. Until the old OS sandbox
- * is removed, containers are opt-in: SFAGENTS_CONTAINERS=1.
- */
-export function containersEnabled(): boolean {
-  return process.env['SFAGENTS_CONTAINERS'] === '1';
-}

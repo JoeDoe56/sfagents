@@ -210,7 +210,7 @@ export interface ContextTool {
   /** The tool's schema as sent to the model. */
   schema: unknown;
   /**
-   * A command run through another tool (sf-web and sf-artifact, in the
+   * A command run through another tool (sfa-web and sfa-artifact, in the
    * shell): listed with its usage, but its tokens are already that tool's.
    */
   partOf?: string;

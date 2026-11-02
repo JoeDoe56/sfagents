@@ -224,7 +224,7 @@ export function openSettingsSheet(device) {
     });
     providersBox.replaceChildren(
       section('Providers', rows, data ? note : ''),
-      section('Web Access', [webRow], 'Agents with "web" in tools.allow search and fetch pages with `sf-web` in their shell, through Bright Data. The key stays in the keyring and in SF Agents; the sandbox never sees it.'),
+      section('Web Access', [webRow], 'Agents at network level "on" search and fetch pages with `sfa-web` in their shell, through Bright Data. The key stays in the keyring and in SF Agents; agents never see it.'),
     );
     ctx.refresh();
   }
@@ -314,6 +314,10 @@ export function openSettingsSheet(device) {
       let node;
       if (s.type === 'origins') {
         groups.get(s.group).push(...originRows(s, hint));
+        continue;
+      }
+      if (s.type === 'folders') {
+        groups.get(s.group).push(...folderRows(s, hint));
         continue;
       }
       if (s.type === 'boolean') {
@@ -483,6 +487,68 @@ export function openSettingsSheet(device) {
     } catch (error) {
       showError(error.message, "Couldn't remove the address");
     }
+  }
+
+  /**
+   * Project folders: one row per folder (its menu removes it) and Add
+   * Folder. Both save at once; agents see the change on their next command.
+   */
+  function folderRows(s, hint) {
+    const list = Array.isArray(s.value) ? s.value : [];
+    const rows = list.map((folder) => {
+      const row = createRow({
+        icon: 'folder',
+        iconTint: '#0a84ff',
+        title: folder,
+        subtitle: 'Read-only for every agent',
+        accessory: 'ellipsis',
+        onTap: () =>
+          showMenu({
+            anchor: row.el,
+            align: 'end',
+            groups: [[{ label: 'Remove', symbol: 'trash', role: 'destructive', action: () => saveFolders(s, list.filter((f) => f !== folder)) }]],
+          }),
+      });
+      return row.el;
+    });
+    rows.push(createRow({ icon: 'plus.circle.fill', title: 'Add Folder', subtitle: hint.split('\n')[0], wrap: true, tintTitle: true, onTap: () => openAddFolder(s) }).el);
+    return rows;
+  }
+
+  async function saveFolders(s, next) {
+    try {
+      server = await postJson('/api/settings', { values: { [s.key]: next } });
+      renderServer();
+    } catch (error) {
+      showError(error.message, "Couldn't change the folders");
+      throw error;
+    }
+  }
+
+  function openAddFolder(s) {
+    const f = field({ label: 'Folder', placeholder: 'C:\\Users\\you\\projects' });
+    // eslint-disable-next-line prefer-const
+    let sheet;
+    sheet = openSheet({
+      title: 'Add Folder',
+      detents: ['medium'],
+      className: 'st-sheet',
+      z: 1200,
+      build(sh) {
+        sh.body.append(section(null, [f.row], 'The full path of a folder on this computer. Every agent can read it at /roots/<name>; none can change it.'));
+        f.input.addEventListener('input', () => sheet?.setDirty(!!f.input.value.trim()));
+        setTimeout(() => f.input.focus(), 350);
+      },
+      onConfirm: async () => {
+        const current = server.settings.find((x) => x.key === s.key)?.value ?? [];
+        try {
+          await saveFolders(s, [...current, f.input.value.trim()]);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
   }
 
   function setDraft(s, v) {

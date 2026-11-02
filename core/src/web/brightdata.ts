@@ -3,7 +3,7 @@
  * search results (search_engine) and pages fetched through its unlocker as
  * Markdown or HTML (scrape_as_markdown, scrape_as_html). The API key is the
  * one added in Settings, kept in the OS keyring. Calls run in the host
- * process; sandboxed commands reach them only through `sf-web`.
+ * process; agent containers reach them only through `sfa-web`.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';

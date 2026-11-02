@@ -3,7 +3,7 @@
  * GPT models write (*** Begin Patch / *** Add File / *** Update File /
  * *** Delete File / *** Move to / @@ hunks / *** End Patch). Editing through
  * a shell's quoting (cmd especially) breaks on multi-line text; a patch on
- * stdin does not. The command runs inside the sandbox as a Node script, so
+ * stdin does not. The command runs inside the agent's container as a Node script, so
  * the agent's file permissions apply to every change.
  *
  * The source below is the script itself (applyPatch is also exported for tests).
@@ -157,7 +157,7 @@ function applyPatch(text, fs, path, cwd) {
 }
 `;
 
-/** The script put on the sandbox's PATH as `apply_patch` (run with SF Agents' Node). */
+/** The script put on the container's PATH as `apply_patch`. */
 export function applyPatchScript(): string {
   return String.raw`#!/usr/bin/env sf-node
 'use strict';

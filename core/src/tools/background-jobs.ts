@@ -1,6 +1,6 @@
 /**
  * Shell commands that keep running after the tool call returns: dev servers,
- * watchers, long builds. Each runs in the agent's sandbox like any command;
+ * watchers, long builds. Each runs in the agent's container like any command;
  * its output is kept (the last part of it) so the agent can read it later,
  * and it runs until it exits, the agent stops it, or SF Agents quits.
  */
@@ -11,7 +11,7 @@ import { stripAnsiAndControl } from '../utils/text-utils.js';
 
 /** Output kept per job (the most recent part). */
 const MAX_JOB_OUTPUT_CHARS = 256 * 1024;
-/** Background jobs one set of folders (sandbox policy) may run at once. */
+/** Background jobs one agent may run at once. */
 export const MAX_RUNNING_JOBS = 8;
 /** Finished jobs remembered, for their output and exit code. */
 const MAX_FINISHED_JOBS = 20;
@@ -22,7 +22,7 @@ export interface BackgroundJob {
   readonly cwd: string;
   readonly owner: string;
   readonly startedAt: number;
-  /** When the sandbox had set up and the command itself started. */
+  /** When the command itself started in the container. */
   runningAt?: number;
   endedAt?: number;
   exitCode?: number | null;
@@ -67,7 +67,7 @@ export function getJob(owner: string, id: string): BackgroundJob | undefined {
 
 /**
  * Starts @p command in the background. @p onEnd runs once it has exited (and
- * the sandbox cleaned up), for resources tied to the job such as its host channel.
+ * for resources tied to the job, such as its use of SF Agents' commands.
  */
 export function startJob(command: string, owner: string, options: ShellSpawnOptions, onEnd?: () => void | Promise<void>): BackgroundJob {
   const running = [...jobs.values()].filter((j) => j.owner === owner && j.endedAt === undefined);
@@ -91,17 +91,12 @@ export function startJob(command: string, owner: string, options: ShellSpawnOpti
     state.runningAt = Date.now();
     markStarted();
   });
-  const state: JobState = { id, command, cwd: options.cwd, owner, startedAt: Date.now(), child: proc.child, ...(proc.kill ? { kill: proc.kill } : {}), output: '', dropped: 0, read: 0, ended, started };
+  const state: JobState = { id, command, cwd: options.cwd, owner, startedAt: Date.now(), child: proc.child, kill: proc.kill, output: '', dropped: 0, read: 0, ended, started };
   jobs.set(id, state);
   let finished = false;
   const finish = async (result: { exitCode?: number | null; signal?: NodeJS.Signals | null; error?: string }) => {
     if (finished) return;
     finished = true;
-    try {
-      proc.cleanup?.();
-    } catch (error) {
-      result.error ??= error instanceof Error ? error.message : String(error);
-    }
     try {
       await onEnd?.();
     } catch {
@@ -123,7 +118,7 @@ function pruneFinished() {
 }
 
 /**
- * Waits until the job has run for @p ms (sandbox setup not counted), has
+ * Waits until the job has run for @p ms, has
  * exited, or @p signal aborts.
  */
 export async function waitForJob(id: string, ms: number, signal?: AbortSignal): Promise<void> {

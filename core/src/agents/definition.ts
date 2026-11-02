@@ -5,9 +5,8 @@
  * instead of silently granting or dropping permissions.
  */
 
-import { isNetworkLevel, NETWORK_LEVELS, type NetworkLevel } from '../container/network.js';
-import path from 'node:path';
-import { BUILTIN_TOOL_IDS, LEGACY_FILE_TOOL_IDS, LEGACY_WRITE_TOOL_IDS, MCP_TOOL_PREFIX, ToolNames } from '../tools/tool-names.js';
+import { isNetworkLevel, NETWORK_LEVEL_TEXT, NETWORK_LEVELS, type NetworkLevel } from '../container/network.js';
+import { MCP_TOOL_PREFIX } from '../tools/tool-names.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../providers/types.js';
 
 /** Providers an agent file can name without adding one in Settings (keys from environment variables). */
@@ -28,36 +27,7 @@ export interface McpServerGrant {
   tools?: string[];
 }
 
-/** Another agent this one may message, from a "N-name.json" entry in tools.allow. */
-export interface WorkspaceAccess {
-  path: string;
-  mode: 'read' | 'write' | 'none';
-}
-
-/** One entry of workspace.paths: a folder and what commands may do in it. */
-export interface WorkspacePath {
-  /** Absolute, or under the home folder ("~/..."). */
-  path: string;
-  /** "" (none), "r", "rw" (no deleting) or "rwd". */
-  letters: string;
-  access: 'none' | 'read' | 'edit' | 'write';
-}
-
-/** What workspace.paths letters mean (r read, w write, d delete), or why they are wrong. */
-export function parsePathLetters(letters: string): { access: WorkspacePath['access'] } | { error: string } {
-  if (!/^[rwd]*$/.test(letters)) return { error: 'may only use the letters r (read), w (write) and d (delete), e.g. "r", "rw" or "rwd"; "" blocks the folder' };
-  if (new Set(letters).size !== letters.length) return { error: 'lists a letter twice' };
-  const has = (c: string) => letters.includes(c);
-  if (has('w') && !has('r')) return { error: '"w" needs "r" too ("rw")' };
-  if (has('d') && !has('w')) return { error: '"d" needs "w" too ("rwd")' };
-  return { access: has('d') ? 'write' : has('w') ? 'edit' : has('r') ? 'read' : 'none' };
-}
-
-/** An absolute path, or one under the home folder ("~", "~/x"). */
-export function isAbsoluteSpec(p: string): boolean {
-  return p === '~' || p.startsWith('~/') || p.startsWith('~\\') || path.posix.isAbsolute(p) || path.win32.isAbsolute(p);
-}
-
+/** Another agent this one may message, from a "N-name.json" entry in agents. */
 export interface AgentGrant {
   /** The agent's file name, relative to the agents folder (e.g. "researcher.json"). */
   file: string;
@@ -103,48 +73,25 @@ export interface AgentDefinition {
   reasoning?: ReasoningEffort;
   temperature?: number;
   maxOutputTokens?: number;
-  workspace?: {
-    /**
-     * The folders this agent may use, in order (the first is where commands
-     * start), each with its permission letters. A folder inside another
-     * narrows or widens it, and "" blocks it. Replaces roots and access.
-     */
-    paths?: WorkspacePath[];
-    /** Older form: read-write folders relative to the project (empty with paths). */
-    roots: string[];
-    /**
-     * The network level of the agent's container: "off", "pkg" (package
-     * registries), "git" (pkg plus Git hosts) or "on". The older true/false
-     * (OS sandbox) means "on" and "pkg".
-     */
-    network?: boolean | NetworkLevel;
-    /**
-     * Folder-sharing style exceptions to the roots (which are read-write):
-     * the longest matching path wins. `~` is the home folder; relative paths
-     * are against the project directory.
-     */
-    access?: WorkspaceAccess[];
-  };
+  /**
+   * What the agent's shell can reach on the network: "off", "pkg" (package
+   * registries), "git" (pkg plus Git hosts) or "on" (the internet, and
+   * sfa-web). The only permission an agent has; every agent runs its
+   * commands in its own container.
+   */
+  network: NetworkLevel;
+  /** Agents this one may message ("N-name.json" entries of agents). */
+  agents?: AgentGrant[];
   tools?: {
-    allow?: string[];
     mcpServers?: Array<string | McpServerGrant>;
-    /** Tool IDs that skip the confirmation prompt (e.g. "shell", "mcp__srv__*"). */
+    /** MCP tools that skip the confirmation prompt ("mcp__srv__tool", "mcp__srv__*"). */
     autoApprove?: string[];
-    /** Ask before each shell command (default false: the sandbox is the boundary). */
-    ask?: boolean;
-    /** Agents this one may message ("N-name.json" entries of tools.allow). */
-    agents?: AgentGrant[];
     /**
      * Tools left out of requests until the agent loads them with tool_search:
      * "auto" (default: MCP tools, once there are more than 10), true (all MCP
      * tools), false (none), or tool names and patterns ("mcp__github__*").
      */
     defer?: boolean | 'auto' | string[];
-    /**
-     * Set when tools.allow listed removed file tools (read_file, edit, ...):
-     * they became `shell`, read-only ("read") unless one of them could write.
-     */
-    legacy?: { tools: string[]; access: 'read' | 'write' };
   };
   /**
    * Access to the main persistent conversation's sections and history:
@@ -176,7 +123,7 @@ export interface AgentDefinition {
     toolTimeoutSeconds?: number;
     shellTimeoutSeconds?: number;
     maxToolOutputChars?: number;
-    /** Web requests (`sf-web`) per run, for agents with "web" (default 25). */
+    /** Web requests (`sfa-web`) per run, for agents at network level "on" (default 25). */
     webRequests?: number;
   };
 }
@@ -195,7 +142,7 @@ export class ConfigError extends Error {
 export const AGENT_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 /** Agent names come from file names: anything printable without path separators. */
 export const AGENT_NAME_PATTERN = /^[^\\/:*?"<>|\x00-\x1f]{1,100}$/;
-/** "3-researcher.json" in tools.allow: may run up to 3 instances of agents/researcher.json. */
+/** "3-researcher.json" in agents: may run up to 3 instances of agents/researcher.json. */
 export const AGENT_GRANT_PATTERN = /^([1-9][0-9]{0,2})-(.+\.json)$/i;
 
 const TOP_LEVEL_KEYS = new Set([
@@ -210,7 +157,8 @@ const TOP_LEVEL_KEYS = new Set([
   'reasoning',
   'temperature',
   'maxOutputTokens',
-  'workspace',
+  'network',
+  'agents',
   'tools',
   'conversation',
   'artifacts',
@@ -299,7 +247,10 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
   if (!isPlainObject(raw)) c.fail(undefined, 'agent definition must be a JSON object');
   for (const key of Object.keys(raw)) {
     if (key === 'spawn') {
-      c.fail('spawn', 'is no longer used: let an agent message another by adding "N-name.json" to tools.allow (N = how many it may run at once)');
+      c.fail('spawn', 'is no longer used: let an agent message another by adding "N-name.json" to agents (N = how many it may run at once)');
+    }
+    if (key === 'workspace') {
+      c.fail('workspace', 'was removed: every agent works in its own container, with /workspaces (shared, read-write) and the project folders from Settings (read-only). Set "network" instead');
     }
     if (!TOP_LEVEL_KEYS.has(key)) {
       c.fail(key, `unknown field. Allowed fields: ${[...TOP_LEVEL_KEYS].filter((k) => k !== '$schema').join(', ')}`);
@@ -385,90 +336,43 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
   const temperature = c.number(raw['temperature'], 'temperature', 0, 2);
   const maxOutputTokens = c.integer(raw['maxOutputTokens'], 'maxOutputTokens', 1, 1_000_000);
 
-  let workspace: AgentDefinition['workspace'];
-  if (raw['workspace'] !== undefined) {
-    const ws = c.object(raw['workspace'], 'workspace', ['paths', 'roots', 'network', 'access']);
-    const rawNetwork = ws['network'];
-    if (rawNetwork !== undefined && typeof rawNetwork !== 'boolean' && !isNetworkLevel(rawNetwork)) c.fail('workspace.network', `must be one of ${NETWORK_LEVELS.map((l) => `"${l}"`).join(', ')}`);
-    const network = rawNetwork as boolean | NetworkLevel | undefined;
-    if (ws['paths'] !== undefined) {
-      if (ws['roots'] !== undefined || ws['access'] !== undefined) c.fail('workspace.paths', 'replaces roots and access: use one form or the other');
-      if (!ws['paths'] || typeof ws['paths'] !== 'object' || Array.isArray(ws['paths'])) c.fail('workspace.paths', 'must be an object of folder → permission letters, e.g. { "C:/work/site": "rwd", "~/notes": "r" }');
-      const paths = Object.entries(ws['paths'] as Record<string, unknown>).map(([p, letters]): WorkspacePath => {
-        const field = `workspace.paths["${p}"]`;
-        if (!p.trim() || p.length > 4096) c.fail(field, 'needs a folder path');
-        if (!isAbsoluteSpec(p)) c.fail(field, 'must be an absolute path (or start with ~ for the home folder)');
-        if (typeof letters !== 'string') c.fail(field, 'must be a string of permission letters ("r", "rw", "rwd" or "")');
-        const parsed = parsePathLetters(letters);
-        if ('error' in parsed) c.fail(field, parsed.error);
-        return { path: p, letters, access: parsed.access };
-      });
-      if (!paths.some((e) => e.access !== 'none')) c.fail('workspace.paths', 'must give at least one folder a permission ("r", "rw" or "rwd")');
-      workspace = { paths, roots: [], ...(network !== undefined ? { network } : {}) };
-    } else {
-      const roots = c.stringArray(ws['roots'], 'workspace.roots', { unique: true, nonEmptyItems: true });
-      if (!roots) c.fail('workspace.roots', 'is required when workspace is given');
-      if (roots.length === 0) c.fail('workspace.roots', 'must list at least one directory');
-      let access: WorkspaceAccess[] | undefined;
-      if (ws['access'] !== undefined) {
-        if (!Array.isArray(ws['access'])) c.fail('workspace.access', 'must be an array of { "path": "...", "mode": "read" | "write" | "none" }');
-        const seen = new Set<string>();
-        access = (ws['access'] as unknown[]).map((entry, i) => {
-          const field = `workspace.access[${i}]`;
-          const o = c.object(entry, field, ['path', 'mode']);
-          const p = c.string(o['path'], `${field}.path`, { nonEmpty: true, maxLength: 4096 });
-          const mode = c.string(o['mode'], `${field}.mode`);
-          if (!['read', 'write', 'none'].includes(mode)) c.fail(`${field}.mode`, 'must be "read", "write" or "none"');
-          if (seen.has(p)) c.fail(`${field}.path`, `"${p}" is listed twice`);
-          seen.add(p);
-          return { path: p, mode: mode as WorkspaceAccess['mode'] };
-        });
-      }
-      workspace = { roots, ...(network !== undefined ? { network } : {}), ...(access ? { access } : {}) };
-    }
+  if (raw['network'] === undefined) c.fail('network', `is required: one of ${NETWORK_LEVELS.map((l) => `"${l}"`).join(', ')} (${NETWORK_LEVELS.map((l) => `${l}: ${NETWORK_LEVEL_TEXT[l]}`).join('; ')})`);
+  if (!isNetworkLevel(raw['network'])) c.fail('network', `must be one of ${NETWORK_LEVELS.map((l) => `"${l}"`).join(', ')}`);
+  const network = raw['network'] as NetworkLevel;
+
+  let agents: AgentGrant[] | undefined;
+  if (raw['agents'] !== undefined) {
+    agents = [];
+    const entries = c.stringArray(raw['agents'], 'agents', { unique: true, nonEmptyItems: true })!;
+    entries.forEach((entry, i) => {
+      const grant = AGENT_GRANT_PATTERN.exec(entry);
+      if (!grant) c.fail(`agents[${i}]`, 'must look like "N-name.json": another agent\'s file, and how many of it may run at once (e.g. "3-researcher.json")');
+      const target = grant[2]!;
+      if (target.includes('/') || target.includes('\\')) c.fail(`agents[${i}]`, 'names a file in the agents folder, without a path');
+      const agent = target.replace(/\.json$/i, '');
+      if (agents!.some((a) => a.agent === agent)) c.fail(`agents[${i}]`, `"${agent}" is granted twice`);
+      agents!.push({ file: target, agent, max: Number(grant[1]) });
+    });
   }
 
   let tools: AgentDefinition['tools'];
   if (raw['tools'] !== undefined) {
-    const t = c.object(raw['tools'], 'tools', ['allow', 'mcpServers', 'autoApprove', 'ask', 'defer']);
-    const ask = c.boolean(t['ask'], 'tools.ask');
-    let defer: boolean | 'auto' | string[] | undefined;
-    if (t['defer'] === 'auto' || typeof t['defer'] === 'boolean') defer = t['defer'] as boolean | 'auto';
-    else if (t['defer'] !== undefined) {
-      if (!Array.isArray(t['defer'])) c.fail('tools.defer', 'must be "auto", true, false, or a list of tool names and patterns like "mcp__github__*"');
-      defer = c.stringArray(t['defer'], 'tools.defer', { unique: true, nonEmptyItems: true });
+    const t = raw['tools'];
+    if (isPlainObject(t) && (t['allow'] !== undefined || t['ask'] !== undefined)) {
+      c.fail(t['allow'] !== undefined ? 'tools.allow' : 'tools.ask', 'was removed: every agent has the shell and the message tool, sfa-web needs "network": "on", and other agents go in "agents" ("N-name.json")');
     }
-    const allowAll = c.stringArray(t['allow'], 'tools.allow', { unique: true });
-    const allow: string[] = [];
-    const agents: AgentGrant[] = [];
-    const legacy: string[] = [];
-    allowAll?.forEach((entry, i) => {
-      const grant = AGENT_GRANT_PATTERN.exec(entry);
-      if (grant) {
-        const target = grant[2]!;
-        if (target.includes('/') || target.includes('\\')) c.fail(`tools.allow[${i}]`, 'agent grants name a file in the agents folder, without a path');
-        const agent = target.replace(/\.json$/i, '');
-        if (agents.some((a) => a.agent === agent)) c.fail(`tools.allow[${i}]`, `"${agent}" is granted twice`);
-        agents.push({ file: target, agent, max: Number(grant[1]) });
-        return;
-      }
-      if (LEGACY_FILE_TOOL_IDS.includes(entry)) {
-        legacy.push(entry);
-        return;
-      }
-      if (!BUILTIN_TOOL_IDS.includes(entry)) {
-        c.fail(
-          `tools.allow[${i}]`,
-          `unknown tool "${entry}". Built-in tools: ${BUILTIN_TOOL_IDS.join(', ')}. Other agents are granted as "N-name.json" (N = how many may run at once); MCP tools with tools.mcpServers.`,
-        );
-      }
-      allow.push(entry);
-    });
+    const tt = c.object(t, 'tools', ['mcpServers', 'autoApprove', 'defer']);
+    let defer: boolean | 'auto' | string[] | undefined;
+    if (tt['defer'] === 'auto' || typeof tt['defer'] === 'boolean') defer = tt['defer'] as boolean | 'auto';
+    else if (tt['defer'] !== undefined) {
+      if (!Array.isArray(tt['defer'])) c.fail('tools.defer', 'must be "auto", true, false, or a list of tool names and patterns like "mcp__github__*"');
+      defer = c.stringArray(tt['defer'], 'tools.defer', { unique: true, nonEmptyItems: true });
+    }
     let mcpServers: Array<string | McpServerGrant> | undefined;
-    if (t['mcpServers'] !== undefined) {
-      if (!Array.isArray(t['mcpServers'])) c.fail('tools.mcpServers', 'must be an array');
+    if (tt['mcpServers'] !== undefined) {
+      if (!Array.isArray(tt['mcpServers'])) c.fail('tools.mcpServers', 'must be an array');
       const seen = new Set<string>();
-      mcpServers = (t['mcpServers'] as unknown[]).map((entry, i) => {
+      mcpServers = (tt['mcpServers'] as unknown[]).map((entry, i) => {
         const field = `tools.mcpServers[${i}]`;
         let grant: string | McpServerGrant;
         let server: string;
@@ -489,40 +393,23 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
         return grant;
       });
     }
-    // Removed file tools: shell does their work now, in the sandbox.
-    const hadShell = allow.includes(ToolNames.SHELL);
-    if (legacy.length && !hadShell) allow.push(ToolNames.SHELL);
-    const legacyInfo = legacy.length
-      ? { tools: legacy, access: (hadShell || legacy.some((id) => LEGACY_WRITE_TOOL_IDS.includes(id)) ? 'write' : 'read') as 'read' | 'write' }
-      : undefined;
-    const autoApprove = c
-      .stringArray(t['autoApprove'], 'tools.autoApprove', { unique: true, nonEmptyItems: true })
-      ?.filter((entry) => !LEGACY_FILE_TOOL_IDS.includes(entry));
+    const autoApprove = c.stringArray(tt['autoApprove'], 'tools.autoApprove', { unique: true, nonEmptyItems: true });
     autoApprove?.forEach((entry, i) => {
       const field = `tools.autoApprove[${i}]`;
-      if (entry.startsWith(MCP_TOOL_PREFIX)) {
-        const parts = entry.slice(MCP_TOOL_PREFIX.length).split('__');
-        if (parts.length !== 2 || !parts[0] || !parts[1]) {
-          c.fail(field, 'MCP entries must look like "mcp__<server>__<tool>" or "mcp__<server>__*"');
-        }
-        const serverNames = (mcpServers ?? []).map((g) => (typeof g === 'string' ? g : g.server));
-        if (!serverNames.includes(parts[0]!)) {
-          c.fail(field, `refers to MCP server "${parts[0]}", which is not in tools.mcpServers`);
-        }
-      } else if (!BUILTIN_TOOL_IDS.includes(entry) || entry === ToolNames.WEB) {
-        c.fail(field, entry === ToolNames.WEB ? '"web" is not a tool call, so it never asks' : `unknown tool "${entry}"`);
-      } else if (!(allow ?? []).includes(entry)) {
-        c.fail(field, `"${entry}" is not in tools.allow, so it cannot be auto-approved`);
+      if (!entry.startsWith(MCP_TOOL_PREFIX)) c.fail(field, 'lists MCP tools only ("mcp__<server>__<tool>" or "mcp__<server>__*"); shell commands never ask');
+      const parts = entry.slice(MCP_TOOL_PREFIX.length).split('__');
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        c.fail(field, 'MCP entries must look like "mcp__<server>__<tool>" or "mcp__<server>__*"');
+      }
+      const serverNames = (mcpServers ?? []).map((g) => (typeof g === 'string' ? g : g.server));
+      if (!serverNames.includes(parts[0]!)) {
+        c.fail(field, `refers to MCP server "${parts[0]}", which is not in tools.mcpServers`);
       }
     });
     tools = {
-      allow: allowAll === undefined ? undefined : allow,
       mcpServers,
       autoApprove,
-      ...(ask !== undefined ? { ask } : {}),
       ...(defer !== undefined ? { defer } : {}),
-      ...(agents.length ? { agents } : {}),
-      ...(legacyInfo ? { legacy: legacyInfo } : {}),
     };
   }
 
@@ -591,7 +478,8 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     reasoning,
     temperature,
     maxOutputTokens,
-    workspace,
+    network,
+    ...(agents ? { agents } : {}),
     tools,
     conversation,
     artifacts,
@@ -630,9 +518,4 @@ export function mcpGrants(def: AgentDefinition): Map<string, ReadonlySet<string>
     else grants.set(g.server, g.tools ? new Set(g.tools) : undefined);
   }
   return grants;
-}
-
-/** Built-in tools an agent may call. */
-export function builtinAllow(def: AgentDefinition): readonly string[] {
-  return def.tools?.allow ?? [];
 }

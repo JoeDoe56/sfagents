@@ -9,7 +9,6 @@
  *   sfagents web                   serve the web interface (default http://127.0.0.1:8093)
  */
 
-import { spawnSync } from 'node:child_process';
 import readline from 'node:readline';
 import { parseArgs } from 'node:util';
 import {
@@ -31,12 +30,9 @@ import {
   getErrorMessage,
   KeyringUnavailableError,
   isLeftover,
-  isSandboxRun,
   containerManager,
-  containersEnabled,
   killProcessTree,
   sfagentsHome,
-  windowsSandboxPath,
   mcpGrants,
   MissingCredentialError,
   stripAnsiAndControl,
@@ -415,7 +411,7 @@ async function runOnce(
   registerCleanup(() => runtime.dispose());
   // The bridge to the agents' containers keeps a docker exec open; end it so
   // the process can exit. The containers keep running for the next request.
-  if (containersEnabled()) registerCleanup(() => containerManager().bridge.stop());
+  registerCleanup(() => containerManager().bridge.stop());
   if (opts.conversation) {
     const conversation = opts.conversation;
     registerCleanup(() => conversation.close());
@@ -532,7 +528,7 @@ async function serveWeb(
   // Cleanups run in reverse: stop the server (and any run) before closing the conversation.
   registerCleanup(() => conversation.close());
   // Quitting stops the agents' containers (after the server and any run).
-  if (containersEnabled()) registerCleanup(() => containerManager().stopAll());
+  registerCleanup(() => containerManager().stopAll());
   registerCleanup(() => server.close());
   let url: string;
   try {
@@ -594,15 +590,12 @@ async function stopEverything(code: number, streams: Streams): Promise<never> {
   await runExitCleanup();
   try {
     // Turning off screen mirroring's virtual display is left to finish on its own.
-    // What an earlier SF Agents left behind goes too: sandboxed commands (they
-    // lock the helper's file), the keyboard and sensor programs, the keyboard
+    // What an earlier SF Agents left behind goes too: the keyboard and sensor programs, the keyboard
     // worker, the screen helper and speech servers whose parent is gone.
     const home = sfagentsHome();
     const stopped = await killProcessTree({ graceMs: 2_000, keep: (command) => command.includes('--vdisplay-off'), orphans: (command) => isLeftover(command, home) });
     if (stopped.length) {
       streams.stderr.write(`Stopped ${stopped.length} process${stopped.length === 1 ? '' : 'es'} left running.\n`);
-      // A sandboxed command killed this way skipped the helper's own cleanup: put its permission changes back.
-      if (process.platform === 'win32' && stopped.some((p) => isSandboxRun(p.command))) spawnSync(windowsSandboxPath(), ['recover'], { windowsHide: true, timeout: 30_000 });
       // Lets exit handlers that were waiting on them run (the virtual display's).
       await new Promise((resolve) => setTimeout(resolve, 300));
     }

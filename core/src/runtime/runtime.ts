@@ -8,15 +8,15 @@
  * front ends consume typed RuntimeEvents and supply a ConfirmationHandler.
  */
 
-import { networkLevelOf } from '../container/network.js';
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
 import { CHAT_GUIDANCE, ChatToolNames, createChatTools } from '../conversation/chat-tools.js';
 import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
 import { ARTIFACT_COMMAND, ARTIFACT_GUIDANCE, artifactCommand, artifactIndex } from '../conversation/artifacts.js';
-import { availableHostCommands, hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
+import { hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import {
@@ -40,10 +40,9 @@ import { ToolNames } from '../tools/tool-names.js';
 import { TOOL_SEARCH, ToolSearchTool, calledToolNames, deferredToolNames, deferredToolsNote } from '../tools/tool-search.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
 import { ShellTool } from '../tools/shell.js';
-import { WorkspaceContext } from '../permissions/workspace.js';
-import { buildSandboxPolicy } from '../sandbox/policy.js';
-import type { SandboxPolicy } from '../sandbox/sandbox.js';
-import { DEFAULT_WEB_REQUESTS } from '../sandbox/host-channel.js';
+import { DEFAULT_WEB_REQUESTS } from '../tools/host-commands.js';
+import { AppSettings } from '../settings/settings.js';
+import { sfagentsHome } from '../settings/home.js';
 import { BrightDataWeb, type WebAccess } from '../web/brightdata.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { McpManager } from '../mcp/manager.js';
@@ -59,7 +58,7 @@ import {
   type ToolActivity,
 } from './events.js';
 import { PersistenceFailure, type RunRecorder, type ViewSource } from './recorder.js';
-import { ConversationService, STATE_DIR_NAME, type ReplayTarget } from '../conversation/service.js';
+import { ConversationService, type ReplayTarget } from '../conversation/service.js';
 import { buildWorkingContext, contextBreakdown, type ContextBreakdown, type ContextReport, type ContextTool } from '../conversation/context.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
@@ -82,8 +81,10 @@ export interface RuntimeOptions {
    * keeps an ephemeral in-memory conversation.
    */
   conversation?: ConversationService;
-  /** Web access for agents with "web" (default: Bright Data, with the key added in Settings). */
+  /** Web access for agents at network level "on" (default: Bright Data, with the key added in Settings). */
   web?: WebAccess;
+  /** The project folders every agent reads (default: the Project Folders setting). */
+  folders?: () => string[];
 }
 
 interface RunParams {
@@ -153,7 +154,7 @@ function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
   return { message: { role: 'tool', tool_call_id: call.id, content }, activity: { name: call.name, ok: false }, status: 'error' };
 }
 
-/** Whether the agent's shell has `sf-artifact` (it then gets the artifact guidance). */
+/** Whether the agent's shell has `sfa-artifact` (it then gets the artifact guidance). */
 /** A message to another agent (these run in parallel). */
 function toAgent(call: ParsedToolCall): boolean {
   return call.name === ToolNames.MESSAGE && typeof call.args['to'] === 'string' && call.args['to'] !== USER;
@@ -176,9 +177,7 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
     `Agent id: ${node.id}`,
     `Date: ${new Date().toISOString().slice(0, 10)}`,
     `Platform: ${process.platform} (${os.release()})`,
-    node.roots.length
-      ? `Workspace roots (shell commands run in a sandbox confined to these; relative paths resolve against the first): ${node.roots.join(', ')}`
-      : 'Workspace: none (this agent has no filesystem access)',
+    `Shell: your own Linux container. Work in /workspaces (shared with the other agents); the person's project folders are read-only under /roots. Network level: ${d.network}.`,
     `Tools available to you: ${toolNames.length ? toolNames.join(', ') : '(none)'}`,
   ];
   const partner = link?.partner?.id;
@@ -220,6 +219,7 @@ export class AgentRuntime implements AgentMessenger {
   private disposed = false;
   readonly conversation?: ConversationService;
   private readonly web: WebAccess;
+  private readonly folders?: () => string[];
 
   constructor(options: RuntimeOptions) {
     this.tree = options.tree;
@@ -234,6 +234,7 @@ export class AgentRuntime implements AgentMessenger {
     this.conversation = options.conversation;
     this.threads = new ThreadService(options.conversation?.dir);
     this.web = options.web ?? new BrightDataWeb(() => new ProviderRegistry().webKey());
+    if (options.folders) this.folders = options.folders;
   }
 
   /**
@@ -258,36 +259,21 @@ export class AgentRuntime implements AgentMessenger {
     // Access defaults depend on where the agent works (see conversationAccess).
     const depth = role === 'main' ? 0 : 1;
     const tools = new Map<string, AnyDeclarativeTool>();
-    const allow = d.tools?.allow ?? [];
-    const sandbox = this.sandboxPolicy(node);
-    const workspace = node.roots.length
-      ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules)
-      : undefined;
-    // SF Agents' own commands: sf-web ("web" in tools.allow) and sf-artifact (artifacts.access "create").
+    // SF Agents' own commands: sfa-web (network "on") and sfa-artifact (artifacts.access "create").
     const commands: HostCommands = {
-      ...(allow.includes(ToolNames.WEB) ? { web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS } } : {}),
-      ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, workspace) } : {}),
+      ...(d.network === 'on' ? { web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS } } : {}),
+      ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined) } : {}),
     };
     if (!commands.artifact) delete commands.artifact;
-    // "shell" in tools.allow is the general shell (in the sandbox); without it, an agent
-    // with web access or artifacts gets a shell that runs only those commands.
-    const fullShell = allow.includes(ToolNames.SHELL) && !!workspace;
-    // Pushing (and fetching private repositories) with the person's Git credentials, on the host.
-    if (fullShell && workspace) commands.git = { agent: node.id, workspace };
-    if (fullShell || availableHostCommands(commands).length) {
-      const ctx: ToolContext = {
-        ...(workspace ? { workspace } : {}),
-        maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
-        secretEnvNames: this.secretEnvNames,
-        shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
-        sandbox,
-        askShell: d.tools?.ask === true,
-        commands,
-        shellMode: fullShell ? 'full' : 'helpers',
-        agentId: node.id,
-      };
-      tools.set(ToolNames.SHELL, new ShellTool(ctx));
-    }
+    const ctx: ToolContext = {
+      agentId: node.id,
+      maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
+      secretEnvNames: this.secretEnvNames,
+      shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
+      container: { level: d.network, roots: this.projectFolders(), hidden: this.hiddenPaths() },
+      commands,
+    };
+    tools.set(ToolNames.SHELL, new ShellTool(ctx));
 
     for (const [server, grantedTools] of mcpGrants(d)) {
       const cfg = this.tree.mcp.servers[server];
@@ -324,23 +310,40 @@ export class AgentRuntime implements AgentMessenger {
     return tools;
   }
 
-  /** What one agent's shell commands can reach. */
-  sandboxPolicy(node: AgentNode): SandboxPolicy {
-    const state = this.conversation?.protectedPaths() ?? [];
-    const stateDir = this.conversation?.dir && path.basename(this.conversation.dir) === STATE_DIR_NAME ? this.conversation.dir : undefined;
-    return buildSandboxPolicy({
-      roots: node.roots,
-      secretFiles: this.tree.secretFiles,
-      // The .sfagents folder is hidden whether or not this run keeps a conversation in it.
-      stateDirs: [stateDir ?? path.join(this.tree.dataDir, STATE_DIR_NAME), ...state.filter((p) => p !== stateDir && !path.extname(p))],
-      stateFiles: state.filter((p) => p !== stateDir && !!path.extname(p)),
-      protectedFiles: this.tree.protectedFiles,
-      agentsDir: this.tree.agentsDir,
-      promptsDir: this.tree.promptsDir,
-      access: node.access,
-      network: node.definition.workspace?.network === true || node.definition.workspace?.network === 'on',
-      level: networkLevelOf(node.definition.workspace?.network),
+  /** The project folders every agent reads (Settings → Project Folders), those that exist. */
+  projectFolders(): string[] {
+    let folders: string[] = [];
+    try {
+      folders = this.folders ? this.folders() : new AppSettings().get<string[]>('agents.folders');
+    } catch {
+      // unreadable settings: no folders
+    }
+    return folders.filter((f) => {
+      try {
+        return fs.statSync(f).isDirectory();
+      } catch {
+        return false;
+      }
     });
+  }
+
+  /**
+   * What agents never see inside the project folders: SF Agents' own data
+   * (the project's data folder with agents, prompts, mcp.json, .env and the
+   * conversation, and the per-user folder). Secret files such as .env and
+   * keys are hidden too, wherever they are (see findSecretFiles).
+   */
+  hiddenPaths(): string[] {
+    return [...new Set([
+      this.tree.dataDir,
+      this.tree.agentsDir,
+      this.tree.promptsDir,
+      ...this.tree.secretFiles,
+      ...this.tree.protectedFiles,
+      ...(this.conversation?.dir ? [this.conversation.dir] : []),
+      ...(this.conversation?.protectedPaths() ?? []),
+      sfagentsHome(),
+    ].map((p) => path.resolve(p)))];
   }
 
   private provider(definition: Readonly<AgentDefinition>): ModelProvider {

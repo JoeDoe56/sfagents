@@ -67,16 +67,15 @@ export * from './mcp/config.js';
 export { McpManager } from './mcp/manager.js';
 export type { McpServerState, McpToolInfo, McpServerStatus } from './mcp/manager.js';
 export { mcpFunctionName, transformMcpResult } from './mcp/mcp-tool.js';
-export { WorkspaceContext } from './permissions/workspace.js';
 export * from './tools/tools.js';
 export { ToolErrorType } from './tools/tool-error.js';
-export { ToolNames, BUILTIN_TOOL_IDS } from './tools/tool-names.js';
+export { ToolNames } from './tools/tool-names.js';
 export { TOOL_SEARCH, AUTO_DEFER_MIN, ToolSearchTool, deferredToolNames, matchesToolPattern } from './tools/tool-search.js';
 export { stripAnsiAndControl } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
 export { openInBrowser } from './utils/open-url.js';
 export { removeDir } from './utils/remove-dir.js';
-export { descendantsOf, isLeftover, isSandboxRun, killProcessTree, orphansOf, parseProcessList, type ProcessEntry } from './utils/process-tree.js';
+export { descendantsOf, isLeftover, killProcessTree, orphansOf, parseProcessList, type ProcessEntry } from './utils/process-tree.js';
 export * from './conversation/types.js';
 export { parseConversation, serializeConversation, serializeRecord, decorationFor } from './conversation/format.js';
 export { ConversationState, SemanticError } from './conversation/state.js';
@@ -169,8 +168,8 @@ export {
   validateGenui,
   writeGenuiState,
 } from './conversation/genui.js';
-export { availableHostCommands, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, splitCommandLine, WEB_COMMAND } from './tools/host-commands.js';
-export type { HostCommandReply, HostCommands } from './tools/host-commands.js';
+export { availableHostCommands, DEFAULT_WEB_REQUESTS, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, WEB_COMMAND } from './tools/host-commands.js';
+export type { HostCommandReply, HostCommands, WebGrant } from './tools/host-commands.js';
 export {
   IMAGE_TOKEN_ESTIMATE,
   looksLikeText,
@@ -180,22 +179,13 @@ export {
   userMessageFor,
 } from './conversation/attachments.js';
 export { estimateMessages } from './conversation/context.js';
-export { detectSandbox, setSandboxForTesting, accessFor, HOST_CHANNEL_ENV, SANDBOX_RUN_DIR } from './sandbox/sandbox.js';
-export type { Sandbox, SandboxPolicy, SandboxRule, SandboxAccess, SandboxStatus, SandboxCommand, WrappedCommand } from './sandbox/sandbox.js';
-export { buildSandboxPolicy, GIT_PROTECTED } from './sandbox/policy.js';
-export { BubblewrapSandbox, bubblewrapCommand, findBubblewrap, LINUX_SYSTEM_PATHS } from './sandbox/linux.js';
-export { findPython, landlockCommand } from './sandbox/landlock.js';
-export { SeatbeltSandbox, seatbeltProfile } from './sandbox/macos.js';
-export { WindowsSandbox, detectWindowsSandbox, windowsSandboxPath } from './sandbox/windows.js';
-export { openHostChannel, hostCommandTools, hostCommandScript, DEFAULT_WEB_REQUESTS } from './sandbox/host-channel.js';
-export { packageProxy, PackageProxy, PACKAGE_HOSTS, hostAllowed, parseTarget, type NetworkLogEntry } from './sandbox/package-proxy.js';
-export { applyPatch, applyPatchScript, APPLY_PATCH_COMMAND } from './sandbox/apply-patch.js';
-export { GIT_COMMAND, GIT_USAGE, refusal as gitRefusal, httpsHost as httpsGitHost } from './tools/host-git.js';
-export type { HostChannel, WebGrant } from './sandbox/host-channel.js';
+export { NetworkLog, networkLog, type NetworkLogEntry } from './container/network-log.js';
+export { applyPatch, applyPatchScript, APPLY_PATCH_COMMAND } from './tools/apply-patch.js';
+export { GIT_IDENTITY_VARS } from './tools/shell.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
 export type { WebAccess, WebOperation } from './web/brightdata.js';
 export { ContainerBridge, BridgeStream, encodeFrame, FrameReader, lazyDuplex, BRIDGE_CONTAINER, RUN_VOLUME } from './container/bridge.js';
-export { ContainerManager, containerManager, setContainerManagerForTesting, containersEnabled, containerIdFor, containerName, containerIdFromAppHost, rootMounts, hostToContainerPath, containerToHostPath, findSecretFiles, hostWorkspacesDir, agentImage, APP_HOST_SUFFIX, CONTAINER_COMMANDS, CONTAINER_CAPS, type AgentContainerSpec, type RootMount } from './container/containers.js';
+export { ContainerManager, containerManager, setContainerManagerForTesting, containerIdFor, containerName, containerIdFromAppHost, rootMounts, hostToContainerPath, containerToHostPath, findSecretFiles, hostWorkspacesDir, agentImage, APP_HOST_SUFFIX, CONTAINER_COMMANDS, CONTAINER_CAPS, type AgentContainerSpec, type RootMount } from './container/containers.js';
 export { CommandDockerCli, defaultDockerCli, docker, WSL_DISTRO, type DockerCli, type DockerResult } from './container/docker.js';
 export { handleProxyConnection, levelAllows, isPrivateAddress, isNetworkLevel, networkLevelOf, NETWORK_LEVELS, NETWORK_LEVEL_TEXT, PACKAGE_HOSTS as CONTAINER_PACKAGE_HOSTS, GIT_HOSTS, HOST_CHANNEL_NAME, type NetworkLevel, type NetworkEvent } from './container/network.js';
 export { BRIDGE_SOURCE, INIT_SOURCE, CLIENT_SOURCE, EXEC_SOURCE, KILL_SOURCE, FRAME } from './container/scripts.js';
