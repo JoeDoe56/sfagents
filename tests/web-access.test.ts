@@ -14,7 +14,7 @@ import {
   type WebAccess,
   type WebOperation,
 } from '@sfagents/core';
-import { baseAgent, makeTempDir, writeAgent } from './helpers.js';
+import { baseAgent, makeTempDir, NO_CONTAINER_TESTS, writeAgent } from './helpers.js';
 
 
 class FakeWeb implements WebAccess {
@@ -42,7 +42,7 @@ async function sh(t: Map<string, AnyDeclarativeTool>, command: string): Promise<
 const stdout = (r: ToolResult) => /Stdout: ([\s\S]*?)\nStderr:/.exec(r.llmContent)?.[1] ?? '';
 const stderr = (r: ToolResult) => /Stderr: ([\s\S]*?)\nExit Code:/.exec(r.llmContent)?.[1] ?? '';
 
-describe('sfa-web (in the agent container)', { skip: process.platform === 'win32' && 'the fake Docker needs bash' }, () => {
+describe('sfa-web (in the agent container)', { skip: NO_CONTAINER_TESTS }, () => {
   test('a container reaches the web through SF Agents, and results can go to files', async () => {
     const web = new FakeWeb();
     const { tools: t } = await tools({ network: 'on' }, web);

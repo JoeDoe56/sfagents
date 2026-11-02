@@ -15,7 +15,7 @@ import {
   ToolErrorType,
   type ChatMessage,
 } from '@sfagents/core';
-import { baseAgent, CLI_ENTRY, lastToolContent, makeTempDir, runCli, scriptedFactory, startMockOpenAI, writeJson, type MockChatHandler, type Script, writeAgent, catFile, stdioServerConfig, writeFileCommand } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, CLI_ENTRY, lastToolContent, makeTempDir, runCli, scriptedFactory, startMockOpenAI, writeJson, type MockChatHandler, type Script, writeAgent, catFile, stdioServerConfig, writeFileCommand } from './helpers.js';
 
 
 const isWin = process.platform === 'win32';
@@ -54,7 +54,7 @@ function roles(messages: readonly ChatMessage[]): string {
 }
 
 describe('persistent conversation (runtime)', () => {
-  test('a tool exchange and reasoning blocks survive a restart and replay validly', async () => {
+  test('a tool exchange and reasoning blocks survive a restart and replay validly', { skip: NO_CONTAINER_TESTS }, async () => {
     const { dir, file } = project({});
     fs.writeFileSync(path.join(work, 'fact.txt'), 'The launch code is AZURE-7.\n');
     const details = [{ type: 'reasoning.text', format: 'anthropic-claude-v1', index: 0, text: 'read it', signature: 'sig123' }];
@@ -125,7 +125,7 @@ describe('persistent conversation (runtime)', () => {
     await second.close();
   });
 
-  test('crash after execution but before the result is stored: outcome is unknown, not repeated', async () => {
+  test('crash after execution but before the result is stored: outcome is unknown, not repeated', { skip: NO_CONTAINER_TESTS }, async () => {
     const { dir } = project({});
     const first = openRuntime(
       dir,
@@ -305,7 +305,7 @@ describe('persistent conversation (CLI)', () => {
     assert.equal(third.code, 0, third.stderr);
   });
 
-  test('a process killed mid-tool leaves an interrupted run that is reported, not repeated', async () => {
+  test('a process killed mid-tool leaves an interrupted run that is reported, not repeated', { skip: NO_CONTAINER_TESTS }, async () => {
     const sleepCmd = isWin ? 'ping -n 30 127.0.0.1' : 'sleep 30';
     let calls = 0;
     handler = (body) => {

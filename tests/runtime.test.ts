@@ -1,4 +1,4 @@
-import { test, describe } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,10 +13,15 @@ import {
   type ConfirmationRequest,
   type RuntimeEvent,
 } from '@sfagents/core';
-import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeFileCommand, writeJson, type Script, writeAgent } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeFileCommand, writeJson, type Script, writeAgent } from './helpers.js';
 
 
 const ECHO = 'mcp__local__echo';
+/** Disposed after the file, so a failed test leaves no MCP server running (it would keep the run open). */
+const runtimes: AgentRuntime[] = [];
+after(async () => {
+  for (const r of runtimes) await r.dispose().catch(() => {});
+});
 
 function setup(agent: Record<string, unknown>) {
   const dir = makeTempDir();
@@ -32,6 +37,7 @@ function runtimeWith(agent: Record<string, unknown>, script: Script, opts: { con
   const { dir, tree } = setup(agent);
   const { factory, providers } = scriptedFactory(script);
   const runtime = new AgentRuntime({ tree, providerFactory: factory, ...opts });
+  runtimes.push(runtime);
   return { dir, tree, runtime, providers };
 }
 
@@ -50,7 +56,7 @@ describe('single agent loop', () => {
     assert.deepEqual(req.tools?.map((t) => t.name), ['shell'], 'every agent has the shell');
   });
 
-  test('executes an allowed tool and feeds the result into the next turn', async () => {
+  test('executes an allowed tool and feeds the result into the next turn', { skip: NO_CONTAINER_TESTS }, async () => {
     const { runtime, providers } = runtimeWith({}, (req, n) =>
       n === 0
         ? { toolCalls: [{ name: 'shell', args: { command: catFile('notes.txt') } }] }
@@ -97,7 +103,7 @@ describe('single agent loop', () => {
     await runtime.dispose();
   });
 
-  test('confirmation handler: deny, allow once, allow always; autoApprove and approveAll skip prompts; the shell never asks', async () => {
+  test('confirmation handler: deny, allow once, allow always; autoApprove and approveAll skip prompts; the shell never asks', { skip: NO_CONTAINER_TESTS }, async () => {
     const asked: ConfirmationRequest[] = [];
     const decisions = ['deny', 'allow_once', 'allow_always'] as const;
     const { runtime } = runtimeWith(
@@ -196,7 +202,7 @@ describe('single agent loop', () => {
     assert.ok(Date.now() - started < 4000);
   });
 
-  test('cancellation mid-stream and mid-tool keeps the conversation valid', async () => {
+  test('cancellation mid-stream and mid-tool keeps the conversation valid', { skip: NO_CONTAINER_TESTS }, async () => {
     const { runtime } = runtimeWith({}, (_req, n) =>
       n === 0 ? { toolCalls: [{ name: 'shell', args: { command: process.platform === 'win32' ? 'ping -n 30 127.0.0.1' : 'sleep 30' } }, { name: 'shell', args: { command: 'echo never' } }] } : { text: 'after' },
       { approveAll: true },

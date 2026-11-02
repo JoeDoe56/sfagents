@@ -250,7 +250,7 @@ describe('prompts folder', () => {
     });
     const tree = loadAgentTree(dir);
     assert.equal(tree.byId.get('a')!.definition.systemPrompt, 'Rule one.\nBe brief.\n\nYou are a.\n\nReview carefully.');
-    assert.deepEqual(tree.byId.get('a')!.definition.prompts, ['prompts/rules.txt', 'prompts/style.md', 'prompts/Code Review.txt']);
+    assert.deepEqual(tree.byId.get('a')!.definition.prompts!.map((p) => p.replace(/\\/g, '/')), ['prompts/rules.txt', 'prompts/style.md', 'prompts/Code Review.txt']);
     // A bare "@name" that names no file is ordinary text.
     assert.equal(tree.byId.get('b')!.definition.systemPrompt, 'You are b.\nRule one.\nBe brief.\nMail @someone if stuck.\n@nobody');
     // Prompt files are protected from agents, like agent files.

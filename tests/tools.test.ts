@@ -11,7 +11,7 @@ import {
   type AnyDeclarativeTool,
   type ToolResult,
 } from '@sfagents/core';
-import { baseAgent, makeTempDir, writeJson, writeAgent } from './helpers.js';
+import { baseAgent, makeTempDir, NO_CONTAINER_TESTS, writeJson, writeAgent } from './helpers.js';
 
 const isWin = process.platform === 'win32';
 
@@ -58,7 +58,7 @@ describe('shell tool', () => {
   });
 });
 
-describe('shell (in the agent container)', { skip: isWin && 'the fake Docker needs bash' }, () => {
+describe('shell (in the agent container)', { skip: NO_CONTAINER_TESTS }, () => {
   test('runs a command in the container without asking, and reports exit codes', async () => {
     const f = await fixture();
     const ok = await call(f, 'shell', { command: 'echo hello && pwd', directory: path.basename(f.work) });

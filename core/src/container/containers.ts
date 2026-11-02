@@ -64,6 +64,9 @@ export function containerName(cid: string): string {
 
 /** Where /workspaces lives, as SF Agents (on this computer) reads it. */
 export function hostWorkspacesDir(): string {
+  // Tests point it at a temporary folder (their stand-in for Docker mounts it as /workspaces).
+  const override = process.env['SFAGENTS_WORKSPACES_DIR'];
+  if (override) return override;
   return process.platform === 'win32' ? windowsWorkspacesDir() : path.join(sfagentsHome(), 'workspaces');
 }
 
@@ -397,7 +400,7 @@ export class ContainerManager {
           ...(typeof request.stdin === 'string' ? { stdin: request.stdin } : {}),
           callId: context.callId,
           signal: context.signal,
-          container: { appHost: `${containerIdOf(state)}${APP_HOST_SUFFIX}`, writeRoots: [hostWorkspacesDir()], readRoots: state.mounts.map((m) => m.hostPath), hidden: state.hidden },
+          container: { appHost: `${containerIdOf(state)}${APP_HOST_SUFFIX}`, writeRoots: [hostWorkspacesDir()], readRoots: state.mounts.map((m) => m.hostPath), hidden: state.hidden, show: (h) => hostToContainerPath(h, state.mounts) ?? h },
         });
       } catch (error) {
         reply = { ok: false, error: getErrorMessage(error) };

@@ -195,7 +195,10 @@ class ArtifactPaths {
   private readonly read: string[];
   private readonly write: string[];
   private readonly hidden: string[];
+  /** How a path is named to the agent. */
+  readonly show: (hostPath: string) => string;
   constructor(service: ConversationService, container: ArtifactContainer | undefined) {
+    this.show = (h) => container?.show?.(h) ?? h;
     const canon = (dirs: readonly string[]) => dirs.map((d) => canonicalPath(d));
     this.write = canon([service.genuiDir, service.artifactsDir, ...(container?.writeRoots ?? [])]);
     this.read = [...this.write, ...canon(container?.readRoots ?? [])];
@@ -213,7 +216,7 @@ class ArtifactPaths {
   /** An existing file or folder the agent may show, as its canonical path. */
   existing(p: string): string {
     const real = this.allowed(p, this.read);
-    if (!real) throw new ArtifactError(`${p} is not one of your files: artifacts show files in /workspaces or the project folders under /roots.`);
+    if (!real) throw new ArtifactError(`${this.show(p)} is not one of your files: artifacts show files in /workspaces or the project folders under /roots.`);
     let st: fs.Stats;
     try {
       st = fs.statSync(real);
@@ -374,7 +377,7 @@ export function runArtifactRequest(
     let dest = paths.writable(target);
     // No folder of its own to write it in (no working folder): a new file goes in SF Agents' artifacts folder.
     if (!dest && p.path !== undefined && !path.isAbsolute(p.path) && !view && !o.cwd && !p.path.split(/[\\/]+/).includes('..')) dest = inside(service.artifactsDir, p.path);
-    if (!dest) throw new ArtifactError(`${p.path ?? target} is not a place you can write: write files under /workspaces.`);
+    if (!dest) throw new ArtifactError(`${p.path !== undefined && !path.isAbsolute(p.path) ? p.path : paths.show(target)} is not a place you can write: write files under /workspaces.`);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, p.content.replace(/\r\n/g, '\n'), 'utf8');
     file = dest;
@@ -397,7 +400,8 @@ export function runArtifactRequest(
     ? service.relinkArtifact(recorded.id, { title: p.title, run: o.runId, callId: o.callId })
     : service.linkArtifact({ title: p.title!, file: file!, run: o.runId, callId: o.callId, ...(folder ? { type: 'folder' } : {}) });
   const follows = folder ? 'It opens the folder in the file manager.' : 'It follows the file: edit the file to change it.';
-  return `${recorded ? 'Artifact' : 'Created artifact'} ${v.id} "${v.title}" shows ${p.path}. ${follows}`;
+  const named = p.path !== undefined && !path.isAbsolute(p.path) ? p.path : paths.show(file!);
+  return `${recorded ? 'Artifact' : 'Created artifact'} ${v.id} "${v.title}" shows ${named}. ${follows}`;
 }
 
 /** Throws the validator's findings for a GenUI view file, so the agent fixes them. */
@@ -424,6 +428,8 @@ export interface ArtifactContainer {
   writeRoots: readonly string[];
   readRoots: readonly string[];
   hidden: readonly string[];
+  /** A path on this computer as the agent knows it (/workspaces/…, /roots/…), for messages. */
+  show?: (hostPath: string) => string;
 }
 
 /** What an agent's `sfa-artifact` runs: bound to its conversation and run. */

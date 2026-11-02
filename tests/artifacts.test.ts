@@ -18,7 +18,7 @@ import {
   type ChatMessage,
   type FunctionDeclaration,
 } from '@sfagents/core';
-import { baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, lastToolContent, makeTempDir, runCli, scriptedFactory, writeJson, type Script, writeAgent } from './helpers.js';
 
 
 /** The test's own folder in /workspaces, where its commands run. */
@@ -133,7 +133,7 @@ describe('artifacts: storage and records', () => {
 });
 
 describe('artifacts: model tools and grants', () => {
-  test('artifacts are the files themselves: created with or without content, they follow the file', async () => {
+  test('artifacts are the files themselves: created with or without content, they follow the file', { skip: NO_CONTAINER_TESTS }, async () => {
     const dir = project();
     const ws = workspace();
     fs.mkdirSync(path.join(ws, 'docs'));
@@ -192,7 +192,7 @@ describe('artifacts: model tools and grants', () => {
     conversation.close();
   });
 
-  test('a folder is an artifact too: it opens in the file manager and has no content to read', async () => {
+  test('a folder is an artifact too: it opens in the file manager and has no content to read', { skip: NO_CONTAINER_TESTS }, async () => {
     const dir = project();
     const ws = workspace();
     fs.mkdirSync(path.join(ws, 'site', 'css'), { recursive: true });
@@ -219,7 +219,7 @@ describe('artifacts: model tools and grants', () => {
     conversation.close();
   });
 
-  test('sfa-artifact writes without asking, only in /workspaces; app artifacts record the address', async () => {
+  test('sfa-artifact writes without asking, only in /workspaces; app artifacts record the address', { skip: NO_CONTAINER_TESTS }, async () => {
     const dir = project();
     const ws = workspace();
     const { tree, conversation } = open(dir);

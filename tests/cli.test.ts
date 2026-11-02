@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hostWorkspacesDir } from '@sfagents/core';
-import { baseAgent, catFile, makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, catFile, makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
 
 // The CLI runs in its own process; its commands go to the same fake Docker (see helpers.ts).
 
@@ -79,7 +79,7 @@ describe('sfagents CLI', () => {
     assert.match(missing.stderr, /No agents found/);
   });
 
-  test('run: streams the answer to stdout and tool activity to stderr', async () => {
+  test('run: streams the answer to stdout and tool activity to stderr', { skip: NO_CONTAINER_TESTS }, async () => {
     handler = (body) =>
       lastTool(body) === undefined
         ? { toolCalls: [{ name: 'shell', args: { command: catFile('hello.txt') } }] }

@@ -35,10 +35,15 @@ export const CLI_ENTRY = path.join(REPO_ROOT, 'cli', 'bin', 'sfagents.js');
 
 // Agent commands run through a stand-in for Docker (tests/fixtures/fake-docker.mjs):
 // SF Agents' real bridge and commands, with the command run here by bash.
+// Never the real engine or the real /workspaces: on Windows the stand-in cannot run, so
+// the tests that run commands are skipped there (NO_CONTAINER_TESTS).
 if (!process.env['SFAGENTS_DOCKER']) {
   process.env['SFAGENTS_DOCKER'] = path.join(REPO_ROOT, 'tests', 'fixtures', 'fake-docker.mjs');
   process.env['SFA_FAKE_DOCKER_STATE'] = fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-docker-'));
+  process.env['SFAGENTS_WORKSPACES_DIR'] = fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-workspaces-'));
 }
+/** A skip reason for tests that run commands in an agent container, where the stand-in for Docker cannot run. */
+export const NO_CONTAINER_TESTS: string | false = process.platform === 'win32' && 'the stand-in for Docker needs bash and Unix process groups';
 // The container bridge runs until SF Agents stops it.
 after(() => containerManager().bridge.stop());
 

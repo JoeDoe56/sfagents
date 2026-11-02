@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree, parseSetting } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
-import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, writeAgent } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, writeAgent } from './helpers.js';
 
 
 function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
@@ -346,7 +346,7 @@ describe('web server', () => {
     }
   });
 
-  test('a message streams over SSE, creates an artifact, and the artifact can be pinned and served sandboxed', async () => {
+  test('a message streams over SSE, creates an artifact, and the artifact can be pinned and served sandboxed', { skip: NO_CONTAINER_TESTS }, async () => {
     const script: Script = (req, call) => {
       if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'shell', args: { command: 'sfa-artifact --title Page --content "<h1>hi</h1>" index.html' } }] };
       return { text: `Done (${lastToolContent(req)?.slice(0, 20)})` };

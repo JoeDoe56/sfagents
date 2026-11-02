@@ -5,7 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { AgentRuntime, ArtifactError, hostWorkspacesDir, ConversationService, loadAgentTree, moveUserData, parseConversation, runArtifactRequest, serializeConversation, validateGenui, type ChatMessage } from '@sfagents/core';
 import { WebServer } from '@sfagents/web';
-import { baseAgent, makeTempDir, scriptedFactory, writeAgent, type Script } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, makeTempDir, scriptedFactory, writeAgent, type Script } from './helpers.js';
 
 const VIEW = {
   version: 1,
@@ -139,7 +139,7 @@ function request(base: string, pathname: string, method = 'GET', body?: unknown)
 }
 
 describe('GenUI: SF Agents\' own folders', () => {
-  test('an agent writes views and artifacts with sfa-artifact, and reads them back', async () => {
+  test('an agent writes views and artifacts with sfa-artifact, and reads them back', { skip: NO_CONTAINER_TESTS }, async () => {
     const dir = makeTempDir('sfagents-genui-own-');
     writeAgent(dir, baseAgent('main'));
     moveUserData(dir);
