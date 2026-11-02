@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev zlib1g-dev libffi-dev libsqlite3-dev libbz2-dev \
       liblzma-dev libreadline-dev libncurses-dev libxml2-dev libyaml-dev \
       python3 python3-dev python3-venv python3-pip pipx \
-      ruby-full \
+      ruby-full ruby-bundler \
       php-cli php-curl php-mbstring php-xml php-zip php-sqlite3 php-intl composer \
       lua5.4 liblua5.4-dev luarocks \
       ffmpeg imagemagick poppler-utils ghostscript \
@@ -195,6 +195,10 @@ ENV CACHE_ROOT=/cache \
     WINEPREFIX=/home/agent/.wine \
     WINEDEBUG=-all \
     JAVA_HOME=/usr/lib/jvm/java-${JAVA_MAJOR}-openjdk-amd64
+
+# A new Wine prefix otherwise stops at a dialog offering Wine Mono and Gecko,
+# which nobody can click in a headless container.
+ENV WINEDLLOVERRIDES=mscoree,mshtml=
 
 COPY rootfs/ /
 

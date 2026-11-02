@@ -109,10 +109,19 @@ t_media() {
   identify small.png
 }
 t_wine() {
-  # The first run creates the Wine prefix, which takes a while.
-  timeout 300 xvfb-run -a wine hello.exe 2>/dev/null | tr -d '\r' &&
-  timeout 120 wine rs/target/x86_64-pc-windows-gnu/debug/rs.exe 2>/dev/null | tr -d '\r' &&
-  timeout 120 wine gomod/h.exe 2>/dev/null | tr -d '\r'
+  # One virtual display for the whole check. wineboot creates the prefix
+  # first, which takes a while; then each program has a minute.
+  xvfb-run -a bash -c '
+    timeout 300 wineboot -i >/dev/null 2>&1 || { echo "wineboot failed or timed out"; exit 1; }
+    for exe in hello.exe rs/target/x86_64-pc-windows-gnu/debug/rs.exe gomod/h.exe; do
+      timeout 60 wine "$exe" 2>/dev/null || { echo "$exe failed or timed out"; exit 1; }
+    done
+    wineserver -k' > wine.out 2>&1
+  local rc=$?
+  tr -d '\r' < wine.out > wine.txt
+  cat wine.txt
+  [ "$rc" -eq 0 ] && grep -q '^c ok$' wine.txt && grep -q '^Hello, world!$' wine.txt &&
+    grep -q '^go ok$' wine.txt && echo "3 Windows programs ran"
 }
 t_tools() {
   git --version && git lfs version >/dev/null && rg --version >/dev/null && fd --version >/dev/null &&
