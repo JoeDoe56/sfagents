@@ -1,0 +1,24 @@
+[Unit]
+Description=SF Agents Docker Engine
+After=network-online.target containerd.service
+Wants=network-online.target containerd.service
+
+[Service]
+Type=notify
+ExecStartPre=/bin/mkdir -p /run/sfagents
+ExecStart=/usr/bin/dockerd \
+  -H unix:///run/sfagents/docker.sock \
+  --pidfile /run/sfagents/docker.pid \
+  --data-root /var/lib/sfagents-docker \
+  --exec-root /run/sfagents/docker-exec \
+  --containerd /run/containerd/containerd.sock \
+  --bridge none --iptables=false --ip6tables=false
+Restart=always
+RestartSec=2
+LimitNOFILE=infinity
+TasksMax=infinity
+Delegate=yes
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

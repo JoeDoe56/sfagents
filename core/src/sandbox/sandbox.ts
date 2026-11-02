@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isPathWithinRoot } from '../permissions/workspace.js';
+import type { NetworkLevel } from '../container/network.js';
 
 /**
  * What commands may do under a path: "write" is read, write and delete;
@@ -44,6 +45,8 @@ export interface SandboxRule {
 export interface SandboxPolicy {
   rules: readonly SandboxRule[];
   network: boolean;
+  /** The network level of the agent's container (container backend). */
+  level?: NetworkLevel;
   /** A Unix socket (named pipe on Windows) served by the host, reachable from inside. */
   hostChannel?: { path: string };
   /** Host files a command may run inside the sandbox (read-only), e.g. the `sf-web` helper. */

@@ -5,6 +5,7 @@
  * instead of silently granting or dropping permissions.
  */
 
+import { isNetworkLevel, NETWORK_LEVELS, type NetworkLevel } from '../container/network.js';
 import path from 'node:path';
 import { BUILTIN_TOOL_IDS, LEGACY_FILE_TOOL_IDS, LEGACY_WRITE_TOOL_IDS, MCP_TOOL_PREFIX, ToolNames } from '../tools/tool-names.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../providers/types.js';
@@ -111,8 +112,12 @@ export interface AgentDefinition {
     paths?: WorkspacePath[];
     /** Older form: read-write folders relative to the project (empty with paths). */
     roots: string[];
-    /** Whether shell commands may use the network (default false: offline). */
-    network?: boolean;
+    /**
+     * The network level of the agent's container: "off", "pkg" (package
+     * registries), "git" (pkg plus Git hosts) or "on". The older true/false
+     * (OS sandbox) means "on" and "pkg".
+     */
+    network?: boolean | NetworkLevel;
     /**
      * Folder-sharing style exceptions to the roots (which are read-write):
      * the longest matching path wins. `~` is the home folder; relative paths
@@ -383,7 +388,9 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
   let workspace: AgentDefinition['workspace'];
   if (raw['workspace'] !== undefined) {
     const ws = c.object(raw['workspace'], 'workspace', ['paths', 'roots', 'network', 'access']);
-    const network = c.boolean(ws['network'], 'workspace.network');
+    const rawNetwork = ws['network'];
+    if (rawNetwork !== undefined && typeof rawNetwork !== 'boolean' && !isNetworkLevel(rawNetwork)) c.fail('workspace.network', `must be one of ${NETWORK_LEVELS.map((l) => `"${l}"`).join(', ')}`);
+    const network = rawNetwork as boolean | NetworkLevel | undefined;
     if (ws['paths'] !== undefined) {
       if (ws['roots'] !== undefined || ws['access'] !== undefined) c.fail('workspace.paths', 'replaces roots and access: use one form or the other');
       if (!ws['paths'] || typeof ws['paths'] !== 'object' || Array.isArray(ws['paths'])) c.fail('workspace.paths', 'must be an object of folder → permission letters, e.g. { "C:/work/site": "rwd", "~/notes": "r" }');

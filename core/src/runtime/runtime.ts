@@ -8,6 +8,7 @@
  * front ends consume typed RuntimeEvents and supply a ConfirmationHandler.
  */
 
+import { networkLevelOf } from '../container/network.js';
 import os from 'node:os';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
@@ -337,7 +338,8 @@ export class AgentRuntime implements AgentMessenger {
       agentsDir: this.tree.agentsDir,
       promptsDir: this.tree.promptsDir,
       access: node.access,
-      network: node.definition.workspace?.network === true,
+      network: node.definition.workspace?.network === true || node.definition.workspace?.network === 'on',
+      level: networkLevelOf(node.definition.workspace?.network),
     });
   }
 

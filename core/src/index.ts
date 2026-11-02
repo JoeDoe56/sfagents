@@ -194,3 +194,9 @@ export { GIT_COMMAND, GIT_USAGE, refusal as gitRefusal, httpsHost as httpsGitHos
 export type { HostChannel, WebGrant } from './sandbox/host-channel.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
 export type { WebAccess, WebOperation } from './web/brightdata.js';
+export { ContainerBridge, BridgeStream, encodeFrame, FrameReader, lazyDuplex, BRIDGE_CONTAINER, RUN_VOLUME } from './container/bridge.js';
+export { ContainerManager, containerManager, setContainerManagerForTesting, containersEnabled, containerIdFor, containerName, containerIdFromAppHost, rootMounts, hostToContainerPath, containerToHostPath, findSecretFiles, hostWorkspacesDir, agentImage, APP_HOST_SUFFIX, CONTAINER_COMMANDS, CONTAINER_CAPS, type AgentContainerSpec, type RootMount } from './container/containers.js';
+export { CommandDockerCli, defaultDockerCli, docker, WSL_DISTRO, type DockerCli, type DockerResult } from './container/docker.js';
+export { handleProxyConnection, levelAllows, isPrivateAddress, isNetworkLevel, networkLevelOf, NETWORK_LEVELS, NETWORK_LEVEL_TEXT, PACKAGE_HOSTS as CONTAINER_PACKAGE_HOSTS, GIT_HOSTS, HOST_CHANNEL_NAME, type NetworkLevel, type NetworkEvent } from './container/network.js';
+export { BRIDGE_SOURCE, INIT_SOURCE, CLIENT_SOURCE, EXEC_SOURCE, KILL_SOURCE, FRAME } from './container/scripts.js';
+export { wslStatus, setupDistro, mergeWslConfig, wslConfigPath, mountRootsInDistro, WSLCONFIG_SETTINGS, type WslStatus } from './container/wsl.js';

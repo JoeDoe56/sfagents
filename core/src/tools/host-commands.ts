@@ -6,7 +6,7 @@
  * mode). Either way the same handler answers, with the agent's own grants.
  */
 
-import { ArtifactError, ARTIFACT_COMMAND, ARTIFACT_USAGE, type ArtifactCommand } from '../conversation/artifacts.js';
+import { ArtifactError, ARTIFACT_COMMAND, ARTIFACT_USAGE, type ArtifactCommand, type ArtifactContainer } from '../conversation/artifacts.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { WebGrant } from '../sandbox/host-channel.js';
 import { GIT_COMMAND, GIT_USAGE, runGit, type GitGrant } from './host-git.js';
@@ -72,7 +72,7 @@ async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal
 export async function runHostCommand(
   argv: readonly string[],
   cmds: HostCommands,
-  o: { cwd?: string; stdin?: string; callId?: string; signal: AbortSignal },
+  o: { cwd?: string; stdin?: string; callId?: string; signal: AbortSignal; container?: ArtifactContainer },
 ): Promise<HostCommandReply> {
   const [name, ...args] = argv;
   try {
@@ -83,7 +83,7 @@ export async function runHostCommand(
     if (name === ARTIFACT_COMMAND) {
       if (!cmds.artifact) return { ok: false, error: 'This agent may not create artifacts (artifacts.access).' };
       if (args.includes('-h') || args.includes('--help')) return { ok: true, text: ARTIFACT_USAGE };
-      return { ok: true, text: cmds.artifact(args, { cwd: o.cwd, callId: o.callId, stdin: o.stdin }) };
+      return { ok: true, text: cmds.artifact(args, { cwd: o.cwd, callId: o.callId, stdin: o.stdin, ...(o.container ? { container: o.container } : {}) }) };
     }
     if (name === GIT_COMMAND) {
       if (!cmds.git) return { ok: false, error: 'This agent has no general shell, so no sf-git.' };

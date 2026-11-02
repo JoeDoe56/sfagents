@@ -33,6 +33,7 @@ export interface BackgroundJob {
 
 interface JobState extends BackgroundJob {
   child: ChildProcess;
+  kill?: () => void;
   output: string;
   /** Characters dropped from the front of `output` so far. */
   dropped: number;
@@ -55,7 +56,7 @@ export function runningJobCount(): number {
 }
 
 function publicJob(j: JobState): BackgroundJob {
-  const { child: _child, output: _output, dropped: _dropped, read: _read, ended: _ended, started: _started, ...rest } = j;
+  const { child: _child, kill: _kill, output: _output, dropped: _dropped, read: _read, ended: _ended, started: _started, ...rest } = j;
   return { ...rest };
 }
 
@@ -90,7 +91,7 @@ export function startJob(command: string, owner: string, options: ShellSpawnOpti
     state.runningAt = Date.now();
     markStarted();
   });
-  const state: JobState = { id, command, cwd: options.cwd, owner, startedAt: Date.now(), child: proc.child, output: '', dropped: 0, read: 0, ended, started };
+  const state: JobState = { id, command, cwd: options.cwd, owner, startedAt: Date.now(), child: proc.child, ...(proc.kill ? { kill: proc.kill } : {}), output: '', dropped: 0, read: 0, ended, started };
   jobs.set(id, state);
   let finished = false;
   const finish = async (result: { exitCode?: number | null; signal?: NodeJS.Signals | null; error?: string }) => {
@@ -157,7 +158,8 @@ export async function stopJob(owner: string, id: string): Promise<boolean> {
   if (!j || j.owner !== owner) return false;
   if (j.endedAt === undefined) {
     j.stopped = true;
-    killProcessTree(j.child);
+    if (j.kill) j.kill();
+    else killProcessTree(j.child);
     await Promise.race([j.ended, new Promise((resolve) => setTimeout(resolve, 15_000))]);
   }
   return true;

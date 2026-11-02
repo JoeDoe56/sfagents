@@ -14,7 +14,10 @@
  * other local programs cannot use the proxy.
  */
 
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
+import { sfagentsHome } from '../settings/home.js';
 import net from 'node:net';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
@@ -80,7 +83,25 @@ export class PackageProxy {
   private log: NetworkLogEntry[] = [];
   private listeners = new Set<(entry: NetworkLogEntry) => void>();
 
-  constructor(private readonly hosts: readonly string[] = PACKAGE_HOSTS) {}
+  /**
+   * @param logFile where the log is kept across restarts (JSON lines); the
+   * last entries are read back when the proxy is created.
+   */
+  constructor(private readonly hosts: readonly string[] = PACKAGE_HOSTS, private readonly logFile?: string) {
+    if (!logFile) return;
+    try {
+      const lines = fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).slice(-MAX_LOG);
+      for (const line of lines) {
+        try {
+          this.log.push(JSON.parse(line) as NetworkLogEntry);
+        } catch {
+          // a torn last line
+        }
+      }
+    } catch {
+      // no log yet
+    }
+  }
 
   /** Starts listening (once) and resolves with the port. */
   start(): Promise<number> {
@@ -173,6 +194,17 @@ export class PackageProxy {
 
   private push(entry: NetworkLogEntry) {
     this.log.push(entry);
+    if (this.logFile) {
+      try {
+        fs.mkdirSync(path.dirname(this.logFile), { recursive: true });
+        // Keep the file small: start over from the kept entries past 2 MB.
+        if ((fs.statSync(this.logFile, { throwIfNoEntry: false })?.size ?? 0) > 2 * 1024 * 1024) {
+          fs.writeFileSync(this.logFile, this.log.slice(-MAX_LOG).map((e) => JSON.stringify(e)).join('\n') + '\n');
+        } else fs.appendFileSync(this.logFile, JSON.stringify(entry) + '\n');
+      } catch {
+        // the in-memory log still has it
+      }
+    }
     if (this.log.length > MAX_LOG) this.log.splice(0, this.log.length - MAX_LOG);
     for (const l of this.listeners) l(entry);
   }
@@ -222,6 +254,6 @@ let shared: PackageProxy | undefined;
 
 /** The proxy SF Agents' commands share. */
 export function packageProxy(): PackageProxy {
-  shared ??= new PackageProxy();
+  shared ??= new PackageProxy(PACKAGE_HOSTS, path.join(sfagentsHome(), 'logs', 'network.jsonl'));
   return shared;
 }

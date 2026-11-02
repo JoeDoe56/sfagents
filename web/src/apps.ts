@@ -14,6 +14,17 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
+import { containerIdFromAppHost, containerManager, lazyDuplex } from '@sfagents/core';
+
+/**
+ * A connection to the app: over the network, or, for an app running in an
+ * agent's container (host <container id>.sfa-agent), through the container bridge.
+ */
+function connectToApp(target: URL): Duplex | undefined {
+  const cid = containerIdFromAppHost(target.hostname);
+  if (!cid) return undefined;
+  return lazyDuplex(containerManager().openPort(cid, Number(target.port || 80)));
+}
 
 export const APP_COOKIE = 'sfagents_app';
 
@@ -168,7 +179,10 @@ export class AppProxy {
     }
     const upstream = http.request(
       // No connection pooling: a dev server that restarts must not leave stale sockets.
-      { host: route.target.hostname, port: route.target.port || 80, method: req.method, path: route.path, headers: reqHeaders, agent: false },
+      {
+        host: route.target.hostname, port: route.target.port || 80, method: req.method, path: route.path, headers: reqHeaders, agent: false,
+        ...(containerIdFromAppHost(route.target.hostname) ? { createConnection: () => connectToApp(route.target) as net.Socket } : {}),
+      },
       (up) => {
         const headers = { ...up.headers };
         const csp = headers['content-security-policy'];
@@ -226,7 +240,9 @@ export class AppProxy {
 
   /** Live-reload sockets and other WebSocket upgrades: a byte pipe to the app. */
   upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, route: AppRoute): void {
-    const upstream = net.connect(Number(route.target.port || 80), route.target.hostname, () => {
+    const container = connectToApp(route.target);
+    const upstream = container ?? net.connect(Number(route.target.port || 80), route.target.hostname);
+    upstream.once('connect', () => {
       const headers = this.headers(req, route);
       const lines = [`${req.method} ${route.path} HTTP/1.1`];
       for (const [k, v] of Object.entries(headers)) {

@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveWorkspacePath } from '../permissions/workspace.js';
+import type { NetworkLevel } from '../container/network.js';
 import { accessFor, isWritable, type SandboxAccess, type SandboxPolicy, type SandboxRule } from './sandbox.js';
 
 export interface SandboxPolicyInput {
@@ -27,6 +28,7 @@ export interface SandboxPolicyInput {
   /** Extra rules (workspace.access), applied last. */
   access?: readonly SandboxRule[];
   network?: boolean;
+  level?: NetworkLevel;
   hostChannel?: SandboxPolicy['hostChannel'];
   tools?: SandboxPolicy['tools'];
 }
@@ -73,6 +75,7 @@ export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
   return {
     rules,
     network: input.network ?? false,
+    ...(input.level ? { level: input.level } : {}),
     ...(input.hostChannel ? { hostChannel: input.hostChannel } : {}),
     ...(input.tools ? { tools: input.tools } : {}),
   };

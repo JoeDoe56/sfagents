@@ -133,7 +133,7 @@ describe('agents folder', () => {
     dir = setup({});
     skippedError(dir, /\[workspace.access\[0\].mode\]: must be "read", "write" or "none"/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], access: [{ path: 'x', mode: 'rw' }] } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
-    skippedError(dir, /\[workspace.network\]: must be true or false/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], network: 'yes' } }), 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /\[workspace.network\]: must be one of/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], network: 'yes' } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
     skippedError(dir, /\[tools.ask\]: must be true or false/, { 'agents/a.json': baseAgent('a', { tools: { ask: 1 } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});

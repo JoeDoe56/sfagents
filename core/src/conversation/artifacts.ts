@@ -281,13 +281,14 @@ export function runArtifactRequest(
   service: ConversationService,
   workspace: WorkspaceContext | undefined,
   p: ArtifactRequest,
-  o: { cwd?: string; runId?: string; callId?: string } = {},
+  o: { cwd?: string; runId?: string; callId?: string; container?: ArtifactContainer } = {},
 ): string {
   const where = (rel: string) => (o.cwd && !path.isAbsolute(rel) ? path.resolve(o.cwd, rel) : rel);
   const view = p.id !== undefined ? service.state.artifactViews.get(p.id) : undefined;
   if (p.id !== undefined && !view) throw new ArtifactError(`There is no artifact "${p.id}". The <artifacts> index lists the IDs.`);
   // SF Agents' own folders (the GenUI views, and artifacts made without a workspace) need no workspace access.
-  const own = (abs: string) => [service.genuiDir, service.artifactsDir].some((d) => isPathWithinRoot(path.resolve(abs), d));
+  // So do the folders of the agent's container (its workspaces and read-only roots, as SF Agents reads them).
+  const own = (abs: string) => [service.genuiDir, service.artifactsDir, ...(o.container?.readRoots ?? [])].some((d) => isPathWithinRoot(path.resolve(abs), d));
   const inside = (dir: string, rel: string) => {
     const abs = path.resolve(dir, rel);
     if (!isPathWithinRoot(abs, dir) || abs === path.resolve(dir)) throw new ArtifactError(`${rel} must be a file name inside ${path.basename(dir)}/.`);
@@ -316,7 +317,7 @@ export function runArtifactRequest(
       const port = p.port ?? Number(view?.url ? new URL(view.url).port : NaN);
       const page = p.page ? (p.page.startsWith('/') ? p.page : `/${p.page}`) : '/';
       if (/[\s#]/.test(page) || page.startsWith('//')) throw new ArtifactError('--page must be a path on the app, like "/" or "/settings".');
-      url = `http://127.0.0.1:${port}${page}`;
+      url = `http://${o.container?.appHost ?? '127.0.0.1'}:${port}${page}`;
     }
     if (view) {
       if (p.title === undefined && url === view.url) throw new ArtifactError('Give a new --title, --port or --page for the artifact.');
@@ -397,11 +398,21 @@ function checkGenui(file: string, shownAs: string): void {
   if (errors.length) throw new ArtifactError(genuiErrorText(shownAs, errors));
 }
 
+/**
+ * For an agent whose commands run in a container: the host name its apps are
+ * reached by (SF Agents' app proxy connects through the container bridge),
+ * and the folders on this computer that hold its container's files.
+ */
+export interface ArtifactContainer {
+  appHost: string;
+  readRoots: readonly string[];
+}
+
 /** What an agent's `sf-artifact` runs: bound to its conversation, workspace and run. */
-export type ArtifactCommand = (args: readonly string[], o: { cwd?: string; callId?: string; stdin?: string }) => string;
+export type ArtifactCommand = (args: readonly string[], o: { cwd?: string; callId?: string; stdin?: string; container?: ArtifactContainer }) => string;
 
 /** The `sf-artifact` handler for one agent, or undefined when it may not create artifacts. */
 export function artifactCommand(service: ConversationService, access: ArtifactAccess, runId?: string, workspace?: WorkspaceContext): ArtifactCommand | undefined {
   if (access !== 'create') return undefined;
-  return (args, o) => runArtifactRequest(service, workspace, parseArtifactArgs(args, o.stdin), { cwd: o.cwd, runId, callId: o.callId });
+  return (args, o) => runArtifactRequest(service, workspace, parseArtifactArgs(args, o.stdin), { cwd: o.cwd, runId, callId: o.callId, ...(o.container ? { container: o.container } : {}) });
 }
