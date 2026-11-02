@@ -375,7 +375,7 @@ export function describeTree(tree: AgentTree): string {
     lines.push(`${node === tree.root ? '* ' : '  '}${node.id}${d.name ? ` "${d.name}"` : ''}  (${d.provider ? `${d.provider}:${d.model}` : `no provider${d.model ? `, ${d.model}` : ''}`}${d.reasoning ? `, reasoning ${d.reasoning}` : ''})  ${rel(tree.configDir, node.file)}`);
     lines.push(`      tools: ${tools.length ? tools.join(', ') : '(none)'}`);
     if (d.tools?.autoApprove?.length) lines.push(`      auto-approve: ${d.tools.autoApprove.join(', ')}`);
-    if (d.prompts?.length) lines.push(`      prompts: ${d.prompts.join(', ')}`);
+    if (d.prompts?.length) lines.push(`      prompts: ${d.prompts.map((p) => p.replace(/\\/g, '/')).join(', ')}`);
     lines.push(`      network: ${d.network}`);
   }
   for (const s of tree.skipped) lines.push(`  skipped ${s.file}: ${s.error}`);
