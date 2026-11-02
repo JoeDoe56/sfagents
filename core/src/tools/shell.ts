@@ -174,6 +174,11 @@ export function killProcessTree(child: ChildProcess): void {
   }
 }
 
+/** docker exec failed because the container is gone or stopped (exit 125/126 from Docker itself). */
+function isContainerGone(r: ShellRunResult): boolean {
+  return (r.exitCode === 125 || r.exitCode === 126 || r.exitCode === 1) && /No such container|is not running|container .* is restarting/i.test(r.stderr) && !r.stdout;
+}
+
 export interface ShellRunResult {
   stdout: string;
   stderr: string;
@@ -235,7 +240,7 @@ function spawnInContainer(command: string, options: ShellSpawnOptions, onOutput:
   const target = options.container!;
   const job = randomUUID();
   const env = Object.entries(options.env).filter(([k, v]) => v !== undefined && CONTAINER_ENV.has(k)).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-  const { executable, args } = target.cli.argv(['exec', ...(options.stdin !== undefined ? ['-i'] : []), '-u', 'agent', '-w', options.cwd, ...env, target.name, '/run/sfa/bin/sfa-exec', job, command]);
+  const { executable, args } = target.cli.argv(['exec', ...(options.stdin !== undefined ? ['-i'] : []), '-u', 'agent', '-w', options.cwd, ...env, '-e', `SFA_COMMAND=${command}`, target.name, '/run/sfa/bin/sfa-exec', job]);
   const child = spawn(executable, args, { windowsHide: true, detached: process.platform !== 'win32', stdio: [options.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   if (options.stdin !== undefined && child.stdin) {
     child.stdin.on('error', () => {});
@@ -645,6 +650,15 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
     let result: ShellRunResult;
     try {
       result = await runShellCommand(this.params.command!, { cwd, env, container, timeoutMs, signal, ...stdin });
+      // The container stopped since it was last checked: check again and run once more.
+      if (isContainerGone(result)) {
+        manager.forget(this.ctx.agentId!);
+        const again = { cli: manager.cli, name: await manager.prepare(this.containerSpec()) };
+        result = await runShellCommand(this.params.command!, { cwd, env, container: again, timeoutMs, signal, ...stdin });
+      }
+    } catch (error) {
+      const message = `The agent's container could not start: ${error instanceof Error ? error.message : String(error)}`;
+      return { llmContent: message, returnDisplay: 'No container', error: { message, type: ToolErrorType.EXECUTION_DENIED } };
     } finally {
       release();
     }

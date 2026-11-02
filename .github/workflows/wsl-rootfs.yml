@@ -40,6 +40,7 @@ jobs:
             set -e
             test -x /opt/sfagents/bin/docker
             systemctl is-enabled sfagents-docker.service
+            systemctl is-enabled sfagents-isolate.service
             test "$(systemctl is-enabled docker.service 2>/dev/null || true)" = masked
             grep -q "^enabled *= *false" /etc/wsl.conf
             grep -q "unix:///run/sfagents/docker.sock" /etc/systemd/system/sfagents-docker.service

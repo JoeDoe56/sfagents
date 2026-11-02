@@ -194,6 +194,8 @@ export async function setupDistro(o: { report(line: string): void; rootfs?: stri
     const imported = await wsl(['--import', WSL_DISTRO, installDir, tar, '--version', '2'], { timeoutMs: 30 * 60_000 });
     if (imported.code !== 0) throw new Error(`wsl --import failed: ${(imported.stderr || imported.stdout).trim()}`);
     if (!o.rootfs) fs.rmSync(tar, { force: true });
+    // The disk is attached while the distro runs (an import may start it); stop the distro first.
+    await wsl(['--terminate', WSL_DISTRO], { timeoutMs: 60_000 });
     const sparse = await wsl(['--manage', WSL_DISTRO, '--set-sparse', 'true'], { timeoutMs: 120_000 });
     if (sparse.code !== 0) o.report(`Note: could not make the distro's disk sparse (${(sparse.stderr || sparse.stdout).trim()}); it still works, but its disk file will not shrink.`);
   }

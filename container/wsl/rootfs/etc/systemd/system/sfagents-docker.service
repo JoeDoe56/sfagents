@@ -1,7 +1,8 @@
 [Unit]
 Description=SF Agents Docker Engine
-After=network-online.target containerd.service
+After=network-online.target containerd.service sfagents-isolate.service
 Wants=network-online.target containerd.service
+Requires=sfagents-isolate.service
 
 [Service]
 Type=notify

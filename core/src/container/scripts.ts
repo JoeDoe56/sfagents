@@ -223,19 +223,20 @@ setInterval(() => {}, 1 << 30);
 `;
 
 /**
- * sfa-exec <job> <command>: runs a shell command in its own session and
+ * sfa-exec <job> (command in SFA_COMMAND): runs a shell command in its own session and
  * records the session's id, so SF Agents can stop the command and everything
  * it started (sfa-kill). Stopping the docker exec client alone would leave
  * them running in the container.
  */
 export const EXEC_SOURCE = String.raw`#!/bin/sh
+# The command arrives in SFA_COMMAND, not as an argument, so it never shows in
+# the process list (where "pkill -f <pattern>" would match and kill it).
 job="$1"
-shift
 exec setsid -w bash -c '
   echo $$ > "/run/sfa/exec/$0.pid"
   trap "rm -f /run/sfa/exec/$0.pid" EXIT
-  PATH="/run/sfa/bin:$PATH" bash -l -c "PATH=/run/sfa/bin:\$PATH; $1"
-' "$job" "$1"
+  PATH="/run/sfa/bin:$PATH" bash -l -c "PATH=/run/sfa/bin:\$PATH; __sfa_c=\$SFA_COMMAND; unset SFA_COMMAND; eval \"\$__sfa_c\""
+' "$job"
 `;
 
 /** sfa-kill <job>: stops a command sfa-exec started, with everything it started. */

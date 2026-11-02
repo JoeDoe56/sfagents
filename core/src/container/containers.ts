@@ -43,6 +43,8 @@ export const CONTAINER_COMMANDS: Record<string, string> = { 'sfa-web': 'sf-web',
 export const CONTAINER_CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID', 'KILL', 'AUDIT_WRITE'];
 export const DEFAULT_MEMORY_MB = 4096;
 export const DEFAULT_CPUS = 4;
+/** How long a checked container counts as ready without checking again. */
+const READY_TTL_MS = 60_000;
 
 export function agentImage(): string {
   return process.env['SFAGENTS_AGENT_IMAGE'] || DEFAULT_AGENT_IMAGE;
@@ -193,6 +195,8 @@ export class ContainerManager {
   private agents = new Map<string, AgentState>();
   private imageReady?: Promise<void>;
   private preparing = new Map<string, Promise<string>>();
+  /** Recently checked containers: spec key and when, per container id. */
+  private ready = new Map<string, { key: string; name: string; at: number }>();
 
   constructor(private readonly options: ContainerManagerOptions = {}) {
     this.cli = options.cli ?? defaultDockerCli();
@@ -210,7 +214,13 @@ export class ContainerManager {
       const present = await this.cli.run(['image', 'inspect', '--format', '{{.Id}}', this.image]);
       if (present.code === 0) return;
       this.options.log?.(`Downloading the agent image ${this.image} (about 4 GB, once)…`);
-      await docker(this.cli, ['pull', '--quiet', this.image], { timeoutMs: 2 * 60 * 60_000 });
+      const started = Date.now();
+      const ticker = setInterval(() => this.options.log?.(`  still downloading (${Math.round((Date.now() - started) / 1000)} s)…`), 20_000);
+      try {
+        await docker(this.cli, ['pull', '--quiet', this.image], { timeoutMs: 2 * 60 * 60_000 });
+      } finally {
+        clearInterval(ticker);
+      }
     })().catch((error) => {
       this.imageReady = undefined;
       throw error;
@@ -248,12 +258,26 @@ export class ContainerManager {
       this.agents.set(cid, { agentId: spec.agentId, level: spec.level, mounts, contexts: [] });
     }
     const key = `${cid}\0${JSON.stringify([spec.roots, spec.hidden, spec.memoryMb, spec.cpus])}`;
+    // Checking a container costs a few wsl.exe calls and a walk for secret
+    // files; commands in a row reuse the last check for a short while.
+    const recent = this.ready.get(cid);
+    if (recent && recent.key === key && Date.now() - recent.at < READY_TTL_MS) return Promise.resolve(recent.name);
     let pending = this.preparing.get(key);
     if (!pending) {
-      pending = this.create(cid, spec, mounts).finally(() => this.preparing.delete(key));
+      pending = this.create(cid, spec, mounts)
+        .then((name) => {
+          this.ready.set(cid, { key, name, at: Date.now() });
+          return name;
+        })
+        .finally(() => this.preparing.delete(key));
       this.preparing.set(key, pending);
     }
     return pending;
+  }
+
+  /** Checks the agent's container again on its next command. */
+  forget(agentId: string): void {
+    this.ready.delete(containerIdFor(agentId));
   }
 
   private async create(cid: string, spec: AgentContainerSpec, mounts: RootMount[]): Promise<string> {
@@ -293,7 +317,8 @@ export class ContainerManager {
     const args = [
       '--name', containerName(cid), '--hostname', cid.slice(0, 63),
       '--label', 'sfagents=1', '--label', 'sfagents.role=agent', '--label', `sfagents.agent=${spec.agentId}`,
-      '--network', 'none', '--add-host', 'sfa-proxy:127.0.0.1',
+      // Without a network Docker leaves the hostname out of /etc/hosts, and sudo complains.
+      '--network', 'none', '--add-host', 'sfa-proxy:127.0.0.1', '--add-host', `${cid.slice(0, 63)}:127.0.0.1`,
       '--cap-drop', 'ALL', ...CONTAINER_CAPS.flatMap((c) => ['--cap-add', c]),
       '--memory', `${spec.memoryMb ?? DEFAULT_MEMORY_MB}m`, '--cpus', String(spec.cpus ?? DEFAULT_CPUS), '--pids-limit', '4096',
       '--mount', `type=bind,src=${workspaces},dst=${CONTAINER_WORKSPACES}`,
@@ -404,6 +429,7 @@ export class ContainerManager {
     // Quitting has a few seconds for everything; kill instead of a graceful stop.
     if (ids.length) await this.cli.run(['kill', ...ids], { timeoutMs: 15_000 });
     this.agents.clear();
+    this.ready.clear();
   }
 }
 

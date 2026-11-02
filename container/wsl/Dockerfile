@@ -28,7 +28,7 @@ COPY rootfs/ /
 RUN install -d /opt/sfagents/bin \
  && cp /usr/bin/docker /opt/sfagents/bin/docker \
  && systemctl mask docker.service docker.socket \
- && systemctl enable sfagents-docker.service containerd.service \
+ && systemctl enable sfagents-isolate.service sfagents-docker.service containerd.service \
  && { systemctl mask systemd-resolved.service systemd-networkd.service getty@tty1.service 2>/dev/null || true; } \
  && install -d -o 1000 -g 1000 /srv/sfagents/workspaces \
  && install -d /mnt/sfa-roots \
