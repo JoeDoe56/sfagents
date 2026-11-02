@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY rootfs/ /
+RUN chmod 755 /usr/local/sbin/sfagents-isolate
 
 # SF Agents' own CLI path, so Docker Desktop's WSL integration (which can
 # replace /usr/bin/docker) never changes which engine SF Agents talks to.
