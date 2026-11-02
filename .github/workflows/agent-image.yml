@@ -1,0 +1,94 @@
+# Builds sfagents-agent, the image every SF Agents agent container runs
+# (container/image), smoke-tests it, and publishes it to
+# ghcr.io/joedoe56/sfagents-agent.
+#
+# Tags: the branch name (main also gets "latest") and sha-<short commit>.
+# The package must be made public once in its GitHub package settings, so
+# SF Agents can pull it without a login.
+name: Agent image
+
+on:
+  push:
+    branches: [main, docker]
+    paths:
+      - container/image/**
+      - .github/workflows/agent-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: agent-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/joedoe56/sfagents-agent
+
+jobs:
+  build:
+    name: Build, test, publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      # The image is 12 to 14 GB; a standard runner starts with about 14 GB
+      # free. Remove the preinstalled toolsets this job never uses.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/local/lib/node_modules /usr/lib/jvm \
+            /usr/share/miniconda /opt/az /opt/microsoft /opt/google
+          sudo docker image prune --all --force
+          sudo apt-get clean
+          df -h /
+
+      - uses: actions/checkout@v5
+
+      - name: Tags
+        id: tags
+        run: |
+          branch="${GITHUB_REF_NAME//\//-}"
+          tags="$IMAGE:$branch,$IMAGE:sha-${GITHUB_SHA::7}"
+          if [ "$GITHUB_REF_NAME" = main ]; then tags="$tags,$IMAGE:latest"; fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "local=sfagents-agent:ci" >> "$GITHUB_OUTPUT"
+
+      # The plain docker builder writes straight into the local image store,
+      # so the image exists once on disk instead of in a builder cache too.
+      - name: Build
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: |
+          docker build --progress=plain -t "${{ steps.tags.outputs.local }}" container/image
+          docker image ls "${{ steps.tags.outputs.local }}"
+          df -h /
+
+      # The image points every tool at sfa-proxy, which only exists inside
+      # SF Agents. Clear those for the test.
+      - name: Smoke test
+        run: |
+          docker run --rm \
+            -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \
+            -e YARN_HTTP_PROXY= -e YARN_HTTPS_PROXY= \
+            -v "$PWD/container/image/smoke-test.sh:/smoke-test.sh:ro" \
+            "${{ steps.tags.outputs.local }}" bash -l /smoke-test.sh
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        run: |
+          IFS=',' read -ra tags <<< "${{ steps.tags.outputs.tags }}"
+          for t in "${tags[@]}"; do
+            docker tag "${{ steps.tags.outputs.local }}" "$t"
+            docker push --quiet "$t"
+          done
+          docker image inspect --format '{{.Size}}' "${{ steps.tags.outputs.local }}" \
+            | awk '{printf "Image size: %.1f GB\n", $1/1e9}' >> "$GITHUB_STEP_SUMMARY"

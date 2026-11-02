@@ -1,0 +1,5 @@
+# The agent has root inside its own container. The container itself is the
+# boundary: no Docker socket, no privileged mode, a reduced capability set.
+agent ALL=(ALL) NOPASSWD: ALL
+Defaults env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/cargo/bin:/usr/local/go/bin"
