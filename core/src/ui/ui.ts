@@ -20,16 +20,18 @@ export const UI_USAGE = `Usage (your own container desktop is always available):
 Add --host for the person's apps (only the main agent, during an approved full-control session).
 task uses StartLux 4B Instant; it picks controls and actions, never writes text. You provide values.
 On uncertainty it returns the tree, screenshot and history so you can continue with act or click.
-Sending, deleting, paying, publishing and password fields always ask the person. Passwords must be entered directly by the person; never put credentials in --values or commands.`;
+Your own desktop never asks the person: act, click and type freely there.
+With --host, buttons that send, delete, submit, pay or publish ask the person once each, and the person types host passwords themselves. Clicks by coordinates do not ask.`;
 
 export interface UiControl { id: string; name: string; role: string; actions: string[]; password?: boolean; context?: string; value?: string; bounds?: number[] }
 export interface UiReply { text?: string; error?: string; controls?: UiControl[]; apps?: Array<{ id: string; name: string; title?: string }>; image?: { mime: string; data: string } }
 export interface UiAdapter { request(p: Record<string, unknown>, signal: AbortSignal): Promise<UiReply> }
+/** Asks the person; only host actions have one. */
+export type Approve = (question: string, signal: AbortSignal) => Promise<boolean>;
 export interface UiGrant {
   container: UiAdapter;
   host?: UiAdapter;
   fullControl?: { manager: FullControlManager; owner: object };
-  approve: (question: string, signal: AbortSignal) => Promise<boolean>;
   service: UiService;
 }
 
@@ -91,7 +93,7 @@ export class ContainerUiAdapter implements UiAdapter {
 }
 
 export const uiNativeFile = (name: string): string => fs.readFileSync(new URL(`../../native/ui/${name}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-export const riskyControl = (c: UiControl): boolean => !!c.password || /\b(send|delete|remove|pay|purchase|buy|checkout|publish|post|submit|transfer|confirm order|password|sign in|log in)\b/i.test(`${c.name} ${c.role}`);
+export const riskyControl = (c: UiControl): boolean => !!c.password || /\b(send|delete|remove|pay|purchase|buy|checkout|publish|post|submit|transfer|confirm order|password)\b/i.test(`${c.name} ${c.role}`);
 const accepted = (a: DecisionAnswer | undefined, gate: number): string | undefined => {
   if (!a?.choice || !Number.isFinite(a.confidence) || a.confidence! < gate || (a.none_probability ?? 0) >= .2) return undefined;
   return a.choice;
@@ -102,18 +104,23 @@ export class UiService {
   constructor(readonly decider: UiDecider = new StartLux(), readonly gate = .8) {}
   async warm(signal: AbortSignal): Promise<() => void> { return this.decider instanceof StartLux ? this.decider.acquire(signal) : () => {}; }
   stop(): void { if (this.decider instanceof StartLux) this.decider.stop(); }
-  async act(adapter: UiAdapter, p: { app: string; id: string; action: string; value?: string }, approve: UiGrant['approve'], signal: AbortSignal): Promise<UiReply> {
+  /**
+   * `approve` is undefined for the agent's own container desktop: nothing
+   * there asks the person. On the host, irreversible buttons (send, delete,
+   * submit, pay...) and password fields ask once each.
+   */
+  async act(adapter: UiAdapter, p: { app: string; id: string; action: string; value?: string }, approve: Approve | undefined, signal: AbortSignal): Promise<UiReply> {
     const tree = await adapter.request({ op: 'tree', app: p.app }, signal);
     const c = tree.controls?.find((c) => c.id === p.id);
     if (!c || !c.actions.includes(p.action)) throw new Error('Control changed or action unsupported. Read the tree again.');
-    if (riskyControl(c) && !await approve(`${p.action} on ${c.password ? 'a password field' : `${c.role} “${c.name}”${c.context ? ` in ${c.context}` : ''}`} in app ${p.app}?${c.password ? ' Enter it directly in the app, then allow; do not give the password to the agent.' : ''}`, signal)) throw new Error('The person did not approve this action.');
+    if (approve && riskyControl(c) && !await approve(`${p.action} on ${c.password ? 'a password field' : `${c.role} “${c.name}”${c.context ? ` in ${c.context}` : ''}`} in app ${p.app}?${c.password ? ' Enter it directly in the app, then allow; do not give the password to the agent.' : ''}`, signal)) throw new Error('The person did not approve this action.');
     signal.throwIfAborted();
-    if (c.password && p.action === 'set_value') return { text: 'Enter the password directly in the app. The UI driver did not type a password.' };
+    if (approve && c.password && p.action === 'set_value') return { text: 'Enter the password directly in the app. The UI driver did not type a password.' };
     const outcome = await adapter.request({ op: 'act', ...p, expectedName: c.name, expectedRole: c.role, expectedPassword: !!c.password, expectedContext: c.context ?? '' }, signal);
     if (outcome.error !== undefined) throw new Error(outcome.error || 'Native UI operation failed.');
     return outcome;
   }
-  async task(adapter: UiAdapter, app: string, goal: string, values: Record<string, string>, approve: UiGrant['approve'], signal: AbortSignal): Promise<{ text: string; image?: UiReply['image'] }> {
+  async task(adapter: UiAdapter, app: string, goal: string, values: Record<string, string>, approve: Approve | undefined, signal: AbortSignal): Promise<{ text: string; image?: UiReply['image'] }> {
     let release: (() => void) | undefined;
     const history: Array<{ control: string; action: string; changed: boolean }> = [];
     let tree: UiReply = { controls: [] };
@@ -147,7 +154,7 @@ export class UiService {
             const a = await this.decider.decide({ goal, control: { name: c.name, role: c.role, context: c.context, value: c.password ? undefined : c.value }, supplied_value_available: value !== undefined }, { action: { type: 'choice', instructions: `Which supported action on ${c.name} advances the goal? Use set_value to enter supplied text.`, criteria: Object.fromEntries(c.actions.map((a) => [a, meanings[a] ?? a])) } }, pictures, signal);
             const action = accepted(a['action'], this.gate);
             if (action && c.actions.includes(action)) {
-              if (action === 'set_value' && c.password) {
+              if (approve && action === 'set_value' && c.password) {
                 await this.act(adapter, { app, id: c.id, action }, approve, signal);
                 return await handoff('Password entry is reserved for the person in the app. Continue after they have entered it.');
               }
@@ -178,7 +185,8 @@ export async function runUiCommand(grant: UiGrant | undefined, args: readonly st
   try {
     const host = args[0] === '--host'; const rest = host ? args.slice(1) : [...args];
     const [op, app, id, action, value] = rest;
-    let signal = o.signal; let approve = grant.approve;
+    // The agent's own container desktop never asks; only host actions do.
+    let signal = o.signal; let approve: Approve | undefined;
     if (host) {
       if (!grant.fullControl || !grant.host) throw new Error('Only the main agent can drive the host UI during a full-control session.');
       signal = AbortSignal.any([signal, grant.fullControl.manager.require(grant.fullControl.owner)]);
@@ -196,7 +204,6 @@ export async function runUiCommand(grant: UiGrant | undefined, args: readonly st
     } else if (op === 'click' && app && id !== undefined && action !== undefined) {
       const x = Number(id); const y = Number(action);
       if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Give window-relative x and y coordinates.');
-      if (!await approve(`Click at ${x},${y} in ${host ? 'host' : 'container'} window ${app}? A coordinate fallback cannot identify the button or password field.`, signal)) throw new Error('Coordinate click denied.');
       reply = await adapter.request({ op, app, x, y }, signal);
     } else if (op === 'apps' || (['open', 'tree', 'screenshot'].includes(op ?? '') && app)) reply = await adapter.request({ op, ...(app ? { app } : {}), ...(op === 'open' ? { args: rest.slice(2) } : {}) }, signal);
     else return { ok: false, error: UI_USAGE };

@@ -202,7 +202,7 @@ export class GitWorkspaces {
 
   private env(extra: Record<string, string> = {}): Record<string, string> {
     const count = Number(extra['GIT_CONFIG_COUNT'] ?? 0);
-    return { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...(this.o.identity?.() ?? {}), ...extra, GIT_CONFIG_COUNT: String(count + 2), [`GIT_CONFIG_KEY_${count}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${count}`]: '/dev/null', [`GIT_CONFIG_KEY_${count + 1}`]: 'core.fsmonitor', [`GIT_CONFIG_VALUE_${count + 1}`]: 'false' };
+    return { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_GLOBAL: '/dev/null', ...(this.o.identity?.() ?? {}), ...extra, GIT_CONFIG_COUNT: String(count + 2), [`GIT_CONFIG_KEY_${count}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${count}`]: '/dev/null', [`GIT_CONFIG_KEY_${count + 1}`]: 'core.fsmonitor', [`GIT_CONFIG_VALUE_${count + 1}`]: 'false' };
   }
 
   /** Git's environment with a login for the remote (only in the helper container). */

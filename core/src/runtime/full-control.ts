@@ -123,6 +123,8 @@ export class FullControlManager {
   readonly journal: RollbackJournal;
   constructor(private readonly o: { confirm?: ConfirmationHandler; minutes: () => number; journal?: RollbackJournal; onChange?: (s: FullControlStatus | null) => void; onEnd?: () => void }) { this.journal = o.journal ?? new RollbackJournal(); }
   status(): FullControlStatus | null { return this.active ? { ...this.active.status, folders: [...this.active.status.folders] } : null; }
+  /** Whether this run holds the lease now. */
+  holds(owner: object): boolean { return this.active?.owner === owner && Date.now() < this.active.status.expires; }
   context(owner: object): string {
     if (this.active?.owner !== owner) return 'Full control: inactive. Host shell and host UI require a message full_control request approved by the person.';
     const seconds = Math.max(0, Math.ceil((this.active.status.expires - Date.now()) / 1000));

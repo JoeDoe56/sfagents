@@ -74,6 +74,22 @@ export const DEFAULT_MAX_TURNS = 40;
 export const DEFAULT_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_TOOL_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * What a model request adds to the stored messages. The system prompt gets
+ * only text that rarely changes (the network level), so providers can keep
+ * reusing their cached copy of the prompt. Text that changes every step (the
+ * full-control countdown) goes on the newest message instead.
+ */
+export function withStepContext(messages: readonly ChatMessage[], system: string, step?: string): ChatMessage[] {
+  const out = messages.map((m, i) => (i === 0 && m.role === 'system' ? { ...m, content: `${m.content}\n\n${system}` } : m));
+  const last = out.at(-1);
+  if (!step || !last || out.length < 2) return out;
+  const note = `[SF Agents] ${step}`;
+  if (last.role === 'tool') out[out.length - 1] = { ...last, content: `${last.content}\n\n${note}` };
+  else if (last.role === 'user') out[out.length - 1] = { ...last, content: typeof last.content === 'string' ? `${last.content}\n\n${note}` : [...last.content, { type: 'text', text: note }] };
+  return out;
+}
+
 export interface RuntimeOptions {
   fullControl?: FullControlManager;
   ui?: UiService;
@@ -336,10 +352,6 @@ export class AgentRuntime implements AgentMessenger {
     commands.ui = {
       container: new ContainerUiAdapter(() => ({ agentId: node.id, ...ctx.container })),
       ...(hostGrant ? { host: new WindowsUiAdapter(), fullControl: hostGrant } : {}), service: this.ui,
-      approve: async (question, signal) => {
-        if (!this.confirm) return false;
-        return await this.confirm({ agentPath, toolName: 'host_action', details: { type: 'info', title: 'Allow This UI Action?', prompt: question } }, signal) === 'allow_once';
-      },
     };
     tools.set(ToolNames.SHELL, new ShellTool(ctx));
 
@@ -618,7 +630,7 @@ export class AgentRuntime implements AgentMessenger {
       try {
         for await (const event of provider.stream({
           model: d.model,
-          messages: messages.map((m, i) => i === 0 && m.role === 'system' ? { ...m, content: `${m.content}\n\n${this.fullControl.context(link)}\nNetwork level now: ${this.tree.byId.get(node.id)?.definition.network ?? 'off'} (the current editor setting overrides earlier network descriptions).` } : m),
+          messages: withStepContext(messages, `Network level now: ${this.tree.byId.get(node.id)?.definition.network ?? 'off'} (the current editor setting overrides earlier network descriptions).`, this.fullControl.holds(link) ? this.fullControl.context(link) : undefined),
           tools: declarations(),
           reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,

@@ -33,14 +33,18 @@ test('uncertain choices retry with a screenshot then hand back without acting', 
   assert.equal(JSON.parse(result.text).status, 'handoff'); assert.equal(calls, 2); assert.deepEqual(imageCounts, [0, 1]); assert.ok(result.image);
 });
 
-test('passwords and risky buttons ask, denied actions do not execute, containers need no host lease', async () => {
+test('the agent\'s own container never asks; host passwords and risky buttons ask, and denied actions do not execute', async () => {
   assert.equal(riskyControl({ ...control, name: 'Publish' }), true);
   let actions = 0; let approvals = 0;
-  const adapter: UiAdapter = { request: async (p) => p.op === 'act' ? (actions++, { text: 'ok' }) : { controls: [{ ...control, password: true }] } };
+  const adapter: UiAdapter = { request: async (p) => p.op === 'act' || p.op === 'click' ? (actions++, { text: 'ok' }) : { controls: [{ ...control, password: true }] } };
   const service = new UiService({ decide: async () => ({}) });
-  const grant: UiGrant = { container: adapter, service, approve: async (q) => { approvals++; assert.doesNotMatch(q, /secret-value/); return false; } };
-  const denied = await runUiCommand(grant, ['act', 'app', '1', 'set_value', 'secret-value'], { signal: signal() });
-  assert.equal(denied.ok, false); assert.equal(approvals, 1); assert.equal(actions, 0);
+  const grant: UiGrant = { container: adapter, service };
+  const typed = await runUiCommand(grant, ['act', 'app', '1', 'set_value', 'test-password'], { signal: signal() });
+  assert.equal(typed.ok, true); assert.equal(actions, 1);
+  const clicked = await runUiCommand(grant, ['click', 'app', '10', '20'], { signal: signal() });
+  assert.equal(clicked.ok, true); assert.equal(actions, 2);
+  const denied = await service.act(adapter, { app: 'app', id: '1', action: 'set_value', value: 'secret-value' }, async (q) => { approvals++; assert.doesNotMatch(q, /secret-value/); return false; }, signal()).then(() => true, () => false);
+  assert.equal(denied, false); assert.equal(approvals, 1); assert.equal(actions, 2);
   const host = await runUiCommand(grant, ['--host', 'tree', 'app'], { signal: signal() });
   assert.equal(host.ok, false);
   const container = await runUiCommand(grant, ['tree', 'app'], { signal: signal() }); assert.equal(container.ok, true);

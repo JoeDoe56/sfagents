@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { FullControlManager, RollbackJournal, AgentRuntime, ConversationService, loadAgentTree, UiService, AppSettings, ProviderRegistry, MemorySecretStore, runHostShell } from '@sfagents/core';
+import { FullControlManager, RollbackJournal, AgentRuntime, ConversationService, loadAgentTree, UiService, AppSettings, ProviderRegistry, MemorySecretStore, runHostShell, withStepContext } from '@sfagents/core';
 import { WebServer } from '@sfagents/web';
 import { makeTempDir, baseAgent, writeAgent, scriptedFactory } from './helpers.js';
 
@@ -103,4 +103,14 @@ test('web approval, banner events, host shell, file review and undo work togethe
     assert.equal((await server.request('POST', '/api/full-control', { action: 'undo', id })).status, 200);
     assert.equal(fs.existsSync(file), false);
   } finally { unsubscribe(); await server.close(); conversation.close(); registry.close(); }
+});
+
+test('the countdown goes on the newest message, so the system prompt stays the same between steps', () => {
+  const messages = [{ role: 'system' as const, content: 'prompt' }, { role: 'user' as const, content: 'hi' }, { role: 'tool' as const, tool_call_id: 'a', content: 'out' }];
+  const first = withStepContext(messages, 'Network level now: on', 'Full control: 4m 59s left.');
+  const second = withStepContext(messages, 'Network level now: on', 'Full control: 4m 30s left.');
+  assert.equal(first[0]!.content, second[0]!.content);
+  assert.match(String(first.at(-1)!.content), /4m 59s left/);
+  assert.equal(messages[2]!.content, 'out', 'stored messages are not changed');
+  assert.equal(withStepContext(messages, 'x').at(-1)!.content, 'out');
 });

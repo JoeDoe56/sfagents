@@ -15,7 +15,7 @@ export type { ProjectWatcher } from './agents/watch.js';
 export { ThreadService, ThreadRecorder, ThreadBusyError, threadKey, threadPair, threadMessages, THREADS_DIR_NAME } from './agents/threads.js';
 export type { ThreadInfo, ThreadLease } from './agents/threads.js';
 export * from './runtime/events.js';
-export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS } from './runtime/runtime.js';
+export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS, withStepContext } from './runtime/runtime.js';
 export type { InboxItem, SendOptions } from './runtime/runtime.js';
 export type { RuntimeOptions } from './runtime/runtime.js';
 export * from './providers/types.js';
