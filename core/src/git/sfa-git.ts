@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 /**
  * `sfa-git` and `sfa-ci`: an agent's Git commands that need SF Agents
  * (cloning, task workspaces, pushing, CI). They run in SF Agents and its
@@ -6,6 +7,7 @@
  * usual.
  */
 
+import type { GitHubPullRequests } from './github.js';
 import type { NetworkLevel } from '../container/network.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { GitError, githubRepo, taskOfPath, type GitWorkspaces } from './workspaces.js';
@@ -21,6 +23,8 @@ export const GIT_USAGE = `Usage (a task is a folder /workspaces/<repo>/<task> on
   sfa-git finish -m "message"        squash this task's run checkpoints into one commit
   sfa-git push                       push this task's branch (sfagents/<task>)
   sfa-git push --main                push this task to the default branch (fast-forward only; finish first)
+  sfa-git pull-into <host-folder>    fast-forward a Project Folder during full control
+  sfa-git pr open|status            draft a GitHub PR or read checks and review comments (enable in Settings)
   sfa-git undo                       undo the last run's checkpoint in this task
 Run the task commands inside the task's folder. SF Agents commits each task after every run (a checkpoint).
 There is no force push and no deleting remote branches; pushing .github/workflows changes asks the person.`;
@@ -35,6 +39,8 @@ export interface GitGrant {
   workspaces: GitWorkspaces;
   agentId: string;
   level: NetworkLevel;
+  pullRequests?: GitHubPullRequests;
+  pullInto?: (repo: string, task: string, folder: string) => Promise<string>;
   /** Asks the person (pushing workflow changes); false when there is no one to ask. */
   approve: (question: string) => Promise<boolean>;
 }
@@ -95,6 +101,19 @@ export async function runGitCommand(grant: GitGrant | undefined, args: readonly 
         const t = here(o.cwd);
         return { ok: true, text: await ws.push(t.repo, t.task, { toMain: rest.includes('--main'), approve: grant.approve }) };
       }
+      case 'pull-into': {
+        if (!grant.pullInto) throw new GitError('Pulling into the person’s folders needs an active main-agent full-control session.');
+        const t = here(o.cwd);
+        if (!rest[0]) throw new GitError('Give the Project Folder to fast-forward.');
+        return { ok: true, text: await grant.pullInto(t.repo, t.task, rest[0]) };
+      }
+      case 'pr': {
+        if (!remote(grant.level)) return { ok: false, error: NEEDS_GIT };
+        if (!grant.pullRequests) throw new GitError('Pull Requests are disabled in Settings.');
+        const t = here(o.cwd);
+        const signal = AbortSignal.timeout(120_000);
+        return { ok: true, text: rest[0] === 'open' ? await grant.pullRequests.open(t.repo, t.task, grant.approve, signal) : await grant.pullRequests.refresh(t.repo, t.task, signal) };
+      }
       case 'undo': {
         const t = here(o.cwd);
         return { ok: true, text: await ws.undo(t.repo, t.task) };
@@ -128,7 +147,9 @@ export async function runCiCommand(grant: GitGrant | undefined, args: readonly s
       return i >= 0 ? args[i + 1] : undefined;
     };
     const workflow = opt('--workflow');
-    const timeoutMs = Math.min(120, Math.max(1, Number(opt('--timeout') ?? 30))) * 60_000;
+    const minutes = Number(opt('--timeout') ?? 30);
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 120) return { ok: false, error: '--timeout must be between 1 and 120 minutes.' };
+    const timeoutMs = minutes * 60_000;
     const login = await ws.login(t.repo);
     const api = async (p: string, init: RequestInit = {}) => {
       const res = await ws.fetchApi(`https://api.github.com/repos/${gh.owner}/${gh.name}${p}`, {
@@ -143,6 +164,7 @@ export async function runCiCommand(grant: GitGrant | undefined, args: readonly s
     if ((await info.json() as { private?: boolean }).private !== false) return { ok: false, error: 'sfa-ci is only for public repositories (Actions minutes on private ones cost money).' };
     const pushed = await ws.push(t.repo, t.task, { toMain: false, approve: grant.approve });
     const sha = await ws.head(t.repo, t.task);
+    ws.setTaskMetadata(t.repo, t.task, { ci: { sha, state: 'pending', updated: new Date().toISOString() } });
     const branch = `sfagents/${t.task}`;
     if (workflow) {
       const d = await api(`/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: branch }), headers: { 'Content-Type': 'application/json' } });
@@ -154,12 +176,16 @@ export async function runCiCommand(grant: GitGrant | undefined, args: readonly s
     for (let quiet = 0; ; ) {
       const r = await api(`/actions/runs?head_sha=${sha}&per_page=30`);
       runs = r.ok ? ((await r.json()) as { workflow_runs: Run[] }).workflow_runs : [];
-      if (!runs.length && ++quiet > 12) return { ok: true, text: `${pushed} No workflow ran for ${sha.slice(0, 7)} within two minutes. Pass --workflow <file.yml> to start one (it needs "on: workflow_dispatch").` };
+      if (!runs.length && ++quiet > 12) {
+        ws.setTaskMetadata(t.repo, t.task, { ci: { sha, state: 'none', updated: new Date().toISOString() } });
+        return { ok: true, text: `${pushed} No workflow ran for ${sha.slice(0, 7)} within two minutes. Pass --workflow <file.yml> to start one (it needs "on: workflow_dispatch").` };
+      }
       if (runs.length && runs.every((x) => x.status === 'completed')) break;
       if (Date.now() > end) return { ok: true, text: `${pushed} Still running after ${timeoutMs / 60_000} minutes:\n${runs.map((x) => `${x.name}: ${x.status} ${x.html_url}`).join('\n')}` };
-      await new Promise((res) => setTimeout(res, 10_000));
+      await delay(10_000, undefined, { signal: o.signal });
       if (o.signal.aborted) throw new Error('Stopped.');
     }
+    ws.setTaskMetadata(t.repo, t.task, { ci: { sha, state: runs.every((r) => ['success', 'skipped', 'neutral'].includes(r.conclusion ?? '')) ? 'pass' : 'fail', ...(runs[0] ? { url: runs[0].html_url } : {}), updated: new Date().toISOString() } });
     const out: string[] = [pushed];
     for (const run of runs) {
       out.push(`${run.conclusion === 'success' ? 'PASS' : 'FAIL'} ${run.name}: ${run.conclusion} ${run.html_url}`);

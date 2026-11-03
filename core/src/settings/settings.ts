@@ -30,6 +30,7 @@ export interface SettingSpec {
 }
 
 export const SETTINGS: readonly SettingSpec[] = [
+  { key: 'agents.pullRequests', label: 'Pull Requests', hint: 'Draft GitHub pull requests from task branches, read checks and review comments, and merge from the review sheet.', group: 'Agents', type: 'boolean', default: false, restart: false },
   {
     key: 'agents.folders',
     label: 'Project Folders',

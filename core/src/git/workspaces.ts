@@ -47,6 +47,8 @@ export interface TaskRecord {
   agent: string;
   created: string;
   used: string;
+  ci?: { sha: string; state: 'pending' | 'pass' | 'fail' | 'stale' | 'none'; url?: string; updated: string };
+  pr?: { number: number; url: string; state: string; sha: string; checks: string; comments: string; updated: string };
 }
 
 export interface RepoRecord {
@@ -199,7 +201,8 @@ export class GitWorkspaces {
   // ---------------------------------------------------------------- running git
 
   private env(extra: Record<string, string> = {}): Record<string, string> {
-    return { GIT_TERMINAL_PROMPT: '0', ...(this.o.identity?.() ?? {}), ...extra };
+    const count = Number(extra['GIT_CONFIG_COUNT'] ?? 0);
+    return { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...(this.o.identity?.() ?? {}), ...extra, GIT_CONFIG_COUNT: String(count + 2), [`GIT_CONFIG_KEY_${count}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${count}`]: '/dev/null', [`GIT_CONFIG_KEY_${count + 1}`]: 'core.fsmonitor', [`GIT_CONFIG_VALUE_${count + 1}`]: 'false' };
   }
 
   /** Git's environment with a login for the remote (only in the helper container). */
@@ -241,11 +244,23 @@ export class GitWorkspaces {
     this.o.onChange?.();
   }
 
+  taskMetadata(repo: string, task: string): TaskRecord {
+    return this.taskRecord(repo, task);
+  }
+
+  setTaskMetadata(repo: string, task: string, patch: Pick<Partial<TaskRecord>, 'ci' | 'pr'>): void {
+    this.taskRecord(repo, task);
+    this.store.update((d) => Object.assign(d.tasks[`${repo}/${task}`]!, patch));
+    this.changed();
+  }
+
   // ---------------------------------------------------------------- repositories and tasks
 
   /** Clones a repository into /workspaces/<name>/.repo. */
   async clone(url: string, name = repoNameOf(url)): Promise<RepoRecord> {
     if (!/^https:\/\/[^\s]+$/.test(url)) throw new GitError('Give the repository’s https address (git@ addresses become https in the container).');
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new GitError('Use a repository URL without embedded credentials, query strings or fragments. SF Agents uses the host Git login.');
     if (!NAME.test(name)) throw new GitError(`"${name}" can’t be a folder name: letters, digits, . _ and - only.`);
     const existing = this.store.read().repos[name];
     if (existing) return existing;
@@ -309,13 +324,14 @@ export class GitWorkspaces {
     const dir = this.taskDir(t.repo, t.task);
     const out = await this.sh(dir, [
       'git rev-parse --abbrev-ref HEAD',
+      'git rev-parse HEAD',
       `git rev-list --left-right --count HEAD...${q(`origin/${r.defaultBranch}`)} 2>/dev/null || echo "0 0"`,
       'git log --first-parent --format=%s -n 300',
       'echo ---',
       'git status --porcelain | wc -l',
       ...(size ? ['du -sk . | cut -f1'] : []),
     ].join('; '));
-    const [branch, counts, ...rest] = out.split('\n');
+    const [branch, head, counts, ...rest] = out.split('\n');
     const sep = rest.indexOf('---');
     const subjects = rest.slice(0, sep);
     const [dirtyCount, sizeKb] = rest.slice(sep + 1);
@@ -334,6 +350,8 @@ export class GitWorkspaces {
     }
     return {
       ...t,
+      ...(t.ci ? { ci: { ...t.ci, state: t.ci.sha === head?.trim() && Number(dirtyCount) === 0 ? t.ci.state : 'stale' as const } } : {}),
+      ...(t.pr ? { pr: { ...t.pr, checks: t.pr.sha === head?.trim() && Number(dirtyCount) === 0 ? t.pr.checks : 'stale' } } : {}),
       path: dir,
       branch: branch?.trim() ?? '',
       defaultBranch: r.defaultBranch,
@@ -495,10 +513,10 @@ export class GitWorkspaces {
    * the task: the task's branch is pushed, then fetched there. Stops when
    * that copy has uncommitted changes or has gone another way.
    */
-  async pullInto(repo: string, task: string, folder: string, approve: (q: string) => Promise<boolean>): Promise<string> {
+  async pullInto(repo: string, task: string, folder: string, approve: (q: string) => Promise<boolean>, signal?: AbortSignal): Promise<string> {
     const git = (args: string[]) =>
       new Promise<string>((resolve, reject) =>
-        execFile('git', args, { cwd: folder, timeout: 10 * 60_000, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (error, stdout, stderr) =>
+        execFile('git', args, { cwd: folder, ...(signal ? { signal } : {}), timeout: 10 * 60_000, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (error, stdout, stderr) =>
           error ? reject(new GitError(String(stderr || error.message).trim())) : resolve(String(stdout)),
         ),
       );

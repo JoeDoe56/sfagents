@@ -13,6 +13,8 @@ import {
   duplicateAgentFile,
   instructionsLength,
   loadAgentTree,
+  loadAgentEditor,
+  agentFormChoices,
   mergeWslConfig,
   newAgentForm,
   parseAgentDefinition,
@@ -63,6 +65,14 @@ describe('agent files: container resources and voice', () => {
 });
 
 describe('the agent editor (core)', () => {
+  test('create the first agent without a tree or an agents folder', () => {
+    const dir = makeTempDir();
+    const editor = loadAgentEditor(dir);
+    assert.deepEqual(agentFormChoices(editor, LIMITS).agents, []);
+    saveAgentForm(editor, form({ instructions: 'Write.' }), LIMITS);
+    assert.equal(loadAgentTree(dir).root.id, 'writer');
+  });
+
   test('a new form chooses nothing that must be chosen, and the sliders start within the cap', () => {
     const f = newAgentForm({ maxMemoryMb: 2048, maxCpus: 2 });
     assert.equal(f.network, null);

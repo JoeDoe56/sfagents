@@ -320,6 +320,10 @@ export class CodexAppServer implements CodexConnection {
     try {
       this.child.stdin.end();
       this.child.kill();
+      // Descendants can inherit these pipes on Windows after the app-server exits.
+      this.child.stdin.destroy();
+      this.child.stdout.destroy();
+      this.child.stderr.destroy();
     } catch {
       // already gone
     }

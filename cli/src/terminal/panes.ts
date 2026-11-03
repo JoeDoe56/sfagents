@@ -1534,10 +1534,10 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
 
 // ------------------------------------------------------------------ Git task workspaces
 
-type WorkspaceRow = { repo: string; task: string; agent: string; branch: string; defaultBranch: string; ahead: number; behind: number; checkpoints: number; changed: number; added?: number; removed?: number; dirty: boolean };
+type WorkspaceRow = { repo: string; task: string; agent: string; branch: string; defaultBranch: string; ahead: number; behind: number; checkpoints: number; changed: number; added?: number; removed?: number; dirty: boolean; ci?: { state: string }; pr?: { number: number; checks: string; sha: string; comments: string } };
 type WorkspaceReview = { message: string; files: Array<{ path: string; status: string; hunks: Array<{ header: string; lines: string[] }>; binary?: boolean }> };
 
-const workspaceState = (w: WorkspaceRow) => `${w.ahead} ahead, ${w.behind} behind ${w.defaultBranch}${w.checkpoints ? ` · ${w.checkpoints} checkpoint(s)` : ''}${w.dirty ? ' · uncommitted' : ''}`;
+const workspaceState = (w: WorkspaceRow) => `${w.ahead} ahead, ${w.behind} behind ${w.defaultBranch}${w.checkpoints ? ` · ${w.checkpoints} checkpoint(s)` : ''}${w.dirty ? ' · uncommitted' : ''}${w.ci ? ` · CI ${w.ci.state}` : ''}${w.pr ? ` · PR #${w.pr.number} ${w.pr.checks}` : ''}`;
 
 /** The task workspaces (sfa-git), as the web app's Workspaces sheet. */
 export function workspacesPane(host: PaneHost): Pane {
@@ -1591,10 +1591,11 @@ export function workspacePane(host: PaneHost, w: WorkspaceRow, folders: string[]
   };
   const p = loading(host, {
     title: `${w.repo}/${w.task}`,
-    hint: 'r reject hunk · s squash · u undo run · m update · p push · P push to main · f pull into folder · x remove · Esc',
+    hint: 'r reject · s squash · u undo · m update · p push · P main · f pull · o open/refresh PR · v send reviews · M merge PR · x remove · Esc',
     load: () => host.api<WorkspaceReview>('GET', path),
     view: (d, width) => {
       const rows: Row[] = [{ lines: [`  ${color.dim(truncate(`${current.branch} · ${workspaceState(current)}`, width - 4))}`] }, blank];
+      if (current.pr?.comments) rows.push(note(current.pr.comments, width), blank);
       if (!d.files.length) rows.push(note('No changes since the last commit.', width));
       for (const f of d.files) {
         rows.push({ lines: [`  ${color.bold(clean(f.path))} ${color.dim(f.status)}${f.binary ? color.dim(' (binary)') : ''}`] });
@@ -1611,6 +1612,15 @@ export function workspacePane(host: PaneHost, w: WorkspaceRow, folders: string[]
     },
     key: (ch, row) => {
       switch (ch) {
+        case 'o':
+          act(current.pr ? 'pr-refresh' : 'pr-open');
+          return true;
+        case 'v':
+          act('pr-reviews');
+          return true;
+        case 'M':
+          if (current.pr) host.confirm(`Merge PR #${current.pr.number} at ${current.pr.sha.slice(0, 7)}?`, () => act('pr-merge', { sha: current.pr!.sha }));
+          return true;
         case 'r': {
           const v = row?.value as { file: string; hunk: number } | undefined;
           if (v) host.confirm(`Reject this change in ${v.file}?`, () => act('reject', v));
@@ -1645,6 +1655,32 @@ export function workspacePane(host: PaneHost, w: WorkspaceRow, folders: string[]
     event: (name) => {
       if (name === 'workspaces') p.reload();
     },
+  });
+  return p;
+}
+
+/** The same Stop and rollback actions as the web banner and journal sheet. */
+export function fullControlPane(host: PaneHost): Pane {
+  type Journal = { id: string; agent: string; started: string; ended?: string; reason?: string };
+  const p = loading(host, {
+    title: 'Full Control', hint: 's Stop · Enter review files · u undo selected session · Esc',
+    load: () => host.api<{ status: { agent: string; expires: number } | null; journals: Journal[] }>('GET', 'full-control'),
+    view: (d, w) => [note(d.status ? `${d.status.agent} has full control until ${new Date(d.status.expires).toLocaleTimeString()}. Press s to stop.` : 'No full-control session.', w), blank,
+      ...d.journals.map((j) => ({ pick: true, value: j, lines: [`  ${clean(j.agent)} · ${j.started} · ${j.reason ?? 'Active'}`] }))],
+    enter: (row) => {
+      const j = row.value as Journal;
+      host.api<{ files: Array<{ path: string; before: string | null; after: string | null }> }>('GET', `full-control-diff?id=${encodeURIComponent(j.id)}`).then((d) => host.open(plainPane('Session File Changes', d.files.map((f) => `${f.before === null ? '+' : f.after === null ? '−' : '~'} ${f.path}`).join('\n') || 'No file changes.')), (e) => host.fail(e));
+    },
+    key: (key, row) => {
+      if (key === 's') { host.api('POST', 'full-control', { action: 'stop' }).then(() => p.reload(), (e) => host.fail(e)); return true; }
+      if (key === 'u' && row) {
+        const j = row.value as Journal;
+        if (j.ended) host.confirm('Undo files changed in this session? Later edits stop the undo.', () => { host.api('POST', 'full-control', { action: 'undo', id: j.id }).then(() => p.reload(), (e) => host.fail(e)); });
+        return true;
+      }
+      return false;
+    },
+    event: (name) => { if (name === 'full-control') p.reload(); },
   });
   return p;
 }

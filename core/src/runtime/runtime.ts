@@ -1,3 +1,6 @@
+import { UiService, ContainerUiAdapter, WindowsUiAdapter } from '../ui/ui.js';
+import { FullControlManager, RollbackJournal } from './full-control.js';
+import { GitHubPullRequests } from '../git/github.js';
 /**
  * The SF Agents runtime: model turns, the tool loop and child execution.
  *
@@ -62,7 +65,7 @@ import {
   type ToolActivity,
 } from './events.js';
 import { PersistenceFailure, type RunRecorder, type ViewSource } from './recorder.js';
-import { ConversationService, type ReplayTarget } from '../conversation/service.js';
+import { ConversationService, STATE_DIR_NAME, type ReplayTarget } from '../conversation/service.js';
 import { buildWorkingContext, contextBreakdown, type ContextBreakdown, type ContextReport, type ContextTool } from '../conversation/context.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
@@ -71,6 +74,11 @@ export const DEFAULT_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_TOOL_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface RuntimeOptions {
+  fullControl?: FullControlManager;
+  ui?: UiService;
+  pullRequests?: () => boolean;
+  fullControlMinutes?: () => number;
+  onFullControlChange?: (status: import('./full-control.js').FullControlStatus | null) => void;
   tree: AgentTree;
   /** Defaults to OpenRouter / OpenAI-compatible providers keyed from `env`. */
   providerFactory?: ProviderFactory;
@@ -224,9 +232,23 @@ export class AgentRuntime implements AgentMessenger {
   private readonly web: WebAccess;
   private readonly folders?: () => string[];
   readonly git?: GitWorkspaces;
+  readonly fullControl: FullControlManager;
+  readonly ui: UiService;
+  private readonly pullRequests: () => boolean;
 
   constructor(options: RuntimeOptions) {
     this.tree = options.tree;
+    this.ui = options.ui ?? new UiService();
+    this.pullRequests = options.pullRequests ?? (() => new AppSettings().get<boolean>('agents.pullRequests'));
+    let warmControl: AbortController | undefined;
+    let releaseWarm: (() => void) | undefined;
+    this.fullControl = options.fullControl ?? new FullControlManager({ ...(options.confirm ? { confirm: options.confirm } : {}), minutes: options.fullControlMinutes ?? (() => new AppSettings().get<number>('agents.fullControlMinutes')), journal: new RollbackJournal(undefined, [options.tree.agentsDir, options.tree.promptsDir, path.join(options.tree.dataDir, STATE_DIR_NAME), ...options.tree.secretFiles, ...options.tree.protectedFiles, ...(options.conversation?.protectedPaths() ?? []), sfagentsHome()]), onChange: (status) => {
+      options.onFullControlChange?.(status);
+      if (status) {
+        const controller = new AbortController(); warmControl = controller;
+        void this.ui.warm(controller.signal).then((release) => { if (controller.signal.aborted) release(); else releaseWarm = release; }).catch(() => undefined);
+      } else { warmControl?.abort(); warmControl = undefined; releaseWarm?.(); releaseWarm = undefined; }
+    } });
     const env = options.env ?? process.env;
     this.env = env;
     this.secretEnvNames = credentialEnvNames([...this.tree.byId.values()].map((n) => n.definition));
@@ -278,7 +300,13 @@ export class AgentRuntime implements AgentMessenger {
       const confirm = this.confirm;
       const approveAll = this.approveAll;
       commands.git = {
+        ...(role === 'main' && agentPath.length === 1 ? { pullInto: async (repo: string, task: string, folder: string) => {
+          const lease = this.fullControl.require(link);
+          if (!this.projectFolders().includes(folder)) throw new Error('Pick one of the Project Folders.');
+          return this.git!.pullInto(repo, task, folder, async (q) => this.fullControl.approveAction(link, node.id, q, link.signal), AbortSignal.any([link.signal, lease]));
+        } } : {}),
         workspaces: this.git,
+        pullRequests: new GitHubPullRequests(this.git, this.pullRequests),
         agentId: node.id,
         level: d.network,
         approve: async (question) => {
@@ -291,6 +319,7 @@ export class AgentRuntime implements AgentMessenger {
     }
     const ctx: ToolContext = {
       agentId: node.id,
+      ...(role === 'main' && agentPath.length === 1 ? { fullControl: { manager: this.fullControl, owner: link } } : {}),
       maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
       secretEnvNames: this.secretEnvNames,
       shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
@@ -298,12 +327,21 @@ export class AgentRuntime implements AgentMessenger {
       patchFormat: this.patchFormat(d),
       commands,
     };
+    const hostGrant = role === 'main' && agentPath.length === 1 ? { manager: this.fullControl, owner: link } : undefined;
+    commands.ui = {
+      container: new ContainerUiAdapter({ agentId: node.id, level: d.network, roots: this.projectFolders(), hidden: this.hiddenPaths(), ...d.container }),
+      ...(hostGrant ? { host: new WindowsUiAdapter(), fullControl: hostGrant } : {}), service: this.ui,
+      approve: async (question, signal) => {
+        if (!this.confirm) return false;
+        return await this.confirm({ agentPath, toolName: 'host_action', details: { type: 'info', title: 'Allow This UI Action?', prompt: question } }, signal) === 'allow_once';
+      },
+    };
     tools.set(ToolNames.SHELL, new ShellTool(ctx));
 
     // The agent replying to the person can talk with them mid-turn (and ask them questions).
     const toUser = role === 'main' && !!conversation && conversation === this.conversation;
     // Every agent has message: talking with the person and agents, and (in the persistent conversation) searching and filing it.
-    tools.set(ToolNames.MESSAGE, new MessageTool(this, node, this.tree.byId, agentPath, emit, conversation, link, toUser, conversation?.file ? conversationAccess(d, depth) : 'none'));
+    tools.set(ToolNames.MESSAGE, new MessageTool(this, node, this.tree.byId, agentPath, emit, conversation, link, toUser, conversation?.file ? conversationAccess(d, depth) : 'none', role === 'main' && agentPath.length === 1 ? { manager: this.fullControl, owner: link } : undefined));
     return tools;
   }
 
@@ -419,10 +457,12 @@ export class AgentRuntime implements AgentMessenger {
 
   async run(params: RunParams): Promise<AgentRunResult> {
     this.activeRuns++;
+    params.link ??= idleLink(params.node.id);
     try {
       return await this.runAgent(params);
     } finally {
       this.activeRuns--;
+      if (params.link) this.fullControl.endRun(params.link);
       // Every task this agent touched gets a checkpoint commit, so the run can be undone and reviewed.
       if (this.git) await this.git.checkpointAgent(params.node.id, params.task.replace(/\s+/g, ' ').slice(0, 72)).catch(() => undefined);
       this.closeRetired();
@@ -467,6 +507,7 @@ export class AgentRuntime implements AgentMessenger {
 
     const finish = (status: AgentTerminateMode, error?: string): AgentRunResult => {
       clearTimeout(timer);
+      this.fullControl.endRun(link);
       params.signal.removeEventListener('abort', onParentAbort);
       if (link.children.size) children.abort(new Error('The agent that started this one stopped.'));
       let result: AgentRunResult = {
@@ -570,7 +611,7 @@ export class AgentRuntime implements AgentMessenger {
       try {
         for await (const event of provider.stream({
           model: d.model,
-          messages,
+          messages: messages.map((m, i) => i === 0 && m.role === 'system' ? { ...m, content: `${m.content}\n\n${this.fullControl.context(link)}` } : m),
           tools: declarations(),
           reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,
@@ -841,6 +882,8 @@ export class AgentRuntime implements AgentMessenger {
   }
 
   async dispose(): Promise<void> {
+    this.fullControl.stop('runtime closed');
+    this.ui.stop();
     if (this.disposed) return;
     this.disposed = true;
     this.threads.close();

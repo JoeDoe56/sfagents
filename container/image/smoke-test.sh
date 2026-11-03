@@ -160,6 +160,7 @@ check lua           t_lua
 check pandoc/tex    t_pandoc
 check ffmpeg/magick t_media
 check playwright    t_playwright
+check gui           bash -c 'command -v Xvfb dbus-daemon openbox mousepad xdotool >/dev/null && /usr/bin/python3 -c "import pyatspi, gi; gi.require_version(\"Gdk\", \"3.0\"); from gi.repository import Gdk"'
 check wine          t_wine
 check tools         t_tools
 

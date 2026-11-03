@@ -151,7 +151,7 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | `context` | Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
 | `limits` | Turn budget, timeouts, `webRequests` (web requests per run, default 25) and `viewImages` (images one shell call may show with `sfa-view`, default 8, at most 20). Defaults are shown above. |
 
-Every agent has the shell (in its own container) and, when it may message others, the message tool. Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. `workspace`, `tools.allow` and `tools.ask` were removed with the old sandbox; a file that still has them is skipped with what to use instead. Each agent's permissions are its own. An agent it may message can have a wider network level or different MCP servers; grants may form any graph, including two agents that may message each other.
+Every agent has exactly two native tools: shell (in its own container) and message (all conversation and agent interaction). Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. `workspace`, `tools.allow` and `tools.ask` were removed with the old sandbox; a file that still has them is skipped with what to use instead. Each agent's permissions are its own. An agent it may message can have a wider network level or different MCP servers; grants may form any graph, including two agents that may message each other.
 
 ## Agent containers
 
@@ -415,3 +415,18 @@ Core has no terminal or web code; the CLI and the web server use only Core's pub
 ## License
 
 SF Agents is licensed under the GNU General Public License, version 3 ([LICENSE](LICENSE)). Files derived from Qwen Code and Gemini CLI keep their Apache License 2.0 headers ([licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)), which is compatible with GPL-3.0; [NOTICE](NOTICE) and [PROVENANCE.md](PROVENANCE.md) list them and the other third-party components.
+
+
+## Full control and app UI
+
+Agents can use `sfa-ui` in their own private container desktop at every network level. The image includes Xvfb, Openbox, D-Bus, AT-SPI, GTK and keyboard fallback tools. `sfa-ui apps`, `open`, `tree`, `act`, `screenshot` and `task` are described by `sfa-ui --help`. Screenshots return to the model through the existing image channel.
+
+The main agent can request one full-control session using `message` action `full_control`, with `reason`, `plan` and absolute `folders` to snapshot. Only an Allow Once card grants it; `--yes`, remembered approvals and chat text cannot grant a session. It ends at idle, Stop, or Full Control Maximum (five minutes by default). During it, `shell` with `target: "host"`, `sfa-ui --host ...` and `sfa-git pull-into <Project Folder>` become available. The web banner and `/full-control` in the TUI show the remaining time and Stop.
+
+Full Control Files in the agent sheet, or `/full-control` in the TUI, shows the session journal and file undo. Rollback covers the named folders, excludes credentials, dependencies, symlinks and SF Agents' history/configuration, and refuses to overwrite later edits. Actions inside apps are outside file rollback. Sending, deleting, paying, publishing and password controls require their own one-time approval. Passwords are entered directly by the person, never in commands or `--values`.
+
+`task` uses StartLux-Decision v1.1 4B Instant, with thinking disabled, a confidence gate of 0.8, screenshot retry and a bounded handoff to the calling agent. The first call downloads a pinned Q4_K_M model and projector and creates a private Python environment under the SF Agents home; it needs Python 3.12+ and an NVIDIA GPU for the automatic Windows/Linux x64 runtime. No system Python or PATH is changed. `SFAGENTS_PYTHON` can name Python, and `SFAGENTS_LLAMA_SERVER` can name an existing compatible GPU llama-server. The worker releases its GPU allocations after the last UI task or full-control session. Speech is moved to CPU only when its GPU allocation leaves insufficient room.
+
+Pull Requests in Settings is off by default. When enabled, `sfa-git pr open` creates a draft GitHub PR; `sfa-git pr status` reads checks and review feedback. The task sheet can refresh the PR, send reviews to its agent, and mark a draft ready and merge the reviewed SHA on click. CI and PR results appear on task pills; a changed task marks old results stale.
+
+See [container completion and validation](docs/CONTAINER-COMPLETION.md) for test results and platform limits. Old agent files containing `workspace`, `tools.allow` or `tools.ask` must be recreated with the agent editor.

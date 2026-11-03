@@ -11,7 +11,17 @@ import path from 'node:path';
 import { AGENT_GRANT_PATTERN, AGENT_NAME_PATTERN, CONTAINER_LIMITS, ConfigError, parseAgentDefinition } from './definition.js';
 import { expandPrompt, isPromptReference, PromptReferenceError } from './prompts.js';
 import type { AgentTree } from './loader.js';
+import { dataDirFor } from './loader.js';
+import { loadMcpConfig } from '../mcp/config.js';
 import { isNetworkLevel, NETWORK_LEVELS, NETWORK_LEVEL_TEXT, type NetworkLevel } from '../container/network.js';
+
+/** Editing needs directories and choices, not a running agent. Also works before the first save. */
+export type AgentEditorContext = Pick<AgentTree, 'agentsDir' | 'promptsDir' | 'mcp'>;
+
+export function loadAgentEditor(project: string): AgentEditorContext {
+  const dir = dataDirFor(path.resolve(project));
+  return { agentsDir: path.join(dir, 'agents'), promptsDir: path.join(dir, 'prompts'), mcp: loadMcpConfig(path.join(dir, 'mcp.json')) };
+}
 
 /** What the agent editor shows. */
 export interface AgentForm {
@@ -51,7 +61,7 @@ export interface AgentFormLimits {
 }
 
 /** What the editor needs besides the form: choices and limits. */
-export function agentFormChoices(tree: AgentTree, limits: AgentFormLimits) {
+export function agentFormChoices(tree: AgentEditorContext, limits: AgentFormLimits) {
   return {
     networkLevels: NETWORK_LEVELS.map((value) => ({ value, text: NETWORK_LEVEL_TEXT[value] })),
     mcpServers: Object.keys(tree.mcp.servers).sort((a, b) => a.localeCompare(b)),
@@ -75,7 +85,7 @@ function promptFiles(dir: string): Array<{ name: string; chars: number }> {
   }
 }
 
-function agentFileNames(tree: AgentTree): string[] {
+function agentFileNames(tree: AgentEditorContext): string[] {
   try {
     return fs
       .readdirSync(tree.agentsDir)
@@ -86,7 +96,7 @@ function agentFileNames(tree: AgentTree): string[] {
   }
 }
 
-function fileOf(tree: AgentTree, name: string): string | undefined {
+function fileOf(tree: AgentEditorContext, name: string): string | undefined {
   const lower = `${name.toLowerCase()}.json`;
   try {
     const found = fs.readdirSync(tree.agentsDir).find((n) => n.toLowerCase() === lower);
@@ -119,7 +129,7 @@ export function newAgentForm(limits?: AgentFormLimits): AgentForm {
 }
 
 /** An agent file as the form shows it (also one that did not load, so it can be fixed here). */
-export function readAgentForm(tree: AgentTree, name: string): AgentForm {
+export function readAgentForm(tree: AgentEditorContext, name: string): AgentForm {
   const file = fileOf(tree, name);
   if (!file) throw new Error(`No agent named "${name}".`);
   const raw = readRaw(file);
@@ -159,7 +169,7 @@ export function instructionsLength(text: string, files: ReadonlyArray<{ name: st
  * Checks a form, field by field. `original` is the agent being edited
  * (undefined for a new one): its own name is not a clash.
  */
-export function validateAgentForm(tree: AgentTree, form: AgentForm, limits: AgentFormLimits, original?: string): AgentFormErrors {
+export function validateAgentForm(tree: AgentEditorContext, form: AgentForm, limits: AgentFormLimits, original?: string): AgentFormErrors {
   const errors: AgentFormErrors = {};
   const name = form.name.trim();
   if (!name) errors.name = 'Give the agent a name.';
@@ -278,7 +288,7 @@ function formField(field: string | undefined): keyof AgentForm | undefined {
  * Throws AgentFormError with the problems by field; nothing is written then.
  * Returns the agent's file.
  */
-export function saveAgentForm(tree: AgentTree, form: AgentForm, limits: AgentFormLimits, original?: string): string {
+export function saveAgentForm(tree: AgentEditorContext, form: AgentForm, limits: AgentFormLimits, original?: string): string {
   const errors = validateAgentForm(tree, form, limits, original);
   if (Object.keys(errors).length) throw new AgentFormError(errors);
   const name = form.name.trim();
@@ -317,7 +327,7 @@ export function saveAgentForm(tree: AgentTree, form: AgentForm, limits: AgentFor
 }
 
 /** Other agents' "N-old.json" entries become "N-new.json". */
-function renameGrants(tree: AgentTree, from: string, to: string): void {
+function renameGrants(tree: AgentEditorContext, from: string, to: string): void {
   for (const n of fs.readdirSync(tree.agentsDir)) {
     if (!n.toLowerCase().endsWith('.json')) continue;
     const file = path.join(tree.agentsDir, n);
@@ -340,7 +350,7 @@ function renameGrants(tree: AgentTree, from: string, to: string): void {
 }
 
 /** Copies an agent to "<name> copy" (numbered when taken); returns the new name. */
-export function duplicateAgentFile(tree: AgentTree, name: string): string {
+export function duplicateAgentFile(tree: AgentEditorContext, name: string): string {
   const file = fileOf(tree, name);
   if (!file) throw new Error(`No agent named "${name}".`);
   const base = path.basename(file).replace(/\.json$/i, '');
@@ -354,7 +364,7 @@ export function duplicateAgentFile(tree: AgentTree, name: string): string {
 }
 
 /** Deletes an agent's file (its container is removed by the caller; workspaces stay). */
-export function deleteAgentFile(tree: AgentTree, name: string): void {
+export function deleteAgentFile(tree: AgentEditorContext, name: string): void {
   const file = fileOf(tree, name);
   if (!file) throw new Error(`No agent named "${name}".`);
   fs.rmSync(file);

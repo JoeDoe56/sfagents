@@ -1,3 +1,4 @@
+import type { FullControlManager } from '../runtime/full-control.js';
 import type { NetworkLevel } from '../container/network.js';
 import type { HostCommands } from './host-commands.js';
 import type { PatchFormat } from './sfa-patch.js';
@@ -10,6 +11,7 @@ import type { PatchFormat } from './sfa-patch.js';
 export interface ToolContext {
   /** The agent's id: it names its container. */
   readonly agentId: string;
+  readonly fullControl?: { manager: FullControlManager; owner: object };
   /** Upper bound on the text returned to the model from one tool call. */
   readonly maxOutputChars: number;
   /** Environment variable names removed from spawned processes (MCP servers). */

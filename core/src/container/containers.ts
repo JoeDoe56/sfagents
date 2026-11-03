@@ -1,3 +1,4 @@
+import { uiNativeFile } from '../ui/ui.js';
 /**
  * Agent containers: one long-lived container per agent, all from the same
  * image (ghcr.io/joedoe56/sfagents-agent), managed by SF Agents.
@@ -42,7 +43,7 @@ export const CONTAINER_WORKSPACES = '/workspaces';
 export const CONTAINER_ROOTS = '/roots';
 /** SF Agents' commands inside containers, and the names they run as on the host. */
 /** SF Agents' commands in every container; each hands its call to SF Agents. */
-export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact', 'sfa-mcp', 'sfa-git', 'sfa-ci'];
+export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact', 'sfa-mcp', 'sfa-git', 'sfa-ci', 'sfa-ui'];
 /** Commands that are scripts of their own in the container but also ask SF Agents. */
 const SCRIPT_COMMANDS: readonly string[] = [VIEW_COMMAND];
 /** Capabilities sudo and apt need; everything else (NET_RAW, NET_ADMIN, SYS_*) stays dropped. */
@@ -244,6 +245,8 @@ export class ContainerManager {
   /** The files the bridge puts in an agent's /run/sfa/bin. */
   runFiles(): Record<string, BridgeFile> {
     const files: Record<string, BridgeFile> = {
+      'sfa-desktop': { content: uiNativeFile('desktop.sh') },
+      'sfa-ui-native.py': { content: uiNativeFile('linux.py'), mode: 0o644 },
       'sfa-init.cjs': { content: INIT_SOURCE, mode: 0o644 },
       'sfa-client.cjs': { content: CLIENT_SOURCE, mode: 0o644 },
       'sfa-exec': { content: EXEC_SOURCE },
@@ -379,7 +382,7 @@ export class ContainerManager {
       const isDir = fs.statSync(h, { throwIfNoEntry: false })?.isDirectory();
       args.push('--mount', isDir ? `type=tmpfs,dst=${target},tmpfs-size=65536` : `type=bind,src=/dev/null,dst=${target},readonly`);
     }
-    args.push('-e', `SFA_AGENT=${cid}`, this.image, 'node', '/run/sfa/bin/sfa-init.cjs');
+    args.push('-e', 'DISPLAY=:99', '-e', 'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/sfa-desktop-bus', '-e', 'NO_AT_BRIDGE=0', '-e', 'ACCESSIBILITY_ENABLED=1', '-e', 'QT_ACCESSIBILITY=1', '-e', 'GTK_MODULES=gail:atk-bridge', '-e', 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1', '-e', `SFA_AGENT=${cid}`, this.image, 'node', '/run/sfa/bin/sfa-init.cjs');
     return args;
   }
 
@@ -432,7 +435,7 @@ export class ContainerManager {
         if (!CONTAINER_COMMANDS.includes(name!) && !SCRIPT_COMMANDS.includes(name!)) throw new Error(`Unknown command ${name}.`);
         if (!context) throw new Error(`${name} works only while SF Agents runs one of this agent's commands.`);
         const cwd = typeof request.cwd === 'string' ? containerToHostPath(request.cwd, state.mounts) : undefined;
-        reply = await runHostCommand([name!, ...rest.map((a) => this.argToHost(a, request.cwd as string, state.mounts))], context.cmds, {
+        reply = await runHostCommand([name!, ...rest.map((a) => name === 'sfa-ui' ? a : this.argToHost(a, request.cwd as string, state.mounts))], context.cmds, {
           ...(cwd ? { cwd } : {}),
           ...(typeof request.stdin === 'string' ? { stdin: request.stdin } : {}),
           callId: context.callId,

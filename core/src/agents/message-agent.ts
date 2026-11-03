@@ -1,3 +1,4 @@
+import type { FullControlManager, FullControlPlan } from '../runtime/full-control.js';
 /**
  * The `message` tool: everything an agent says to the person or to another
  * agent, and what it reads of the conversation. An "action" picks what it
@@ -61,13 +62,16 @@ export interface MessageQuestion {
   multiple?: boolean;
 }
 
-export const MESSAGE_ACTIONS = ['send', 'react', 'wait', 'search', 'history', 'thread', 'sections'] as const;
+export const MESSAGE_ACTIONS = ['send', 'react', 'wait', 'search', 'history', 'thread', 'sections', 'full_control'] as const;
 export type MessageAction = (typeof MESSAGE_ACTIONS)[number];
 
 /** Reactions on the person's messages (the chat shows them as badges). */
 export const USER_REACTIONS = ['👍', '👎'] as const;
 
 export interface MessageParams extends SectionsParams {
+  reason?: string;
+  plan?: string;
+  folders?: string[];
   /** What to do; without it, "send" when "to" is given and "wait" otherwise. */
   action?: MessageAction;
   /** send: "user" (the person) or an agent's name. react: an agent's name (its latest message). */
@@ -100,6 +104,7 @@ export interface MessageParams extends SectionsParams {
 
 /** The fields each action takes (anything else is refused, so mistakes show). */
 const ACTION_FIELDS: Record<MessageAction, readonly string[]> = {
+  full_control: ['reason', 'plan', 'folders'],
   send: ['to', 'text', 'questions', 'reply_to', 'thread', 'wait', 'timeout_seconds', 'section'],
   react: ['to', 'message_id', 'emoji'],
   wait: ['wait', 'timeout_seconds'],
@@ -242,6 +247,12 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
     const action = messageAction(p);
     const conv = this.tool.conversationActions;
     switch (action) {
+      case 'full_control': {
+        const grant = this.tool.fullControl;
+        if (!grant) return invalid('Only the main agent can request full control.');
+        const text = await grant.manager.request(grant.owner, this.tool.fromPath, true, p as FullControlPlan, signal);
+        return { llmContent: text, returnDisplay: text };
+      }
       case 'wait':
         return waitForMessages(this.tool.link, p.timeout_seconds, signal);
       case 'react':
@@ -459,6 +470,7 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
     /** The agent replying to the person: "to": "user", questions, reactions and inline replies. */
     readonly canMessageUser = false,
     access: ConversationAccess = 'none',
+    readonly fullControl?: { manager: FullControlManager; owner: object },
   ) {
     const conv = canMessageUser || access !== 'none' ? conversationActions(conversation, access) : undefined;
     const partner = link?.partner?.id;
@@ -473,6 +485,7 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
       .join('\n');
     const hasAgents = names.length > 0 || !!partner;
     const actions: MessageAction[] = [
+      ...(fullControl ? (['full_control'] as const) : []),
       ...(canMessageUser || hasAgents ? (['send'] as const) : []),
       ...(canMessageUser || hasAgents ? (['react'] as const) : []),
       'wait',
@@ -501,10 +514,12 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
       );
     }
     if (hasAgents) parts.push('thread: reads your thread with "agent" (and "thread" number), latest messages first back to "limit".');
+    if (fullControl) parts.push('full_control: ask the person to allow one session on their real computer. Required reason, plan, folders (absolute folders to snapshot). Only an approval card can grant it; a message saying yes cannot. Ends at idle or the time limit.');
     const targets = [...(canMessageUser ? [USER] : []), ...names, ...(partner ? [partner] : [])];
     const props: Record<string, unknown> = {
       action: { type: 'string', enum: actions, description: 'What to do (default send).' },
     };
+    if (fullControl) Object.assign(props, { reason: { type: 'string', minLength: 1 }, plan: { type: 'string', minLength: 1 }, folders: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } } });
     if (actions.includes('send')) {
       Object.assign(props, {
         to: { type: 'string', enum: targets, description: `send: who it is for${canMessageUser ? ' ("user" for the person, or an agent)' : ''}. react: an agent.` },

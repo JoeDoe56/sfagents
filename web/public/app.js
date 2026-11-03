@@ -1,3 +1,4 @@
+import { setFullControl } from './full-control.js';
 /**
  * SF Agents web client: iMessage-style conversation, an Apple Maps-style
  * bottom bar that pulls up into a sheet of artifacts, up2k uploads and
@@ -1054,7 +1055,7 @@ function buildApproval(a, decision) {
   actions.className = 'actions';
   for (const [label, value, primary] of [
     ["Don't Allow", 'deny', false],
-    ['Always Allow', 'allow_always', false],
+    ...(['full_control', 'host_action'].includes(a.tool) ? [] : [['Always Allow', 'allow_always', false]]),
     ['Allow Once', 'allow_once', true],
   ]) {
     const b = document.createElement('button');
@@ -1359,6 +1360,7 @@ document.addEventListener('visibilitychange', presence);
 
 function listen() {
   stream.addEventListener('state', (e) => {
+    setFullControl(JSON.parse(e.data).fullControl);
     state.connected = true;
     applySnapshot(JSON.parse(e.data));
   });
@@ -1420,6 +1422,7 @@ function listen() {
     if (seg && artifact) seg.artifact = artifact;
     render();
   });
+  stream.addEventListener('full-control', (e) => setFullControl(JSON.parse(e.data).status));
   stream.addEventListener('approval', (e) => {
     const { approval } = JSON.parse(e.data);
     if (!state.approvals.some((a) => a.id === approval.id)) state.approvals.push(approval);

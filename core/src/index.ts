@@ -194,3 +194,10 @@ export { wslStatus, setupDistro, mergeWslConfig, wslConfigPath, wslConfigSetting
 export { GitWorkspaces, GitError, CHECKPOINT_PREFIX, TASK_BRANCH_PREFIX, CONTAINER_WORKSPACES_DIR, taskOfPath, repoNameOf, githubRepo, hostGitCredential, parsePatch, type GitRunner, type GitCredential, type TaskRecord, type RepoRecord, type WorkspaceInfo, type ReviewFile, type ReviewHunk } from './git/workspaces.js';
 export { GIT_COMMAND, CI_COMMAND, GIT_USAGE, CI_USAGE, runGitCommand, runCiCommand, type GitGrant } from './git/sfa-git.js';
 export { defaultGitWorkspaces } from './git/default.js';
+
+export { GitHubPullRequests, githubApi } from './git/github.js';
+
+export { FullControlManager, RollbackJournal, runHostShell, type FullControlPlan, type FullControlStatus } from './runtime/full-control.js';
+
+export { UiService, ContainerUiAdapter, WindowsUiAdapter, runUiCommand, riskyControl, UI_COMMAND, UI_USAGE, type UiAdapter, type UiControl, type UiGrant, type UiReply } from './ui/ui.js';
+export { StartLux, type UiDecider, type DecisionQuestion, type DecisionAnswer } from './ui/startlux.js';

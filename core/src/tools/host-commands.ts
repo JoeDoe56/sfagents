@@ -1,3 +1,4 @@
+import { UI_COMMAND, UI_USAGE, runUiCommand, type UiGrant } from '../ui/ui.js';
 /**
  * SF Agents' own shell commands: `sfa-web` (web access), `sfa-artifact`
  * (artifacts) and `sfa-mcp` (MCP servers). They run in SF Agents, not in
@@ -14,7 +15,7 @@ import type { ToolImage } from './tools.js';
 import { CI_COMMAND, CI_USAGE, GIT_COMMAND, GIT_USAGE, runCiCommand, runGitCommand, type GitGrant } from '../git/sfa-git.js';
 
 export const WEB_COMMAND = 'sfa-web';
-export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, MCP_COMMAND, VIEW_COMMAND, GIT_COMMAND, CI_COMMAND];
+export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, MCP_COMMAND, VIEW_COMMAND, GIT_COMMAND, CI_COMMAND, UI_COMMAND];
 
 /** Web requests an agent may make per run, unless limits.webRequests says otherwise. */
 export const DEFAULT_WEB_REQUESTS = 25;
@@ -42,10 +43,12 @@ export interface HostCommands {
   view?: ViewGrant;
   /** sfa-git and sfa-ci (Git workspaces). */
   git?: GitGrant;
+  ui?: UiGrant;
 }
 
 /** How a command is described where tools are listed (the agent sheet): what it does, and its usage. */
 export function hostCommandSchema(name: string): { name: string; description: string; usage: string } {
+  if (name === UI_COMMAND) return { name, description: 'Drives apps in the agent container, or host apps during an approved full-control session. Uses accessibility patterns and StartLux 4B Instant.', usage: UI_USAGE };
   if (name === GIT_COMMAND) return { name, description: 'Git workspaces: clone, task worktrees, update from main, squash, push (no force), undo a run. A command in the shell tool.', usage: GIT_USAGE };
   if (name === CI_COMMAND) return { name, description: 'Pushes the task and reports its GitHub Actions results and artifacts (public repositories). A command in the shell tool.', usage: CI_USAGE };
   if (name === VIEW_COMMAND) return { name, description: 'Shows images, video (contact sheets, frames, crops), image diffs and PDF pages to the model, and transcribes speech. A command in the shell tool.', usage: VIEW_USAGE };
@@ -58,7 +61,7 @@ export type HostCommandReply = { ok: true; text: string; truncated?: boolean } |
 
 /** The commands this agent has, by name. */
 export function availableHostCommands(cmds: HostCommands): string[] {
-  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : []), ...(cmds.git ? [GIT_COMMAND, CI_COMMAND] : [])];
+  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : []), ...(cmds.git ? [GIT_COMMAND, CI_COMMAND] : []), ...(cmds.ui ? [UI_COMMAND] : [])];
 }
 
 async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
@@ -94,6 +97,7 @@ export async function runHostCommand(
 ): Promise<HostCommandReply> {
   const [name, ...args] = argv;
   try {
+    if (name === UI_COMMAND) return await runUiCommand(cmds.ui, args, { signal: o.signal, ...(o.images ? { images: o.images } : {}) });
     if (name === WEB_COMMAND) {
       if (!cmds.web) return { ok: false, error: 'This agent has no web access (it needs network level "on").' };
       return await web(cmds.web, args, o.signal);

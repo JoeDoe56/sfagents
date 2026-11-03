@@ -1,3 +1,4 @@
+import { openFullControlJournal } from './full-control.js';
 /**
  * The send button's sheet: the agent, its reasoning effort and how full its
  * working context is. The medium detent shows the agent (a pop-up button
@@ -448,7 +449,8 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       parts.agentSection = createSection({ rows: [parts.agentRow, parts.accountRow], note: info?.model ?? '' });
       const line = parts.agentSection.el;
       const workspacesRow = createRow({ icon: 'folder', iconTint: '#ff9f0a', title: 'Workspaces', accessory: 'chevron', onTap: () => openWorkspaces() });
-      const treeSection = createSection({ rows: [parts.treeRow, workspacesRow] }).el;
+      const fullControlRow = createRow({ icon: 'clock', iconTint: '#ff9f0a', title: 'Full Control Files', accessory: 'chevron', onTap: () => openFullControlJournal() });
+      const treeSection = createSection({ rows: [parts.treeRow, workspacesRow, fullControlRow] }).el;
 
       const effort = el('div', 'ag-effort');
       const label = el('p', 'ag-label ag-unit');

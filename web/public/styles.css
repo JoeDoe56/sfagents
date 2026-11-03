@@ -1149,3 +1149,7 @@ button.tree-card:active { transform: scale(0.97); background: #3a3a3c; }
 .ws-hunk-bar .diff-line { flex: 1; min-width: 0; font: 12px/18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 4px 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-heading { margin: 16px 20px 6px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
 .ws-message { display: block; box-sizing: border-box; width: calc(100% - 40px); margin: 0 20px; padding: 10px 12px; font: 13px/18px ui-monospace, SFMono-Regular, Menlo, monospace; color: inherit; background: var(--fill-2, rgba(128, 128, 128, 0.12)); border: 1px solid var(--separator, rgba(128, 128, 128, 0.35)); border-radius: 10px; resize: vertical; }
+
+.full-control-banner { position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:10000; display:flex; gap:12px; align-items:center; padding:10px 16px; border-radius:16px; background:#8a3900; color:white; box-shadow:0 4px 20px #0005; }
+.full-control-banner[hidden] { display:none; }
+.ws-pr-info { white-space:pre-wrap; overflow-wrap:anywhere; }

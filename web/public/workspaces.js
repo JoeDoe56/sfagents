@@ -28,7 +28,7 @@ const enc = encodeURIComponent;
 export function workspacePills(list) {
   return (list ?? [])
     .filter((w) => w.changed > 0 || w.ahead > 0)
-    .map((w) => ({ id: `ws:${w.repo}/${w.task}`, name: `${w.repo}/${w.task}`, branch: w.branch, files: w.changed, added: w.added ?? 0, removed: w.removed ?? 0, path: w.path, workspace: w }));
+    .map((w) => ({ id: `ws:${w.repo}/${w.task}`, name: `${w.repo}/${w.task}${w.ci ? ` · CI ${w.ci.state === 'pass' ? '✓' : w.ci.state === 'fail' ? '✕' : w.ci.state === 'pending' ? '…' : w.ci.state}` : ''}${w.pr ? ` · PR #${w.pr.number} ${w.pr.checks}` : ''}`, branch: w.branch, files: w.changed, added: w.added ?? 0, removed: w.removed ?? 0, path: w.path, workspace: w }));
 }
 
 function stateText(w) {
@@ -92,13 +92,15 @@ export function openWorkspace(w, from) {
       const body = sheet.body;
       const summary = el('p', 'diff-summary', `${w.branch} · ${stateText(w)}`);
       const actions = el('div', 'ws-actions');
+      const prActions = el('div', 'ws-actions');
+      const prInfo = el('pre', 'ws-pr-info');
       const list = el('div', 'diff-list', 'Loading…');
       const message = el('textarea', 'ws-message');
       message.rows = 4;
       message.placeholder = 'Commit message';
       message.setAttribute('aria-label', 'Commit message');
       const finishNote = el('p', 'diff-note', 'Squash puts the run checkpoints (and anything uncommitted) into one commit with this message.');
-      body.append(summary, actions, list, el('h3', 'ws-heading', 'Commit message'), message, finishNote);
+      body.append(summary, actions, prActions, prInfo, list, el('h3', 'ws-heading', 'Commit message'), message, finishNote);
 
       const busy = (on) => body.classList.toggle('ws-busy', on);
       const run = async (label, action, extra, confirmText) => {
@@ -145,6 +147,19 @@ export function openWorkspace(w, from) {
       async function load() {
         const [review, all] = await Promise.all([getJson(`/api/workspaces/${enc(w.repo)}/${enc(w.task)}`), getJson('/api/workspaces')]);
         folders = all.folders ?? [];
+        current = all.workspaces.find((x) => x.repo === w.repo && x.task === w.task) ?? current;
+        prActions.replaceChildren();
+        const pr = current.pr;
+        prInfo.textContent = pr ? `PR #${pr.number} · ${pr.state} · checks ${pr.checks}\n${pr.comments || 'No review comments.'}` : '';
+        if (all.pullRequests) {
+          prActions.append(button(pr ? 'Refresh PR and Reviews' : 'Open Draft PR', () => run('Pull Request', pr ? 'pr-refresh' : 'pr-open')));
+          if (pr) {
+            const link = el('a', 'ws-button', 'View on GitHub');
+            link.href = pr.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+            prActions.append(link, button('Send Reviews to Agent', () => run('Send Reviews', 'pr-reviews')));
+            if (!['closed', 'merged'].includes(pr.state)) prActions.append(button('Merge PR', () => run('Merge PR', 'pr-merge', { sha: pr.sha }, `Merge PR #${pr.number} at ${pr.sha.slice(0, 7)} into ${current.defaultBranch}? A draft will be marked ready before merging.`)));
+          }
+        }
         if (!message.value || message.dataset.drafted === message.value) {
           message.value = review.message;
           message.dataset.drafted = review.message;

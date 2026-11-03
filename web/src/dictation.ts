@@ -894,6 +894,21 @@ export class Dictation {
    * and resolves with Qwen3-ASR's address. A GPU build that cannot start or
    * run Qwen3-ASR fails here, and the next build is tried.
    */
+  private uiGpuReservationMb = 0;
+
+  /** Reserve room for StartLux; move speech to CPU only when the free GPU memory is insufficient. */
+  async reserveUiGpu(mb: number): Promise<void> {
+    this.uiGpuReservationMb = mb;
+    if (this.closed || !this.servers.length) return;
+    const free = await nvidiaFreeMb(this.options.hardware?.() ?? detectHardware());
+    const onGpu = this.status_.placement?.asr === 'gpu' || this.status_.placement?.tts === 'gpu';
+    if (mb > 0 && onGpu && (free === null || free < mb)) {
+      this.stop(); await this.start();
+    } else if (mb === 0 && (this.status_.placement?.asr === 'cpu' || this.status_.placement?.tts === 'cpu')) {
+      this.stop(); await this.start();
+    }
+  }
+
   private async launchAll(backend: Backend): Promise<string> {
     const threads = await physicalCores();
     const voice = this.have(this.ttsModel);
@@ -902,7 +917,8 @@ export class Dictation {
     // What goes on the GPU, best first; the rest goes on the CPU.
     const plans: string[][] = backend === 'cpu' ? [[]] : voice ? [[TTS_ID, ASR_ID], [TTS_ID], [ASR_ID], []] : [[ASR_ID], []];
     const all = voice ? [TTS_ID, ASR_ID] : [ASR_ID];
-    const free = backend === 'cpu' ? null : await nvidiaFreeMb(this.options.hardware?.() ?? detectHardware());
+    const available = backend === 'cpu' ? null : await nvidiaFreeMb(this.options.hardware?.() ?? detectHardware());
+    const free = this.uiGpuReservationMb ? Math.max(0, (available ?? 0) - this.uiGpuReservationMb) : available;
     for (const gpu of plans) {
       const cpu = all.filter((id) => !gpu.includes(id));
       const need = gpu.reduce((n, id) => n + GPU_PEAK_MB[id]!, 0) + GPU_HEADROOM_MB;

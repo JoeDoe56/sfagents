@@ -209,7 +209,7 @@ describe('sections: the message tool', () => {
     const tools = first.request.tools as FunctionDeclaration[];
     assert.deepEqual(tools.map((t) => t.name).sort(), ['message', 'shell']);
     const actions = ((tools.find((t) => t.name === 'message')!.parameters as { properties: { action: { enum: string[] } } }).properties.action.enum);
-    assert.deepEqual(actions, ['send', 'react', 'wait', 'search', 'history', 'sections']);
+    assert.deepEqual(actions, ['full_control', 'send', 'react', 'wait', 'search', 'history', 'sections']);
     assert.match((first.messages[0] as { content: string }).content, /<conversation_memory>[\s\S]*"section": "keep"/);
     const afterClear = providers.get('main')!.requests.find((r) => (r.messages as ChatMessage[]).some((m) => m.role === 'user' && String(m.content).startsWith('What retry limit')))!;
     assert.doesNotMatch(JSON.stringify(afterClear.messages), /retry limit is 5/);
@@ -318,7 +318,7 @@ describe('sections: the message tool', () => {
     await new AgentRuntime({ tree, providerFactory: factory }).createSession().run('hi');
     const tools = providers.get('main')!.requests[0]!.request.tools!;
     assert.deepEqual(tools.map((t) => t.name), ['shell', 'message']);
-    assert.deepEqual((tools[1]!.parameters as { properties: { action: { enum: string[] } } }).properties.action.enum, ['wait']);
+    assert.deepEqual((tools[1]!.parameters as { properties: { action: { enum: string[] } } }).properties.action.enum, ['full_control', 'wait']);
   });
 });
 

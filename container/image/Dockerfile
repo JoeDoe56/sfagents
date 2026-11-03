@@ -23,7 +23,14 @@ ARG JAVA_MAJOR=21
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ENV LANG=C.UTF-8 \
+ENV DISPLAY=:99 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/sfa-desktop-bus \
+    NO_AT_BRIDGE=0 \
+    ACCESSIBILITY_ENABLED=1 \
+    QT_ACCESSIBILITY=1 \
+    GTK_MODULES=gail:atk-bridge \
+    QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 \
+    LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     TZ=Etc/UTC
 
@@ -44,7 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       php-cli php-curl php-mbstring php-xml php-zip php-sqlite3 php-intl composer \
       lua5.4 liblua5.4-dev luarocks \
       ffmpeg imagemagick poppler-utils ghostscript \
-      xvfb xauth fonts-dejavu fonts-liberation fonts-noto-color-emoji \
+      xvfb xauth dbus-x11 at-spi2-core python3-pyatspi python3-gi gir1.2-gtk-3.0 openbox x11-utils xdotool xterm mousepad libatk-bridge2.0-0 gsettings-desktop-schemas fonts-dejavu fonts-liberation fonts-noto-color-emoji \
  && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
  && git lfs install --system \
  && rm -rf /var/lib/apt/lists/*

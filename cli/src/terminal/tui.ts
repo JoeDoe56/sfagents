@@ -26,6 +26,7 @@ import {
   agentEditorPane,
   agentsPane,
   workspacesPane,
+  fullControlPane,
   artifactsPane,
   contextPane,
   diffsPane,
@@ -150,6 +151,7 @@ const HELP = [
   '  /context           plan usage and what the working context holds',
   '  /files [folder]    the file manager',
   '  /agents            the agents: edit one, or make a new one (/edit-agent, /new-agent)',
+  '  /full-control      session countdown, Stop, file journal and undo (/full-control stop)',
   '  /workspaces        the Git task workspaces: review, squash, push, undo a run',
   '  /settings          settings, providers and speech',
   '  /speak [stop]      speak the latest reply aloud on this computer (or stop)',
@@ -174,6 +176,7 @@ export class Tui {
   private live: { id: string; segments: Segment[]; replyTo?: string } | null = null;
   /** GenUI views by artifact id → title: the terminal names them and points to the web interface. */
   private views = new Map<string, string>();
+  private fullControl: { agent: string; expires: number } | null = null;
   private approvals: Approval[] = [];
   private readonly answered = new Map<string, string>();
   private reactions: Record<string, string> = {};
@@ -267,6 +270,8 @@ export class Tui {
       }),
     );
     this.cleanups.push(server.subscribe((event, data) => this.onEvent(event, data)));
+    const fullControlTimer = setInterval(() => { if (this.fullControl) this.draw(); }, 1000);
+    fullControlTimer.unref(); this.cleanups.push(() => clearInterval(fullControlTimer));
 
     readline.emitKeypressEvents(this.input);
     if (this.input.isTTY) this.input.setRawMode(true);
@@ -333,6 +338,7 @@ export class Tui {
     switch (event) {
       case 'state': {
         const s = data as { agent: AgentInfo; items: Item[]; more: boolean; live: Tui['live']; approvals: Approval[]; reactions?: Record<string, string>; read?: Tui['read']; notices?: Array<string | { text: string; level?: string }> };
+        this.fullControl = (data.fullControl as Tui['fullControl']) ?? null;
         this.agent = s.agent;
         this.items = s.items;
         this.more = s.more;
@@ -411,6 +417,8 @@ export class Tui {
         if (seg && typeof data.artifact === 'string') seg.artifact = data.artifact;
         break;
       }
+      case 'full-control':
+        this.fullControl = (data.status as Tui['fullControl']) ?? null; this.draw(); return;
       case 'approval': {
         const a = data.approval as Approval;
         if (!this.approvals.some((x) => x.id === a.id)) this.approvals.push(a);
@@ -558,6 +566,7 @@ export class Tui {
     const pending = this.approvals.find((a) => !this.answered.has(a.id));
     if (pending && !this.text && !this.prompt && str && /^[yan]$/i.test(str)) {
       const decision = { y: 'allow_once', a: 'allow_always', n: 'deny' }[str.toLowerCase() as 'y' | 'a' | 'n'] as 'allow_once' | 'allow_always' | 'deny';
+      if (decision === 'allow_always' && ['full_control', 'host_action'].includes(pending.tool)) return;
       try {
         this.options.server.answer(pending.id, decision);
       } catch (error) {
@@ -1088,6 +1097,9 @@ export class Tui {
       }
       case '/agents':
         return this.openPane(agentsPane(this.host));
+      case '/full-control':
+        if (arg === 'stop') { this.api('POST', 'full-control', { action: 'stop' }).catch((e) => this.notice(String(e), 'error')); return; }
+        return this.openPane(fullControlPane(this.host));
       case '/workspaces':
         return this.openPane(workspacesPane(this.host));
       case '/new-agent':
@@ -1415,6 +1427,10 @@ export class Tui {
       });
       if (!this.approvals.length) out.push('', color.dim(`  ${this.agent?.id ?? 'The agent'} is working…`));
     }
+    if (this.fullControl) {
+      const seconds = Math.max(0, Math.ceil((this.fullControl.expires - Date.now()) / 1000));
+      out.push(color.yellow(`  FULL CONTROL · ${this.fullControl.agent} · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} left · /full-control stop`));
+    }
     for (const a of this.approvals) {
       const decision = this.answered.get(a.id);
       out.push('', color.yellow(color.bold(`  ? ${clean(a.agent)} wants to use ${clean(a.tool)}`)));
@@ -1423,7 +1439,7 @@ export class Tui {
       out.push(
         decision
           ? `    ${decision === 'deny' ? color.red('Denied') : color.green(decision === 'allow_always' ? 'Allowed always' : 'Allowed once')}`
-          : `    ${color.bold('[y]')} Allow once   ${color.bold('[a]')} Always allow   ${color.bold('[n]')} Deny`,
+          : ['full_control', 'host_action'].includes(a.tool) ? `    ${color.bold('[y]')} Allow once   ${color.bold('[n]')} Deny` : `    ${color.bold('[y]')} Allow once   ${color.bold('[a]')} Always allow   ${color.bold('[n]')} Deny`,
       );
     }
     if (this.infoLines.length) out.push('', ...this.infoLines.flatMap((l) => indent(wrap(l, w))).map(color.dim));
