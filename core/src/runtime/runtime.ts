@@ -1,3 +1,4 @@
+import { containerManager } from '../container/containers.js';
 import { UiService, ContainerUiAdapter, WindowsUiAdapter } from '../ui/ui.js';
 import { FullControlManager, RollbackJournal } from './full-control.js';
 import { GitHubPullRequests } from '../git/github.js';
@@ -284,12 +285,16 @@ export class AgentRuntime implements AgentMessenger {
     link: RunLink = idleLink(node.id),
   ): Promise<Map<string, AnyDeclarativeTool>> {
     const d = node.definition;
+    const current = () => this.tree.byId.get(node.id)?.definition;
+    const level = () => current()?.network ?? 'off';
+    const runtime = this;
     // Access defaults depend on where the agent works (see conversationAccess).
     const depth = role === 'main' ? 0 : 1;
     const tools = new Map<string, AnyDeclarativeTool>();
     // SF Agents' own commands: sfa-web (network "on") and sfa-artifact (artifacts.access "create").
     const commands: HostCommands = {
-      ...(d.network === 'on' ? { web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS } } : {}),
+      networkLevel: level,
+      web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS },
       ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined) } : {}),
     };
     if (!commands.artifact) delete commands.artifact;
@@ -308,7 +313,7 @@ export class AgentRuntime implements AgentMessenger {
         workspaces: this.git,
         pullRequests: new GitHubPullRequests(this.git, this.pullRequests),
         agentId: node.id,
-        level: d.network,
+        get level() { return level(); },
         approve: async (question) => {
           if (approveAll) return true;
           if (!confirm) return false;
@@ -323,13 +328,13 @@ export class AgentRuntime implements AgentMessenger {
       maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
       secretEnvNames: this.secretEnvNames,
       shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
-      container: { level: d.network, roots: this.projectFolders(), hidden: this.hiddenPaths(), ...d.container },
+      get container() { return { level: level(), roots: runtime.projectFolders(), hidden: runtime.hiddenPaths(), ...current()?.container }; },
       patchFormat: this.patchFormat(d),
       commands,
     };
     const hostGrant = role === 'main' && agentPath.length === 1 ? { manager: this.fullControl, owner: link } : undefined;
     commands.ui = {
-      container: new ContainerUiAdapter({ agentId: node.id, level: d.network, roots: this.projectFolders(), hidden: this.hiddenPaths(), ...d.container }),
+      container: new ContainerUiAdapter(() => ({ agentId: node.id, ...ctx.container })),
       ...(hostGrant ? { host: new WindowsUiAdapter(), fullControl: hostGrant } : {}), service: this.ui,
       approve: async (question, signal) => {
         if (!this.confirm) return false;
@@ -432,12 +437,14 @@ export class AgentRuntime implements AgentMessenger {
   /** Runs one agent until it answers, fails, times out, runs out of turns or is cancelled. */
   /**
    * Takes newly loaded agents (their files or mcp.json changed). Runs in
-   * progress finish with what they started with; the next turn of every
-   * session uses the new definitions. MCP servers restart only when mcp.json
+   * progress keep their definitions, except network levels take effect on the
+   * next request and revoke existing tunnels. The next turn uses all new
+   * definitions. MCP servers restart only when mcp.json
    * changed, and the old connections close once no run uses them.
    */
   reload(tree: AgentTree): { mcpChanged: boolean } {
     const mcpChanged = JSON.stringify(tree.mcp.servers) !== JSON.stringify(this.tree.mcp.servers);
+    for (const id of this.tree.byId.keys()) containerManager().setNetworkLevel(id, tree.byId.get(id)?.definition.network ?? 'off');
     this.tree = tree;
     this.secretEnvNames = credentialEnvNames([...tree.byId.values()].map((n) => n.definition));
     if (mcpChanged && this.ownsMcp) {
@@ -611,7 +618,7 @@ export class AgentRuntime implements AgentMessenger {
       try {
         for await (const event of provider.stream({
           model: d.model,
-          messages: messages.map((m, i) => i === 0 && m.role === 'system' ? { ...m, content: `${m.content}\n\n${this.fullControl.context(link)}` } : m),
+          messages: messages.map((m, i) => i === 0 && m.role === 'system' ? { ...m, content: `${m.content}\n\n${this.fullControl.context(link)}\nNetwork level now: ${this.tree.byId.get(node.id)?.definition.network ?? 'off'} (the current editor setting overrides earlier network descriptions).` } : m),
           tools: declarations(),
           reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,

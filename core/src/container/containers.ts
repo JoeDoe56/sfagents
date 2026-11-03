@@ -190,6 +190,8 @@ interface AgentState {
   mounts: RootMount[];
   /** Files and folders on this computer the container does not see (secrets, SF Agents' data). */
   hidden: string[];
+  /** Outgoing network tunnels; local SF Agents command channels are excluded. */
+  connections: Set<Duplex>;
   /** Commands running now, newest last: their host commands and call. */
   contexts: Array<{ cmds: HostCommands; callId?: string; signal: AbortSignal; command?: string; images?: ToolImage[] }>;
 }
@@ -270,11 +272,11 @@ export class ContainerManager {
     const mounts = rootMounts(spec.roots);
     const state = this.agents.get(cid);
     if (state) {
-      state.level = spec.level;
+      this.setNetworkLevel(spec.agentId, spec.level);
       state.mounts = mounts;
       state.hidden = [...(spec.hidden ?? [])];
     } else {
-      this.agents.set(cid, { agentId: spec.agentId, level: spec.level, mounts, hidden: [...(spec.hidden ?? [])], contexts: [] });
+      this.agents.set(cid, { agentId: spec.agentId, level: spec.level, mounts, hidden: [...(spec.hidden ?? [])], connections: new Set(), contexts: [] });
     }
     const key = `${cid}\0${JSON.stringify([spec.roots, spec.hidden, spec.memoryMb, spec.cpus])}`;
     // Checking a container costs a few wsl.exe calls and a walk for secret
@@ -382,7 +384,7 @@ export class ContainerManager {
       const isDir = fs.statSync(h, { throwIfNoEntry: false })?.isDirectory();
       args.push('--mount', isDir ? `type=tmpfs,dst=${target},tmpfs-size=65536` : `type=bind,src=/dev/null,dst=${target},readonly`);
     }
-    args.push('-e', 'DISPLAY=:99', '-e', 'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/sfa-desktop-bus', '-e', 'NO_AT_BRIDGE=0', '-e', 'ACCESSIBILITY_ENABLED=1', '-e', 'QT_ACCESSIBILITY=1', '-e', 'GTK_MODULES=gail:atk-bridge', '-e', 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1', '-e', `SFA_AGENT=${cid}`, this.image, 'node', '/run/sfa/bin/sfa-init.cjs');
+    args.push('-e', `SFA_DESKTOP=${spec.agentId === GIT_HELPER_AGENT ? '0' : '1'}`, '-e', 'DISPLAY=:99', '-e', 'DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/sfa-desktop-bus', '-e', 'NO_AT_BRIDGE=0', '-e', 'NODE_USE_ENV_PROXY=1', '-e', 'ACCESSIBILITY_ENABLED=1', '-e', 'QT_ACCESSIBILITY=1', '-e', 'GTK_MODULES=gail:atk-bridge', '-e', 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1', '-e', `SFA_AGENT=${cid}`, this.image, 'node', '/run/sfa/bin/sfa-init.cjs');
     return args;
   }
 
@@ -406,17 +408,31 @@ export class ContainerManager {
     };
   }
 
+  /** Revoke existing tunnels when an editor change takes effect; the container stays running. */
+  setNetworkLevel(agentId: string, level: NetworkLevel): void {
+    const state = this.agents.get(containerIdFor(agentId));
+    if (!state || state.level === level) return;
+    state.level = level;
+    for (const stream of state.connections) stream.destroy();
+    state.connections.clear();
+  }
+
   private onConnection(cid: string, stream: Duplex): void {
     const state = this.agents.get(cid);
     if (!state) {
       stream.destroy();
       return;
     }
+    state.connections.add(stream);
+    stream.once('close', () => state.connections.delete(stream));
     handleProxyConnection(cid, stream, {
       level: () => this.agents.get(cid)?.level ?? 'off',
       command: () => state.contexts.at(-1)?.command,
       log: (event) => (this.options.onNetwork ?? ((e: NetworkEvent) => networkLog().add(e)))({ ...event, agent: state.agentId }),
-      hostChannel: (_cid, s, head) => this.hostChannel(state, s, head),
+      hostChannel: (_cid, s, head) => {
+        state.connections.delete(s);
+        this.hostChannel(state, s, head);
+      },
     });
   }
 

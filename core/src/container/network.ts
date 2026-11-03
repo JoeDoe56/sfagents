@@ -249,8 +249,15 @@ async function route(agent: string, stream: Duplex, headBytes: Buffer, rest: Buf
   try {
     addresses = await (h.lookup ?? defaultLookup)(host);
   } catch (error) {
+    if (stream.destroyed) return;
     record(host, port, false, `name lookup failed: ${error instanceof Error ? error.message : String(error)}`);
     return reply(stream, '502 Bad Gateway', `SF Agents: cannot resolve ${host}.\n`);
+  }
+  // An editor change can revoke this request while DNS is still pending.
+  if (stream.destroyed) return;
+  if (!levelAllows(h.level(agent), host, port).allowed) {
+    record(host, port, false, 'network level changed during name lookup');
+    return reply(stream, '403 Forbidden', 'SF Agents: the network level changed.\n');
   }
   const address = addresses.find((a) => !isPrivateAddress(a));
   if (!address) {

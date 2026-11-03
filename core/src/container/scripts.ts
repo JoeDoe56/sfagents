@@ -174,6 +174,12 @@ export const INIT_SOURCE = String.raw`'use strict';
 const net = require('node:net');
 const fs = require('node:fs');
 const RUN = '/run/sfa';
+// The advertised DISPLAY is ready for apps launched directly by shell too.
+// Older images keep working until the person updates their environment.
+if (process.env.SFA_DESKTOP !== '0' && fs.existsSync('/usr/bin/Xvfb') && fs.existsSync(RUN + '/bin/sfa-desktop')) {
+  const desktop = require('node:child_process').spawn('bash', [RUN + '/bin/sfa-desktop'], { stdio: 'ignore' });
+  desktop.on('error', (error) => console.error('sfa-init: desktop: ' + error.message));
+}
 const proxy = net.createServer((client) => {
   const upstream = net.connect(RUN + '/proxy.sock');
   client.pipe(upstream).pipe(client);

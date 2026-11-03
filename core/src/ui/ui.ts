@@ -67,18 +67,18 @@ export class WindowsUiAdapter implements UiAdapter {
 
 export class ContainerUiAdapter implements UiAdapter {
   private started?: Promise<string>;
-  constructor(private readonly spec: AgentContainerSpec) {}
+  constructor(private readonly spec: AgentContainerSpec | (() => AgentContainerSpec)) {}
   async request(p: Record<string, unknown>, signal: AbortSignal): Promise<UiReply> {
     signal.throwIfAborted();
     const { containerManager } = await import('../container/containers.js');
     const manager = containerManager();
     this.started ??= (async () => {
-      const name = await manager.prepare(this.spec);
+      const name = await manager.prepare(typeof this.spec === 'function' ? this.spec() : this.spec);
       const start = await manager.cli.run(['exec', '-d', '-u', 'agent', name, 'bash', '/run/sfa/bin/sfa-desktop'], { timeoutMs: 15_000 });
       if (start.code !== 0) throw new Error('The container desktop could not start. Pull the new agent image and Reset Environment.');
       for (let i = 0; i < 30; i++) {
         signal.throwIfAborted();
-        const ready = await manager.cli.run(['exec', '-u', 'agent', name, 'test', '-S', '/tmp/sfa-desktop-bus'], { timeoutMs: 5000 });
+        const ready = await manager.cli.run(['exec', '-u', 'agent', name, 'bash', '-c', 'test -S /tmp/sfa-desktop-bus && xdpyinfo -display :99 >/dev/null 2>&1'], { timeoutMs: 5000 });
         if (ready.code === 0) return name;
         await delay(100, undefined, { signal });
       }

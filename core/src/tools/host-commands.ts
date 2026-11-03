@@ -1,3 +1,4 @@
+import type { NetworkLevel } from '../container/network.js';
 import { UI_COMMAND, UI_USAGE, runUiCommand, type UiGrant } from '../ui/ui.js';
 /**
  * SF Agents' own shell commands: `sfa-web` (web access), `sfa-artifact`
@@ -33,6 +34,7 @@ export const WEB_USAGE = 'Usage:\n  sfa-web search <query>   Google results (JSO
 
 /** What one agent's commands may use in this run. */
 export interface HostCommands {
+  networkLevel?: () => NetworkLevel;
   /** Web access (network level "on"), with this run's remaining requests. */
   web?: WebGrant;
   /** Artifacts (artifacts.access "create"). */
@@ -61,7 +63,7 @@ export type HostCommandReply = { ok: true; text: string; truncated?: boolean } |
 
 /** The commands this agent has, by name. */
 export function availableHostCommands(cmds: HostCommands): string[] {
-  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : []), ...(cmds.git ? [GIT_COMMAND, CI_COMMAND] : []), ...(cmds.ui ? [UI_COMMAND] : [])];
+  return [...(cmds.web && (!cmds.networkLevel || cmds.networkLevel() === 'on') ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : []), ...(cmds.git ? [GIT_COMMAND, CI_COMMAND] : []), ...(cmds.ui ? [UI_COMMAND] : [])];
 }
 
 async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
@@ -99,6 +101,7 @@ export async function runHostCommand(
   try {
     if (name === UI_COMMAND) return await runUiCommand(cmds.ui, args, { signal: o.signal, ...(o.images ? { images: o.images } : {}) });
     if (name === WEB_COMMAND) {
+      if (cmds.networkLevel && cmds.networkLevel() !== 'on') return { ok: false, error: 'This agent needs network level on for sfa-web.' };
       if (!cmds.web) return { ok: false, error: 'This agent has no web access (it needs network level "on").' };
       return await web(cmds.web, args, o.signal);
     }
