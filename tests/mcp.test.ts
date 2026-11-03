@@ -213,7 +213,7 @@ describe('MCP servers', () => {
     const result = await runtime.createSession().run('hi');
     assert.equal(result.status, AgentTerminateMode.GOAL);
     const tools = providers.get('main')!.requests[0]!.request.tools!;
-    assert.deepEqual(tools.map((t) => t.name), ['shell']);
+    assert.deepEqual(tools.map((t) => t.name), ['shell', 'message']);
     assert.match(tools[0]!.description, /Your MCP servers \(allowed\) are reached with `sfa-mcp`/);
     assert.equal(runtime.mcp.isStarted('allowed'), false);
     assert.equal(runtime.mcp.isStarted('forbidden'), false);

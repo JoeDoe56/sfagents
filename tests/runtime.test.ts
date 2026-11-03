@@ -53,7 +53,7 @@ describe('single agent loop', () => {
     const req = providers.get('main')!.requests[0]!.request;
     assert.equal(req.messages[0]!.role, 'system');
     assert.match((req.messages[0] as { content: string }).content, /You are main\.[\s\S]*<environment>/);
-    assert.deepEqual(req.tools?.map((t) => t.name), ['shell'], 'every agent has the shell');
+    assert.deepEqual(req.tools?.map((t) => t.name), ['shell', 'message'], 'every agent has the shell and message');
   });
 
   test('executes an allowed tool and feeds the result into the next turn', { skip: NO_CONTAINER_TESTS }, async () => {
@@ -68,7 +68,7 @@ describe('single agent loop', () => {
     assert.equal(result.text, 'The file says: The answer is 42.');
     assert.deepEqual(result.toolCalls, [{ name: 'shell', ok: true, errorType: undefined }]);
     const second = providers.get('main')!.requests[1]!.request;
-    assert.deepEqual(second.tools?.map((t) => t.name), ['shell']);
+    assert.deepEqual(second.tools?.map((t) => t.name), ['shell', 'message']);
     assert.ok(events.some((e) => e.type === 'tool_request' && e.name === 'shell'));
     assert.ok(events.some((e) => e.type === 'tool_result' && e.ok));
   });
@@ -79,8 +79,8 @@ describe('single agent loop', () => {
     );
     const result = await runtime.createSession().run('go');
     assert.equal(result.toolCalls.length, 2);
-    assert.ok(result.toolCalls.every((c) => !c.ok && c.errorType === ToolErrorType.TOOL_NOT_REGISTERED));
-    assert.match(result.text, /Tool "message" is not available to agent "main"\. Available tools: shell/);
+    assert.equal(result.toolCalls[0]!.errorType, ToolErrorType.TOOL_NOT_REGISTERED);
+    assert.match(result.text, /may not message "main"/);
     assert.equal(fs.existsSync(path.join(hostWorkspacesDir(), 'pwn.txt')), false);
   });
 

@@ -2381,8 +2381,8 @@ export class WebServer {
         return;
       }
       case 'tool_request': {
-        // keep_section only confirms the topic; it is not worth a line in the chat.
-        if (event.name === 'keep_section') return;
+        // keep_section only confirms the topic, and a reaction shows as its badge: neither is worth a line in the chat.
+        if (event.name === 'keep_section' || (event.name === 'message' && event.args['action'] === 'react' && event.args['message_id'] !== undefined)) return;
         // A message to the person mid-turn: a finished bubble now (the hidden step after it ends the text, so later text starts a new one).
         const said = root ? messageToUser(event.name, JSON.stringify(event.args)) : undefined;
         if (said) {
@@ -2447,7 +2447,7 @@ export class WebServer {
         this.publishSections();
         if (event.name === 'message') this.publishThreads();
         // The agent's 👍 shows on the message at once (the result is recorded just after this event).
-        if (event.name === 'react_to_message') setTimeout(() => this.broadcast('agent_reactions', { reactions: chatEffects(this.conversation.state).reactions }), 20);
+        if (event.name === 'react_to_message' || event.name === 'message') setTimeout(() => this.broadcast('agent_reactions', { reactions: chatEffects(this.conversation.state).reactions }), 20);
         return;
       }
       case 'agent_message': {

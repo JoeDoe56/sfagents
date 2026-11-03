@@ -1,7 +1,9 @@
 /**
- * The `message` tool: one tool for talking with the person ("to": "user",
- * optionally with questions they answer on a card), with another agent (in
- * their persistent thread), and for waiting on either ("wait": true alone).
+ * The `message` tool: everything an agent says to the person or to another
+ * agent, and what it reads of the conversation. An "action" picks what it
+ * does: send (to the person, optionally with questions they answer on a card
+ * or as an inline reply; or to another agent, in their persistent thread),
+ * react, wait, search, history, thread and sections.
  *
  * The agents an agent may write to come from its "N-name.json" grants. The
  * thread remembers everything both have said, so a follow-up can be short.
@@ -20,6 +22,10 @@ import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { ThreadBusyError } from './threads.js';
 import type { RunRecorder } from '../runtime/recorder.js';
 import { delay, type Mailbox } from './mailbox.js';
+import type { ConversationState } from '../conversation/state.js';
+import { conversationActions, SECTION_CHOICE_HELP, type ConversationAccess, type ConversationActions, type SectionsParams } from '../conversation/tools.js';
+import { SectionOperationError } from '../conversation/sections.js';
+import { threadKey } from './threads.js';
 
 /** Upper bound on one message. */
 export const MAX_AGENT_MESSAGE_CHARS = 32_000;
@@ -55,17 +61,58 @@ export interface MessageQuestion {
   multiple?: boolean;
 }
 
-export interface MessageParams {
-  /** "user" (the person) or an agent's name; omit with "wait" to wait for messages. */
+export const MESSAGE_ACTIONS = ['send', 'react', 'wait', 'search', 'history', 'thread', 'sections'] as const;
+export type MessageAction = (typeof MESSAGE_ACTIONS)[number];
+
+/** Reactions on the person's messages (the chat shows them as badges). */
+export const USER_REACTIONS = ['👍', '👎'] as const;
+
+export interface MessageParams extends SectionsParams {
+  /** What to do; without it, "send" when "to" is given and "wait" otherwise. */
+  action?: MessageAction;
+  /** send: "user" (the person) or an agent's name. react: an agent's name (its latest message). */
   to?: string;
   text?: string;
-  /** Which of the threads with this agent to use (1 is the usual one); omit to take the first free one. */
+  /** send/thread: which of the threads with this agent (1 is the usual one). */
   thread?: number;
-  /** Wait for the answer (or, without "to", for any message) instead of continuing at once. */
+  /** send: wait for the answer instead of continuing at once. */
   wait?: boolean;
   timeout_seconds?: number;
-  /** For the person: questions they answer on a card. */
+  /** send to the person: questions they answer on a card. */
   questions?: MessageQuestion[];
+  /** send: to the person, the id of the message this answers inline; to an agent, a short quote of what it answers. */
+  reply_to?: string;
+  /** react: the person's message, by id. */
+  message_id?: string;
+  /** react: the emoji (null removes a reaction on the person's message). */
+  emoji?: string | null;
+  /** search: the words to find. */
+  query?: string;
+  /** search: section titles only. */
+  sections?: boolean;
+  /** history: messages before this id. */
+  before?: string;
+  /** history/thread: how many messages. */
+  limit?: number;
+  /** thread: the agent the thread is with. */
+  agent?: string;
+}
+
+/** The fields each action takes (anything else is refused, so mistakes show). */
+const ACTION_FIELDS: Record<MessageAction, readonly string[]> = {
+  send: ['to', 'text', 'questions', 'reply_to', 'thread', 'wait', 'timeout_seconds', 'section'],
+  react: ['to', 'message_id', 'emoji'],
+  wait: ['wait', 'timeout_seconds'],
+  search: ['query', 'sections', 'section', 'page'],
+  history: ['before', 'limit'],
+  thread: ['agent', 'thread', 'limit'],
+  sections: ['op', 'section', 'title', 'parent', 'messages', 'merge', 'make_current', 'expected_revision', 'page'],
+};
+
+/** The action a call means (older calls have no "action"). */
+export function messageAction(p: { action?: unknown; to?: unknown; wait?: unknown; text?: unknown; questions?: unknown }): MessageAction {
+  if (typeof p.action === 'string' && (MESSAGE_ACTIONS as readonly string[]).includes(p.action)) return p.action as MessageAction;
+  return p.to === undefined && p.wait === true && p.text === undefined && p.questions === undefined ? 'wait' : 'send';
 }
 
 /** What one run can be reached by while it works (see Mailbox). */
@@ -119,6 +166,8 @@ export interface AgentMessenger {
     /** The writer's run, when it can be reached while it works. */
     link?: RunLink;
   }): Promise<MessageOutcome>;
+  /** A thread's records, by key (see threadKey). */
+  readThread?(key: string): ConversationState | undefined;
 }
 
 /** What the writing agent gets back. */
@@ -176,31 +225,53 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
   }
 
   getDescription(): string {
-    if (this.params.to === undefined) return 'Waiting for messages';
-    const text = (this.params.text ?? this.params.questions?.map((q) => q.question).join(' / ') ?? '').replace(/\s+/g, ' ');
-    return `${this.params.to}: ${text.length > 100 ? `${text.slice(0, 100)}…` : text}`;
+    const p = this.params;
+    const action = messageAction(p);
+    if (action === 'wait') return 'Waiting for messages';
+    if (action === 'react') return `React ${p.emoji ?? '(remove)'} to ${p.message_id ?? p.to ?? ''}`;
+    if (action === 'search') return `Search "${p.query ?? ''}"`;
+    if (action === 'history') return 'Recent messages';
+    if (action === 'thread') return `Thread with ${p.agent ?? ''}`;
+    if (action === 'sections') return `Sections${p.op ? ` ${p.op}` : ''}`;
+    const text = (p.text ?? p.questions?.map((q) => q.question).join(' / ') ?? '').replace(/\s+/g, ' ');
+    return `${p.to}: ${text.length > 100 ? `${text.slice(0, 100)}…` : text}`;
   }
 
   async execute(signal: AbortSignal, _updateOutput?: (output: string) => void, context?: ToolCallContext): Promise<ToolResult> {
     const p = this.params;
-    if (p.to === undefined) {
-      if (p.text !== undefined || p.questions !== undefined) return invalid('Say who it is for: "to": "user" or an agent\'s name.');
-      if (!p.wait) return invalid('Give "to" and "text" to send a message, or "wait": true alone to wait for messages.');
-      return waitForMessages(this.tool.link, p.timeout_seconds, signal);
+    const action = messageAction(p);
+    const conv = this.tool.conversationActions;
+    switch (action) {
+      case 'wait':
+        return waitForMessages(this.tool.link, p.timeout_seconds, signal);
+      case 'react':
+        return this.react();
+      case 'search':
+        return conv ? conv.search(p, signal) : invalid('This agent has no access to the conversation.');
+      case 'history':
+        return conv ? conv.history(p) : invalid('This agent has no access to the conversation.');
+      case 'sections':
+        return conv ? conv.sections(p) : invalid('This agent has no access to the conversation.');
+      case 'thread':
+        return this.readThread();
+      case 'send':
+        break;
     }
+    if (p.to === undefined) return invalid('Say who it is for: "to": "user" or an agent\'s name.');
     if (p.to === USER) return this.toUser(signal);
     if (p.questions !== undefined) return invalid('questions are for the person ("to": "user"); write an agent plain text.');
+    if (p.section !== undefined) return invalid('"section" is for messages to the person.');
     if (typeof p.text !== 'string' || !p.text.trim()) return invalid('text must not be empty.');
+    const text = p.reply_to ? `[replying to: "${p.reply_to.replace(/\s+/g, ' ').slice(0, 300)}"]\n${p.text}` : p.text;
     const partner = this.tool.link?.partner;
-    if (partner && p.to === partner.id) return this.toPartner(partner, p.text, signal);
+    if (partner && p.to === partner.id) return this.toPartner(partner, text, signal);
     const max = this.tool.from.grants.get(p.to);
     const to = this.tool.agents.get(p.to);
     if (!max || !to) {
-      const allowed = [...(this.tool.canMessageUser ? [USER] : []), ...this.tool.from.grants.keys(), ...(partner ? [partner.id] : [])];
-      const message = `"${this.tool.from.id}" may not message "${p.to}". It may message: ${allowed.join(', ') || '(no one)'}.`;
+      const message = `"${this.tool.from.id}" may not message "${p.to}". It may message: ${this.tool.targets().join(', ') || '(no one)'}.`;
       return { llmContent: message, returnDisplay: message, error: { message, type: ToolErrorType.EXECUTION_DENIED } };
     }
-    if (this.params.thread !== undefined && (this.params.thread < 1 || this.params.thread > max)) {
+    if (p.thread !== undefined && (p.thread < 1 || p.thread > max)) {
       const message = `thread must be between 1 and ${max} for "${to.id}".`;
       return { llmContent: message, returnDisplay: message, error: { message, type: ToolErrorType.INVALID_TOOL_PARAMS } };
     }
@@ -211,10 +282,10 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
         fromPath: this.tool.fromPath,
         to,
         max,
-        message: p.text,
-        thread: this.params.thread,
+        message: text,
+        thread: p.thread,
         // Without a run to deliver to later, the reply has to be waited for.
-        wait: this.params.wait === true || !this.tool.link,
+        wait: p.wait === true || !this.tool.link,
         signal,
         emit: this.tool.emit,
         callId: context?.callId,
@@ -255,7 +326,7 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
     return { llmContent, returnDisplay: display, metadata };
   }
 
-  /** To the person: a chat message now, and questions they answer on a card. */
+  /** To the person: a chat message (or an inline reply), questions they answer on a card, and the section it is filed under. */
   private async toUser(signal: AbortSignal): Promise<ToolResult> {
     const p = this.params;
     if (!this.tool.canMessageUser) {
@@ -264,20 +335,83 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
     }
     const asks = p.questions?.length ?? 0;
     if ((typeof p.text !== 'string' || !p.text.trim()) && !asks) return invalid('Give "text", "questions", or both.');
+    const conv = this.tool.conversationActions;
+    if (p.reply_to !== undefined) {
+      const target = conv ? shownMessage(conv.service.state, p.reply_to) : undefined;
+      if (!target) return invalid(`"${p.reply_to}" is not a message in this conversation (reply_to takes an id like "m12").`);
+    }
+    // Where this exchange is filed: required of an agent that keeps the sections.
+    let filed = '';
+    // An inline reply stays with its message: it files nothing.
+    if (conv?.organizes && p.reply_to === undefined) {
+      if (p.section === undefined) return invalid(`"section" is required: ${SECTION_CHOICE_HELP}.`);
+      try {
+        filed = ` Filed: ${conv.chooseSection(p.section)}.`;
+      } catch (error) {
+        return invalid(error instanceof SectionOperationError ? error.message : getErrorMessage(error));
+      }
+    } else if (p.section !== undefined && !conv) {
+      return invalid('"section" applies only in the persistent conversation.');
+    }
+    const metadata = { said: p.text ?? '', ...(p.reply_to ? { replyTo: p.reply_to } : {}) };
     const link = this.tool.link;
     // Questions wait for their answers unless told not to.
-    if (!(p.wait ?? asks > 0)) return { llmContent: asks ? 'Sent. Their answers arrive as a message when they give them; keep working.' : 'Sent. Keep working.', returnDisplay: 'Sent' };
-    if (!link?.waitForPerson) return { llmContent: 'Sent, but no one can answer in this run (it is not interactive). Continue with your best judgment and say what you assumed.', returnDisplay: 'Sent' };
+    if (!(p.wait ?? asks > 0)) {
+      return { llmContent: (asks ? 'Sent. Their answers arrive as a message when they give them; keep working.' : 'Sent.') + filed, returnDisplay: 'Sent', metadata };
+    }
+    if (!link?.waitForPerson) return { llmContent: `Sent, but no one can answer in this run (it is not interactive). Continue with your best judgment and say what you assumed.${filed}`, returnDisplay: 'Sent', metadata };
     const seconds = Math.min(MAX_WAIT_SECONDS, Math.max(1, p.timeout_seconds ?? MAX_WAIT_SECONDS));
     try {
       const answered = await firstOf([link.waitForPerson], seconds, signal);
       return answered
-        ? { llmContent: `The person answered; their message follows.`, returnDisplay: 'Answered' }
-        : { llmContent: `No answer within ${seconds}s. Continue with your best judgment and say what you assumed.`, returnDisplay: 'No answer yet' };
+        ? { llmContent: `The person answered; their message follows.${filed}`, returnDisplay: 'Answered', metadata }
+        : { llmContent: `No answer within ${seconds}s. Continue with your best judgment and say what you assumed.${filed}`, returnDisplay: 'No answer yet', metadata };
     } catch (error) {
       if (isAbortError(error) || signal.aborted) return cancelled();
       throw error;
     }
+  }
+
+  /** A reaction: on one of the person's messages (by id), or on an agent's latest message (by name). */
+  private react(): ToolResult {
+    const p = this.params;
+    if (p.message_id !== undefined) {
+      const conv = this.tool.conversationActions;
+      if (!this.tool.canMessageUser || !conv) return invalid('Only the agent replying in the conversation reacts to the person\'s messages; react to an agent with "to".');
+      const m = shownMessage(conv.service.state, p.message_id);
+      if (!m || m.role !== 'user') return invalid(`"${p.message_id}" is not one of the person's messages.`);
+      if (p.emoji !== null && !(USER_REACTIONS as readonly string[]).includes(String(p.emoji))) return invalid(`On the person's messages, emoji must be ${USER_REACTIONS.join(' or ')} (or null to remove yours).`);
+      return { llmContent: p.emoji ? `Reacted ${p.emoji} to ${m.id}.` : `Removed your reaction from ${m.id}.`, returnDisplay: p.emoji ? `Reacted ${p.emoji}` : 'Reaction removed' };
+    }
+    if (!p.to || p.to === USER) return invalid('Give "message_id" (one of the person\'s messages) or "to" (an agent, for its latest message).');
+    if (typeof p.emoji !== 'string' || !p.emoji.trim() || [...p.emoji].length > 8) return invalid('emoji must be one emoji.');
+    const from = this.tool.from.id;
+    const content = mailText(from, 1, `reacted ${p.emoji} to your last message`);
+    const partner = this.tool.link?.partner;
+    if (partner && p.to === partner.id) {
+      partner.link.mailbox.deliver({ from, thread: partner.thread, content: mailText(from, partner.instance, `reacted ${p.emoji} to your last message`), record: () => partner.link.recorder?.note?.(from, content) });
+      return { llmContent: `Reacted ${p.emoji}; ${p.to} sees it at its next step.`, returnDisplay: `Reacted ${p.emoji}` };
+    }
+    const child = [...(this.tool.link?.children.values() ?? [])].filter((c) => c.agent === p.to).pop();
+    if (!child) return invalid(`${p.to} is not working now; a reaction reaches an agent only while it works. Send it a message instead.`);
+    const text = mailText(from, child.instance, `reacted ${p.emoji} to your last message`);
+    child.link.mailbox.deliver({ from, thread: child.thread, content: text, record: () => child.record(`(reacted ${p.emoji})`) });
+    return { llmContent: `Reacted ${p.emoji}; ${p.to} sees it at its next step.`, returnDisplay: `Reacted ${p.emoji}` };
+  }
+
+  /** Your thread with an agent, from its file. */
+  private readThread(): ToolResult {
+    const p = this.params;
+    const partner = this.tool.link?.partner?.id;
+    if (!p.agent) return invalid('"agent" is required: the agent the thread is with.');
+    if (p.agent !== partner && !this.tool.from.grants.has(p.agent)) return invalid(`You have no thread with "${p.agent}". Yours: ${this.tool.targets().filter((t) => t !== USER).join(', ') || 'none'}.`);
+    const state = this.tool.messenger.readThread?.(threadKey(this.tool.from.id, p.agent, p.thread ?? 1));
+    const list = (state?.messages ?? []).filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim());
+    if (!list.length) return { llmContent: `Nothing in your thread with ${p.agent} yet.`, returnDisplay: 'Empty thread' };
+    const limit = Math.max(1, Math.min(p.limit ?? 20, 100));
+    const page = list.slice(-limit);
+    const lines = page.map((m) => `[${m.id}] ${m.role === 'assistant' ? (state!.runs.get(m.run)?.start?.agent ?? m.agent) : m.agent}: ${m.content.length > 2000 ? `${m.content.slice(0, 2000)}...` : m.content}`);
+    return { llmContent: (list.length > page.length ? `(${list.length - page.length} earlier messages not shown)\n` : '') + lines.join('\n\n'), returnDisplay: `${page.length} message(s)` };
   }
 
   /** To the agent this one is working for: it gets it at its next step. */
@@ -299,8 +433,20 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
   }
 }
 
+/** A message the person can see, by id ("m12" or "[m12]"). */
+function shownMessage(state: ConversationState, id: unknown): { id: string; role: string; content: string } | undefined {
+  if (typeof id !== 'string') return undefined;
+  const m = state.messages.find((x) => x.id === id.trim().replace(/^\[|\]$/g, ''));
+  if (!m || m.event || (m.role !== 'user' && !(m.role === 'assistant' && m.content.trim()))) return undefined;
+  return m;
+}
+
 export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> {
   static readonly Name = ToolNames.MESSAGE;
+  /** Searching, reading and filing in the main conversation, when the agent may. */
+  readonly conversationActions: ConversationActions | undefined;
+  /** The actions this agent has. */
+  readonly actions: readonly MessageAction[];
 
   constructor(
     readonly messenger: AgentMessenger,
@@ -310,9 +456,11 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
     readonly emit: (event: RuntimeEvent) => void,
     readonly conversation?: ConversationService,
     readonly link?: RunLink,
-    /** The agent replying to the person: "to": "user" and questions. */
+    /** The agent replying to the person: "to": "user", questions, reactions and inline replies. */
     readonly canMessageUser = false,
+    access: ConversationAccess = 'none',
   ) {
+    const conv = canMessageUser || access !== 'none' ? conversationActions(conversation, access) : undefined;
     const partner = link?.partner?.id;
     const names = [...from.grants.keys()].filter((n) => agents.has(n) && n !== partner);
     const list = names
@@ -323,56 +471,115 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
       })
       .concat(partner ? [`- ${partner}: the agent you are working for (it wrote to you); message it any time`] : [])
       .join('\n');
-    const parts: string[] = [];
+    const hasAgents = names.length > 0 || !!partner;
+    const actions: MessageAction[] = [
+      ...(canMessageUser || hasAgents ? (['send'] as const) : []),
+      ...(canMessageUser || hasAgents ? (['react'] as const) : []),
+      'wait',
+      ...(conv ? (['search', 'history'] as const) : []),
+      ...(hasAgents ? (['thread'] as const) : []),
+      ...(conv ? (['sections'] as const) : []),
+    ];
+    const parts: string[] = ['"action" picks what it does; each action takes only its own fields.'];
     if (canMessageUser) {
       parts.push(
-        `To the person ("to": "user"): a chat message now, without ending your turn. Add "questions" to ask them things they answer on a card (each with up to ${MAX_QUESTION_OPTIONS} options; they can always type something else instead); questions wait for the answers unless "wait": false. Their answer arrives as their next message.`,
+        `send to the person ("to": "user"): everything you say to them goes through here, at any point of your turn. "reply_to" (a message id like "m12") answers that message in its own reply thread instead of the main chat. Add "questions" to ask things they answer on a card (each with up to ${MAX_QUESTION_OPTIONS} options; they can always type something else); questions wait for the answers unless "wait": false. Their answer arrives as their next message.${conv?.organizes ? ` "section" is required (except on an inline reply): ${SECTION_CHOICE_HELP}.` : ''}`,
       );
     }
     if (list) {
       parts.push(
-        `To another agent ("to": its name), in your persistent thread with it. By default it returns at once and the agent works alongside you: its reply, and anything it sends you meanwhile, arrive later as messages in your context. To an agent that is still working, the message is delivered at its next step (pass its thread number). With "wait": true it returns the agent's reply, or the first message it sends you, whichever comes first. The thread keeps everything you and it have said, across turns and sessions; the agent does not see the user's conversation unless you include what it needs.\n\nAgents you can message:\n${list}`,
+        `send to another agent ("to": its name), in your persistent thread with it. By default it returns at once and the agent works alongside you: its reply, and anything it sends you meanwhile, arrive later as messages in your context. To an agent that is still working, the message is delivered at its next step (pass its thread number). With "wait": true it returns the agent's reply, or the first message it sends you, whichever comes first. "reply_to" (a short quote) says which of its messages you answer. The thread keeps everything you and it have said, across turns and sessions; the agent does not see the person's conversation unless you include what it needs.\n\nAgents you can message:\n${list}`,
       );
     }
-    parts.push(`With only "wait": true: waits until a message arrives from another agent${link?.waitForPerson ? ' or the person' : ''}, or until the timeout. Use it when you have nothing else to do until someone answers.`);
+    if (canMessageUser || hasAgents) {
+      parts.push(`react: ${canMessageUser ? `"message_id" and ${USER_REACTIONS.join(' or ')} on one of the person's messages (null removes yours), a quicker answer than a reply${hasAgents ? '; or ' : '.'}` : ''}${hasAgents ? '"to" an agent and any emoji, on its latest message (while it works).' : ''}`);
+    }
+    parts.push(`wait: waits until a message arrives from another agent${link?.waitForPerson ? ' or the person' : ''}, or until "timeout_seconds". Use it when you have nothing else to do until someone answers.`);
+    if (conv) {
+      parts.push(
+        `search: "query" finds messages in the whole stored conversation (also those no longer in your context), with "section" to narrow it; with "sections": true it matches section titles instead. history: the latest messages ("limit", "before" a message id). sections: "op" "list" (the topics), "fetch" (a section's messages, "section" an ID or "unassigned", paginated)${conv.organizes ? ', or "add" (a new section with "title" and "parent", or with "section" an existing one to rename ("title"), move ("parent"), file "messages" into, or "merge" others into; merges need "expected_revision")' : ''}.`,
+      );
+    }
+    if (hasAgents) parts.push('thread: reads your thread with "agent" (and "thread" number), latest messages first back to "limit".');
     const targets = [...(canMessageUser ? [USER] : []), ...names, ...(partner ? [partner] : [])];
-    super(
-      MessageTool.Name,
-      'Message',
-      `Sends a message, or waits for one.\n\n${parts.join('\n\n')}`,
-      Kind.Delegate,
-      {
-        type: 'object',
-        properties: {
-          to: { type: 'string', enum: targets, description: `Who it is for${canMessageUser ? ': "user" for the person, or an agent' : ': an agent'}. Omit (with "wait": true) to wait for messages.` },
-          text: { type: 'string', minLength: 1, description: 'The message, in Markdown. To an agent: terse, structured, self-contained for what the thread does not already hold.' },
-          ...(canMessageUser
-            ? {
-                questions: {
-                  type: 'array',
-                  minItems: 1,
-                  description: 'For the person: questions shown on a card they tap to answer. Ask only what you cannot find out yourself.',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      question: { type: 'string', minLength: 1 },
-                      options: { type: 'array', maxItems: MAX_QUESTION_OPTIONS, items: { type: 'string', minLength: 1 }, description: `Up to ${MAX_QUESTION_OPTIONS} choices. The card always adds "Other" for a typed answer; leave out for a typed answer only.` },
-                      multiple: { type: 'boolean', description: 'They may pick more than one (default false).' },
-                    },
-                    required: ['question'],
-                  },
-                },
-              }
-            : {}),
-          thread: { type: 'integer', minimum: 1, description: 'Which of your threads with this agent (1 is the usual one). To reach one that is still working, give its thread; omit to use the first free one.' },
-          wait: { type: 'boolean', description: 'Wait for the answer before continuing. Default false (true with questions): keep working.' },
-          timeout_seconds: { type: 'integer', minimum: 1, maximum: MAX_WAIT_SECONDS, description: `How long to wait (default ${DEFAULT_WAIT_SECONDS} for messages, ${MAX_WAIT_SECONDS} for the person).` },
+    const props: Record<string, unknown> = {
+      action: { type: 'string', enum: actions, description: 'What to do (default send).' },
+    };
+    if (actions.includes('send')) {
+      Object.assign(props, {
+        to: { type: 'string', enum: targets, description: `send: who it is for${canMessageUser ? ' ("user" for the person, or an agent)' : ''}. react: an agent.` },
+        text: { type: 'string', minLength: 1, description: 'send: the message, in Markdown. To an agent: terse, structured, self-contained for what the thread does not already hold.' },
+        reply_to: { type: 'string', description: 'send: to the person, the id of the message this answers inline ("m12"); to an agent, a short quote of the message you answer.' },
+        thread: { type: 'integer', minimum: 1, description: 'send/thread: which of your threads with this agent (1 is the usual one). To reach one that is still working, give its thread.' },
+        wait: { type: 'boolean', description: 'send: wait for the answer before continuing. Default false (true with questions).' },
+      });
+    }
+    if (canMessageUser) {
+      props['questions'] = {
+        type: 'array',
+        minItems: 1,
+        description: 'send to the person: questions shown on a card they tap to answer. Ask only what you cannot find out yourself.',
+        items: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', minLength: 1 },
+            options: { type: 'array', maxItems: MAX_QUESTION_OPTIONS, items: { type: 'string', minLength: 1 }, description: `Up to ${MAX_QUESTION_OPTIONS} choices. The card always adds "Other" for a typed answer; leave out for a typed answer only.` },
+            multiple: { type: 'boolean', description: 'They may pick more than one (default false).' },
+          },
+          required: ['question'],
         },
-      },
-    );
+      };
+    }
+    if (actions.includes('react')) {
+      Object.assign(props, {
+        ...(canMessageUser ? { message_id: { type: 'string', description: 'react: one of the person\'s messages ("m12").' } } : {}),
+        emoji: { type: ['string', 'null'], description: `react: the emoji${canMessageUser ? ` (${USER_REACTIONS.join(' or ')} on the person's messages; null removes yours)` : ''}.` },
+      });
+    }
+    props['timeout_seconds'] = { type: 'integer', minimum: 1, maximum: MAX_WAIT_SECONDS, description: `send/wait: how long to wait (default ${DEFAULT_WAIT_SECONDS} for messages, ${MAX_WAIT_SECONDS} for the person).` };
+    if (conv) {
+      Object.assign(props, {
+        section: { type: 'string', description: `send to the person: ${conv.organizes ? 'required, ' : ''}${SECTION_CHOICE_HELP}. search: limit to this section. sections: the section ID.` },
+        query: { type: 'string', maxLength: 200, description: 'search: words to find.' },
+        sections: { type: 'boolean', description: 'search: match section titles only.' },
+        before: { type: 'string', description: 'history: messages before this id.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'history/thread: how many messages (default 20).' },
+        op: { type: 'string', enum: conv.organizes ? ['list', 'fetch', 'add'] : ['list', 'fetch'], description: 'sections: what to do.' },
+        page: { type: 'integer', minimum: 1, description: 'search/sections: the page.' },
+        ...(conv.organizes
+          ? {
+              title: { type: 'string', maxLength: 120, description: 'sections add: the topic title.' },
+              parent: { type: ['string', 'null'], description: 'sections add: parent section ID (null moves an existing section to the top level).' },
+              messages: { type: 'array', items: { type: 'string' }, description: 'sections add: message IDs ("m12"), ranges ("m12-m20") or "current_exchange" to file.' },
+              merge: { type: 'array', items: { type: 'string' }, description: 'sections add with "section": IDs of sections to merge into it.' },
+              make_current: { type: 'boolean', description: 'sections add: file following messages under it (default true when creating).' },
+              expected_revision: { type: 'integer', minimum: 0, description: 'sections add: the revision from the list; required to merge.' },
+            }
+          : {}),
+      });
+    } else if (hasAgents) {
+      props['limit'] = { type: 'integer', minimum: 1, maximum: 100, description: 'thread: how many messages (default 20).' };
+    }
+    if (hasAgents) props['agent'] = { type: 'string', enum: targets.filter((t) => t !== USER), description: 'thread: the agent the thread is with.' };
+    super(MessageTool.Name, 'Message', `Talks with the person and other agents, and reads the conversation.\n\n${parts.join('\n\n')}`, Kind.Delegate, { type: 'object', properties: props });
+    this.conversationActions = conv;
+    this.actions = actions;
+  }
+
+  /** Who this agent may send to. */
+  targets(): string[] {
+    const partner = this.link?.partner?.id;
+    return [...(this.canMessageUser ? [USER] : []), ...this.from.grants.keys(), ...(partner ? [partner] : [])];
   }
 
   protected override validateToolParamValues(params: MessageParams): string | null {
+    const action = messageAction(params);
+    if (params.action !== undefined && !this.actions.includes(action)) return `action "${String(params.action)}" is not available to this agent; it has: ${this.actions.join(', ')}.`;
+    const allowed = ACTION_FIELDS[action];
+    for (const key of Object.keys(params)) {
+      if (key === 'action' || (params as Record<string, unknown>)[key] === undefined) continue;
+      if (!allowed.includes(key)) return `"${key}" does not belong to action "${action}" (it takes: ${allowed.join(', ')}).`;
+    }
     if (typeof params.text === 'string' && params.text.length > MAX_AGENT_MESSAGE_CHARS) {
       return `text must be at most ${MAX_AGENT_MESSAGE_CHARS} characters (got ${params.text.length}). Summarize, or pass file paths the agent can read.`;
     }
@@ -427,5 +634,8 @@ async function waitForMessages(link: RunLink | undefined, timeout: number | unde
 }
 
 export const MESSAGE_USER_GUIDANCE = `<talking_with_the_person>
-Your turn is not limited to one final answer. With message ("to": "user") you can tell the person something at any point and keep working: what you are about to do on a long task, a finding they should see now, a decision you made. When you need their input to continue (an ambiguous request, a choice only they can make, missing access), ask with "questions": each one shows on a card with up to ${MAX_QUESTION_OPTIONS} options to tap (they can always type something else), and the call waits for their answer, which arrives as their next message. Offer real choices, put the one you recommend first, and ask several related things in one card rather than one at a time. Do not ask what you can find out yourself, and keep updates short and occasional, not a running commentary.
+Everything you say to the person goes through message (action "send", "to": "user"); that is your reply. You can send at any point of your turn and keep working: what you are about to do on a long task, a finding they should see now, then your answer. After your last message, end your turn without further text.
+The person reads this conversation as a chat, in a browser and in a terminal. Their messages start with their id, like [m12]. To acknowledge something without a whole reply (a thank-you, an "ok"), react (action "react", ${USER_REACTIONS.join(' or ')}) and end the turn. To answer one earlier message in its own reply thread, send with "reply_to" its id.
+When you need their input to continue (an ambiguous request, a choice only they can make, missing access), ask with "questions": each one shows on a card with up to ${MAX_QUESTION_OPTIONS} options to tap (they can always type something else), and the call waits for their answer, which arrives as their next message. Offer real choices, put the one you recommend first, and ask several related things in one card rather than one at a time. Do not ask what you can find out yourself, and keep updates short and occasional, not a running commentary.
+Notes from SF Agents in square brackets tell you when the person reacted to one of your messages and whether they have read your last reply. They are not typed by the person. A message the person sends while you work arrives between your steps: take it into account.
 </talking_with_the_person>`;

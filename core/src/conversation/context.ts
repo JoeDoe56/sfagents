@@ -116,7 +116,7 @@ function buildIndex(state: ConversationState, maxTokens: number, retrievable: bo
   const more = entries.length - shown;
   const header = `<conversation_sections revision="${state.structureRevision}">`;
   const footer = [
-    more > 0 ? `${more} more section(s) not listed${retrievable ? ' — use list_sections (paginated)' : ''}.` : '',
+    more > 0 ? `${more} more section(s) not listed${retrievable ? ' — message action "sections" lists them (paginated)' : ''}.` : '',
     unassigned > 0 ? `${unassigned} message(s) are not in any section.` : '',
   ]
     .filter(Boolean)
@@ -176,13 +176,13 @@ export function buildWorkingContext(
       state.lastResetSeq > 0 ? 'messages before the last context reset are not shown' : '',
     ].filter(Boolean);
     notes.push(
-      `Context note: ${parts.join('; ')}.${options.retrievable ? ' They are stored: use search_conversation or fetch_section when the user refers to them.' : ''}`,
+      `Context note: ${parts.join('; ')}.${options.retrievable ? ' They are stored: use message with action "search" or "sections" (op "fetch") when the person refers to them.' : ''}`,
     );
   }
   if (options.retrievable && state.currentSection) {
     const earliest = earliestIncludedSeq(groups, included.length);
     const hidden = state.messages.filter((m) => m.role !== 'tool' && m.seq < earliest && state.sectionOf(m.id) === state.currentSection).length;
-    if (hidden > 0) notes.push(`The current section [${state.currentSection}] has ${hidden} earlier message(s) outside this context; fetch_section ${state.currentSection} retrieves them.`);
+    if (hidden > 0) notes.push(`The current section [${state.currentSection}] has ${hidden} earlier message(s) outside this context; message action "sections" with op "fetch" and section "${state.currentSection}" retrieves them.`);
   }
   const systemExtra = [index.text, ...notes].filter(Boolean).join('\n\n') || undefined;
   const estimatedTokens = fixed + (systemExtra ? estimateTokens(systemExtra) : 0) + estimateMessages(messages);

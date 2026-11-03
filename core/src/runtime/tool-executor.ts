@@ -50,6 +50,8 @@ export interface ToolExecutionOutcome {
   status: ToolMessageStatus;
   /** Images the call showed (sfa-view), sent after the results. */
   images?: ToolImage[];
+  /** The tool's metadata (what message said to the person, for the run's answer). */
+  metadata?: Record<string, unknown>;
 }
 
 function statusOf(result: ToolResult): ToolMessageStatus {
@@ -128,6 +130,7 @@ export async function executeToolCall(
     activity: { name: call.name, ok, errorType: result.error?.type },
     status: statusOf(result),
     ...(result.images?.length ? { images: result.images } : {}),
+    ...(result.metadata ? { metadata: result.metadata } : {}),
   };
 }
 

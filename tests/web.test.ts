@@ -456,7 +456,7 @@ describe('web server', () => {
       const last = msgs[msgs.length - 1]!;
       requests.push({ system: String(msgs[0]!.content), last: typeof last.content === 'string' ? last.content : '', ids: '' });
       if (call === 0) return { text: 'Here is the plan.' };
-      if (call === 1) return { toolCalls: [{ name: 'react_to_message', args: { message_id: 'm2', emoji: '👍' } }, { name: 'reply_inline', args: { message_id: 'm2', text: 'Noted, aside.' } }] };
+      if (call === 1) return { toolCalls: [{ name: 'message', args: { action: 'react', message_id: 'm2', emoji: '👍' } }, { name: 'message', args: { action: 'send', to: 'user', reply_to: 'm2', text: 'Noted, aside.' } }] };
       return {};
     });
     const ev = events(s.base);
@@ -466,7 +466,7 @@ describe('web server', () => {
       const end1 = await ev.wait((e) => e.event === 'run_end');
       const items1 = end1.data['items'] as Array<{ kind: string; id: string }>;
       const answer = items1.find((i) => i.kind === 'assistant')!.id;
-      assert.match(requests[0]!.system, /<chat>/);
+      assert.match(requests[0]!.system, /<talking_with_the_person>/);
       // Activity on a page: the agent's reply counts as read.
       assert.equal((await postJson(s.base, '/api/presence', {})).status, 200);
       const seen = await ev.wait((e) => e.event === 'seen');
@@ -568,9 +568,9 @@ describe('web server', () => {
 
   test('the topic index follows the sections the model creates', async () => {
     const s = await startServer((req, call) => {
-      if (call === 0) return { toolCalls: [{ name: 'add_section', args: { title: 'Kiln schedule', messages: ['current_exchange'] } }] };
+      if (call === 0) return { toolCalls: [{ name: 'message', args: { action: 'send', to: 'user', text: 'Filed.', section: 'new: Kiln schedule' } }] };
       if (call === 1) return { text: 'Filed under Kiln schedule.' };
-      if (call === 2) return { toolCalls: [{ name: 'add_section', args: { title: 'Cone 6 glazes', parent: 's1', messages: ['current_exchange'] } }] };
+      if (call === 2) return { toolCalls: [{ name: 'message', args: { action: 'send', to: 'user', text: 'Filed.', section: 'new under s1: Cone 6 glazes' } }] };
       return { text: 'ok' };
     });
     const ev = events(s.base);
@@ -790,7 +790,7 @@ describe('agent settings and context', () => {
       const byId = Object.fromEntries(c.categories.map((x: { id: string }) => [x.id, x]));
       assert.ok(byId.system.tokens > 0);
       assert.ok(byId.messages.tokens > 0);
-      assert.ok(byId.conversation.items.some((t: { name: string }) => t.name === 'search_conversation'));
+      assert.ok(byId.agents.items.some((t: { name: string }) => t.name === 'message'));
       // sfa-artifact is listed with the tools, as a command in the shell (its tokens are the shell's).
       type Item = { name: string; tokens: number; partOf?: string; schema: { usage?: string } };
       const art = (byId.builtin.items as Item[]).find((t) => t.name === 'sfa-artifact')!;

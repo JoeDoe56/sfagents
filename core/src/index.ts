@@ -4,8 +4,8 @@
 
 export * from './agents/definition.js';
 export * from './agents/loader.js';
-export { MessageTool, MAX_QUESTION_OPTIONS, USER, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText } from './agents/message-agent.js';
-export type { MessageParams, MessageQuestion } from './agents/message-agent.js';
+export { MessageTool, MAX_QUESTION_OPTIONS, USER, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText, messageAction, MESSAGE_ACTIONS, USER_REACTIONS } from './agents/message-agent.js';
+export type { MessageAction, MessageParams, MessageQuestion } from './agents/message-agent.js';
 export type { AgentReplyPayload, AgentMessenger } from './agents/message-agent.js';
 export { watchProject } from './agents/watch.js';
 export { PROMPTS_DIR_NAME, PromptReferenceError, defaultPromptsDir, ensurePrompts, expandPrompt, isPromptReference } from './agents/prompts.js';
@@ -129,9 +129,9 @@ export {
   CURRENT_EXCHANGE,
 } from './conversation/sections.js';
 export type { SectionEntry, SectionPage, SearchHit, SearchResult, FetchResult } from './conversation/sections.js';
-export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER, MAX_SECTION_REMINDERS } from './conversation/tools.js';
+export { ConversationActions, conversationActions, ORGANIZE_GUIDANCE, SECTION_CHOICE_HELP } from './conversation/tools.js';
 export type { ConversationAccess } from './conversation/tools.js';
-export { AGENT_REACTIONS, CHAT_GUIDANCE, ChatToolNames, chatEffects, createChatTools } from './conversation/chat-tools.js';
+export { AGENT_REACTIONS, ChatToolNames, chatEffectOf, chatEffects } from './conversation/chat-tools.js';
 export {
   buildWorkingContext,
   contextBreakdown,

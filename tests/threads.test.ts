@@ -205,7 +205,7 @@ describe('agents messaging each other in threads', () => {
       const last = req.messages[req.messages.length - 1]!;
       if (last.role === 'user' && /blue/.test(String((last as { content: string }).content))) return { text: 'Painting it blue.' };
       if (last.role === 'tool') return { text: 'no answer' };
-      return { toolCalls: [{ name: 'message', args: { to: 'user', questions: [{ question: 'Which color?', options: ['red', 'blue'] }], timeout_seconds: 5 } }] };
+      return { toolCalls: [{ name: 'message', args: { to: 'user', questions: [{ question: 'Which color?', options: ['red', 'blue'] }], timeout_seconds: 5, section: 'keep' } }] };
     };
     const { runtime } = start(tree, script, conversation);
     const session = runtime.createSession();
@@ -248,7 +248,7 @@ describe('agents messaging each other in threads', () => {
     assert.match(out[0]!, /must NOT have more than 6 items/);
     assert.match(out[1]!, /Say who it is for/);
     assert.match(out[2]!, /params\/to must be equal to one of the allowed values/);
-    assert.match(out[3]!, /Sent\. Keep working/);
-    assert.match(out[4]!, /"wait": true alone/);
+    assert.match(out[3]!, /"section" is required/);
+    assert.match(out[4]!, /Say who it is for/);
   });
 });

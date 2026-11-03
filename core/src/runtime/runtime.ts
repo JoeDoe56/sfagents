@@ -13,18 +13,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
-import { CHAT_GUIDANCE, ChatToolNames, createChatTools } from '../conversation/chat-tools.js';
-import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
+import { ORGANIZE_GUIDANCE } from '../conversation/tools.js';
 import { ARTIFACT_COMMAND, ARTIFACT_GUIDANCE, artifactCommand, artifactIndex } from '../conversation/artifacts.js';
 import { hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
 import { DEFAULT_VIEW_IMAGES } from '../tools/sfa-view.js';
 import { toolImagesMessage, type ShownImage } from '../conversation/attachments.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
+import type { ConversationState } from '../conversation/state.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import {
   AGENT_MESSAGING_GUIDANCE,
   MESSAGE_USER_GUIDANCE,
   MessageTool,
+  messageAction,
   THREAD_MESSAGING_GUIDANCE,
   USER,
   mailText,
@@ -51,7 +52,7 @@ import { McpManager, type McpToolInfo } from '../mcp/manager.js';
 import { mcpApprover, type McpGrant, type McpServerGrant } from '../mcp/sfa-mcp.js';
 import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
 import { createDefaultProviderFactory, credentialEnvNames, providerChoices, type ProviderFactory } from '../providers/factory.js';
-import { executeToolCall, type ToolExecutionOutcome } from './tool-executor.js';
+import { executeToolCall } from './tool-executor.js';
 import {
   AgentTerminateMode,
   type AgentRunResult,
@@ -152,22 +153,17 @@ function addUsage(total: TokenUsage, add?: TokenUsage): void {
   }
 }
 
-/** A call other than a section choice, made after a section reminder: refused without running. */
-function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
-  const content = `Not run: only keep_section or add_section can be called now. Your reply was already delivered.`;
-  return { message: { role: 'tool', tool_call_id: call.id, content }, activity: { name: call.name, ok: false }, status: 'error' };
-}
-
 /** Whether the agent's shell has `sfa-artifact` (it then gets the artifact guidance). */
 /** A message to another agent (these run in parallel). */
 function toAgent(call: ParsedToolCall): boolean {
-  return call.name === ToolNames.MESSAGE && typeof call.args['to'] === 'string' && call.args['to'] !== USER;
+  return call.name === ToolNames.MESSAGE && messageAction(call.args) === 'send' && typeof call.args['to'] === 'string' && call.args['to'] !== USER;
 }
 
 /** What the system prompt explains, from the tools an agent has. */
-function features(tools: ReadonlyMap<string, AnyDeclarativeTool>): { artifacts: boolean; toUser: boolean } {
+function features(tools: ReadonlyMap<string, AnyDeclarativeTool>): { artifacts: boolean; toUser: boolean; organizes: boolean } {
   const message = tools.get(ToolNames.MESSAGE);
-  return { artifacts: hasArtifactCommand(tools), toUser: message instanceof MessageTool && message.canMessageUser };
+  const m = message instanceof MessageTool ? message : undefined;
+  return { artifacts: hasArtifactCommand(tools), toUser: !!m?.canMessageUser, organizes: !!m?.conversationActions?.organizes };
 }
 
 function hasArtifactCommand(tools: ReadonlyMap<string, AnyDeclarativeTool>): boolean {
@@ -175,7 +171,7 @@ function hasArtifactCommand(tools: ReadonlyMap<string, AnyDeclarativeTool>): boo
   return shell instanceof ShellTool && shell.commandNames.includes(ARTIFACT_COMMAND);
 }
 
-export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean; toUser?: boolean } = {}): string {
+export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean; toUser?: boolean; organizes?: boolean } = {}): string {
   const d = node.definition;
   const env = [
     `Agent id: ${node.id}`,
@@ -187,12 +183,11 @@ export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[],
   const partner = link?.partner?.id;
   const agents = [...new Set([...node.grants.keys(), ...(partner ? [partner] : [])])];
   if (toolNames.includes(ToolNames.MESSAGE) && agents.length) env.push(`Agents you can message with ${ToolNames.MESSAGE}: ${agents.join(', ')}`);
-  let guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
+  let guidance = features.organizes ? `\n\n${ORGANIZE_GUIDANCE}` : '';
   if (toolNames.includes(ToolNames.MESSAGE) && node.grants.size > 0) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
   if (partner && toolNames.includes(ToolNames.MESSAGE)) guidance += `\n\n${THREAD_MESSAGING_GUIDANCE}`;
   if (features.toUser && toolNames.includes(ToolNames.MESSAGE)) guidance += `\n\n${MESSAGE_USER_GUIDANCE}`;
   if (features.artifacts) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
-  if (toolNames.includes(ChatToolNames.REACT)) guidance += `\n\n${CHAT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
 }
 
@@ -287,13 +282,8 @@ export class AgentRuntime implements AgentMessenger {
 
     // The agent replying to the person can talk with them mid-turn (and ask them questions).
     const toUser = role === 'main' && !!conversation && conversation === this.conversation;
-    if (toUser || node.grants.size > 0 || link.partner) tools.set(ToolNames.MESSAGE, new MessageTool(this, node, this.tree.byId, agentPath, emit, conversation, link, toUser));
-    // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
-    if (conversation?.file) {
-      for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
-      // Reactions and inline replies: the agent talking with the person.
-      if (role === 'main' && conversation === this.conversation) for (const tool of createChatTools(conversation)) tools.set(tool.name, tool);
-    }
+    // Every agent has message: talking with the person and agents, and (in the persistent conversation) searching and filing it.
+    tools.set(ToolNames.MESSAGE, new MessageTool(this, node, this.tree.byId, agentPath, emit, conversation, link, toUser, conversation?.file ? conversationAccess(d, depth) : 'none'));
     return tools;
   }
 
@@ -535,18 +525,10 @@ export class AgentRuntime implements AgentMessenger {
     this.sessionApprovals.set(node.id, approvals);
 
     try {
-    // An organizing agent must settle every turn's section; a turn that ends without it is sent back, at most twice.
-    const mustChooseSection = tools.has(ConversationToolNames.KEEP);
-    let sectionChosen = false;
-    let sectionReminders = 0;
-    // The reminder and the round it starts are bookkeeping: they stay out of the record (section changes are their own records).
-    const recordTurn: typeof record = (fn) => {
-      if (sectionReminders === 0) record(fn);
-    };
+    const recordTurn = record;
     // Messages the person sent meanwhile join the run before the next request.
     // So do messages from other agents (replies, questions, follow-ups).
     const takeInbox = (): boolean => {
-      if (sectionReminders > 0) return false;
       const arrived = params.inbox?.() ?? [];
       for (const item of link.mailbox.take()) {
         recordTurn(() => item.record?.());
@@ -555,7 +537,6 @@ export class AgentRuntime implements AgentMessenger {
       }
       if (!arrived.length) return false;
       messages.push(...arrived);
-      sectionChosen = false;
       return true;
     };
     while (turns < maxTurns) {
@@ -603,26 +584,16 @@ export class AgentRuntime implements AgentMessenger {
       const finishReason = done.finishReason;
       recordTurn((r) => r.assistant(assistantMessage, finishReason));
       messages.push(done.message);
-      // After a section reminder the reply has already been given; keep it as the result.
-      if (done.message.content && sectionReminders === 0) lastText = done.message.content;
+      if (done.message.content) lastText = done.message.content;
 
       if (done.toolCalls.length === 0) {
         // A message that arrived while the model answered gets its own answer in this run.
-        if (done.finishReason !== 'length' && (!mustChooseSection || sectionChosen) && takeInbox()) continue;
+        if (done.finishReason !== 'length' && takeInbox()) continue;
         if (done.finishReason === 'length') {
           return finish(AgentTerminateMode.GOAL, 'The model hit its output token limit; the answer may be incomplete.');
         }
-        if (mustChooseSection && !sectionChosen) {
-          if (sectionReminders < MAX_SECTION_REMINDERS) {
-            sectionReminders++;
-            messages.push({ role: 'user', content: SECTION_REMINDER });
-            continue;
-          }
-          emit({ type: 'warning', agentPath, message: 'The model ended its turn without keep_section or add_section; this turn stays in the current section.' });
-        }
         // Agents it started are still working: the turn waits for what they send, then goes on.
         if (link.children.size > 0) {
-          sectionReminders = 0;
           let arrived = false;
           while (link.children.size > 0 && !(arrived = takeInbox())) {
             try {
@@ -674,20 +645,17 @@ export class AgentRuntime implements AgentMessenger {
           while (pending[0] && toAgent(pending[0])) batch.push(pending.shift()!);
         }
         const outcomes = await Promise.all(
-          batch.map((call) =>
-            // After a reminder only the section choice is left to do.
-            sectionReminders > 0 && !SECTION_CHOICE_TOOLS.includes(call.name)
-              ? Promise.resolve(sectionOnlyOutcome(call))
-              : executeToolCall(call, execContext, signal),
-          ),
+          batch.map((call) => executeToolCall(call, execContext, signal)),
         );
         batch.forEach((call, i) => {
           const outcome = outcomes[i]!;
           recordTurn((r) => r.toolResult(outcome.message, call.name, outcome.status, outcome.images));
           messages.push(outcome.message);
           if (outcome.images?.length) shown.push({ callId: call.id, images: outcome.images.map((i) => ({ label: i.label ?? 'image', mime: i.mime, data: i.data })) });
-          if (sectionReminders === 0) activity.push(outcome.activity);
-          if (outcome.status === 'ok' && SECTION_CHOICE_TOOLS.includes(call.name)) sectionChosen = true;
+          activity.push(outcome.activity);
+          // What the agent said to the person is the run's answer.
+          const said = outcome.metadata?.['said'];
+          if (outcome.status === 'ok' && typeof said === 'string' && said.trim() && !outcome.metadata?.['replyTo']) lastText = said;
         });
       }
       if (shown.length) messages.push(toolImagesMessage(shown));
@@ -709,6 +677,11 @@ export class AgentRuntime implements AgentMessenger {
    * thread is listed as an artifact of the main conversation the first time
    * it is used there.
    */
+  /** A thread's records (the message tool's "thread" action). */
+  readThread(key: string): ConversationState | undefined {
+    return this.threads.read(key);
+  }
+
   async messageAgent(params: {
     from: AgentNode;
     fromPath: readonly string[];
