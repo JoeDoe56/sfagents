@@ -521,7 +521,7 @@ describe('web server', () => {
     }
   });
 
-  test('approvals are asked in the browser; denial and cancellation work', async () => {
+  test('approvals are asked in the browser; denial and cancellation work', { skip: NO_CONTAINER_TESTS }, async () => {
     const s = await startServer(
       (req, call) => {
         if (call === 0) return { toolCalls: [mcpCall('local', 'echo', { text: 'approved-run' })] };

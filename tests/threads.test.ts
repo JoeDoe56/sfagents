@@ -13,6 +13,7 @@ import {
   type ModelRequest,
 } from '@sfagents/core';
 import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, mcpCall, shellStdout } from './helpers.js';
+import { NO_CONTAINER_TESTS as _NCT } from './helpers.js';
 
 
 const runtimes: AgentRuntime[] = [];
@@ -50,7 +51,7 @@ const hasToolResult = (req: ModelRequest) => req.messages[req.messages.length - 
 const inThread = (req: ModelRequest) => /<thread>/.test(systemOf(req));
 
 describe('agents messaging each other in threads', () => {
-  test('an agent messages another, which works with its own tools and replies', async () => {
+  test('an agent messages another, which works with its own tools and replies', { skip: _NCT }, async () => {
     const { tree, dir, conversation } = project({
       main: { agents: ['1-worker.json'] },
       worker: { description: 'Reads shared files.', tools: { mcpServers: [{ server: 'local', tools: ['echo'] }] } },

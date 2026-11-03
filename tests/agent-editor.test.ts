@@ -25,6 +25,7 @@ import {
 } from '@sfagents/core';
 import { WebServer } from '@sfagents/web';
 import { baseAgent, makeTempDir, scriptedFactory, writeAgent, writeJson } from './helpers.js';
+import { NO_CONTAINER_TESTS as _NCT } from './helpers.js';
 
 const LIMITS = { maxMemoryMb: 16384, maxCpus: 8, providers: ['OpenRouter 1', 'Claude'] };
 
@@ -196,7 +197,7 @@ describe('the agent editor (server)', () => {
     };
   }
 
-  test('the form, saving with errors by field, a new agent, a rename, duplicate, reset and delete', async () => {
+  test('the form, saving with errors by field, a new agent, a rename, duplicate, reset and delete', { skip: _NCT }, async () => {
     const s = await start();
     try {
       const got = await s.call('/api/agent-editor?agent=main');
