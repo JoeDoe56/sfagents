@@ -32,6 +32,7 @@ import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installBubbleMenus } from './bubblemenu.js';
+import { speak } from './speech.js';
 import { springAnimate, springyScroll } from './springs.js';
 import { createChatDock, renderDiff } from './chatdock.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
@@ -1457,6 +1458,8 @@ function listen() {
   stream.addEventListener('threads', () => refreshTranscript());
   for (const name of ['signin', 'providers', 'settings']) stream.addEventListener(name, (e) => settingsEvent(name, JSON.parse(e.data)));
   stream.addEventListener('terminals', () => terminalsChanged());
+  // An agent's voice clip was transcribed (the agent editor shows the transcript).
+  stream.addEventListener('agent-voice', (e) => window.dispatchEvent(new CustomEvent('sfa-agent-voice', { detail: JSON.parse(e.data) })));
   stream.addEventListener('sections', (e) => setSections(JSON.parse(e.data).sections));
   stream.addEventListener('run_end', (e) => {
     const data = JSON.parse(e.data);
@@ -1470,6 +1473,8 @@ function listen() {
     render();
     updateComposer();
     if (agentSheetOpen()) agentSheet?.refresh();
+    // The agent reads its replies aloud: on the device in use (the focused page), not on every open one.
+    if (data.speak && document.visibilityState === 'visible' && document.hasFocus()) speak(data.speak.text, data.speak.agent).catch(() => {});
   });
   stream.addEventListener('ping', () => {});
   stream.addEventListener('down', () => {

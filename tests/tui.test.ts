@@ -307,4 +307,46 @@ describe('terminal interface', () => {
       conversation.close();
     }
   });
+
+  test('the agent editor: a new agent from the keyboard, with errors by field, and Ctrl+S saves', async () => {
+    const dir = makeTempDir('sfagents-tui-');
+    writeAgent(dir, { ...baseAgent('main') });
+    const tree = loadAgentTree(dir);
+    const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
+    const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(() => ({ text: 'ok' })).factory, watchAgents: false, auth: false });
+    const url = await server.start();
+    const term = new Terminal(110, 60);
+    const tui = new Tui({ server, logs: new LogBook(), url, input: term.input, output: term.output, captureOutput: false });
+    const done = tui.run();
+    const CTRL_S = '\u0013';
+    const TAB = '\t';
+    try {
+      await term.type('/agents');
+      await until('the agents', () => term.screen().includes('New agent') && /main.*\(replying\)/.test(term.screen()));
+      await term.keys('n');
+      await until('the editor', () => term.screen().includes('Network (required)'));
+      // Saving an empty form says what each field needs.
+      await term.keys(CTRL_S);
+      await until('the errors', () => term.screen().includes('Give the agent a name.') && term.screen().includes('Choose what the agent’s container can reach.'));
+      // Name: Enter asks for it.
+      await term.keys('\r');
+      await term.type('tester');
+      // Tab down to the instructions (name, description, provider, model, instructions).
+      await term.keys(TAB, TAB, TAB, TAB, '\r');
+      await term.type('You test.');
+      for (let i = 0; i < 8 && !/› +● Off|› +○ Off/.test(term.screen()); i++) await term.keys(TAB);
+      await term.keys('\r', '\u001b[C');
+      await until('network chosen', () => /● Packages\b/.test(term.screen()));
+      await term.keys(CTRL_S);
+      await until('saved', () => fs.existsSync(path.join(dir, 'agents', 'tester.json')));
+      const raw = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'tester.json'), 'utf8'));
+      assert.deepEqual(raw, { systemPrompt: 'You test.', network: 'pkg' });
+      await until('the title', () => term.screen().includes('Agent: tester'));
+    } finally {
+      tui.quit();
+      await done;
+      await server.close();
+      conversation.close();
+    }
+  });
 });

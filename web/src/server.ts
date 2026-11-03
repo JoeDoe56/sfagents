@@ -1846,6 +1846,9 @@ export class WebServer {
     }
   }
 
+  /** Called with each reply an agent reads aloud (the terminal speaks it through this computer). */
+  emitSpeak?: (reply: { agent: string; text: string }) => void;
+
   /** Stops speakAloud(); true if something was being spoken. */
   stopSpeaking(): boolean {
     const s = this.speaking;
@@ -2474,8 +2477,13 @@ export class WebServer {
       this.publishArtifacts();
       this.publishThreads();
       const { items, more } = displayItems(this.conversation.state);
+      // An agent set to read its replies aloud: the page (or terminal) that is in use speaks it.
+      const last = items.at(-1);
+      const speak = !failure && last?.kind === 'assistant' && this.runtime.tree.byId.get(last.agent)?.definition.voice?.speak ? { agent: last.agent, text: last.text } : undefined;
+      if (speak) this.emitSpeak?.(speak);
       this.broadcast('run_end', {
         run: id,
+        ...(speak ? { speak } : {}),
         status: result?.status ?? AgentTerminateMode.ERROR,
         error: failure ? getErrorMessage(failure) : result?.error,
         items,

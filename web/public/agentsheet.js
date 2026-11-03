@@ -15,6 +15,7 @@ import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showError, confirmDialog, toast } from './dialogs.js';
 import { showMenu } from './menu.js';
 import { openAgentTree } from './agenttree.js';
+import { openAgentEditor } from './agenteditor.js';
 
 const LEVEL_NAMES = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -368,13 +369,23 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     showMenu({ anchor: parts.accountRow.anchor, align: 'end', placement: 'cover', title: listed.length > 1 ? 'In order: the next takes over at a limit' : undefined, groups: [listed.map(item), others.map(item)] });
   }
 
+  /** The agent editor; the sheet shows what it saved. */
+  function editAgent(name) {
+    openAgentEditor({
+      ...(name ? { agent: name } : {}),
+      onEditFile,
+      onSaved: () => (loadAgent(), loadContext()),
+      onDeleted: () => loadAgent(),
+    });
+  }
+
   function pickAgent() {
-    if (!agents.length) return;
     showMenu({
       anchor: parts.agentRow.anchor,
       align: 'end',
       placement: 'cover',
       groups: [
+        [{ label: 'New Agent…', symbol: 'plus', action: () => editAgent() }],
         agents.map((a) => ({
           label: a.name ?? a.id,
           detail: a.model,
@@ -396,6 +407,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     const tree = openAgentTree({
       current: staged.agent ?? info?.id,
       onEditFile,
+      onEditAgent: (id) => editAgent(id),
       // Picking an agent in the tree stages it here, as the menu does.
       onUseAgent: (id) => {
         const a = agentById(id);
@@ -409,14 +421,14 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     });
   }
 
-  // The gear opens the agent's file in the file manager's editor.
+  // The gear opens the agent editor.
   const gear = createButton({
     symbol: 'gear',
-    aria: 'Edit the agent file',
+    aria: 'Edit the agent',
     size: 'large',
     onClick: () => {
       const a = stagedAgent();
-      if (a?.file) onEditFile?.(a.file);
+      if (a?.id) editAgent(a.id);
     },
   });
   const ctx = openSheet({

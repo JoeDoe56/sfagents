@@ -263,7 +263,7 @@ export function installBubbleMenus(root, o) {
         else
           item('Speak Response', 'speak', () => {
             close();
-            speak(msg.text).catch((error) => toast(`Could not read it aloud: ${error.message}`, { symbol: 'exclamationmark.triangle', timeout: 5000 }));
+            speak(msg.text, msg.agent).catch((error) => toast(`Could not read it aloud: ${error.message}`, { symbol: 'exclamationmark.triangle', timeout: 5000 }));
           });
       }
       menu.append(el('div', 'bm-sep'));

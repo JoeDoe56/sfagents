@@ -49,7 +49,7 @@ export function layoutTree(agents, rootId) {
 }
 
 /**
- * @param {{current?: string, onEditFile?: (file: string) => void, onUseAgent?: (id: string) => void}} [o]
+ * @param {{current?: string, onEditFile?: (file: string) => void, onEditAgent?: (id: string) => void, onUseAgent?: (id: string) => void}} [o]
  */
 export function openAgentTree(o = {}) {
   let agents = [];
@@ -91,6 +91,7 @@ export function openAgentTree(o = {}) {
       groups: [
         [
           a.id !== current && o.onUseAgent ? { label: 'Use This Agent', symbol: 'checkmark.circle', action: () => o.onUseAgent(a.id) } : null,
+          o.onEditAgent ? { label: 'Edit Agent', symbol: 'gear', action: () => o.onEditAgent(a.id) } : null,
           a.file && o.onEditFile ? { label: 'Edit Agent File', symbol: 'square.and.pencil', action: () => o.onEditFile(a.file) } : null,
         ].filter(Boolean),
       ],

@@ -23,6 +23,8 @@ import {
   artifactPane,
   genuiPane,
   stepPane,
+  agentEditorPane,
+  agentsPane,
   artifactsPane,
   contextPane,
   diffsPane,
@@ -146,6 +148,7 @@ const HELP = [
   '  /changes           uncommitted changes in the agents’ repositories',
   '  /context           plan usage and what the working context holds',
   '  /files [folder]    the file manager',
+  '  /agents            the agents: edit one, or make a new one (/edit-agent, /new-agent)',
   '  /settings          settings, providers and speech',
   '  /speak [stop]      speak the latest reply aloud on this computer (or stop)',
   '  /exit              quit SF Agents (the web interface stops too)',
@@ -238,6 +241,12 @@ export class Tui {
 
   private open(): void {
     const { server, logs } = this.options;
+    // An agent set to read its replies aloud: through this computer's speakers, when the message came from here.
+    server.emitSpeak = (reply) => {
+      if (Date.now() - this.sentHere > 30 * 60_000) return;
+      this.sentHere = 0;
+      server.speakAloud(reply.text, reply.agent).catch(() => {});
+    };
     // Anything else written to the terminal while the interface is up (warnings from
     // libraries, debug output) goes to the Logs tab instead of over the screen.
     if (this.options.captureOutput !== false) {
@@ -521,7 +530,9 @@ export class Tui {
     // Tabs.
     const number = key.meta && /^[1-3]$/.test(name) ? Number(name) : /^f[1-3]$/.test(name) ? Number(name.slice(1)) : 0;
     if (number) return this.setTab(TABS[number - 1]!);
-    if (name === 'tab') return this.setTab(TABS[(TABS.indexOf(this.tab) + (key.shift ? TABS.length - 1 : 1)) % TABS.length]!);
+    // In a form (the agent editor) Tab moves between fields instead.
+    const form = this.tab === 'Chat' && !this.prompt && !!this.panes.at(-1)?.form;
+    if (name === 'tab' && !form) return this.setTab(TABS[(TABS.indexOf(this.tab) + (key.shift ? TABS.length - 1 : 1)) % TABS.length]!);
     // A pane over the chat takes the keys (unless it asked for text).
     if (this.tab === 'Chat' && this.panes.length && !this.prompt) return this.paneKey(str, key, name);
     // Scrolling.
@@ -684,9 +695,19 @@ export class Tui {
     if (name === 'home') return move(-1_000_000);
     if (name === 'end') return move(1_000_000);
     const row = rows[pane.selected]?.pick ? rows[pane.selected] : undefined;
+    if (name === 'tab') return move(key.shift ? -1 : 1);
     if (name === 'return' || name === 'enter') {
       if (row) pane.enter?.(row);
       return this.schedule();
+    }
+    // Ctrl+S saves a form (the agent editor).
+    if (key.ctrl && name === 's') {
+      if (pane.key?.('save', row)) return this.schedule();
+      return;
+    }
+    if (name === 'right') {
+      if (pane.key?.('right', row)) return this.schedule();
+      return;
     }
     if (name === 'backspace' || name === 'left') {
       if (pane.key?.(name === 'left' ? 'left' : '\b', row)) return this.schedule();
@@ -745,7 +766,7 @@ export class Tui {
 
   private async api<T = Record<string, unknown>>(method: 'GET' | 'POST', p: string, body?: unknown): Promise<T> {
     const r = await this.options.server.request(method, `/api/${p}`, body);
-    if (r.status >= 400) throw new Error(String(r.json.error ?? `HTTP ${r.status}`));
+    if (r.status >= 400) throw Object.assign(new Error(String(r.json.error ?? `HTTP ${r.status}`)), { status: r.status, body: r.json });
     return r.json as T;
   }
 
@@ -1005,8 +1026,12 @@ export class Tui {
     this.send(text);
   }
 
+  /** When a message was last sent from this terminal (its reply is read aloud here). */
+  private sentHere = 0;
+
   /** Sends a message, with the reply and attachments being written. */
   private send(text: string): void {
+    this.sentHere = Date.now();
     // While the agent works the message waits, Delivered, and the agent reads it at its next step.
     const replyTo = this.replyTo;
     const attachments = this.attachments;
@@ -1059,6 +1084,12 @@ export class Tui {
         }
         return;
       }
+      case '/agents':
+        return this.openPane(agentsPane(this.host));
+      case '/new-agent':
+        return this.openPane(agentEditorPane(this.host, undefined, () => {}));
+      case '/edit-agent':
+        return this.openPane(agentEditorPane(this.host, arg || this.agent?.id, () => {}));
       case '/effort':
       case '/reasoning': {
         try {
