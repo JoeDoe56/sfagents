@@ -363,7 +363,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
   /** The agent's container: the project folders (read-only), what is hidden in them, and its network level. */
   private containerSpec(): AgentContainerSpec {
     const c = this.ctx.container;
-    return { agentId: this.ctx.agentId, level: c.level, roots: [...c.roots], hidden: [...c.hidden] };
+    return { agentId: this.ctx.agentId, level: c.level, roots: [...c.roots], hidden: [...c.hidden], ...(c.memoryMb ? { memoryMb: c.memoryMb } : {}), ...(c.cpus ? { cpus: c.cpus } : {}) };
   }
 
   private async executeInContainer(signal: AbortSignal, callId?: string): Promise<ToolResult> {

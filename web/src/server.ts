@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +59,18 @@ import {
   chatEffects,
   readJsonFile,
   writeFileAtomic,
+  AgentFormError,
+  agentFormChoices,
+  containerManager,
+  deleteAgentFile,
+  duplicateAgentFile,
+  newAgentForm,
+  readAgentForm,
+  saveAgentForm,
+  writeWslMemoryCap,
+  wslMemoryMb,
+  type AgentForm,
+  type AgentFormLimits,
   type MessageRecord,
   type PlanUsage,
 } from '@sfagents/core';
@@ -433,18 +446,9 @@ export class WebServer {
         onChange: (status) => this.broadcast('dictation', status),
         // Loaded with SF Agents and kept loaded, so dictating never waits for the model.
         keepLoaded: true,
-        settings: () => ({
-          glossary: this.appSettings.get<string>('dictation.glossary'),
-          referenceText: this.appSettings.get<string>('speech.referenceText'),
-        }),
-        // A new reference clip's transcript becomes the setting (shown, and correctable, in Settings → STT & TTS).
-        onReferenceText: (text) => {
-          try {
-            this.appSettings.set({ 'speech.referenceText': text.slice(0, 4000) });
-          } catch (error) {
-            this.log(`dictation: the reference transcript was not saved: ${getErrorMessage(error)}`);
-          }
-        },
+        settings: () => ({ glossary: this.appSettings.get<string>('dictation.glossary') }),
+        // A new clip's transcript shows in the agent editor.
+        onVoice: (agent) => this.broadcast('agent-voice', { agent, voice: this.dictation.agentVoice(agent) }),
       });
     this.pushToTalk =
       options.pushToTalk ??
@@ -455,6 +459,14 @@ export class WebServer {
         onChange: (status) => this.broadcast('push-to-talk', status),
       });
     this.appSettings = options.settings ?? new AppSettings();
+    // The one voice of earlier versions becomes every agent's.
+    try {
+      const raw = readJsonFile<Record<string, unknown>>(this.appSettings.file, {});
+      const given = this.dictation.adoptSharedVoice([...options.tree.byId.keys()], typeof raw['speech.referenceText'] === 'string' ? raw['speech.referenceText'] : undefined);
+      if (given.length) this.log(`dictation: the reference voice is now the voice of ${given.join(', ')} (each agent has its own now).`);
+    } catch (error) {
+      this.log(`dictation: the reference voice was not moved to the agents: ${getErrorMessage(error)}`);
+    }
     this.screen =
       options.screen ??
       new ScreenMirror({
@@ -911,47 +923,58 @@ export class WebServer {
         } else if (body['action'] === 'install-voice') {
           // Qwen3-TTS, for Speak Response; progress arrives as "dictation" events too.
           this.dictation.installVoice().catch((error) => this.log(`dictation: ${getErrorMessage(error)}`));
-        } else if (body['action'] === 'transcribe-voice') {
-          // The reference clip transcribed again by Qwen3-ASR; the transcript replaces the setting.
-          try {
-            await this.dictation.transcribeReference();
-          } catch (error) {
-            throw new HttpError(409, getErrorMessage(error));
-          }
         } else throw new HttpError(400, 'Unknown action.');
         return sendJson(res, 200, this.dictation.status());
       }
       case 'GET voice': {
-        // The reference voice clip Qwen3-TTS copies.
+        // An agent's voice clip, which Qwen3-TTS copies.
         this.checkFetchSite(req);
+        const agent = this.voiceAgent(url);
         // With byte ranges: Safari on iPhone plays no audio served without them.
         let stat: fs.Stats;
         try {
-          stat = fs.statSync(this.dictation.voicePath);
+          stat = fs.statSync(this.dictation.voicePath(agent));
         } catch {
           throw new HttpError(404, 'No voice clip is set.');
         }
-        return this.serveFile({ path: this.dictation.voicePath, size: stat.size, modified: stat.mtimeMs, type: { mime: 'audio/wav' } }, false, req, res);
+        return this.serveFile({ path: this.dictation.voicePath(agent), size: stat.size, modified: stat.mtimeMs, type: { mime: 'audio/wav' } }, false, req, res);
       }
       case 'POST voice': {
+        const agent = this.voiceAgent(url);
         const type = String(req.headers['content-type'] ?? '');
         if (!/^audio\/(wav|wave|x-wav)\b/i.test(type)) throw new HttpError(415, 'Expected Content-Type: audio/wav.');
         try {
-          this.dictation.setReference(await readBody(req, MAX_AUDIO_BYTES));
+          this.dictation.setReference(agent, await readBody(req, MAX_AUDIO_BYTES));
         } catch (error) {
           if (error instanceof HttpError) throw error;
           throw new HttpError(400, getErrorMessage(error));
         }
-        return sendJson(res, 200, this.dictation.status());
+        return sendJson(res, 200, this.dictation.agentVoice(agent));
       }
-      case 'DELETE voice':
-        this.dictation.setReference(null);
-        return sendJson(res, 200, this.dictation.status());
+      case 'DELETE voice': {
+        const agent = this.voiceAgent(url);
+        this.dictation.setReference(agent, null);
+        return sendJson(res, 200, this.dictation.agentVoice(agent));
+      }
+      case 'GET agent-editor':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, this.agentEditor(url.searchParams.get('agent') ?? undefined));
+      case 'POST agent-editor': {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        try {
+          return sendJson(res, 200, await this.agentEditorAction(body));
+        } catch (error) {
+          if (error instanceof AgentFormError) return sendJson(res, 422, { error: error.message, errors: error.errors });
+          throw error;
+        }
+      }
       case 'POST speak': {
         // Text to speech with Qwen3-TTS: with stream, 16-bit mono PCM as it is
         // made (the page plays it as it comes); without, the whole reply as one WAV file.
         const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
         const text = typeof body['text'] === 'string' ? body['text'] : '';
+        // In the voice of the agent that wrote it (by default the one replying now).
+        const voice = typeof body['agent'] === 'string' && body['agent'] ? body['agent'] : this.session.node.id;
         if (!speechText(text)) throw new HttpError(400, 'Nothing to say.'); // only code, emoji or Markdown
         if (text.length > 20_000) throw new HttpError(413, 'That is too long to speak at once.');
         if (body['stream'] === true) {
@@ -960,7 +983,7 @@ export class WebServer {
           res.on('close', () => stop.abort());
           let pcm: AsyncIterable<Buffer>;
           try {
-            pcm = await this.dictation.speakStream(text, stop.signal);
+            pcm = await this.dictation.speakStream(text, voice, stop.signal);
           } catch (error) {
             if (stop.signal.aborted) return;
             throw new HttpError(this.dictation.status().voice.state === 'missing' ? 409 : 503, getErrorMessage(error));
@@ -976,7 +999,7 @@ export class WebServer {
         }
         let wav: Buffer;
         try {
-          wav = await this.dictation.speak(text);
+          wav = await this.dictation.speak(text, voice);
         } catch (error) {
           throw new HttpError(this.dictation.status().voice.state === 'missing' ? 409 : 503, getErrorMessage(error));
         }
@@ -1005,8 +1028,13 @@ export class WebServer {
       case 'GET settings':
         this.checkFetchSite(req);
         return sendJson(res, 200, this.providersApi.settings());
-      case 'POST settings':
-        return sendJson(res, 200, this.providersApi.saveSettings(((await readJson(req)) ?? {}) as Record<string, unknown>));
+      case 'POST settings': {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const saved = this.providersApi.saveSettings(body);
+        const values = body['values'] as Record<string, unknown>;
+        if ('containers.wslMemoryGb' in values) this.applyWslMemoryCap();
+        return sendJson(res, 200, saved);
+      }
       case 'GET providers':
         this.checkFetchSite(req);
         return sendJson(res, 200, await this.providersApi.handle('GET', parts, {}));
@@ -1802,14 +1830,14 @@ export class WebServer {
    * Response): Qwen3-TTS as it is made, played with PvSpeaker. Speaking
    * something else, or stopSpeaking(), stops it.
    */
-  async speakAloud(text: string): Promise<void> {
+  async speakAloud(text: string, agent = this.session.node.id): Promise<void> {
     if (!speechText(text)) throw new Error('Nothing to say.');
     if (text.length > 20_000) throw new Error('That is too long to speak at once.');
     this.stopSpeaking();
     const stop = new AbortController();
     this.speaking = stop;
     try {
-      const pcm = await this.dictation.speakStream(text, stop.signal);
+      const pcm = await this.dictation.speakStream(text, agent, stop.signal);
       await playPcm(pcm, SPEECH_RATE, stop.signal);
     } catch (error) {
       if (!stop.signal.aborted) throw error;
@@ -1868,6 +1896,190 @@ export class WebServer {
     const info = this.agentInfo();
     this.broadcast('agent', info);
     return info;
+  }
+
+  // ---------------------------------------------------------------------------
+  // The agent editor
+
+  /** The agent a voice request is for: ?agent=, else the one replying now. */
+  private voiceAgent(url: URL): string {
+    const agent = url.searchParams.get('agent')?.trim() || this.session.node.id;
+    if (!/^[^\\/:*?"<>|\x00-\x1f]{1,100}$/.test(agent)) throw new HttpError(400, 'Not an agent name.');
+    return agent;
+  }
+
+  /** What the editor's sliders and pickers may offer. */
+  private editorLimits(): AgentFormLimits {
+    const step = 512;
+    const total = process.platform === 'win32' ? (wslMemoryMb() ?? this.appSettings.get<number>('containers.wslMemoryGb') * 1024) : Math.floor(os.totalmem() / 1024 / 1024);
+    return {
+      maxMemoryMb: Math.max(step, Math.floor(total / step) * step),
+      maxCpus: Math.max(1, os.availableParallelism?.() ?? os.cpus().length),
+      providers: [...this.registry.list().map((r) => r.name), 'openrouter', 'openai-compatible'],
+    };
+  }
+
+  /** The editor's form for an agent (or a new one), and what it can choose from. */
+  agentEditor(name?: string) {
+    const tree = this.runtime.tree;
+    const limits = this.editorLimits();
+    let form: AgentForm;
+    try {
+      form = name ? readAgentForm(tree, name) : newAgentForm(limits);
+    } catch (error) {
+      throw new HttpError(404, getErrorMessage(error));
+    }
+    // Models seen with each provider, for the model field's suggestions.
+    const models: Record<string, string[]> = {};
+    const add = (provider: string, model: string) => {
+      if (!model) return;
+      const key = provider.toLowerCase();
+      if (!(models[key] ??= []).includes(model)) models[key]!.push(model);
+    };
+    for (const n of tree.byId.values()) for (const p of n.definition.providers) add(p.provider, p.model);
+    const providers = this.registry.list().map((r) => {
+      add(r.name, DEFAULT_MODELS[r.kind] ?? '');
+      return { name: r.name, kind: r.kind, models: models[r.name.toLowerCase()] ?? [] };
+    });
+    const skipped = name ? tree.skipped.find((s) => path.basename(s.file).replace(/\.json$/i, '').toLowerCase() === name.toLowerCase()) : undefined;
+    return {
+      original: name ? form.name : null,
+      form,
+      choices: { ...agentFormChoices(tree, limits), providers },
+      voice: name ? this.dictation.agentVoice(form.name) : { clip: false },
+      ...(skipped ? { problem: skipped.error } : {}),
+      file: name ? path.join(tree.agentsDir, `${form.name}.json`) : null,
+      onlyAgent: tree.byId.size <= 1 && !!name && tree.byId.has(form.name),
+    };
+  }
+
+  /** Save, Duplicate, Reset Environment, Delete, and the voice's transcript. */
+  async agentEditorAction(body: Record<string, unknown>) {
+    const tree = this.runtime.tree;
+    const agent = typeof body['agent'] === 'string' ? body['agent'] : '';
+    const busy = () => {
+      if (this.session.running || this.live) throw new HttpError(409, 'Wait for the current reply to finish.');
+    };
+    switch (body['action']) {
+      case 'save': {
+        const original = typeof body['original'] === 'string' && body['original'] ? body['original'] : undefined;
+        const form = body['form'] as AgentForm;
+        if (!form || typeof form !== 'object') throw new HttpError(400, '"form" is required.');
+        const clean: AgentForm = {
+          name: String(form.name ?? ''),
+          description: String(form.description ?? ''),
+          provider: String(form.provider ?? ''),
+          model: String(form.model ?? ''),
+          instructions: String(form.instructions ?? '').replace(/\r\n/g, '\n'),
+          network: (form.network ?? null) as AgentForm['network'],
+          mcpServers: Array.isArray(form.mcpServers) ? form.mcpServers.map(String) : [],
+          memoryMb: Number(form.memoryMb),
+          cpus: Number(form.cpus),
+          speak: form.speak === true,
+        };
+        const renamed = !!original && original !== clean.name.trim();
+        const wasCurrent = renamed && this.session.node.id === original;
+        if (renamed) busy();
+        saveAgentForm(tree, clean, this.editorLimits(), original);
+        const name = clean.name.trim();
+        if (renamed) {
+          try {
+            this.dictation.renameVoice(original!, name);
+          } catch (error) {
+            this.log(`agents: ${original}'s voice did not move to ${name}: ${getErrorMessage(error)}`);
+          }
+          // The old name's container goes; the new name gets its own (workspaces stay).
+          void containerManager().removeAgent(original!).catch(() => {});
+        }
+        this.reloadAgents();
+        if (wasCurrent && this.runtime.tree.byId.has(name)) {
+          this.selectAgent(name);
+          this.broadcast('agent', this.agentInfo());
+        }
+        return this.agentEditor(name);
+      }
+      case 'duplicate': {
+        let copy: string;
+        try {
+          copy = duplicateAgentFile(tree, agent);
+        } catch (error) {
+          throw new HttpError(404, getErrorMessage(error));
+        }
+        try {
+          this.dictation.copyVoice(agent, copy);
+        } catch {
+          // the copy has no voice
+        }
+        this.reloadAgents();
+        return this.agentEditor(copy);
+      }
+      case 'reset': {
+        // The container (and its home) is made again on the next command; /workspaces stays.
+        if (!tree.byId.has(agent)) throw new HttpError(404, `No agent named "${agent}".`);
+        if (this.session.node.id === agent) busy();
+        try {
+          await containerManager().removeAgent(agent);
+        } catch (error) {
+          throw new HttpError(503, `The container could not be removed: ${getErrorMessage(error)}`);
+        }
+        this.log(`agents: ${agent}'s environment was reset.`);
+        return this.agentEditor(agent);
+      }
+      case 'delete': {
+        try {
+          readAgentForm(tree, agent);
+        } catch {
+          throw new HttpError(404, `No agent named "${agent}".`);
+        }
+        if (tree.byId.size <= 1 && tree.byId.has(agent)) throw new HttpError(409, 'This is the only agent: add another before deleting it.');
+        if (this.session.node.id === agent) busy();
+        await containerManager()
+          .removeAgent(agent)
+          .catch((error: unknown) => this.log(`agents: ${agent}'s container was not removed: ${getErrorMessage(error)}`));
+        deleteAgentFile(tree, agent);
+        try {
+          this.dictation.removeVoice(agent);
+        } catch {
+          // nothing to remove
+        }
+        this.reloadAgents();
+        return { deleted: agent };
+      }
+      case 'voice-text': {
+        try {
+          this.dictation.setReferenceText(agent, typeof body['text'] === 'string' ? body['text'] : '');
+        } catch (error) {
+          throw new HttpError(409, getErrorMessage(error));
+        }
+        return { voice: this.dictation.agentVoice(agent) };
+      }
+      case 'transcribe-voice': {
+        try {
+          await this.dictation.transcribeReference(agent);
+        } catch (error) {
+          throw new HttpError(409, getErrorMessage(error));
+        }
+        return { voice: this.dictation.agentVoice(agent) };
+      }
+      default:
+        throw new HttpError(400, 'Unknown action.');
+    }
+  }
+
+  /** Writes the WSL Memory Cap setting to .wslconfig (Windows); WSL picks it up the next time it starts. */
+  private applyWslMemoryCap(): void {
+    if (process.platform !== 'win32') return;
+    try {
+      const w = writeWslMemoryCap(this.appSettings.get<number>('containers.wslMemoryGb'));
+      if (w.changed) {
+        this.broadcast('notice', {
+          text: `The WSL memory cap is written to ${w.file}${w.backup ? ` (the file from before SF Agents changed it is ${w.backup})` : ''}. It takes effect the next time WSL starts; "wsl --shutdown" would do it now, but it also restarts Docker Desktop and its containers.`,
+          level: 'info',
+        });
+      }
+    } catch (error) {
+      this.broadcast('notice', { text: `The WSL memory cap could not be written to .wslconfig: ${getErrorMessage(error)}`, level: 'error' });
+    }
   }
 
   /** Later requests start from a fresh working context; the history stays stored. */

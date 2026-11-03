@@ -4,6 +4,7 @@
 
 export * from './agents/definition.js';
 export * from './agents/loader.js';
+export * from './agents/editor.js';
 export { MessageTool, MAX_QUESTION_OPTIONS, USER, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText, messageAction, MESSAGE_ACTIONS, USER_REACTIONS } from './agents/message-agent.js';
 export type { MessageAction, MessageParams, MessageQuestion } from './agents/message-agent.js';
 export type { AgentReplyPayload, AgentMessenger } from './agents/message-agent.js';
@@ -189,4 +190,4 @@ export { ContainerManager, containerManager, setContainerManagerForTesting, cont
 export { CommandDockerCli, defaultDockerCli, docker, WSL_DISTRO, type DockerCli, type DockerResult } from './container/docker.js';
 export { handleProxyConnection, levelAllows, isPrivateAddress, isNetworkLevel, networkLevelOf, NETWORK_LEVELS, NETWORK_LEVEL_TEXT, PACKAGE_HOSTS as CONTAINER_PACKAGE_HOSTS, GIT_HOSTS, HOST_CHANNEL_NAME, type NetworkLevel, type NetworkEvent } from './container/network.js';
 export { BRIDGE_SOURCE, INIT_SOURCE, CLIENT_SOURCE, EXEC_SOURCE, KILL_SOURCE, FRAME } from './container/scripts.js';
-export { wslStatus, setupDistro, mergeWslConfig, wslConfigPath, mountRootsInDistro, WSLCONFIG_SETTINGS, type WslStatus } from './container/wsl.js';
+export { wslStatus, setupDistro, mergeWslConfig, wslConfigPath, wslConfigSettings, writeWslMemoryCap, wslMemoryMb, mountRootsInDistro, WSLCONFIG_SETTINGS, type WslStatus } from './container/wsl.js';

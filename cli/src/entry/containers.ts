@@ -9,13 +9,14 @@
 
 import fs from 'node:fs';
 import {
+  AppSettings,
   containerManager,
   getErrorMessage,
   mergeWslConfig,
   setupDistro,
   wslConfigPath,
+  wslConfigSettings,
   wslStatus,
-  WSLCONFIG_SETTINGS,
 } from '@sfagents/core';
 import type { Streams } from './main.js';
 
@@ -64,7 +65,7 @@ async function setup(out: (line: string) => void): Promise<number> {
   if (process.platform === 'win32') {
     const file = wslConfigPath();
     const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-    const { text, changed } = mergeWslConfig(before, WSLCONFIG_SETTINGS);
+    const { text, changed } = mergeWslConfig(before, wslConfigSettings(new AppSettings().get<number>('containers.wslMemoryGb')));
     if (changed.length) {
       if (before) fs.copyFileSync(file, `${file}.sfagents-backup`);
       fs.writeFileSync(file, text);

@@ -158,6 +158,43 @@ export function mergeWslConfig(text: string, settings: Record<string, Record<str
   return { text: lines.join('\r\n').replace(/(\r\n)*$/, '\r\n'), changed };
 }
 
+/** WSLCONFIG_SETTINGS with the WSL Memory Cap setting (GB). */
+export function wslConfigSettings(memoryGb: number): Record<string, Record<string, string>> {
+  return { ...WSLCONFIG_SETTINGS, wsl2: { ...WSLCONFIG_SETTINGS['wsl2'], memory: `${memoryGb}GB` } };
+}
+
+/**
+ * Writes the WSL Memory Cap to .wslconfig (the previous file is kept as
+ * .wslconfig.sfagents-backup). WSL is never restarted here: it takes effect
+ * the next time WSL starts. Returns whether the file changed.
+ */
+export function writeWslMemoryCap(memoryGb: number, file = wslConfigPath()): { changed: boolean; file: string; backup?: string } {
+  const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const { text, changed } = mergeWslConfig(before, { wsl2: { memory: `${memoryGb}GB` } }, true);
+  if (!changed.length) return { changed: false, file };
+  let backup: string | undefined;
+  if (before) {
+    backup = `${file}.sfagents-backup`;
+    // The first backup is the file as it was before SF Agents changed it; keep it.
+    if (!fs.existsSync(backup)) fs.copyFileSync(file, backup);
+  }
+  fs.writeFileSync(file, text);
+  return { changed: true, file, ...(backup ? { backup } : {}) };
+}
+
+/** The WSL memory limit in .wslconfig, in MB (undefined when none is set). */
+export function wslMemoryMb(file = wslConfigPath()): number | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const m = /^\s*memory\s*=\s*(\d+(?:\.\d+)?)\s*(GB|MB)?\s*$/im.exec(text);
+  if (!m) return undefined;
+  return Math.round(Number(m[1]) * (m[2]?.toUpperCase() === 'MB' ? 1 : 1024));
+}
+
 export function wslConfigPath(): string {
   return path.join(os.homedir(), '.wslconfig');
 }

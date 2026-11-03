@@ -21,7 +21,7 @@ export interface ToolContext {
    * (read-only, at /roots/<name>), and files and folders in them it never sees
    * (secrets, SF Agents' own data).
    */
-  readonly container: { readonly level: NetworkLevel; readonly roots: readonly string[]; readonly hidden: readonly string[] };
+  readonly container: { readonly level: NetworkLevel; readonly roots: readonly string[]; readonly hidden: readonly string[]; readonly memoryMb?: number; readonly cpus?: number };
   /** The edit format the shell's description teaches (from the model's family). */
   readonly patchFormat?: PatchFormat;
   /** SF Agents' own commands this agent may run (`sfa-web`, `sfa-artifact`). */

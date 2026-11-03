@@ -122,6 +122,16 @@ export interface AgentDefinition {
     /** Images one shell call may show the model with `sfa-view` (default 8, at most 20). */
     viewImages?: number;
   };
+  /** The agent's container: memory in MB and processor cores (defaults 4096 and 4). */
+  container?: {
+    memoryMb?: number;
+    cpus?: number;
+  };
+  /** Reading replies aloud (Qwen3-TTS), in the voice clip set for this agent. */
+  voice?: {
+    /** Each finished reply is read aloud. */
+    speak?: boolean;
+  };
 }
 
 export class ConfigError extends Error {
@@ -134,6 +144,12 @@ export class ConfigError extends Error {
     this.name = 'ConfigError';
   }
 }
+
+/** What an agent's container may be given (the editor's sliders stay within the WSL memory cap). */
+export const CONTAINER_LIMITS = {
+  memoryMb: { min: 512, max: 262_144, step: 512, default: 4096 },
+  cpus: { min: 0.5, max: 256, step: 0.5, default: 4 },
+} as const;
 
 export const AGENT_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 /** Agent names come from file names: anything printable without path separators. */
@@ -160,6 +176,8 @@ const TOP_LEVEL_KEYS = new Set([
   'artifacts',
   'context',
   'limits',
+  'container',
+  'voice',
 ]);
 
 type Raw = Record<string, unknown>;
@@ -455,6 +473,21 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     };
   }
 
+  let container: AgentDefinition['container'];
+  if (raw['container'] !== undefined) {
+    const ct = c.object(raw['container'], 'container', ['memoryMb', 'cpus']);
+    container = {
+      memoryMb: c.integer(ct['memoryMb'], 'container.memoryMb', CONTAINER_LIMITS.memoryMb.min, CONTAINER_LIMITS.memoryMb.max),
+      cpus: c.number(ct['cpus'], 'container.cpus', CONTAINER_LIMITS.cpus.min, CONTAINER_LIMITS.cpus.max),
+    };
+  }
+
+  let voice: AgentDefinition['voice'];
+  if (raw['voice'] !== undefined) {
+    const v = c.object(raw['voice'], 'voice', ['speak']);
+    voice = { speak: c.boolean(v['speak'], 'voice.speak') };
+  }
+
   return {
     id,
     ...(name ? { name } : {}),
@@ -474,6 +507,8 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     artifacts,
     context,
     limits,
+    ...(container ? { container } : {}),
+    ...(voice ? { voice } : {}),
   };
 }
 

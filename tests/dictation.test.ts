@@ -483,52 +483,78 @@ describe('dictation that was not set up', { skip: process.platform !== 'linux' &
 });
 
 describe('text to speech', { skip: process.platform !== 'linux' && 'the stand-in audiocpp_server is a shell script' }, () => {
-  test('Qwen3-TTS speaks next to Qwen3-ASR, in the reference voice, with its transcript', async () => {
+  test('Qwen3-TTS speaks next to Qwen3-ASR, in each agent\'s own voice, with its transcript', async () => {
     const dir = makeTempDir();
     standIn(dir);
-    let referenceText = '';
-    const saved: string[] = [];
-    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, settings: () => ({ referenceText }), onReferenceText: (t) => saved.push((referenceText = t)) });
+    const heard: string[] = [];
+    const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL, onVoice: (a) => heard.push(a) });
     try {
       await d.start();
-      await assert.rejects(() => d.speak('Hi.'), /not set up/);
+      await assert.rejects(() => d.speak('Hi.', 'main'), /not set up/);
       // Downloaded while the server runs: it is started again with Qwen3-TTS in its config.
       fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
-      await assert.rejects(() => d.speak('Hi.'), /set a reference voice/, 'the Base model has no voice of its own');
-      d.setReference(wav(8000));
-      assert.equal(d.status().voice.reference, true);
-      assert.throws(() => d.setReference(Buffer.from('not a wav file')), /WAV/);
-      const out = await d.speak('Hello\nthere.');
+      await assert.rejects(() => d.speak('Hi.', 'main'), /"main" has none yet/, 'the Base model has no voice of its own');
+      d.setReference('main', wav(8000));
+      assert.equal(d.agentVoice('main').clip, true);
+      assert.equal(d.agentVoice('Writer').clip, false, 'each agent has its own');
+      assert.throws(() => d.setReference('main', Buffer.from('not a wav file')), /WAV/);
+      const out = await d.speak('Hello\nthere.', 'main');
       assert.equal(out.toString(), 'RIFF....WAVEHello there.');
       const log = await calls(d);
       const tts = log.find((c) => c.startsWith('tts'))!;
       assert.match(tts, /^tts qwen3-asr\+qwen3-tts /, 'both loaded');
       const req = JSON.parse(tts.slice(tts.indexOf('{')));
-      assert.equal(req.voice_ref, path.join(dir, 'voice-ref.wav'));
+      assert.equal(req.voice_ref, path.join(dir, 'voices', 'main', 'voice-ref.wav'));
       assert.equal(req.options.reference_text, 'hello from cpu, max 36', 'the clip, as Qwen3-ASR heard it');
       assert.equal(req.options.guidance_scale, undefined);
       assert.equal(d.status().voice.state, 'loaded');
+      assert.equal(d.agentVoice('main').transcript, 'hello from cpu, max 36');
       // The transcript is made once per clip.
       const asr = () => calls(d).then((c) => c.filter((x) => x.startsWith('asr')).length);
       const before = await asr();
-      await d.speak('Again.');
+      await d.speak('Again.', 'main');
       assert.equal(await asr(), before, 'not transcribed again');
-      d.setReference(wav(16000));
-      await d.speak('New clip.');
+      d.setReference('main', wav(16000));
+      await d.speak('New clip.', 'main');
       assert.equal(await asr(), before + 1, 'a new clip is transcribed');
-      assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'voice-ref.json'), 'utf8')).text, 'hello from cpu, max 40');
-      assert.deepEqual(saved, ['hello from cpu, max 36', 'hello from cpu, max 40'], 'each new transcript becomes the setting');
+      assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'voices', 'main', 'voice-ref.json'), 'utf8')).text, 'hello from cpu, max 40');
+      assert.deepEqual(heard, ['main', 'main']);
       // The user's correction wins, until the clip changes or it is transcribed again.
-      referenceText = 'What I really said.';
-      await d.speak('Corrected.');
+      d.setReferenceText('main', 'What I really said.');
+      await d.speak('Corrected.', 'main');
       const tts2 = (await calls(d)).filter((c) => c.startsWith('tts')).at(-1)!;
       assert.equal(JSON.parse(tts2.slice(tts2.indexOf('{'))).options.reference_text, 'What I really said.');
-      assert.equal(d.status().voice.transcript, 'What I really said.');
-      assert.equal(await d.transcribeReference(), 'hello from cpu, max 40');
-      assert.equal(referenceText, 'hello from cpu, max 40', 'transcribed again: the setting is the new transcript');
-      d.setReference(null);
-      await assert.rejects(() => d.speak('Gone.'), /set a reference voice/);
-      assert.equal(fs.existsSync(path.join(dir, 'voice-ref.wav')), false);
+      assert.deepEqual(d.agentVoice('main'), { clip: true, transcript: 'What I really said.', corrected: true });
+      assert.equal(await d.transcribeReference('main'), 'hello from cpu, max 40');
+      assert.equal(d.agentVoice('main').corrected, undefined, 'transcribed again: the correction is gone');
+      // Renamed, copied, removed.
+      d.renameVoice('main', 'Main Agent');
+      assert.equal(d.agentVoice('main').clip, false);
+      assert.equal(d.agentVoice('Main Agent').transcript, 'hello from cpu, max 40');
+      d.copyVoice('Main Agent', 'Copy');
+      assert.equal(d.agentVoice('Copy').clip, true);
+      d.removeVoice('Copy');
+      d.setReference('Main Agent', null);
+      await assert.rejects(() => d.speak('Gone.', 'Main Agent'), /has none yet/);
+      assert.equal(fs.existsSync(path.join(dir, 'voices', 'main%20agent')), false);
+    } finally {
+      d.close();
+    }
+  });
+
+  test('the one voice of earlier versions becomes the voice of every agent without one', () => {
+    const dir = makeTempDir();
+    const d = new Dictation({ dir, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL });
+    try {
+      assert.deepEqual(d.adoptSharedVoice(['main']), [], 'nothing to move');
+      d.setReference('writer', wav(4000));
+      fs.writeFileSync(path.join(dir, 'voice.wav'), wav(8000));
+      fs.writeFileSync(path.join(dir, 'voice-ref.json'), '{}');
+      assert.deepEqual(d.adoptSharedVoice(['main', 'writer'], 'Hello there.'), ['main']);
+      assert.deepEqual(d.agentVoice('main'), { clip: true, transcript: 'Hello there.', corrected: true });
+      assert.equal(fs.readFileSync(d.voicePath('writer')).length, wav(4000).length, 'its own voice stays');
+      assert.equal(fs.existsSync(path.join(dir, 'voice.wav')), false);
+      assert.equal(fs.existsSync(path.join(dir, 'voice-ref.json')), false);
     } finally {
       d.close();
     }
@@ -570,10 +596,10 @@ describe('speaking as it is made', { skip: process.platform !== 'linux' && 'the 
     fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
     const d = new Dictation({ dir, keepLoaded: true, hardware: () => ({ platform: 'linux', arch: 'x64', nvidia: false, vulkan: false }), ...SMALL });
     try {
-      d.setReference(wav(8000));
+      d.setReference('main', wav(8000));
       await d.start();
       const pieces: string[] = [];
-      for await (const c of await d.speakStream('Hello.')) pieces.push(c.toString());
+      for await (const c of await d.speakStream('Hello.', 'main')) pieces.push(c.toString());
       assert.equal(pieces.join(''), 'pcm0;pcm1;pcm2;pcm3;pcm4;pcm5;pcm6;pcm7;pcm8;pcm9;');
       assert.ok(pieces.length > 1, 'more than one piece');
       const req = JSON.parse((await calls(d)).at(-1)!.replace(/^tts \S+ /, ''));
@@ -583,11 +609,11 @@ describe('speaking as it is made', { skip: process.platform !== 'linux' && 'the 
       const stop = new AbortController();
       let got = 0;
       await assert.rejects(async () => {
-        for await (const _ of await d.speakStream('Long.', stop.signal)) if (++got === 2) stop.abort();
+        for await (const _ of await d.speakStream('Long.', 'main', stop.signal)) if (++got === 2) stop.abort();
       });
       for (let i = 0; i < 50 && !(await calls(d)).some((c) => c.startsWith('tts stopped')); i++) await new Promise((r) => setTimeout(r, 20));
       assert.ok((await calls(d)).some((c) => /^tts stopped after [23]$/.test(c)), 'the generation stopped');
-      assert.equal((await d.speak('Next.')).toString(), 'RIFF....WAVENext.', 'not stuck behind the stopped one');
+      assert.equal((await d.speak('Next.', 'main')).toString(), 'RIFF....WAVENext.', 'not stuck behind the stopped one');
     } finally {
       d.close();
     }
@@ -600,7 +626,7 @@ describe('where the models run', { skip: process.platform !== 'linux' && 'the st
     const dir = makeTempDir();
     standIn(dir);
     fs.writeFileSync(path.join(dir, 'models', 'tts.gguf'), 't');
-    fs.writeFileSync(path.join(dir, 'voice.wav'), wav(8000));
+    fs.writeFileSync((fs.mkdirSync(path.join(dir, 'voices', 'main'), { recursive: true }), path.join(dir, 'voices', 'main', 'voice.wav')), wav(8000));
     fs.writeFileSync(path.join(dir, 'audiocpp', 'cpu', 'room.json'), JSON.stringify({ free, sizes: { 'qwen3-asr': 2.8, 'qwen3-tts': 4.6 } }));
     fs.writeFileSync(path.join(dir, 'audiocpp.json'), JSON.stringify({ runtimes: { vulkan: { dir: 'audiocpp/cpu', tag: RUNTIME_RELEASE.tag } }, working: 'vulkan' }));
     const logs: string[] = [];
@@ -633,7 +659,7 @@ describe('where the models run', { skip: process.platform !== 'linux' && 'the st
       assert.ok(logs.some((l) => /Qwen3-TTS and Qwen3-ASR do not fit on the GPU/.test(l)), logs.join(' | '));
       assert.ok(logs.some((l) => /Speech to text: CPU \(\d+ threads?\) · Text to speech: GPU/.test(l)), logs.join(' | '));
       assert.equal(await d.transcribe(wav(16000)), 'hello from cpu, max 40');
-      assert.equal((await d.speak('Hi.')).toString(), 'RIFF....WAVEHi.');
+      assert.equal((await d.speak('Hi.', 'main')).toString(), 'RIFF....WAVEHi.');
       // One stops: both start again together.
       (d as unknown as { servers: Array<{ child: { kill(): void } }> }).servers[1]!.child.kill();
       for (let i = 0; i < 100 && started().length < 4; i++) await new Promise((r) => setTimeout(r, 100));

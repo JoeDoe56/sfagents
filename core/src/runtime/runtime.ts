@@ -274,7 +274,7 @@ export class AgentRuntime implements AgentMessenger {
       maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
       secretEnvNames: this.secretEnvNames,
       shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
-      container: { level: d.network, roots: this.projectFolders(), hidden: this.hiddenPaths() },
+      container: { level: d.network, roots: this.projectFolders(), hidden: this.hiddenPaths(), ...d.container },
       patchFormat: this.patchFormat(d),
       commands,
     };

@@ -289,6 +289,20 @@ export class ContainerManager {
     return pending;
   }
 
+  /**
+   * Removes the agent's container and its home volume (Reset Environment,
+   * and deleting the agent). /workspaces and the shared cache stay. The next
+   * command makes a fresh container.
+   */
+  async removeAgent(agentId: string): Promise<void> {
+    const cid = containerIdFor(agentId);
+    this.ready.delete(cid);
+    this.agents.delete(cid);
+    await this.cli.run(['rm', '-f', containerName(cid)], { timeoutMs: 60_000 });
+    await this.cli.run(['volume', 'rm', '-f', `sfagents-home-${cid}`], { timeoutMs: 60_000 });
+    await this.bridge.removeAgent(cid).catch(() => {});
+  }
+
   /** Checks the agent's container again on its next command. */
   forget(agentId: string): void {
     this.ready.delete(containerIdFor(agentId));
