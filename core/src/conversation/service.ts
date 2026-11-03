@@ -20,7 +20,8 @@ import { FileConversationStore, MemoryConversationStore, readConversation, type 
 import type { ConversationState } from './state.js';
 import type { AttachmentRef, MessageRecord, ToolMessageStatus } from './types.js';
 import type { ArtifactView } from './state.js';
-import { userMessageFor } from './attachments.js';
+import type { ToolImage } from '../tools/tools.js';
+import { toolImagesMessage, userMessageFor, type ShownImage } from './attachments.js';
 import { ArtifactError, artifactTypeFor, mimeForFilename, safeFilename } from './artifacts.js';
 
 export const STATE_DIR_NAME = '.sfagents';
@@ -625,15 +626,19 @@ export function toChatMessages(
       if (sameModel && m.reasoningDetails) msg.reasoning_details = m.reasoningDetails;
       else if (sameModel && m.reasoning) msg.reasoning = m.reasoning;
       out.push(msg);
+      const shown: Array<{ callId: string; images: ShownImage[] }> = [];
       for (const call of m.toolCalls ?? []) {
         const result = run?.results.get(call.id);
         if (result) {
           out.push({ role: 'tool', tool_call_id: call.id, content: result.content });
+          if (result.attachments?.length) shown.push({ callId: call.id, images: result.attachments.map((a) => ({ label: a.name, mime: a.mime, data: resolveAttachment?.(a) })) });
         } else {
           const started = run?.started.has(call.id) ?? false;
           out.push({ role: 'tool', tool_call_id: call.id, content: started ? INTERRUPTED_UNKNOWN : INTERRUPTED_NOT_STARTED });
         }
       }
+      // Images the calls showed follow their results, as when they ran.
+      if (shown.length) out.push(toolImagesMessage(shown));
     }
     // Tool messages are emitted with their assistant message above.
   }
@@ -715,8 +720,10 @@ class StoreRunRecorder implements RunRecorder {
     this.store.append({ kind: 'tool_start', run: this.runId, callId, tool });
   }
 
-  toolResult(message: ToolMessage, tool: string, status: ToolMessageStatus): void {
-    this.message({ role: 'tool', content: message.content, callId: message.tool_call_id, tool, status });
+  toolResult(message: ToolMessage, tool: string, status: ToolMessageStatus, images?: readonly ToolImage[]): void {
+    // Shown images are kept like uploads, so later turns can send them again.
+    const attachments = images?.map((i, n) => this.service.addUpload(i.label ?? `image-${n + 1}`, i.mime, i.data));
+    this.message({ role: 'tool', content: message.content, callId: message.tool_call_id, tool, status, ...(attachments?.length ? { attachments } : {}) });
   }
 
   end(result: AgentRunResult): void {

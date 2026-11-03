@@ -10,6 +10,7 @@ import type { AgentNode } from '../agents/loader.js';
 import type { AssistantMessage, ToolMessage } from '../providers/types.js';
 import type { AttachmentRef, ToolMessageStatus } from '../conversation/types.js';
 import type { AgentRunResult } from './events.js';
+import type { ToolImage } from '../tools/tools.js';
 
 /** A message the person sent from a GenUI view: the view's artifact id and its state (JSON) at the time. */
 export interface ViewSource {
@@ -29,8 +30,8 @@ export interface RunRecorder {
   assistant(message: AssistantMessage, finishReason: string | null): void;
   /** Execution of an approved tool call is about to begin. */
   toolStart(callId: string, tool: string): void;
-  /** The full tool message returned to the model, and how the call ended. */
-  toolResult(message: ToolMessage, tool: string, status: ToolMessageStatus): void;
+  /** The full tool message returned to the model, how the call ended, and the images it showed. */
+  toolResult(message: ToolMessage, tool: string, status: ToolMessageStatus, images?: readonly ToolImage[]): void;
   end(result: AgentRunResult): void;
 }
 

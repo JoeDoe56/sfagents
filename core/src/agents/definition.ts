@@ -119,6 +119,8 @@ export interface AgentDefinition {
     maxToolOutputChars?: number;
     /** Web requests (`sfa-web`) per run, for agents at network level "on" (default 25). */
     webRequests?: number;
+    /** Images one shell call may show the model with `sfa-view` (default 8, at most 20). */
+    viewImages?: number;
   };
 }
 
@@ -440,6 +442,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       'shellTimeoutSeconds',
       'maxToolOutputChars',
       'webRequests',
+      'viewImages',
     ]);
     limits = {
       maxTurns: c.integer(l['maxTurns'], 'limits.maxTurns', 1, 500),
@@ -448,6 +451,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       shellTimeoutSeconds: c.integer(l['shellTimeoutSeconds'], 'limits.shellTimeoutSeconds', 1, 24 * 3600),
       maxToolOutputChars: c.integer(l['maxToolOutputChars'], 'limits.maxToolOutputChars', 1000, 2_000_000),
       webRequests: c.integer(l['webRequests'], 'limits.webRequests', 1, 10_000),
+      viewImages: c.integer(l['viewImages'], 'limits.viewImages', 1, 20),
     };
   }
 

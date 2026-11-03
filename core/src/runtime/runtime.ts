@@ -17,6 +17,8 @@ import { CHAT_GUIDANCE, ChatToolNames, createChatTools } from '../conversation/c
 import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
 import { ARTIFACT_COMMAND, ARTIFACT_GUIDANCE, artifactCommand, artifactIndex } from '../conversation/artifacts.js';
 import { hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
+import { DEFAULT_VIEW_IMAGES } from '../tools/sfa-view.js';
+import { toolImagesMessage, type ShownImage } from '../conversation/attachments.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import {
@@ -74,6 +76,8 @@ export interface RuntimeOptions {
   /** Approve every tool call that would otherwise ask (CLI --yes). */
   approveAll?: boolean;
   env?: NodeJS.ProcessEnv;
+  /** Speech to text for `sfa-view transcript` (the web app's dictation model). */
+  transcribe?: (wav: Buffer, signal: AbortSignal) => Promise<string>;
   /** Inject an MCP manager (tests); defaults to one built from tree.mcp. */
   mcpManager?: McpManager;
   /**
@@ -206,6 +210,7 @@ export class AgentRuntime implements AgentMessenger {
   private readonly providerFactory: ProviderFactory;
   private readonly confirm?: ConfirmationHandler;
   private readonly approveAll: boolean;
+  private readonly transcribe?: (wav: Buffer, signal: AbortSignal) => Promise<string>;
   private secretEnvNames: readonly string[];
   private readonly env: NodeJS.ProcessEnv;
   private readonly ownsMcp: boolean;
@@ -231,6 +236,7 @@ export class AgentRuntime implements AgentMessenger {
     this.providerFactory = options.providerFactory ?? createDefaultProviderFactory(env);
     this.confirm = options.confirm;
     this.approveAll = options.approveAll ?? false;
+    this.transcribe = options.transcribe;
     this.conversation = options.conversation;
     this.threads = new ThreadService(options.conversation?.dir);
     this.web = options.web ?? new BrightDataWeb(() => new ProviderRegistry().webKey());
@@ -265,6 +271,7 @@ export class AgentRuntime implements AgentMessenger {
       ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined) } : {}),
     };
     if (!commands.artifact) delete commands.artifact;
+    commands.view = { maxImages: d.limits?.viewImages ?? DEFAULT_VIEW_IMAGES, ...(this.transcribe ? { transcribe: this.transcribe } : {}) };
     const mcp = await this.mcpGrant(node, agentPath, emit);
     if (mcp) commands.mcp = mcp;
     const ctx: ToolContext = {
@@ -648,6 +655,8 @@ export class AgentRuntime implements AgentMessenger {
         beforeExecute: (callId: string, tool: string) => recordTurn((r) => r.toolStart(callId, tool)),
       };
       const pending: ParsedToolCall[] = [...done.toolCalls];
+      // Images the calls show (sfa-view) follow all of this step's results.
+      const shown: Array<{ callId: string; images: ShownImage[] }> = [];
       while (pending.length > 0) {
         if (signal.aborted) {
           // Keep the conversation valid: every tool call gets a response.
@@ -674,12 +683,14 @@ export class AgentRuntime implements AgentMessenger {
         );
         batch.forEach((call, i) => {
           const outcome = outcomes[i]!;
-          recordTurn((r) => r.toolResult(outcome.message, call.name, outcome.status));
+          recordTurn((r) => r.toolResult(outcome.message, call.name, outcome.status, outcome.images));
           messages.push(outcome.message);
+          if (outcome.images?.length) shown.push({ callId: call.id, images: outcome.images.map((i) => ({ label: i.label ?? 'image', mime: i.mime, data: i.data })) });
           if (sectionReminders === 0) activity.push(outcome.activity);
           if (outcome.status === 'ok' && SECTION_CHOICE_TOOLS.includes(call.name)) sectionChosen = true;
         });
       }
+      if (shown.length) messages.push(toolImagesMessage(shown));
     }
     } catch (e) {
       if (e instanceof PersistenceFailure) return storageStop(e);

@@ -268,9 +268,10 @@ rm -f "$file"
  */
 export const CLIENT_SOURCE = String.raw`'use strict';
 const net = require('node:net');
-module.exports = function run(name) {
-  const args = process.argv.slice(2);
-  function send(stdin) {
+/** Asks SF Agents once: resolves with its reply ({ok, text} or {ok: false, error}). */
+function request(argv, stdin) {
+  return new Promise((resolve) => {
+    const name = argv[0];
     const socket = net.connect('/run/sfa/proxy.sock');
     let state = 'head';
     let data = Buffer.alloc(0);
@@ -283,37 +284,44 @@ module.exports = function run(name) {
       const status = data.subarray(0, end).toString('latin1').split('\r\n')[0];
       data = data.subarray(end + 4);
       if (!/^HTTP\/1\.[01] 200/.test(status)) {
-        process.stderr.write(name + ': SF Agents refused: ' + status + '\n');
-        process.exit(1);
+        state = 'done';
+        socket.destroy();
+        return resolve({ ok: false, error: 'SF Agents refused: ' + status });
       }
       state = 'body';
-      socket.write(JSON.stringify({ argv: [name].concat(args), cwd: process.cwd(), ...(stdin !== undefined ? { stdin } : {}) }) + '\n');
+      socket.write(JSON.stringify({ argv, cwd: process.cwd(), ...(stdin !== undefined ? { stdin } : {}) }) + '\n');
     });
     socket.on('error', (error) => {
-      process.stderr.write(name + ': cannot reach SF Agents: ' + error.message + '\n');
-      process.exit(1);
+      if (state !== 'done') resolve({ ok: false, error: 'cannot reach SF Agents: ' + error.message });
+      state = 'done';
     });
     socket.on('end', () => {
-      let reply;
-      try { reply = JSON.parse(data.toString('utf8')); } catch {
-        process.stderr.write(name + ': no answer from SF Agents.\n');
-        process.exit(1);
-      }
-      if (!reply.ok) {
-        process.stderr.write(name + ': ' + reply.error + '\n');
-        process.exit(1);
-      }
-      process.stdout.write(reply.text.endsWith('\n') ? reply.text : reply.text + '\n');
-      if (reply.truncated) process.stderr.write(name + ': the result was cut at 1 MB.\n');
+      if (state === 'done') return;
+      state = 'done';
+      try { resolve(JSON.parse(data.toString('utf8'))); } catch { resolve({ ok: false, error: 'no answer from SF Agents.' }); }
     });
-  }
+  });
+}
+function run(name) {
+  const args = process.argv.slice(2);
+  const send = async (stdin) => {
+    const reply = await request([name].concat(args), stdin);
+    if (!reply.ok) {
+      process.stderr.write(name + ': ' + reply.error + '\n');
+      process.exit(1);
+    }
+    process.stdout.write(reply.text.endsWith('\n') ? reply.text : reply.text + '\n');
+    if (reply.truncated) process.stderr.write(name + ': the result was cut at 1 MB.\n');
+  };
   if (args.includes('--stdin')) {
     let input = '';
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', (c) => (input += c));
     process.stdin.on('end', () => send(input));
   } else send();
-};
+}
+module.exports = run;
+module.exports.request = request;
 `;
 
 /** One SF Agents command's launcher in /run/sfa/bin. */

@@ -26,6 +26,8 @@ import { sfagentsHome } from '../settings/home.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { isPathWithinRoot } from '../utils/paths.js';
 import { sfaPatchScript, SFA_PATCH_COMMAND, APPLY_PATCH_COMMAND } from '../tools/sfa-patch.js';
+import { VIEW_COMMAND, VIEW_SOURCE } from '../tools/sfa-view.js';
+import type { ToolImage } from '../tools/tools.js';
 import { runHostCommand, type HostCommands } from '../tools/host-commands.js';
 import { networkLog } from './network-log.js';
 import { ContainerBridge, RUN_VOLUME, type BridgeFile } from './bridge.js';
@@ -41,6 +43,8 @@ export const CONTAINER_ROOTS = '/roots';
 /** SF Agents' commands inside containers, and the names they run as on the host. */
 /** SF Agents' commands in every container; each hands its call to SF Agents. */
 export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact', 'sfa-mcp'];
+/** Commands that are scripts of their own in the container but also ask SF Agents. */
+const SCRIPT_COMMANDS: readonly string[] = [VIEW_COMMAND];
 /** Capabilities sudo and apt need; everything else (NET_RAW, NET_ADMIN, SYS_*) stays dropped. */
 export const CONTAINER_CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID', 'KILL', 'AUDIT_WRITE'];
 export const DEFAULT_MEMORY_MB = 4096;
@@ -184,7 +188,7 @@ interface AgentState {
   /** Files and folders on this computer the container does not see (secrets, SF Agents' data). */
   hidden: string[];
   /** Commands running now, newest last: their host commands and call. */
-  contexts: Array<{ cmds: HostCommands; callId?: string; signal: AbortSignal; command?: string }>;
+  contexts: Array<{ cmds: HostCommands; callId?: string; signal: AbortSignal; command?: string; images?: ToolImage[] }>;
 }
 
 export interface ContainerManagerOptions {
@@ -244,6 +248,7 @@ export class ContainerManager {
       'sfa-kill': { content: KILL_SOURCE },
       [SFA_PATCH_COMMAND]: { content: sfaPatchScript() },
       [APPLY_PATCH_COMMAND]: { content: sfaPatchScript(APPLY_PATCH_COMMAND) },
+      [VIEW_COMMAND]: { content: VIEW_SOURCE },
     };
     for (const name of CONTAINER_COMMANDS) files[name] = { content: clientLauncher(name) };
     return files;
@@ -358,7 +363,7 @@ export class ContainerManager {
    * these host commands, and the network log names it. Call the result when
    * the command has ended.
    */
-  beginCommand(agentId: string, context: { cmds: HostCommands; callId?: string; signal: AbortSignal; command?: string }): () => void {
+  beginCommand(agentId: string, context: { cmds: HostCommands; callId?: string; signal: AbortSignal; command?: string; images?: ToolImage[] }): () => void {
     const state = this.agents.get(containerIdFor(agentId));
     if (!state) return () => {};
     state.contexts.push(context);
@@ -385,7 +390,8 @@ export class ContainerManager {
   /** One request from SF Agents' commands in the container: a JSON line in, a JSON line out. */
   private hostChannel(state: AgentState, stream: Duplex, head: Buffer): void {
     let buffer = head.toString('utf8');
-    const MAX = 4 * 1024 * 1024 + 65_536;
+    // Large enough for sfa-view's images (base64).
+    const MAX = 64 * 1024 * 1024;
     const answer = async (line: string) => {
       const context = state.contexts.at(-1);
       let reply;
@@ -393,7 +399,7 @@ export class ContainerManager {
         const request = JSON.parse(line) as { argv?: unknown; cwd?: unknown; stdin?: unknown };
         if (!Array.isArray(request.argv) || !request.argv.length || !request.argv.every((a) => typeof a === 'string')) throw new Error('Malformed request.');
         const [name, ...rest] = request.argv as string[];
-        if (!CONTAINER_COMMANDS.includes(name!)) throw new Error(`Unknown command ${name}.`);
+        if (!CONTAINER_COMMANDS.includes(name!) && !SCRIPT_COMMANDS.includes(name!)) throw new Error(`Unknown command ${name}.`);
         if (!context) throw new Error(`${name} works only while SF Agents runs one of this agent's commands.`);
         const cwd = typeof request.cwd === 'string' ? containerToHostPath(request.cwd, state.mounts) : undefined;
         reply = await runHostCommand([name!, ...rest.map((a) => this.argToHost(a, request.cwd as string, state.mounts))], context.cmds, {
@@ -401,6 +407,7 @@ export class ContainerManager {
           ...(typeof request.stdin === 'string' ? { stdin: request.stdin } : {}),
           callId: context.callId,
           signal: context.signal,
+          ...(context.images ? { images: context.images } : {}),
           container: { appHost: `${containerIdOf(state)}${APP_HOST_SUFFIX}`, writeRoots: [hostWorkspacesDir()], readRoots: state.mounts.map((m) => m.hostPath), hidden: state.hidden, show: (h) => hostToContainerPath(h, state.mounts) ?? h },
         });
       } catch (error) {
@@ -409,9 +416,12 @@ export class ContainerManager {
       stream.end(`${JSON.stringify(reply)}\n`);
     };
     const onData = (chunk: Buffer | string) => {
-      buffer += chunk.toString();
+      const text = chunk.toString();
+      // Only the new part can hold the end of the line (requests with images are large).
+      const at = text.indexOf('\n');
+      const end = at < 0 ? (chunk === '' ? buffer.indexOf('\n') : -1) : buffer.length + at;
+      buffer += text;
       if (buffer.length > MAX) return stream.destroy();
-      const end = buffer.indexOf('\n');
       if (end < 0) return;
       stream.off('data', onData);
       void answer(buffer.slice(0, end));

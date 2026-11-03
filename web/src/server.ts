@@ -478,6 +478,12 @@ export class WebServer {
       approveAll: options.approveAll,
       providerFactory: this.providerFactory,
       confirm: (request, signal) => this.confirm(request, signal),
+      // sfa-view transcript uses the dictation model, once it is installed (never downloads it unasked).
+      transcribe: async (wav) => {
+        const state = this.dictation.status().state;
+        if (state === 'missing' || state === 'installing') throw new Error('Speech to text is not installed yet: set up dictation in Settings → Speech first.');
+        return this.dictation.transcribe(wav);
+      },
       web: new BrightDataWeb(() => this.registry.webKey()),
     });
     this.session = this.runtime.createSession();

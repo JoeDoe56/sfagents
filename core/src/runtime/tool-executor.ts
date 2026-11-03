@@ -10,7 +10,7 @@
  * is rejected the same way as one that was filtered out.
  */
 
-import type { AnyDeclarativeTool, AnyToolInvocation, ToolResult } from '../tools/tools.js';
+import type { AnyDeclarativeTool, AnyToolInvocation, ToolImage, ToolResult } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ParsedToolCall, ToolMessage } from '../providers/types.js';
@@ -48,6 +48,8 @@ export interface ToolExecutionOutcome {
   message: ToolMessage;
   activity: ToolActivity;
   status: ToolMessageStatus;
+  /** Images the call showed (sfa-view), sent after the results. */
+  images?: ToolImage[];
 }
 
 function statusOf(result: ToolResult): ToolMessageStatus {
@@ -125,6 +127,7 @@ export async function executeToolCall(
     },
     activity: { name: call.name, ok, errorType: result.error?.type },
     status: statusOf(result),
+    ...(result.images?.length ? { images: result.images } : {}),
   };
 }
 

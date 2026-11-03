@@ -149,7 +149,7 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
 | `conversation.access` | Access to the persistent conversation's sections and history: `organize` (search, fetch, create and edit sections), `read` (search and fetch only) or `none`. Default: `organize` when the agent replies in the conversation, `none` when it replies in a thread. |
 | `artifacts.access` | Artifacts: `create` (the `sfa-artifact` command, and the index of recent artifacts), `read` (the index only) or `none`. Same defaults as `conversation.access`. |
 | `context` | Working-context budget per request (estimated tokens) and how many recent exchanges to keep verbatim. Defaults are shown above. |
-| `limits` | Turn budget, timeouts and `webRequests` (web requests per run, default 25). Defaults are shown above. |
+| `limits` | Turn budget, timeouts, `webRequests` (web requests per run, default 25) and `viewImages` (images one shell call may show with `sfa-view`, default 8, at most 20). Defaults are shown above. |
 
 Every agent has the shell (in its own container) and, when it may message others, the message tool. Unknown fields are errors, so a typo cannot silently change permissions: the file is skipped, and the message names the file and field. `workspace`, `tools.allow` and `tools.ask` were removed with the old sandbox; a file that still has them is skipped with what to use instead. Each agent's permissions are its own. An agent it may message can have a wider network level or different MCP servers; grants may form any graph, including two agents that may message each other.
 
@@ -302,6 +302,23 @@ sfa-web html https://example.com/glazes                      # a page as HTML
 ```
 
 `sfa-web` asks SF Agents, which makes the request with [Bright Data](https://brightdata.com)'s hosted MCP server (`search_engine`, `scrape_as_markdown`, `scrape_as_html`). Add the Bright Data API key in **Settings → Providers → Web Access**, or with `sfagents providers web-key`. It is kept in the system keyring and never enters a container. Each run may make `limits.webRequests` requests (default 25); a result is cut at 1 MB, and a request times out after 90 seconds. Bright Data includes 5,000 free requests a month, then bills per request: set a spend limit in its control panel.
+
+## Showing images to the model: sfa-view
+
+Command output is text. `sfa-view` is how an agent looks at something: it turns files in its container into images that go to the model with the shell call's result (right after the results, as the next message, so every provider gets them). The work runs in the container with ffmpeg, ImageMagick and poppler.
+
+```sh
+sfa-view image screenshot.png            # images as they are, downscaled to fit 1568 px
+sfa-view info clip.mp4                   # duration, resolution, fps, audio, scene changes (text)
+sfa-view sheet clip.mp4 --every 2s       # contact sheets: frames tiled with their timestamps
+sfa-view frames clip.mp4 --at 0:12.5,0:13
+sfa-view crop clip.mp4@0:12 100,80,400,300 --zoom 2
+sfa-view diff before.png after.png       # side by side, and the changed pixels in red
+sfa-view pdf scan.pdf --pages 1-3
+sfa-view transcript clip.mp4             # speech to text with timestamps, through SF Agents' dictation model
+```
+
+Each image costs about 1,000 to 1,600 tokens. One shell call shows at most `limits.viewImages` images (default 8, up to 20); past that it refuses before doing the work and says how to narrow it. Shown images are kept with the conversation, so later turns send them again while they are in the working context. `transcript` needs dictation set up in **Settings → Speech**; it never downloads the model on its own.
 
 ## MCP servers
 

@@ -9,9 +9,11 @@ import { ArtifactError, ARTIFACT_COMMAND, ARTIFACT_USAGE, type ArtifactCommand, 
 import { getErrorMessage } from '../utils/errors.js';
 import type { WebAccess } from '../web/brightdata.js';
 import { MCP_COMMAND, MCP_USAGE, runMcpCommand, type McpGrant } from '../mcp/sfa-mcp.js';
+import { runViewCommand, VIEW_COMMAND, VIEW_USAGE, type ViewGrant } from './sfa-view.js';
+import type { ToolImage } from './tools.js';
 
 export const WEB_COMMAND = 'sfa-web';
-export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, MCP_COMMAND];
+export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, MCP_COMMAND, VIEW_COMMAND];
 
 /** Web requests an agent may make per run, unless limits.webRequests says otherwise. */
 export const DEFAULT_WEB_REQUESTS = 25;
@@ -35,10 +37,13 @@ export interface HostCommands {
   artifact?: ArtifactCommand;
   /** MCP servers (tools.mcpServers). */
   mcp?: McpGrant;
+  /** sfa-view (every agent has it; the script runs in the container). */
+  view?: ViewGrant;
 }
 
 /** How a command is described where tools are listed (the agent sheet): what it does, and its usage. */
 export function hostCommandSchema(name: string): { name: string; description: string; usage: string } {
+  if (name === VIEW_COMMAND) return { name, description: 'Shows images, video (contact sheets, frames, crops), image diffs and PDF pages to the model, and transcribes speech. A command in the shell tool.', usage: VIEW_USAGE };
   if (name === MCP_COMMAND) return { name, description: 'The agent\'s MCP servers: lists their tools and calls them. A command in the shell tool.', usage: MCP_USAGE };
   if (name === WEB_COMMAND) return { name, description: 'Web search and pages, fetched by SF Agents (Bright Data). A command in the shell tool, for agents at network level "on".', usage: WEB_USAGE };
   return { name, description: 'Shows a file, a folder or a web app running in the agent\'s container as an artifact, or changes one. A command in the shell tool.', usage: ARTIFACT_USAGE };
@@ -48,7 +53,7 @@ export type HostCommandReply = { ok: true; text: string; truncated?: boolean } |
 
 /** The commands this agent has, by name. */
 export function availableHostCommands(cmds: HostCommands): string[] {
-  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : [])];
+  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : [])];
 }
 
 async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
@@ -80,7 +85,7 @@ async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal
 export async function runHostCommand(
   argv: readonly string[],
   cmds: HostCommands,
-  o: { cwd?: string; stdin?: string; callId?: string; signal: AbortSignal; container?: ArtifactContainer },
+  o: { cwd?: string; stdin?: string; callId?: string; signal: AbortSignal; container?: ArtifactContainer; images?: ToolImage[] },
 ): Promise<HostCommandReply> {
   const [name, ...args] = argv;
   try {
@@ -92,6 +97,10 @@ export async function runHostCommand(
       if (!cmds.artifact) return { ok: false, error: 'This agent may not create artifacts (artifacts.access).' };
       if (args.includes('-h') || args.includes('--help')) return { ok: true, text: ARTIFACT_USAGE };
       return { ok: true, text: cmds.artifact(args, { cwd: o.cwd, callId: o.callId, stdin: o.stdin, ...(o.container ? { container: o.container } : {}) }) };
+    }
+    if (name === VIEW_COMMAND) {
+      if (!cmds.view) return { ok: false, error: 'This agent cannot show images.' };
+      return await runViewCommand(cmds.view, args, { ...(o.stdin !== undefined ? { stdin: o.stdin } : {}), ...(o.images ? { images: o.images } : {}), signal: o.signal });
     }
     if (name === MCP_COMMAND) return await runMcpCommand(cmds.mcp, args, { ...(o.stdin !== undefined ? { stdin: o.stdin } : {}), signal: o.signal });
     return { ok: false, error: `Unknown command ${name}.` };
