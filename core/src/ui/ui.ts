@@ -90,7 +90,7 @@ export class ContainerUiAdapter implements UiAdapter {
   }
 }
 
-export const uiNativeFile = (name: string): string => fs.readFileSync(new URL(`../../native/ui/${name}`, import.meta.url), 'utf8');
+export const uiNativeFile = (name: string): string => fs.readFileSync(new URL(`../../native/ui/${name}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 export const riskyControl = (c: UiControl): boolean => !!c.password || /\b(send|delete|remove|pay|purchase|buy|checkout|publish|post|submit|transfer|confirm order|password|sign in|log in)\b/i.test(`${c.name} ${c.role}`);
 const accepted = (a: DecisionAnswer | undefined, gate: number): string | undefined => {
   if (!a?.choice || !Number.isFinite(a.confidence) || a.confidence! < gate || (a.none_probability ?? 0) >= .2) return undefined;
