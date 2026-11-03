@@ -16,6 +16,7 @@ import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definit
 import { ORGANIZE_GUIDANCE } from '../conversation/tools.js';
 import { ARTIFACT_COMMAND, ARTIFACT_GUIDANCE, artifactCommand, artifactIndex } from '../conversation/artifacts.js';
 import { hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
+import type { GitWorkspaces } from '../git/workspaces.js';
 import { DEFAULT_VIEW_IMAGES } from '../tools/sfa-view.js';
 import { toolImagesMessage, type ShownImage } from '../conversation/attachments.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
@@ -90,6 +91,8 @@ export interface RuntimeOptions {
   web?: WebAccess;
   /** The project folders every agent reads (default: the Project Folders setting). */
   folders?: () => string[];
+  /** Git workspaces for sfa-git and sfa-ci, and the checkpoint after each run. */
+  git?: GitWorkspaces;
 }
 
 interface RunParams {
@@ -220,6 +223,7 @@ export class AgentRuntime implements AgentMessenger {
   readonly conversation?: ConversationService;
   private readonly web: WebAccess;
   private readonly folders?: () => string[];
+  readonly git?: GitWorkspaces;
 
   constructor(options: RuntimeOptions) {
     this.tree = options.tree;
@@ -236,6 +240,7 @@ export class AgentRuntime implements AgentMessenger {
     this.threads = new ThreadService(options.conversation?.dir);
     this.web = options.web ?? new BrightDataWeb(() => new ProviderRegistry().webKey());
     if (options.folders) this.folders = options.folders;
+    if (options.git) this.git = options.git;
   }
 
   /**
@@ -269,6 +274,21 @@ export class AgentRuntime implements AgentMessenger {
     commands.view = { maxImages: d.limits?.viewImages ?? DEFAULT_VIEW_IMAGES, ...(this.transcribe ? { transcribe: this.transcribe } : {}) };
     const mcp = await this.mcpGrant(node, agentPath, emit);
     if (mcp) commands.mcp = mcp;
+    if (this.git) {
+      const confirm = this.confirm;
+      const approveAll = this.approveAll;
+      commands.git = {
+        workspaces: this.git,
+        agentId: node.id,
+        level: d.network,
+        approve: async (question) => {
+          if (approveAll) return true;
+          if (!confirm) return false;
+          const answer = await confirm({ agentPath: [...agentPath], toolName: 'sfa-git', details: { type: 'info', title: 'Git', prompt: question } }, new AbortController().signal);
+          return answer !== 'deny';
+        },
+      };
+    }
     const ctx: ToolContext = {
       agentId: node.id,
       maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
@@ -403,6 +423,8 @@ export class AgentRuntime implements AgentMessenger {
       return await this.runAgent(params);
     } finally {
       this.activeRuns--;
+      // Every task this agent touched gets a checkpoint commit, so the run can be undone and reviewed.
+      if (this.git) await this.git.checkpointAgent(params.node.id, params.task.replace(/\s+/g, ' ').slice(0, 72)).catch(() => undefined);
       this.closeRetired();
     }
   }

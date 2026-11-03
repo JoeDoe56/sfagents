@@ -18,7 +18,7 @@
  *   /run/sfa      the agent's run folder (sockets and SF Agents' commands)
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Duplex } from 'node:stream';
@@ -42,11 +42,13 @@ export const CONTAINER_WORKSPACES = '/workspaces';
 export const CONTAINER_ROOTS = '/roots';
 /** SF Agents' commands inside containers, and the names they run as on the host. */
 /** SF Agents' commands in every container; each hands its call to SF Agents. */
-export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact', 'sfa-mcp'];
+export const CONTAINER_COMMANDS: readonly string[] = ['sfa-web', 'sfa-artifact', 'sfa-mcp', 'sfa-git', 'sfa-ci'];
 /** Commands that are scripts of their own in the container but also ask SF Agents. */
 const SCRIPT_COMMANDS: readonly string[] = [VIEW_COMMAND];
 /** Capabilities sudo and apt need; everything else (NET_RAW, NET_ADMIN, SYS_*) stays dropped. */
 export const CONTAINER_CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID', 'KILL', 'AUDIT_WRITE'];
+/** The Git helper's id, as an agent's (it is not one: no agent file can have a name starting with a dot). */
+export const GIT_HELPER_AGENT = '.sfagents-git';
 export const DEFAULT_MEMORY_MB = 4096;
 export const DEFAULT_CPUS = 4;
 /** How long a checked container counts as ready without checking again. */
@@ -290,6 +292,20 @@ export class ContainerManager {
   }
 
   /**
+   * Runs a shell script in SF Agents' Git helper container: the agent image
+   * with /workspaces, at network level "git", used for every Git operation
+   * SF Agents does itself (see ../git/workspaces.ts), so logins for pushing
+   * never enter an agent's container.
+   */
+  async runGit(script: string, o: { cwd: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number }): Promise<{ code: number; stdout: string; stderr: string }> {
+    const name = await this.prepare({ agentId: GIT_HELPER_AGENT, level: 'git', roots: [] });
+    const env = Object.entries(o.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+    const args = ['exec', ...(o.stdin !== undefined ? ['-i'] : []), '-u', 'agent', '-w', '/', ...env, '-e', `SFA_CWD=${o.cwd}`, '-e', `SFA_COMMAND=${script}`, name, '/run/sfa/bin/sfa-exec', randomUUID()];
+    const r = await this.cli.run(args, { ...(o.stdin !== undefined ? { stdin: o.stdin } : {}), timeoutMs: o.timeoutMs ?? 120_000 });
+    return { code: r.code ?? -1, stdout: r.stdout, stderr: r.stderr };
+  }
+
+  /**
    * Removes the agent's container and its home volume (Reset Environment,
    * and deleting the agent). /workspaces and the shared cache stay. The next
    * command makes a fresh container.
@@ -422,6 +438,7 @@ export class ContainerManager {
           callId: context.callId,
           signal: context.signal,
           ...(context.images ? { images: context.images } : {}),
+          ...(typeof request.cwd === 'string' ? { containerCwd: request.cwd } : {}),
           container: { appHost: `${containerIdOf(state)}${APP_HOST_SUFFIX}`, writeRoots: [hostWorkspacesDir()], readRoots: state.mounts.map((m) => m.hostPath), hidden: state.hidden, show: (h) => hostToContainerPath(h, state.mounts) ?? h },
         });
       } catch (error) {

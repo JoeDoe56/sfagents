@@ -25,6 +25,7 @@ import {
   stepPane,
   agentEditorPane,
   agentsPane,
+  workspacesPane,
   artifactsPane,
   contextPane,
   diffsPane,
@@ -149,6 +150,7 @@ const HELP = [
   '  /context           plan usage and what the working context holds',
   '  /files [folder]    the file manager',
   '  /agents            the agents: edit one, or make a new one (/edit-agent, /new-agent)',
+  '  /workspaces        the Git task workspaces: review, squash, push, undo a run',
   '  /settings          settings, providers and speech',
   '  /speak [stop]      speak the latest reply aloud on this computer (or stop)',
   '  /exit              quit SF Agents (the web interface stops too)',
@@ -1086,6 +1088,8 @@ export class Tui {
       }
       case '/agents':
         return this.openPane(agentsPane(this.host));
+      case '/workspaces':
+        return this.openPane(workspacesPane(this.host));
       case '/new-agent':
         return this.openPane(agentEditorPane(this.host, undefined, () => {}));
       case '/edit-agent':

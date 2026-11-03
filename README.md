@@ -321,6 +321,26 @@ sfa-view transcript clip.mp4             # speech to text with timestamps, throu
 
 Each image costs about 1,000 to 1,600 tokens. One shell call shows at most `limits.viewImages` images (default 8, up to 20); past that it refuses before doing the work and says how to narrow it. Shown images are kept with the conversation, so later turns send them again while they are in the working context. `transcript` needs dictation set up in **Settings → Speech**; it never downloads the model on its own.
 
+## Git workspaces: sfa-git and sfa-ci
+
+A task is a folder `/workspaces/<repo>/<task>` on its own branch `sfagents/<task>`, made from the latest default branch (a Git worktree of one shared clone, `/workspaces/<repo>/.repo`). SF Agents commits each task after every run of the agent working in it (a checkpoint, `sfagents checkpoint: <what it was asked>`), so any run can be undone, and the checkpoints are squashed into one commit when the task is done.
+
+```sh
+sfa-git clone https://github.com/you/app      # needs network level git (or on)
+sfa-git task app fix-login                   # start or continue a task; then cd there
+sfa-git tasks                                # every task: branch, ahead/behind, checkpoints
+sfa-git update                               # rebase on the latest default branch (conflicts are the agent's)
+sfa-git finish -m "Fix the login redirect"   # squash the checkpoints
+sfa-git push                                 # push sfagents/<task>
+sfa-git push --main                          # fast-forward the default branch (after finish and update)
+sfa-git undo                                 # take the last run back out (kept under refs/sfagents/undo/<task>)
+sfa-ci --workflow ci.yml                     # public GitHub repos: push, run, wait; failing logs and artifacts in .sfa-ci/<run>/
+```
+
+Every Git operation SF Agents does runs in its own Git helper container (the agent image, network level git), never in the agent's container: the login for fetching and pushing comes from `gh auth token` or Git Credential Manager (`git credential fill`) on this computer, is passed only to that helper for the one command, and is never stored. There is no force push and no deleting remote branches, and a push that changes `.github/workflows` asks you first. Plain git (status, diff, commit, log, rebase) works in the task folder as usual.
+
+In the web app, a task with work not yet on its default branch shows as a pill above the composer (with the other changed repositories), and the agent sheet has **Workspaces**. A task's sheet shows its changes hunk by hunk with **Reject** on each, an editable commit message drafted from the runs, and Squash, Push Branch, Push to Main, Update from Main, Pull into My Folder (fast-forwards your own checkout, one of your Project Folders, and stops if it has uncommitted changes), Undo Last Run and Remove. In the terminal: `/workspaces`. Pull requests are not built yet.
+
 ## MCP servers
 
 ```json

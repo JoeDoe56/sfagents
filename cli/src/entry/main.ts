@@ -38,6 +38,7 @@ import {
   stripAnsiAndControl,
   type AgentTree,
   type ConfirmationHandler,
+  defaultGitWorkspaces,
 } from '@sfagents/core';
 import { loadConfig, loadEnvFile, locateConfig } from '../config/load.js';
 import { EventRenderer } from '../terminal/render.js';
@@ -328,6 +329,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         confirm: (request, signal) => (bound ? bound(request, signal) : Promise.resolve('deny')),
         conversation,
         providerFactory: providers().factory,
+        git: defaultGitWorkspaces(),
       });
       registerCleanup(() => runtime.dispose());
       if (conversation) registerCleanup(() => conversation.close());
@@ -407,6 +409,7 @@ async function runOnce(
     confirm: rl ? createTerminalConfirm(rl, streams.stderr, renderer) : undefined,
     conversation: opts.conversation,
     providerFactory: providers().factory,
+    git: defaultGitWorkspaces(),
   });
   registerCleanup(() => runtime.dispose());
   // The bridge to the agents' containers keeps a docker exec open; end it so

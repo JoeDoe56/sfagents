@@ -11,9 +11,10 @@ import type { WebAccess } from '../web/brightdata.js';
 import { MCP_COMMAND, MCP_USAGE, runMcpCommand, type McpGrant } from '../mcp/sfa-mcp.js';
 import { runViewCommand, VIEW_COMMAND, VIEW_USAGE, type ViewGrant } from './sfa-view.js';
 import type { ToolImage } from './tools.js';
+import { CI_COMMAND, CI_USAGE, GIT_COMMAND, GIT_USAGE, runCiCommand, runGitCommand, type GitGrant } from '../git/sfa-git.js';
 
 export const WEB_COMMAND = 'sfa-web';
-export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, MCP_COMMAND, VIEW_COMMAND];
+export const HOST_COMMAND_NAMES: readonly string[] = [WEB_COMMAND, ARTIFACT_COMMAND, MCP_COMMAND, VIEW_COMMAND, GIT_COMMAND, CI_COMMAND];
 
 /** Web requests an agent may make per run, unless limits.webRequests says otherwise. */
 export const DEFAULT_WEB_REQUESTS = 25;
@@ -39,10 +40,14 @@ export interface HostCommands {
   mcp?: McpGrant;
   /** sfa-view (every agent has it; the script runs in the container). */
   view?: ViewGrant;
+  /** sfa-git and sfa-ci (Git workspaces). */
+  git?: GitGrant;
 }
 
 /** How a command is described where tools are listed (the agent sheet): what it does, and its usage. */
 export function hostCommandSchema(name: string): { name: string; description: string; usage: string } {
+  if (name === GIT_COMMAND) return { name, description: 'Git workspaces: clone, task worktrees, update from main, squash, push (no force), undo a run. A command in the shell tool.', usage: GIT_USAGE };
+  if (name === CI_COMMAND) return { name, description: 'Pushes the task and reports its GitHub Actions results and artifacts (public repositories). A command in the shell tool.', usage: CI_USAGE };
   if (name === VIEW_COMMAND) return { name, description: 'Shows images, video (contact sheets, frames, crops), image diffs and PDF pages to the model, and transcribes speech. A command in the shell tool.', usage: VIEW_USAGE };
   if (name === MCP_COMMAND) return { name, description: 'The agent\'s MCP servers: lists their tools and calls them. A command in the shell tool.', usage: MCP_USAGE };
   if (name === WEB_COMMAND) return { name, description: 'Web search and pages, fetched by SF Agents (Bright Data). A command in the shell tool, for agents at network level "on".', usage: WEB_USAGE };
@@ -53,7 +58,7 @@ export type HostCommandReply = { ok: true; text: string; truncated?: boolean } |
 
 /** The commands this agent has, by name. */
 export function availableHostCommands(cmds: HostCommands): string[] {
-  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : [])];
+  return [...(cmds.web ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : []), ...(cmds.git ? [GIT_COMMAND, CI_COMMAND] : [])];
 }
 
 async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
@@ -85,7 +90,7 @@ async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal
 export async function runHostCommand(
   argv: readonly string[],
   cmds: HostCommands,
-  o: { cwd?: string; stdin?: string; callId?: string; signal: AbortSignal; container?: ArtifactContainer; images?: ToolImage[] },
+  o: { cwd?: string; stdin?: string; callId?: string; signal: AbortSignal; container?: ArtifactContainer; images?: ToolImage[]; containerCwd?: string },
 ): Promise<HostCommandReply> {
   const [name, ...args] = argv;
   try {
@@ -102,6 +107,8 @@ export async function runHostCommand(
       if (!cmds.view) return { ok: false, error: 'This agent cannot show images.' };
       return await runViewCommand(cmds.view, args, { ...(o.stdin !== undefined ? { stdin: o.stdin } : {}), ...(o.images ? { images: o.images } : {}), signal: o.signal });
     }
+    if (name === GIT_COMMAND) return await runGitCommand(cmds.git, args, { ...(o.containerCwd ? { cwd: o.containerCwd } : {}) });
+    if (name === CI_COMMAND) return await runCiCommand(cmds.git, args, { ...(o.containerCwd ? { cwd: o.containerCwd } : {}), signal: o.signal });
     if (name === MCP_COMMAND) return await runMcpCommand(cmds.mcp, args, { ...(o.stdin !== undefined ? { stdin: o.stdin } : {}), signal: o.signal });
     return { ok: false, error: `Unknown command ${name}.` };
   } catch (error) {

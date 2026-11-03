@@ -35,6 +35,7 @@ import { installBubbleMenus } from './bubblemenu.js';
 import { speak } from './speech.js';
 import { springAnimate, springyScroll } from './springs.js';
 import { createChatDock, renderDiff } from './chatdock.js';
+import { workspacePills, openWorkspace } from './workspaces.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
 configureUi({ scheme: 'dark' });
@@ -238,7 +239,7 @@ dock = createChatDock({
   bar: composer.bar.el,
   chat,
   thread,
-  onOpenDiff: (repo, pill) => openDiff(repo, pill),
+  onOpenDiff: (repo, pill) => (repo.workspace ? openWorkspace(repo.workspace, pill) : openDiff(repo, pill)),
   onLayout: (space) => {
     Object.assign(dockSpace, space);
     layoutAboveBar();
@@ -247,6 +248,12 @@ dock = createChatDock({
 dock.setBar({ clearance, covered: false });
 
 /** A repository's uncommitted changes, in a sheet that grows out of its pill. */
+/** The pills above the composer: uncommitted changes in the project folders, and task workspaces with work. */
+const pills = { diffs: [], workspaces: [] };
+function showPills() {
+  dock.setRepos([...pills.diffs, ...workspacePills(pills.workspaces)]);
+}
+
 function openDiff(repo, pill) {
   openSheet({
     title: repo.name,
@@ -1229,7 +1236,9 @@ function applySnapshot(s) {
   if (s.view) fileManager.applyView(s.view.files);
   state.limits = s.limits || state.limits;
   setArtifacts(s.artifacts);
-  dock.setRepos(s.diffs ?? []);
+  pills.diffs = s.diffs ?? [];
+  pills.workspaces = s.workspaces ?? [];
+  showPills();
   setSections(s.sections);
   if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
   for (const n of s.notices || []) typeof n === 'string' ? notice(n) : notice(n.text, n.level);
@@ -1450,7 +1459,14 @@ function listen() {
     notice(text, level === 'error' ? 'error' : '');
   });
   stream.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
-  stream.addEventListener('diffs', (e) => dock.setRepos(JSON.parse(e.data).repos));
+  stream.addEventListener('diffs', (e) => {
+    pills.diffs = JSON.parse(e.data).repos ?? [];
+    showPills();
+  });
+  stream.addEventListener('workspaces', (e) => {
+    pills.workspaces = JSON.parse(e.data).workspaces ?? [];
+    showPills();
+  });
   stream.addEventListener('reactions', (e) => {
     state.reactions = JSON.parse(e.data).reactions ?? {};
     render();

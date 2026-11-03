@@ -1531,3 +1531,120 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
   void load(agent);
   return p;
 }
+
+// ------------------------------------------------------------------ Git task workspaces
+
+type WorkspaceRow = { repo: string; task: string; agent: string; branch: string; defaultBranch: string; ahead: number; behind: number; checkpoints: number; changed: number; added?: number; removed?: number; dirty: boolean };
+type WorkspaceReview = { message: string; files: Array<{ path: string; status: string; hunks: Array<{ header: string; lines: string[] }>; binary?: boolean }> };
+
+const workspaceState = (w: WorkspaceRow) => `${w.ahead} ahead, ${w.behind} behind ${w.defaultBranch}${w.checkpoints ? ` · ${w.checkpoints} checkpoint(s)` : ''}${w.dirty ? ' · uncommitted' : ''}`;
+
+/** The task workspaces (sfa-git), as the web app's Workspaces sheet. */
+export function workspacesPane(host: PaneHost): Pane {
+  const p = loading(host, {
+    title: 'Workspaces',
+    hint: '↑↓ move · Enter reviews · Esc goes back',
+    load: () => host.api<{ workspaces: WorkspaceRow[]; folders: string[] }>('GET', 'workspaces'),
+    view: (d, w) =>
+      d.workspaces.length
+        ? [
+            blank,
+            ...d.workspaces.map((x) => ({
+              pick: true,
+              value: x,
+              lines: [`  ${color.bold(clean(`${x.repo}/${x.task}`))} ${color.dim(clean(x.agent))}`, `    ${color.dim(truncate(`${x.changed} file(s) · ${workspaceState(x)}`, w - 6))}`],
+            })),
+          ]
+        : [note('No task workspaces yet. An agent at network level Git or Internet starts one with sfa-git clone <url>, then sfa-git task <repo> <task>.', w)],
+    enter: (row) => host.open(workspacePane(host, row.value as WorkspaceRow, p.data?.folders ?? [], () => p.reload())),
+    event: (name) => {
+      if (name === 'workspaces') p.reload();
+    },
+  });
+  return p;
+}
+
+/**
+ * One task's review, as the web app's: the changes hunk by hunk (r rejects
+ * the hunk at the cursor), s squashes with the drafted message, u undoes the
+ * last run, m updates from main, p pushes the branch, P pushes to main, f
+ * pulls into a Project Folder, x removes the workspace.
+ */
+export function workspacePane(host: PaneHost, w: WorkspaceRow, folders: string[], changed: () => void): Pane {
+  const path = `workspaces/${encodeURIComponent(w.repo)}/${encodeURIComponent(w.task)}`;
+  let current = w;
+  const act = (action: string, extra: Record<string, unknown> = {}) => {
+    const send = (approve: boolean) =>
+      host.api<{ text?: string; question?: string; workspaces?: WorkspaceRow[] }>('POST', path, { action, ...extra, ...(approve ? { approve: true } : {}) }).then(
+        (out) => {
+          if (out.question) return host.confirm(out.question, () => void send(true));
+          if (out.text) host.notice(out.text);
+          changed();
+          const next = out.workspaces?.find((x) => x.repo === w.repo && x.task === w.task);
+          if (!next) return host.back();
+          current = next;
+          p.reload();
+        },
+        (e: unknown) => host.fail(e),
+      );
+    void send(false);
+  };
+  const p = loading(host, {
+    title: `${w.repo}/${w.task}`,
+    hint: 'r reject hunk · s squash · u undo run · m update · p push · P push to main · f pull into folder · x remove · Esc',
+    load: () => host.api<WorkspaceReview>('GET', path),
+    view: (d, width) => {
+      const rows: Row[] = [{ lines: [`  ${color.dim(truncate(`${current.branch} · ${workspaceState(current)}`, width - 4))}`] }, blank];
+      if (!d.files.length) rows.push(note('No changes since the last commit.', width));
+      for (const f of d.files) {
+        rows.push({ lines: [`  ${color.bold(clean(f.path))} ${color.dim(f.status)}${f.binary ? color.dim(' (binary)') : ''}`] });
+        f.hunks.forEach((h, i) =>
+          rows.push({
+            pick: true,
+            value: { file: f.path, hunk: i },
+            lines: [`  ${color.cyan(truncate(h.header, width - 4))}`, ...h.lines.slice(0, 40).map((l) => `  ${(l.startsWith('+') ? color.green : l.startsWith('-') ? color.red : color.dim)(truncate(clean(l), width - 4))}`), ...(h.lines.length > 40 ? [`  ${color.dim(`… ${h.lines.length - 40} more lines`)}`] : [])],
+          }),
+        );
+      }
+      rows.push(blank, { lines: [`  ${color.bold('Drafted message')}`] }, ...wrap(clean(d.message), Math.max(10, width - 6)).map((l) => ({ lines: [`    ${l}`] })));
+      return rows;
+    },
+    key: (ch, row) => {
+      switch (ch) {
+        case 'r': {
+          const v = row?.value as { file: string; hunk: number } | undefined;
+          if (v) host.confirm(`Reject this change in ${v.file}?`, () => act('reject', v));
+          return true;
+        }
+        case 's':
+          host.ask('Commit message (squashes the run checkpoints):', (p.data?.message ?? '').split('\n')[0] ?? '', (message) => message.trim() && act('finish', { message }));
+          return true;
+        case 'u':
+          host.confirm('Undo the last run? Its changes stay recoverable in Git.', () => act('undo'));
+          return true;
+        case 'm':
+          act('update');
+          return true;
+        case 'p':
+          act('push');
+          return true;
+        case 'P':
+          host.confirm(`Push to ${current.defaultBranch}? Only a fast-forward.`, () => act('push-main'));
+          return true;
+        case 'f':
+          if (!folders.length) host.notice('Add the checkout as a Project Folder in /settings first.');
+          else if (folders.length === 1) host.confirm(`Fast-forward ${folders[0]} to ${current.branch}?`, () => act('pull-into', { folder: folders[0] }));
+          else host.ask(`Folder (${folders.join('; ')}):`, folders[0]!, (folder) => act('pull-into', { folder: folder.trim() }));
+          return true;
+        case 'x':
+          host.confirm('Remove this workspace and its local branch?', () => act('remove'));
+          return true;
+      }
+      return false;
+    },
+    event: (name) => {
+      if (name === 'workspaces') p.reload();
+    },
+  });
+  return p;
+}

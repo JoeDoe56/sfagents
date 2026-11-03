@@ -182,7 +182,7 @@ export {
 export { estimateMessages } from './conversation/context.js';
 export { NetworkLog, networkLog, type NetworkLogEntry } from './container/network-log.js';
 export { sfaPatch, sfaPatchScript, patchFormatFor, patchGuidance, SFA_PATCH_COMMAND, APPLY_PATCH_COMMAND, type PatchFormat } from './tools/sfa-patch.js';
-export { GIT_IDENTITY_VARS } from './tools/shell.js';
+export { GIT_IDENTITY_VARS, gitIdentityEnv } from './tools/shell.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
 export type { WebAccess, WebOperation } from './web/brightdata.js';
 export { ContainerBridge, BridgeStream, encodeFrame, FrameReader, lazyDuplex, BRIDGE_CONTAINER, RUN_VOLUME } from './container/bridge.js';
@@ -191,3 +191,6 @@ export { CommandDockerCli, defaultDockerCli, docker, WSL_DISTRO, type DockerCli,
 export { handleProxyConnection, levelAllows, isPrivateAddress, isNetworkLevel, networkLevelOf, NETWORK_LEVELS, NETWORK_LEVEL_TEXT, PACKAGE_HOSTS as CONTAINER_PACKAGE_HOSTS, GIT_HOSTS, HOST_CHANNEL_NAME, type NetworkLevel, type NetworkEvent } from './container/network.js';
 export { BRIDGE_SOURCE, INIT_SOURCE, CLIENT_SOURCE, EXEC_SOURCE, KILL_SOURCE, FRAME } from './container/scripts.js';
 export { wslStatus, setupDistro, mergeWslConfig, wslConfigPath, wslConfigSettings, writeWslMemoryCap, wslMemoryMb, mountRootsInDistro, WSLCONFIG_SETTINGS, type WslStatus } from './container/wsl.js';
+export { GitWorkspaces, GitError, CHECKPOINT_PREFIX, TASK_BRANCH_PREFIX, CONTAINER_WORKSPACES_DIR, taskOfPath, repoNameOf, githubRepo, hostGitCredential, parsePatch, type GitRunner, type GitCredential, type TaskRecord, type RepoRecord, type WorkspaceInfo, type ReviewFile, type ReviewHunk } from './git/workspaces.js';
+export { GIT_COMMAND, CI_COMMAND, GIT_USAGE, CI_USAGE, runGitCommand, runCiCommand, type GitGrant } from './git/sfa-git.js';
+export { defaultGitWorkspaces } from './git/default.js';

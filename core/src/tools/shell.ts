@@ -36,7 +36,7 @@ export const GIT_IDENTITY_VARS = ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_CO
 let gitIdentity: Record<string, string> | undefined;
 
 /** The person's Git user.name and user.email (read once), as GIT_AUTHOR_* and GIT_COMMITTER_* variables. */
-function gitIdentityEnv(): Record<string, string> {
+export function gitIdentityEnv(): Record<string, string> {
   if (gitIdentity) return gitIdentity;
   const read = (key: string) => {
     try {

@@ -16,6 +16,7 @@ import { showError, confirmDialog, toast } from './dialogs.js';
 import { showMenu } from './menu.js';
 import { openAgentTree } from './agenttree.js';
 import { openAgentEditor } from './agenteditor.js';
+import { openWorkspaces } from './workspaces.js';
 
 const LEVEL_NAMES = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -446,7 +447,8 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       parts.treeRow = createRow({ icon: 'person.2', iconTint: '#5e5ce6', title: 'Agent Tree', accessory: 'chevron', onTap: showTree });
       parts.agentSection = createSection({ rows: [parts.agentRow, parts.accountRow], note: info?.model ?? '' });
       const line = parts.agentSection.el;
-      const treeSection = createSection({ rows: [parts.treeRow] }).el;
+      const workspacesRow = createRow({ icon: 'folder', iconTint: '#ff9f0a', title: 'Workspaces', accessory: 'chevron', onTap: () => openWorkspaces() });
+      const treeSection = createSection({ rows: [parts.treeRow, workspacesRow] }).el;
 
       const effort = el('div', 'ag-effort');
       const label = el('p', 'ag-label ag-unit');

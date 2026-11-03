@@ -73,6 +73,10 @@ import {
   type AgentFormLimits,
   type MessageRecord,
   type PlanUsage,
+  defaultGitWorkspaces,
+  GitWorkspaces,
+  GitError,
+  type WorkspaceInfo,
 } from '@sfagents/core';
 import { ApiError, ProvidersApi } from './providers-api.js';
 import { AppProxy } from './apps.js';
@@ -145,6 +149,8 @@ function pageBuild(dir: string): string {
 export const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 export interface WebServerOptions {
+  /** Git workspaces (tests); default: the Git helper container. */
+  git?: GitWorkspaces;
   /** What the administrator approval asked for at startup gave (privileges.ts). */
   privileges?: Privileges;
   tree: AgentTree;
@@ -342,6 +348,10 @@ export class WebServer {
   private diffsTimer: NodeJS.Timeout | undefined;
   private diffsPoll: NodeJS.Timeout | undefined;
   private diffsBusy: Promise<void> | undefined;
+  /** The Git task workspaces (sfa-git), as last listed. */
+  private workspaces: WorkspaceInfo[] = [];
+  private workspacesTimer: NodeJS.Timeout | undefined;
+  private workspacesBusy: Promise<WorkspaceInfo[]> | undefined;
   /** In-process clients (the terminal interface): every event the pages get, as it is sent. */
   private readonly listeners = new Set<(event: string, data: unknown) => void>();
   /** When the agent picked up the last message (the "Read" receipt), the same on every page. */
@@ -497,6 +507,7 @@ export class WebServer {
         return this.dictation.transcribe(wav);
       },
       web: new BrightDataWeb(() => this.registry.webKey()),
+      git: options.git ?? defaultGitWorkspaces({ onChange: () => this.workspacesChanged() }),
     });
     this.session = this.runtime.createSession();
     this.agentSettings = new AgentSettingsStore(options.conversation.dir);
@@ -581,6 +592,7 @@ export class WebServer {
       if (this.clients.size) this.refreshDiffs(0);
     }, 10_000);
     this.diffsPoll.unref?.();
+    this.workspacesChanged(0);
     if (options_watch(this.options)) this.projectWatcher = watchProject({ configDir: this.runtime.tree.dataDir, mcpFile: this.mcpFile, onChange: () => this.reloadAgents() });
     const shown = this.host === '0.0.0.0' || this.host === '::' ? 'localhost' : this.host.includes(':') ? `[${this.host}]` : this.host;
     return `http://${shown}:${this.port}/`;
@@ -621,6 +633,7 @@ export class WebServer {
     if (this.fileWatch) clearInterval(this.fileWatch);
     if (this.diffsPoll) clearInterval(this.diffsPoll);
     clearTimeout(this.diffsTimer);
+    clearTimeout(this.workspacesTimer);
     await this.system.close();
     this.processes.close();
     this.live?.controller.abort(new Error('server stopping'));
@@ -1060,6 +1073,21 @@ export class WebServer {
       case 'GET agents':
         this.checkFetchSite(req);
         return sendJson(res, 200, this.agentsInfo());
+      case 'GET workspaces': {
+        this.checkFetchSite(req);
+        if (!parts[1]) return sendJson(res, 200, { workspaces: await this.listWorkspaces(), folders: this.runtime.projectFolders() });
+        if (!this.runtime.git || !parts[2]) throw new HttpError(404, 'No such workspace.');
+        try {
+          return sendJson(res, 200, await this.runtime.git.review(parts[1], parts[2]));
+        } catch (error) {
+          throw new HttpError(error instanceof GitError ? 404 : 500, getErrorMessage(error));
+        }
+      }
+      case 'POST workspaces': {
+        if (!parts[1] || !parts[2]) throw new HttpError(404, 'No such workspace.');
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        return sendJson(res, 200, await this.workspaceAction(parts[1], parts[2], body));
+      }
       case 'GET diffs': {
         this.checkFetchSite(req);
         // Asked for directly, the list is checked now rather than served from the last poll.
@@ -1697,6 +1725,7 @@ export class WebServer {
       more,
       artifacts: this.displayArtifacts(),
       diffs: this.diffs,
+      workspaces: this.workspaces,
       sections: displaySections(this.conversation.state),
       live: this.live ? { id: this.live.id, segments: this.live.segments, ...(this.live.replyTo ? { replyTo: this.live.replyTo } : {}) } : null,
       reactions: this.reactions.all(),
@@ -2241,6 +2270,96 @@ export class WebServer {
   /** The folders whose repositories are checked: the project and the project folders agents read. */
   private diffDirs(): string[] {
     return [...new Set<string>([this.runtime.tree.configDir, ...this.runtime.projectFolders()])];
+  }
+
+  /** Lists the task workspaces again (after `delayMs`, coalescing calls) and tells the pages. */
+  private workspacesChanged(delayMs = 500): void {
+    clearTimeout(this.workspacesTimer);
+    this.workspacesTimer = setTimeout(() => {
+      if (!this.closing) void this.listWorkspaces();
+    }, delayMs);
+    this.workspacesTimer.unref?.();
+  }
+
+  private async listWorkspaces(): Promise<WorkspaceInfo[]> {
+    const git = this.runtime.git;
+    if (!git) return [];
+    this.workspacesBusy ??= git
+      .list()
+      .then((list) => {
+        if (JSON.stringify(list) !== JSON.stringify(this.workspaces)) {
+          this.workspaces = list;
+          this.broadcast('workspaces', { workspaces: list });
+        }
+        return list;
+      })
+      .catch((error) => {
+        this.log(`Workspaces: ${getErrorMessage(error)}`);
+        return this.workspaces;
+      })
+      .finally(() => {
+        this.workspacesBusy = undefined;
+      });
+    return this.workspacesBusy;
+  }
+
+  /**
+   * The person's actions on a task workspace (the review sheet). A push that
+   * changes .github/workflows answers 409 with the question; the page asks
+   * and sends it again with approve: true.
+   */
+  private async workspaceAction(repo: string, task: string, body: Record<string, unknown>): Promise<unknown> {
+    const git = this.runtime.git;
+    if (!git) throw new HttpError(503, 'Git workspaces are not available.');
+    let asked: string | undefined;
+    const approve = async (question: string) => {
+      asked = question;
+      return body['approve'] === true;
+    };
+    const str = (k: string) => (typeof body[k] === 'string' ? (body[k] as string) : '');
+    try {
+      let text = '';
+      switch (body['action']) {
+        case 'undo':
+          text = await git.undo(repo, task);
+          break;
+        case 'update':
+          text = await git.update(repo, task);
+          break;
+        case 'finish':
+          text = `Committed ${await git.finish(repo, task, str('message'))}`;
+          break;
+        case 'reject':
+          await git.rejectHunk(repo, task, str('file'), Number(body['hunk']));
+          text = 'Rejected.';
+          break;
+        case 'push':
+          text = await git.push(repo, task, { toMain: false, approve });
+          break;
+        case 'push-main':
+          text = await git.push(repo, task, { toMain: true, approve });
+          break;
+        case 'pull-into': {
+          const folder = str('folder');
+          if (!this.runtime.projectFolders().includes(folder)) throw new HttpError(400, 'Pick one of your Project Folders.');
+          text = await git.pullInto(repo, task, folder, approve);
+          this.refreshDiffs(0);
+          break;
+        }
+        case 'remove':
+          await git.remove(repo, task);
+          text = 'Removed.';
+          break;
+        default:
+          throw new HttpError(400, '"action" must be undo, update, finish, reject, push, push-main, pull-into or remove.');
+      }
+      await this.listWorkspaces();
+      return { text, workspaces: this.workspaces };
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      if (asked && body['approve'] !== true) return { question: asked };
+      throw new HttpError(409, getErrorMessage(error));
+    }
   }
 
   /** Checks the repositories again (after `delayMs`, coalescing calls) and tells the pages when something changed. */
