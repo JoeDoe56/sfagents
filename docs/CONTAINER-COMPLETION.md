@@ -10,6 +10,7 @@
 - Only a main run can request a full-control lease. A one-time approval card is required, including with `--yes`. The lease ends at idle, Stop, timeout, or runtime disposal. Its cancellation signal reaches host commands and host UI calls. Each model step receives the remaining time.
 - The web banner and TUI countdown expose Stop. Full Control Files in the agent sheet and `/full-control` in the TUI expose history, file changes and undo. Snapshot checksums and later-edit checks protect undo. SF Agents' own configuration/history, credential files, dependencies and symlinks are excluded. File rollback cannot undo app transactions.
 - Every agent has `sfa-ui` on its own container desktop, independently of host full control or network level. `--host` requires the main run's active lease. Windows host UI uses UI Automation patterns, PrintWindow and an explicit SendInput coordinate fallback. Container UI uses Xvfb, Openbox, D-Bus and AT-SPI. Chromium accessibility is enabled both on the desktop bus and in the renderer.
+- Agent desktops start with their containers; UI calls wait for both D-Bus and the display. Node uses the same environment proxy as the other language tools. Network edits apply to the next command in an active run and close existing outgoing tunnels, while preserving local SF Agents command channels and web quotas.
 - Text is supplied by the calling agent; the decision model only selects. If an advertised text pattern fails, the container driver verifies that failure and uses keyboard input on the focused control. Passwords are entered by the person directly in the app. Sensitive buttons and coordinate fallbacks ask through a one-time card.
 - The StartLux loop has a 0.8 confidence gate, rejects a high none-of-the-above score, retries with a screenshot, verifies changes and DONE, and returns the goal/tree/screenshot/history to the calling agent on uncertainty. Control choices use short numbers, with window/dialog context to distinguish duplicate names.
 - The first-use installer is private to the SF Agents home. Model/projector and GPU runtime archives are checksum checked. The source engine and tokenizer revisions are pinned. UI workers are shared across concurrent tasks and released when unused. Speech moves to CPU only when GPU headroom is insufficient.
@@ -17,9 +18,11 @@
 
 ## Verification
 
-Final Windows `npm test`: **306 passed, 24 skipped, 0 failed** (330 tests). The final focused verification also passed, including the real host-command cancellation and web approval/undo round trip.
+Final Windows `npm test`: **311 passed, 24 skipped, 0 failed** (335 tests). The final focused verification also passed, including the real host-command cancellation and web approval/undo round trip. Live network-edit tests cover already-built tools, preserved web quotas and command channels, tunnel revocation, and revocation during DNS lookup.
 
-Run `npm test` on Windows. Container stand-in suites are skipped there because they require Unix process groups. Tests use disposable settings and keyring service names. Test temp folders should be outside this repository: nesting them inside a dirty checkout makes the diff discovery tests legitimately find the parent checkout.
+Final Linux `npm test`: **373 passed, 4 skipped, 0 failed** (377 tests), in a disposable container on the SF Agents-owned engine. This included the Unix container stand-ins, bundled sensor runtime, real X11 keyboard hook and terminal tests. Speech-model downloads were disabled for this test run with `SFAGENTS_SKIP_SPEECH=1`; the test workspace/container/home were removed afterwards.
+
+Run `npm test` on Windows or Linux. Container stand-in suites are skipped on Windows because they require Unix process groups. Tests use disposable settings and keyring service names. Test temp folders should be outside this repository: nesting them inside a dirty checkout makes the diff discovery tests legitimately find the parent checkout.
 
 New tests cover empty-agent creation, PR enablement/checks/reviews/SHA-checked merge, credential handling, lease ownership and expiry, Stop during a real host command, rollback conflicts, and a complete web approval → host shell → banner → review → undo round trip. UI tests cover supplied text, DONE verification, screenshot retry/handoff, password approvals, unsupported actions and native failures.
 
@@ -43,4 +46,4 @@ The automatic runtime is llama.cpp `b12073`, with an 8192-token context and an u
 
 Host UI driving on Linux and macOS remains the plan's later work. Container UI works through Linux AT-SPI on both Windows and Linux Docker hosts. macOS runtime support and a persistent voice agent are also later work.
 
-Build/publish the updated `docker` agent image before using GUI tools with existing installations, then Reset Environment for existing agents to recreate containers from it. Existing legacy agent files with removed sandbox fields must be recreated in the editor. Merging `docker` into `main` still requires Caleb's separate instruction.
+The updated `ghcr.io/joedoe56/sfagents-agent:docker` image was built, smoke-tested and published by [Agent image run 41679390599](https://github.com/JoeDoe56/sfagents/actions/runs/41679390599). Pull that image, then Reset Environment for existing agents to recreate their containers from it. Existing legacy agent files with removed sandbox fields must be recreated in the editor. Merging `docker` into `main` still requires Caleb's separate instruction.
