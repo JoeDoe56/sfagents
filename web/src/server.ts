@@ -82,6 +82,7 @@ import {
   type WorkspaceInfo,
 } from '@sfagents/core';
 import { ApiError, ProvidersApi } from './providers-api.js';
+import { pickNativeFolder } from './folder-dialog.js';
 import { AppProxy } from './apps.js';
 import { AuthError, WebAuth } from './auth.js';
 import { Dictation, SPEECH_RATE, speechText } from './dictation.js';
@@ -190,6 +191,8 @@ export interface WebServerOptions {
   pushToTalk?: PushToTalk;
   /** Disable global keyboard hooks in test servers. */
   enablePushToTalk?: boolean;
+  /** Tests replace the host's native folder dialog. */
+  pickFolder?: (signal: AbortSignal) => Promise<string | null>;
   /** Screen mirroring (default: the helper built from MoonlightWeb, downloaded on first start). */
   screen?: ScreenMirror;
   publicDir?: string;
@@ -370,6 +373,7 @@ export class WebServer {
   private lastActivity = 0;
   private seen: { id: string; time: string } | null = null;
   private closing = false;
+  private folderDialog?: AbortController;
   readonly logs: LogBook;
   private readonly approvals = new Map<string, PendingApproval>();
   private live: LiveRun | undefined;
@@ -638,6 +642,7 @@ export class WebServer {
   }
 
   async close(): Promise<void> {
+    this.folderDialog?.abort();
     this.closing = true;
     this.pending = [];
     if (this.heartbeat) clearInterval(this.heartbeat);
@@ -994,6 +999,21 @@ export class WebServer {
       case 'GET agent-editor':
         this.checkFetchSite(req);
         return sendJson(res, 200, this.agentEditor(url.searchParams.get('agent') ?? undefined));
+      case 'POST agent-folder': {
+        await readJson(req);
+        if (this.folderDialog) throw new HttpError(409, 'A folder dialog is already open on this computer.');
+        const controller = new AbortController();
+        this.folderDialog = controller;
+        const close = () => controller.abort();
+        res.once('close', close);
+        try {
+          const folder = await (this.options.pickFolder ?? pickNativeFolder)(AbortSignal.any([controller.signal, AbortSignal.timeout(300_000)]));
+          return sendJson(res, 200, { folder });
+        } finally {
+          res.off('close', close);
+          this.folderDialog = undefined;
+        }
+      }
       case 'POST agent-editor': {
         const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
         try {

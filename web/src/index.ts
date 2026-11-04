@@ -20,6 +20,8 @@ export type { Privileges, ElevatedStep } from './privileges.js';
 export { describeCall, displayItems, displaySections } from './display.js';
 export type { DisplayItem, DisplayArtifact, DisplayApproval, DisplayAttachment, DisplaySection } from './display.js';
 export { FileService, FileError, typeOf, explain } from './files.js';
+export { pickNativeFolder, runFolderDialog } from './folder-dialog.js';
+export type { FolderDialogRunner, FolderDialogResult } from './folder-dialog.js';
 export type { FileEntry, FileInfo, FileKind, Job, Conflict, ConflictItem } from './files.js';
 export { Trash, freeName } from './trash.js';
 export { writeZip, zipSourcesFor, readZipEntries, extractZip, safeEntryPath, crc32, ZipError } from './zip.js';

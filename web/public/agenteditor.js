@@ -91,6 +91,7 @@ export async function openAgentEditor(o = {}) {
   const errors = new Map(); // field → its error node
   const parts = {};
   let stopEvents = () => {};
+  let folderRequest = null;
 
   const changed = () => JSON.stringify(form) !== JSON.stringify(saved);
   const dirty = () => ctx?.setDirty(changed() || !original);
@@ -224,6 +225,7 @@ export async function openAgentEditor(o = {}) {
     },
     onConfirm: () => save(),
     onClose: () => {
+      folderRequest?.abort();
       current = null;
       stopEvents();
       stopSpeaking();
@@ -247,21 +249,26 @@ export async function openAgentEditor(o = {}) {
         refreshFolders();
       } }]] }),
     }));
-    rows.push(createRow({ title: 'Add Folder', icon: 'plus.circle.fill', tintTitle: true, onTap: () => {
-      let addSheet;
-      const input = createRow({ title: 'Folder', input: { value: '', placeholder: 'Full path on this computer', autocomplete: 'off', onInput: (value) => addSheet?.setDirty(!!value.trim()) } });
-      addSheet = openSheet({ title: 'Add Project Folder', detents: ['medium'], className: 'st-sheet', z: 1200,
-        build(sheet) { sheet.body.append(createSection({ rows: [input], note: 'Only this agent will have this folder mounted read-only at /roots/<name>.' }).el); },
-        onConfirm: () => {
-          const folder = input.input.value.trim();
-          if (!folder) return false;
-          set('folders', [...new Set([...form.folders, folder])]);
-          refreshFolders();
-          return true;
-        },
-      });
-    } }));
-    return createSection({ title: 'Project Folders', rows, note: 'Mounted read-only in this agent’s container at /roots/<name>. It makes changes in /workspaces. Secret files and SF Agents’ own data stay hidden. Save to apply at its next command.' });
+    rows.push(createRow({ title: folderRequest ? 'Choosing Folder…' : 'Add Folder', icon: 'plus.circle.fill', tintTitle: true, disabled: !!folderRequest, onTap: chooseFolder }));
+    return createSection({ title: 'Project Folders', rows, note: 'Add Folder opens the native folder dialog on the computer running SF Agents. Folders are mounted read-only in this agent’s container at /roots/<name>. It makes changes in /workspaces. Secret files and SF Agents’ own data stay hidden. Save to apply at its next command.' });
+  }
+
+  async function chooseFolder() {
+    if (folderRequest) return;
+    const request = new AbortController();
+    folderRequest = request;
+    refreshFolders();
+    try {
+      const res = await fetch('/api/agent-folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: request.signal });
+      const out = await res.json();
+      if (!res.ok) throw new Error(out.error ?? `HTTP ${res.status}`);
+      if (!request.signal.aborted && typeof out.folder === 'string') set('folders', [...new Set([...form.folders, out.folder])]);
+    } catch (error) {
+      if (!request.signal.aborted) showError(error.message, "Couldn't choose the folder");
+    } finally {
+      folderRequest = null;
+      if (current === ctx) refreshFolders();
+    }
   }
 
   function refreshFolders() {
