@@ -1,6 +1,6 @@
 /**
  * Text to speech: the computer reads text aloud with Qwen3-TTS, in the
- * reference voice set in Settings → STT & TTS (web/src/dictation.ts). It
+ * voice set for the agent in its settings (web/src/dictation.ts). It
  * plays as it is made: the server sends 16-bit PCM as Qwen3-TTS makes it, and
  * each piece is scheduled with Web Audio right after the one before, without
  * gaps. A little is buffered first; where Qwen3-TTS is slower than real time
@@ -80,11 +80,13 @@ function audioContext() {
 }
 
 /**
- * Reads text aloud as it is made. Resolves when it has finished playing (or
- * was stopped); rejects when it could not be generated.
+ * Reads text aloud as it is made, in the agent's voice (by default the one
+ * replying now). Resolves when it has finished playing (or was stopped);
+ * rejects when it could not be generated.
  * @param {string} text
+ * @param {string} [agent]
  */
-export async function speak(text) {
+export async function speak(text, agent) {
   stopSpeaking();
   const ctx = audioContext();
   const abort = new AbortController();
@@ -110,7 +112,7 @@ export async function speak(text) {
   if (!(await ensureVoice()) || abort.signal.aborted) return me.stop();
   let res;
   try {
-    res = await fetch('/api/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, stream: true }), signal: abort.signal });
+    res = await fetch('/api/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, stream: true, ...(agent ? { agent } : {}) }), signal: abort.signal });
   } catch (error) {
     if (abort.signal.aborted) return;
     me.stop();

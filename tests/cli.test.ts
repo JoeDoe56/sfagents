@@ -2,11 +2,10 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { detectSandbox } from '@sfagents/core';
-import { baseAgent, catFile, makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeFileCommand, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
+import { hostWorkspacesDir } from '@sfagents/core';
+import { NO_CONTAINER_TESTS, baseAgent, catFile, makeTempDir, runCli, startMockOpenAI, stdioServerConfig, writeJson, type MockChatHandler, writeAgent } from './helpers.js';
 
-// The CLI runs in its own process, with the machine's real sandbox.
-const sandboxed = (await detectSandbox()).ok;
+// The CLI runs in its own process; its commands go to the same fake Docker (see helpers.ts).
 
 let mock: Awaited<ReturnType<typeof startMockOpenAI>>;
 let handler: MockChatHandler = () => ({ text: 'unset' });
@@ -25,15 +24,16 @@ function lastTool(body: { messages: Array<Record<string, unknown>> }): string | 
 
 function project(agent: Record<string, unknown> = {}, extra: (dir: string) => void = () => {}) {
   const dir = makeTempDir();
-  fs.mkdirSync(path.join(dir, 'work'));
-  fs.writeFileSync(path.join(dir, 'work', 'hello.txt'), 'hello from the workspace\n');
+  // Commands start in /workspaces.
+  fs.mkdirSync(hostWorkspacesDir(), { recursive: true });
+  fs.writeFileSync(path.join(hostWorkspacesDir(), 'hello.txt'), 'hello from the workspace\n');
   writeAgent(dir, {
     id: 'main',
+    network: 'off',
     provider: 'openai-compatible',
     providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },
     model: 'mock/model',
     systemPrompt: 'You are main.',
-    workspace: { roots: ['work'] },
     ...agent,
   });
   // The key comes from an untracked .env next to agent.json.
@@ -52,12 +52,13 @@ describe('sfagents CLI', () => {
   });
 
   test('agents validate prints the tree; invalid config exits 2 with file and field', async () => {
-    const dir = project({ tools: { allow: ['2-worker.json'] } }, (d) =>
+    const dir = project({ agents: ['2-worker.json'] }, (d) =>
       writeJson(path.join(d, 'agents', 'worker.json'), {
         provider: 'openai-compatible',
         providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },
         model: 'mock/model',
         systemPrompt: 'w',
+        network: 'off',
       }),
     );
     const ok = await runCli(['agents', 'validate'], { cwd: dir });
@@ -68,22 +69,22 @@ describe('sfagents CLI', () => {
     const picked = await runCli(['agents', 'validate', '--agent', 'worker'], { cwd: dir });
     assert.match(picked.stdout, /^\* worker/m);
 
-    writeJson(path.join(dir, 'agents', 'broken.json'), { provider: 'openrouter', model: 'm', systemPrompt: 'w', tools: { allow: ['web_fetch'] } });
+    writeJson(path.join(dir, 'agents', 'broken.json'), { provider: 'openrouter', model: 'm', systemPrompt: 'w', network: 'off', tools: { allow: ['web_fetch'] } });
     const skipped = await runCli(['agents', 'validate', '--config', dir]);
     assert.equal(skipped.code, 0);
-    assert.match(skipped.stdout, /skipped agents[\\/]broken\.json: \[tools\.allow\[0\]\]: unknown tool "web_fetch"/);
+    assert.match(skipped.stdout, /skipped agents[\\/]broken\.json: \[tools\.allow\]: was removed/);
 
     const missing = await runCli(['agents', 'validate'], { cwd: makeTempDir() });
     assert.equal(missing.code, 2);
     assert.match(missing.stderr, /No agents found/);
   });
 
-  test('run: streams the answer to stdout and tool activity to stderr', { skip: !sandboxed && 'no OS sandbox on this machine' }, async () => {
+  test('run: streams the answer to stdout and tool activity to stderr', { skip: NO_CONTAINER_TESTS }, async () => {
     handler = (body) =>
       lastTool(body) === undefined
         ? { toolCalls: [{ name: 'shell', args: { command: catFile('hello.txt') } }] }
         : { text: `File contents: ${/Stdout: (.*)/.exec(lastTool(body)!)?.[1]?.trim()}` };
-    const dir = project({ tools: { allow: ['shell'] } });
+    const dir = project({});
     const r = await runCli(['run', 'read', 'hello.txt'], { cwd: dir });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout.trim(), 'File contents: hello from the workspace');
@@ -93,21 +94,19 @@ describe('sfagents CLI', () => {
     assert.equal(lastRequest.messages[1]!.content, 'read hello.txt');
   });
 
-  test('run --json returns the structured result; a denied call in non-interactive mode is explained', { skip: !sandboxed && 'no OS sandbox on this machine' }, async () => {
+  test('run --json returns the structured result; a denied call in non-interactive mode is explained', { skip: NO_CONTAINER_TESTS }, async () => {
     handler = (body) =>
-      lastTool(body) === undefined ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('out.txt') } }] } : { text: lastTool(body)! };
-    const dir = project({ tools: { allow: ['shell'], ask: true } });
-    const r = await runCli(['run', '--json', 'write a file'], { cwd: dir });
+      lastTool(body) === undefined ? { toolCalls: [{ name: 'shell', args: { command: `sfa-mcp call local echo '{"text":"ping"}'` } }] } : { text: lastTool(body)! };
+    const dir = project({ tools: { mcpServers: ['local'] } }, (d) => writeJson(path.join(d, 'mcp.json'), { mcpServers: { local: stdioServerConfig() } }));
+    const r = await runCli(['run', '--json', 'echo something'], { cwd: dir });
     assert.equal(r.code, 0, r.stderr);
     const result = JSON.parse(r.stdout);
     assert.equal(result.status, 'GOAL');
-    assert.equal(result.toolCalls[0].errorType, 'execution_denied');
-    assert.match(result.text, /no approval is possible in this non-interactive run/);
-    assert.equal(fs.existsSync(path.join(dir, 'work', 'out.txt')), false);
+    assert.match(result.text, /local echo needs approval, and no approval is possible in this non-interactive run/);
 
-    const yes = await runCli(['run', '--yes', 'write a file'], { cwd: dir });
+    const yes = await runCli(['run', '--yes', 'echo something'], { cwd: dir });
     assert.equal(yes.code, 0);
-    assert.match(fs.readFileSync(path.join(dir, 'work', 'out.txt'), 'utf8'), /^x\r?\n$/);
+    assert.match(yes.stdout, /echo:ping/);
   });
 
   test('run reads the task from stdin with "-"', async () => {
@@ -152,13 +151,14 @@ describe('sfagents CLI', () => {
         ? { toolCalls: [{ name: 'message', args: { to: 'worker', text: 'compute', wait: true } }] }
         : { text: `Final: ${JSON.parse(lastTool(body)!).reply}` };
     };
-    const dir = project({ tools: { allow: ['1-worker.json'] } }, (d) =>
+    const dir = project({ agents: ['1-worker.json'] }, (d) =>
       writeJson(path.join(d, 'agents', 'worker.json'), {
         description: 'computes',
         provider: 'openai-compatible',
         providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },
         model: 'mock/model',
         systemPrompt: 'You are worker.',
+        network: 'off',
       }),
     );
     const r = await runCli(['start'], { cwd: dir, input: 'delegate please\n/exit\n' });

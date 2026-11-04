@@ -1,0 +1,24 @@
+# Agent containers have no SSH route out: the proxy carries HTTP and HTTPS
+# only, so SSH remotes are rewritten to HTTPS. Pushing goes through sfa-git.
+[url "https://github.com/"]
+	insteadOf = git@github.com:
+	insteadOf = ssh://git@github.com/
+[url "https://gitlab.com/"]
+	insteadOf = git@gitlab.com:
+	insteadOf = ssh://git@gitlab.com/
+[url "https://codeberg.org/"]
+	insteadOf = git@codeberg.org:
+	insteadOf = ssh://git@codeberg.org/
+[url "https://bitbucket.org/"]
+	insteadOf = git@bitbucket.org:
+	insteadOf = ssh://git@bitbucket.org/
+# Project roots are mounted read-only from Windows and owned by another user.
+[safe]
+	directory = *
+[init]
+	defaultBranch = main
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true

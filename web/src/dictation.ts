@@ -37,11 +37,12 @@
  * started again if one stops; otherwise they start on demand and stop after
  * ten idle minutes to give the memory back.
  *
- * Qwen3-TTS (the Base model) copies a voice from a clip and its transcript:
- * the reference clip (Settings → STT & TTS, voice.wav) is cut to at most
- * 15 seconds, at a pause, and transcribed by Qwen3-ASR, once per clip
- * (voice-ref.wav and voice-ref.json). It has no voice of its own: without a
- * clip it does not speak.
+ * Qwen3-TTS (the Base model) copies a voice from a clip and its transcript.
+ * Each agent has its own (set in the agent's settings): voices/<agent>/
+ * voice.wav, cut to at most 15 seconds at a pause and transcribed by
+ * Qwen3-ASR once per clip (voice-ref.wav and voice-ref.json there; a
+ * corrected transcript in transcript.txt). It has no voice of its own: an
+ * agent without a clip is not read aloud.
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -145,11 +146,18 @@ export interface VoiceStatus {
   downloadSize: number;
   progress?: Progress;
   error?: string;
-  /** A reference voice clip is set. */
-  reference: boolean;
-  /** What is said in the clip, as Qwen3-TTS gets it (once it has been transcribed). */
+  /** The agent whose clip Qwen3-ASR is transcribing now. */
+  transcribing?: string;
+}
+
+/** An agent's voice clip (the agent editor's Voice section). */
+export interface AgentVoice {
+  /** A clip is set. */
+  clip: boolean;
+  /** What is said in it, as Qwen3-TTS gets it: Qwen3-ASR's transcript, or the correction. */
   transcript?: string;
-  /** Qwen3-ASR is transcribing the clip. */
+  /** The transcript was corrected by hand. */
+  corrected?: boolean;
   transcribing?: boolean;
 }
 
@@ -171,11 +179,9 @@ export interface DictationStatus {
 export interface SpeechSettings {
   /** Words Qwen3-ASR should know, separated by commas. */
   glossary: string;
-  /** What is said in the reference voice clip; filled in by Qwen3-ASR, corrected by the user. */
-  referenceText: string;
 }
 
-export const DEFAULT_SPEECH_SETTINGS: SpeechSettings = { glossary: '', referenceText: '' };
+export const DEFAULT_SPEECH_SETTINGS: SpeechSettings = { glossary: '' };
 
 export interface Hardware {
   platform: NodeJS.Platform;
@@ -387,8 +393,8 @@ export interface DictationOptions {
   keepLoaded?: boolean;
   /** Settings → STT & TTS, read at each use. */
   settings?: () => Partial<SpeechSettings>;
-  /** Qwen3-ASR transcribed a new reference clip: the Reference Transcript setting becomes this. */
-  onReferenceText?: (text: string) => void;
+  /** Qwen3-ASR transcribed an agent's new voice clip. */
+  onVoice?: (agent: string) => void;
   /** Milliseconds between download attempts (tests). */
   retryDelay?: number;
 }
@@ -455,7 +461,7 @@ export class Dictation {
     this.asrModel = options.asrModel ?? ASR_MODEL;
     this.ttsModel = options.ttsModel ?? TTS_MODEL;
     this.status_ = { state: 'missing', downloadSize: 0 };
-    this.voice_ = { state: 'missing', downloadSize: 0, reference: false };
+    this.voice_ = { state: 'missing', downloadSize: 0 };
     this.refreshInstalled();
     this.refreshVoice();
   }
@@ -492,9 +498,96 @@ export class Dictation {
     }
   }
 
-  /** The reference voice clip Qwen3-TTS copies (Settings → STT & TTS). */
-  get voicePath(): string {
-    return path.join(this.dir, 'voice.wav');
+  /** Where an agent's voice is kept (names differ only in case on Windows: one folder). */
+  private voiceDir(agent: string): string {
+    return path.join(this.dir, 'voices', encodeURIComponent(agent.toLowerCase()));
+  }
+
+  /** The voice clip Qwen3-TTS copies for an agent. */
+  voicePath(agent: string): string {
+    return path.join(this.voiceDir(agent), 'voice.wav');
+  }
+
+  /** The agents that have a voice clip (by their folder). */
+  private voiceAgents(): string[] {
+    try {
+      return fs
+        .readdirSync(path.join(this.dir, 'voices'))
+        .filter((n) => fs.existsSync(path.join(this.dir, 'voices', n, 'voice.wav')))
+        .map((n) => decodeURIComponent(n));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * The one voice clip of earlier versions (Settings → STT & TTS) becomes
+   * the voice of every agent that has none; the old files go.
+   */
+  adoptSharedVoice(agents: readonly string[], transcript?: string): string[] {
+    const old = path.join(this.dir, 'voice.wav');
+    if (!fs.existsSync(old)) return [];
+    const given: string[] = [];
+    for (const agent of agents) {
+      if (fs.existsSync(this.voicePath(agent))) continue;
+      fs.mkdirSync(this.voiceDir(agent), { recursive: true });
+      fs.copyFileSync(old, this.voicePath(agent));
+      if (transcript?.trim()) fs.writeFileSync(path.join(this.voiceDir(agent), 'transcript.txt'), transcript.trim());
+      given.push(agent);
+    }
+    for (const f of ['voice.wav', 'voice-ref.wav', 'voice-ref.json']) fs.rmSync(path.join(this.dir, f), { force: true });
+    return given;
+  }
+
+  /** Moves an agent's voice with it when the agent is renamed. */
+  renameVoice(from: string, to: string): void {
+    const a = this.voiceDir(from);
+    const b = this.voiceDir(to);
+    if (a === b || !fs.existsSync(a)) return;
+    fs.rmSync(b, { recursive: true, force: true });
+    fs.renameSync(a, b);
+  }
+
+  /** Removes an agent's voice (the agent was deleted). */
+  removeVoice(agent: string): void {
+    fs.rmSync(this.voiceDir(agent), { recursive: true, force: true });
+  }
+
+  /** Copies an agent's voice to another (Duplicate). */
+  copyVoice(from: string, to: string): void {
+    if (!fs.existsSync(this.voicePath(from))) return;
+    fs.mkdirSync(this.voiceDir(to), { recursive: true });
+    for (const f of fs.readdirSync(this.voiceDir(from))) fs.copyFileSync(path.join(this.voiceDir(from), f), path.join(this.voiceDir(to), f));
+  }
+
+  /** An agent's voice clip and its transcript, as far as they are known. */
+  agentVoice(agent: string): AgentVoice {
+    if (!fs.existsSync(this.voicePath(agent))) return { clip: false };
+    const corrected = this.correctedText(agent);
+    let heard: string | undefined;
+    try {
+      heard = (JSON.parse(fs.readFileSync(path.join(this.voiceDir(agent), 'voice-ref.json'), 'utf8')) as { text?: string }).text;
+    } catch {
+      // not transcribed yet
+    }
+    const transcript = corrected ?? heard;
+    return { clip: true, ...(transcript ? { transcript } : {}), ...(corrected ? { corrected: true } : {}), ...(this.voice_.transcribing === agent.toLowerCase() ? { transcribing: true } : {}) };
+  }
+
+  private correctedText(agent: string): string | undefined {
+    try {
+      return fs.readFileSync(path.join(this.voiceDir(agent), 'transcript.txt'), 'utf8').trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Corrects what is said in an agent's clip ("" goes back to Qwen3-ASR's transcript). */
+  setReferenceText(agent: string, text: string): void {
+    if (!fs.existsSync(this.voicePath(agent))) throw new Error('This agent has no voice clip.');
+    const file = path.join(this.voiceDir(agent), 'transcript.txt');
+    if (text.trim()) fs.writeFileSync(file, text.trim().slice(0, 4000));
+    else fs.rmSync(file, { force: true });
   }
 
   private runtimeBytes(): number {
@@ -525,9 +618,7 @@ export class Dictation {
     this.setVoice({
       state: state ?? (have ? (this.voiceUrl ? 'loaded' : 'ready') : 'missing'),
       downloadSize: have ? 0 : this.ttsModel.size,
-      reference: fs.existsSync(this.voicePath),
-      ...(this.voice_?.transcript ? { transcript: this.voice_.transcript } : {}),
-      ...(this.voice_?.transcribing ? { transcribing: true } : {}),
+      ...(this.voice_?.transcribing ? { transcribing: this.voice_.transcribing } : {}),
     });
   }
 
@@ -803,6 +894,21 @@ export class Dictation {
    * and resolves with Qwen3-ASR's address. A GPU build that cannot start or
    * run Qwen3-ASR fails here, and the next build is tried.
    */
+  private uiGpuReservationMb = 0;
+
+  /** Reserve room for StartLux; move speech to CPU only when the free GPU memory is insufficient. */
+  async reserveUiGpu(mb: number): Promise<void> {
+    this.uiGpuReservationMb = mb;
+    if (this.closed || !this.servers.length) return;
+    const free = await nvidiaFreeMb(this.options.hardware?.() ?? detectHardware());
+    const onGpu = this.status_.placement?.asr === 'gpu' || this.status_.placement?.tts === 'gpu';
+    if (mb > 0 && onGpu && (free === null || free < mb)) {
+      this.stop(); await this.start();
+    } else if (mb === 0 && (this.status_.placement?.asr === 'cpu' || this.status_.placement?.tts === 'cpu')) {
+      this.stop(); await this.start();
+    }
+  }
+
   private async launchAll(backend: Backend): Promise<string> {
     const threads = await physicalCores();
     const voice = this.have(this.ttsModel);
@@ -811,7 +917,8 @@ export class Dictation {
     // What goes on the GPU, best first; the rest goes on the CPU.
     const plans: string[][] = backend === 'cpu' ? [[]] : voice ? [[TTS_ID, ASR_ID], [TTS_ID], [ASR_ID], []] : [[ASR_ID], []];
     const all = voice ? [TTS_ID, ASR_ID] : [ASR_ID];
-    const free = backend === 'cpu' ? null : await nvidiaFreeMb(this.options.hardware?.() ?? detectHardware());
+    const available = backend === 'cpu' ? null : await nvidiaFreeMb(this.options.hardware?.() ?? detectHardware());
+    const free = this.uiGpuReservationMb ? Math.max(0, (available ?? 0) - this.uiGpuReservationMb) : available;
     for (const gpu of plans) {
       const cpu = all.filter((id) => !gpu.includes(id));
       const need = gpu.reduce((n, id) => n + GPU_PEAK_MB[id]!, 0) + GPU_HEADROOM_MB;
@@ -877,12 +984,13 @@ export class Dictation {
     this.options.log?.(`dictation: ${placementText(placement, device)}.`);
     // The reference clip's transcript is made now, and on the GPU the first
     // reply (slower than the next ones) is spent on one word.
-    if (voice) {
+    const agent = this.voiceAgents()[0];
+    if (voice && agent) {
       const url = this.voiceUrl!;
       const gpu = placement.tts === 'gpu';
       this.speaking = this.speaking.then(() =>
-        this.reference().then(
-          (ref) => (ref && gpu ? this.synthesize(url, 'Hello.') : undefined),
+        this.reference(agent).then(
+          (ref) => (ref && gpu ? this.synthesize(url, 'Hello.', agent) : undefined),
           (error) => this.options.log?.(`dictation: the reference voice could not be prepared: ${getErrorMessage(error)}`),
         ).catch(() => {}),
       );
@@ -1051,16 +1159,16 @@ export class Dictation {
 
   // ---------------------------------------------------------------- speaking
 
-  /** Text to speech (a WAV file), in the reference voice when one is set. One reply at a time. */
-  speak(text: string): Promise<Buffer> {
+  /** Text to speech (a WAV file), in the agent's voice. One reply at a time. */
+  speak(text: string, agent: string): Promise<Buffer> {
     if (!text.trim()) return Promise.reject(new Error('There is nothing to say.'));
     if (!this.have(this.ttsModel)) return Promise.reject(new Error('Text to speech is not set up yet.'));
-    const run = this.speaking.then(() => this.speakNow(text));
+    const run = this.speaking.then(() => this.speakNow(text, agent));
     this.speaking = run.catch(() => {});
     return run;
   }
 
-  private async speakNow(text: string): Promise<Buffer> {
+  private async speakNow(text: string, agent: string): Promise<Buffer> {
     await this.start();
     if (!this.serverHasVoice) {
       // Downloaded after the server started.
@@ -1069,7 +1177,7 @@ export class Dictation {
     }
     this.refreshVoice('speaking');
     try {
-      return await this.synthesize(this.voiceUrl!, text);
+      return await this.synthesize(this.voiceUrl!, text, agent);
     } finally {
       this.refreshVoice();
     }
@@ -1081,7 +1189,7 @@ export class Dictation {
    * GPU. One reply at a time, after any before it. Aborting the signal stops
    * the generation in audio.cpp too.
    */
-  async speakStream(text: string, signal?: AbortSignal): Promise<AsyncIterable<Buffer>> {
+  async speakStream(text: string, agent: string, signal?: AbortSignal): Promise<AsyncIterable<Buffer>> {
     if (!text.trim()) throw new Error('There is nothing to say.');
     if (!this.have(this.ttsModel)) throw new Error('Text to speech is not set up yet.');
     const before = this.speaking;
@@ -1096,7 +1204,7 @@ export class Dictation {
         await this.start();
       }
       this.refreshVoice('speaking');
-      const res = await this.request(this.voiceUrl!, text, true, signal);
+      const res = await this.request(this.voiceUrl!, text, agent, true, signal);
       const body = res.body!;
       const done = () => {
         release();
@@ -1116,13 +1224,13 @@ export class Dictation {
     }
   }
 
-  private async synthesize(url: string, text: string): Promise<Buffer> {
-    return Buffer.from(await (await this.request(url, text, false)).arrayBuffer());
+  private async synthesize(url: string, text: string, agent: string): Promise<Buffer> {
+    return Buffer.from(await (await this.request(url, text, agent, false)).arrayBuffer());
   }
 
-  private async request(url: string, text: string, stream: boolean, signal?: AbortSignal): Promise<Response> {
-    const ref = await this.reference();
-    if (!ref) throw new Error('Qwen3-TTS reads in a voice it copies: set a reference voice in Settings → STT & TTS.');
+  private async request(url: string, text: string, agent: string, stream: boolean, signal?: AbortSignal): Promise<Response> {
+    const ref = await this.reference(agent);
+    if (!ref) throw new Error(`Qwen3-TTS reads in a voice it copies, and "${agent}" has none yet: set a voice clip in the agent's settings.`);
     const res = await this.fetch(`${url}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1142,47 +1250,49 @@ export class Dictation {
     return res;
   }
 
-  /** Sets (or with null, removes) the reference voice clip, a WAV file. */
-  setReference(wav: Buffer | null): void {
+  /** Sets (or with null, removes) an agent's voice clip, a WAV file. */
+  setReference(agent: string, wav: Buffer | null): void {
+    const dir = this.voiceDir(agent);
     if (wav) {
       if (wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') throw new Error('The voice clip must be a WAV file.');
-      fs.mkdirSync(this.dir, { recursive: true });
-      fs.writeFileSync(`${this.voicePath}.tmp`, wav);
-      fs.renameSync(`${this.voicePath}.tmp`, this.voicePath);
-    } else fs.rmSync(this.voicePath, { force: true });
-    for (const f of ['voice-ref.wav', 'voice-ref.json']) fs.rmSync(path.join(this.dir, f), { force: true });
-    this.setVoice({ ...this.voice_, reference: !!wav, transcript: undefined });
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(`${this.voicePath(agent)}.tmp`, wav);
+      fs.renameSync(`${this.voicePath(agent)}.tmp`, this.voicePath(agent));
+      for (const f of ['voice-ref.wav', 'voice-ref.json', 'transcript.txt']) fs.rmSync(path.join(dir, f), { force: true });
+    } else fs.rmSync(dir, { recursive: true, force: true });
+    this.setVoice({ ...this.voice_ });
     // A new clip is transcribed now, so its transcript is there to check before it speaks.
-    if (wav && this.servers.length) void this.reference().catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`));
+    if (wav && this.servers.length) void this.reference(agent).catch((error) => this.options.log?.(`dictation: ${getErrorMessage(error)}`));
   }
 
-  /** Transcribes the reference clip again (Settings → STT & TTS); resolves with the transcript. */
-  async transcribeReference(): Promise<string> {
-    const ref = await this.reference(true);
-    if (!ref) throw new Error('There is no reference voice clip.');
+  /** Transcribes an agent's clip again (a correction is dropped); resolves with the transcript. */
+  async transcribeReference(agent: string): Promise<string> {
+    fs.rmSync(path.join(this.voiceDir(agent), 'transcript.txt'), { force: true });
+    const ref = await this.reference(agent, true);
+    if (!ref) throw new Error('This agent has no voice clip.');
     return ref.text;
   }
 
   /**
-   * The reference clip as Qwen3-TTS takes it: at most 15 seconds of
-   * voice.wav, cut at a pause, and what is said in it. Qwen3-ASR transcribes
-   * each new clip once (or again when asked) and the transcript becomes the
-   * Reference Transcript setting (onReferenceText); the setting, which the
-   * user may correct, is what is used. Null without a clip.
+   * An agent's clip as Qwen3-TTS takes it: at most 15 seconds of voice.wav,
+   * cut at a pause, and what is said in it. Qwen3-ASR transcribes each new
+   * clip once (or again when asked); a correction (transcript.txt) wins.
+   * Null without a clip.
    */
-  private reference(again = false): Promise<{ audio: string; text: string } | null> {
+  private reference(agent: string, again = false): Promise<{ audio: string; text: string } | null> {
     // One at a time: a speak request that comes while a new clip is transcribed waits for that transcript.
-    const run = this.referencing.then(() => this.referenceNow(again));
+    const run = this.referencing.then(() => this.referenceNow(agent, again));
     this.referencing = run.catch(() => {});
     return run;
   }
 
-  private async referenceNow(again: boolean): Promise<{ audio: string; text: string } | null> {
-    if (!fs.existsSync(this.voicePath)) return null;
-    const wav = fs.readFileSync(this.voicePath);
+  private async referenceNow(agent: string, again: boolean): Promise<{ audio: string; text: string } | null> {
+    const dir = this.voiceDir(agent);
+    if (!fs.existsSync(this.voicePath(agent))) return null;
+    const wav = fs.readFileSync(this.voicePath(agent));
     const hash = crypto.createHash('sha256').update(wav).digest('hex');
-    const audio = path.join(this.dir, 'voice-ref.wav');
-    const meta = path.join(this.dir, 'voice-ref.json');
+    const audio = path.join(dir, 'voice-ref.wav');
+    const meta = path.join(dir, 'voice-ref.json');
     let heard = '';
     try {
       const m = JSON.parse(fs.readFileSync(meta, 'utf8')) as { hash?: string; text?: string };
@@ -1190,22 +1300,21 @@ export class Dictation {
     } catch {
       // not made yet, or for another clip
     }
-    let text = heard && this.settings().referenceText.trim() ? this.settings().referenceText.trim() : heard;
     if (!heard) {
       const clip = trimReference(wav, MAX_REFERENCE_SECONDS, MIN_REFERENCE_SECONDS);
       fs.writeFileSync(audio, clip);
-      this.setVoice({ ...this.voice_, transcribing: true });
+      this.setVoice({ ...this.voice_, transcribing: agent.toLowerCase() });
       try {
-        text = await this.recognize(await this.start(), clip);
+        heard = await this.recognize(await this.start(), clip);
       } finally {
-        this.setVoice({ ...this.voice_, transcribing: false });
+        const { transcribing: _, ...rest } = this.voice_;
+        this.setVoice(rest);
       }
-      if (!text || isQuiet(text)) throw new Error('Qwen3-ASR heard no speech in the reference voice clip; choose a clip with one person speaking clearly.');
-      fs.writeFileSync(meta, `${JSON.stringify({ hash, text }, null, 2)}\n`);
-      this.options.onReferenceText?.(text);
+      if (!heard || isQuiet(heard)) throw new Error('Qwen3-ASR heard no speech in the voice clip; choose a clip with one person speaking clearly.');
+      fs.writeFileSync(meta, `${JSON.stringify({ hash, text: heard }, null, 2)}\n`);
+      this.options.onVoice?.(agent);
     }
-    if (this.voice_.transcript !== text) this.setVoice({ ...this.voice_, transcript: text });
-    return { audio, text };
+    return { audio, text: this.correctedText(agent) ?? heard };
   }
 
   /** What earlier versions downloaded (the llama.cpp setup, VibeVoice), now unused. */

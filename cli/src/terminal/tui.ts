@@ -23,6 +23,10 @@ import {
   artifactPane,
   genuiPane,
   stepPane,
+  agentEditorPane,
+  agentsPane,
+  workspacesPane,
+  fullControlPane,
   artifactsPane,
   contextPane,
   diffsPane,
@@ -146,6 +150,9 @@ const HELP = [
   '  /changes           uncommitted changes in the agents’ repositories',
   '  /context           plan usage and what the working context holds',
   '  /files [folder]    the file manager',
+  '  /agents            the agents: edit one, or make a new one (/edit-agent, /new-agent)',
+  '  /full-control      session countdown, Stop, file journal and undo (/full-control stop)',
+  '  /workspaces        the Git task workspaces: review, squash, push, undo a run',
   '  /settings          settings, providers and speech',
   '  /speak [stop]      speak the latest reply aloud on this computer (or stop)',
   '  /exit              quit SF Agents (the web interface stops too)',
@@ -169,6 +176,7 @@ export class Tui {
   private live: { id: string; segments: Segment[]; replyTo?: string } | null = null;
   /** GenUI views by artifact id → title: the terminal names them and points to the web interface. */
   private views = new Map<string, string>();
+  private fullControl: { agent: string; expires: number } | null = null;
   private approvals: Approval[] = [];
   private readonly answered = new Map<string, string>();
   private reactions: Record<string, string> = {};
@@ -256,6 +264,8 @@ export class Tui {
       }),
     );
     this.cleanups.push(server.subscribe((event, data) => this.onEvent(event, data)));
+    const fullControlTimer = setInterval(() => { if (this.fullControl) this.draw(); }, 1000);
+    fullControlTimer.unref(); this.cleanups.push(() => clearInterval(fullControlTimer));
 
     readline.emitKeypressEvents(this.input);
     if (this.input.isTTY) this.input.setRawMode(true);
@@ -322,6 +332,7 @@ export class Tui {
     switch (event) {
       case 'state': {
         const s = data as { agent: AgentInfo; items: Item[]; more: boolean; live: Tui['live']; approvals: Approval[]; reactions?: Record<string, string>; read?: Tui['read']; notices?: Array<string | { text: string; level?: string }> };
+        this.fullControl = (data.fullControl as Tui['fullControl']) ?? null;
         this.agent = s.agent;
         this.items = s.items;
         this.more = s.more;
@@ -400,6 +411,8 @@ export class Tui {
         if (seg && typeof data.artifact === 'string') seg.artifact = data.artifact;
         break;
       }
+      case 'full-control':
+        this.fullControl = (data.status as Tui['fullControl']) ?? null; this.draw(); return;
       case 'approval': {
         const a = data.approval as Approval;
         if (!this.approvals.some((x) => x.id === a.id)) this.approvals.push(a);
@@ -521,7 +534,9 @@ export class Tui {
     // Tabs.
     const number = key.meta && /^[1-3]$/.test(name) ? Number(name) : /^f[1-3]$/.test(name) ? Number(name.slice(1)) : 0;
     if (number) return this.setTab(TABS[number - 1]!);
-    if (name === 'tab') return this.setTab(TABS[(TABS.indexOf(this.tab) + (key.shift ? TABS.length - 1 : 1)) % TABS.length]!);
+    // In a form (the agent editor) Tab moves between fields instead.
+    const form = this.tab === 'Chat' && !this.prompt && !!this.panes.at(-1)?.form;
+    if (name === 'tab' && !form) return this.setTab(TABS[(TABS.indexOf(this.tab) + (key.shift ? TABS.length - 1 : 1)) % TABS.length]!);
     // A pane over the chat takes the keys (unless it asked for text).
     if (this.tab === 'Chat' && this.panes.length && !this.prompt) return this.paneKey(str, key, name);
     // Scrolling.
@@ -545,6 +560,7 @@ export class Tui {
     const pending = this.approvals.find((a) => !this.answered.has(a.id));
     if (pending && !this.text && !this.prompt && str && /^[yan]$/i.test(str)) {
       const decision = { y: 'allow_once', a: 'allow_always', n: 'deny' }[str.toLowerCase() as 'y' | 'a' | 'n'] as 'allow_once' | 'allow_always' | 'deny';
+      if (decision === 'allow_always' && ['full_control', 'host_action'].includes(pending.tool)) return;
       try {
         this.options.server.answer(pending.id, decision);
       } catch (error) {
@@ -684,9 +700,19 @@ export class Tui {
     if (name === 'home') return move(-1_000_000);
     if (name === 'end') return move(1_000_000);
     const row = rows[pane.selected]?.pick ? rows[pane.selected] : undefined;
+    if (name === 'tab') return move(key.shift ? -1 : 1);
     if (name === 'return' || name === 'enter') {
       if (row) pane.enter?.(row);
       return this.schedule();
+    }
+    // Ctrl+S saves a form (the agent editor).
+    if (key.ctrl && name === 's') {
+      if (pane.key?.('save', row)) return this.schedule();
+      return;
+    }
+    if (name === 'right') {
+      if (pane.key?.('right', row)) return this.schedule();
+      return;
     }
     if (name === 'backspace' || name === 'left') {
       if (pane.key?.(name === 'left' ? 'left' : '\b', row)) return this.schedule();
@@ -745,7 +771,7 @@ export class Tui {
 
   private async api<T = Record<string, unknown>>(method: 'GET' | 'POST', p: string, body?: unknown): Promise<T> {
     const r = await this.options.server.request(method, `/api/${p}`, body);
-    if (r.status >= 400) throw new Error(String(r.json.error ?? `HTTP ${r.status}`));
+    if (r.status >= 400) throw Object.assign(new Error(String(r.json.error ?? `HTTP ${r.status}`)), { status: r.status, body: r.json });
     return r.json as T;
   }
 
@@ -865,7 +891,7 @@ export class Tui {
         });
         return done();
       case 's':
-        if (message) this.speak(pick.text);
+        if (pick.kind === 'assistant') this.speak(pick.text, pick.agent);
         return done();
       case 'c':
         this.copy(pick.text);
@@ -914,9 +940,10 @@ export class Tui {
   }
 
   /** Speaks text aloud on this computer (Qwen3-TTS, through its speakers). */
-  private speak(text: string): void {
+  private speak(text: string, agent = this.agent?.id): void {
+    if (!agent || !this.options.server.canSpeak(agent)) return this.notice('Enable Read Replies Aloud in this agent’s settings to read a response.');
     this.notice('Speaking… (/speak stop stops it)');
-    this.options.server.speakAloud(text).catch((error: unknown) => {
+    this.options.server.speakAloud(text, agent).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.notice(`Couldn’t speak it: ${message}${/not set up|not installed|missing/i.test(message) ? ' /settings → Speech installs the voice.' : ''}`, 'error');
     });
@@ -1059,6 +1086,17 @@ export class Tui {
         }
         return;
       }
+      case '/agents':
+        return this.openPane(agentsPane(this.host));
+      case '/full-control':
+        if (arg === 'stop') { this.api('POST', 'full-control', { action: 'stop' }).catch((e) => this.notice(String(e), 'error')); return; }
+        return this.openPane(fullControlPane(this.host));
+      case '/workspaces':
+        return this.openPane(workspacesPane(this.host));
+      case '/new-agent':
+        return this.openPane(agentEditorPane(this.host, undefined, () => {}));
+      case '/edit-agent':
+        return this.openPane(agentEditorPane(this.host, arg || this.agent?.id, () => {}));
       case '/effort':
       case '/reasoning': {
         try {
@@ -1111,7 +1149,7 @@ export class Tui {
         if (arg === 'stop') return this.notice(server.stopSpeaking() ? 'Stopped speaking.' : 'Nothing is being spoken.');
         const last = [...this.items].reverse().find((i) => i.kind === 'assistant');
         if (!last || last.kind !== 'assistant') return this.notice('No reply to speak yet.');
-        return this.speak(last.text);
+        return this.speak(last.text, last.agent);
       }
       default:
         this.notice(`Unknown command ${cmd}. /help lists them.`, 'error');
@@ -1241,7 +1279,7 @@ export class Tui {
     else {
       if (this.picked) {
         const pick = this.picks.find((p) => p.id === this.picked);
-        const keys = pick?.kind === 'activity' ? ` Enter opens · d shows the command and output · c copy · ↑↓ move · Esc back to typing` : ' r reply · e react · s speak · c copy · Enter opens · ↑↓ move · Esc back to typing';
+        const keys = pick?.kind === 'activity' ? ` Enter opens · d shows the command and output · c copy · ↑↓ move · Esc back to typing` : ` r reply · e react${pick?.kind === 'assistant' && this.options.server.canSpeak(pick.agent ?? this.agent?.id ?? '') ? ' · s speak' : ''} · c copy · Enter opens · ↑↓ move · Esc back to typing`;
         above.push(color.dim(truncate(keys, width)));
       }
       if (this.replyTo) above.push(`${color.cyan(' ↳ ')}${color.dim(truncate(`Replying to ${this.replyTo.who}: ${clean(this.replyTo.text).replace(/\s+/g, ' ')}`, width - 18))}${color.dim(' · Esc cancels')}`);
@@ -1380,6 +1418,10 @@ export class Tui {
       });
       if (!this.approvals.length) out.push('', color.dim(`  ${this.agent?.id ?? 'The agent'} is working…`));
     }
+    if (this.fullControl) {
+      const seconds = Math.max(0, Math.ceil((this.fullControl.expires - Date.now()) / 1000));
+      out.push(color.yellow(`  FULL CONTROL · ${this.fullControl.agent} · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} left · /full-control stop`));
+    }
     for (const a of this.approvals) {
       const decision = this.answered.get(a.id);
       out.push('', color.yellow(color.bold(`  ? ${clean(a.agent)} wants to use ${clean(a.tool)}`)));
@@ -1388,7 +1430,7 @@ export class Tui {
       out.push(
         decision
           ? `    ${decision === 'deny' ? color.red('Denied') : color.green(decision === 'allow_always' ? 'Allowed always' : 'Allowed once')}`
-          : `    ${color.bold('[y]')} Allow once   ${color.bold('[a]')} Always allow   ${color.bold('[n]')} Deny`,
+          : ['full_control', 'host_action'].includes(a.tool) ? `    ${color.bold('[y]')} Allow once   ${color.bold('[n]')} Deny` : `    ${color.bold('[y]')} Allow once   ${color.bold('[a]')} Always allow   ${color.bold('[n]')} Deny`,
       );
     }
     if (this.infoLines.length) out.push('', ...this.infoLines.flatMap((l) => indent(wrap(l, w))).map(color.dim));

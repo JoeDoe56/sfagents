@@ -12,9 +12,9 @@ import {
   type AgentReplyPayload,
   type ModelRequest,
 } from '@sfagents/core';
-import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, useAnySandbox, writeJson, type Script } from './helpers.js';
+import { baseAgent, catFile, collectEvents, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, mcpCall, shellStdout } from './helpers.js';
+import { NO_CONTAINER_TESTS as _NCT } from './helpers.js';
 
-await useAnySandbox();
 
 const runtimes: AgentRuntime[] = [];
 const conversations: ConversationService[] = [];
@@ -51,10 +51,10 @@ const hasToolResult = (req: ModelRequest) => req.messages[req.messages.length - 
 const inThread = (req: ModelRequest) => /<thread>/.test(systemOf(req));
 
 describe('agents messaging each other in threads', () => {
-  test('an agent messages another, which works with its own tools and replies', async () => {
+  test('an agent messages another, which works with its own tools and replies', { skip: _NCT }, async () => {
     const { tree, dir, conversation } = project({
-      main: { workspace: { roots: ['work'] }, tools: { allow: ['1-worker.json'] } },
-      worker: { description: 'Reads shared files.', workspace: { roots: ['work/shared'] }, tools: { allow: ['shell'], mcpServers: [{ server: 'local', tools: ['echo'] }] } },
+      main: { agents: ['1-worker.json'] },
+      worker: { description: 'Reads shared files.', tools: { mcpServers: [{ server: 'local', tools: ['echo'] }] } },
     });
     const script: Script = (req, _n, agent) => {
       if (agent === 'main') {
@@ -64,8 +64,8 @@ describe('agents messaging each other in threads', () => {
       }
       const toolCount = req.messages.filter((m) => m.role === 'tool').length;
       if (toolCount === 0) return { toolCalls: [{ name: 'shell', args: { command: catFile('data.txt') } }] };
-      if (toolCount === 1) return { toolCalls: [{ name: 'mcp__local__echo', args: { text: '7' } }] };
-      return { text: `number is ${lastToolContent(req)}` };
+      if (toolCount === 1) return { toolCalls: [mcpCall('local', 'echo', { text: '7' })] };
+      return { text: `number is ${shellStdout(lastToolContent(req))}` };
     };
     const { runtime, providers } = start(tree, script, conversation);
     const { events, onEvent } = collectEvents();
@@ -82,7 +82,7 @@ describe('agents messaging each other in threads', () => {
     assert.equal(lastUser(req), 'Read data.txt; echo the number.');
     assert.doesNotMatch(JSON.stringify(req.messages), /Ask the worker/);
     // It can talk back to main while it works.
-    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['mcp__local__echo', 'message', 'shell']);
+    assert.deepEqual(req.tools!.map((t) => t.name).sort(), ['message', 'shell']);
     // The writer's prompt says how to talk to agents.
     assert.match(systemOf(providers.get('main')!.requests[0]!.request), /<agent_messaging>[\s\S]*terse, structured/);
     assert.deepEqual(events.filter((e) => e.type === 'agent_start').map((e) => e.agentPath.join('/')), ['main', 'main/worker']);
@@ -96,7 +96,7 @@ describe('agents messaging each other in threads', () => {
   });
 
   test('a thread persists: both agents see it, whoever writes and whoever replies in the conversation', async () => {
-    const { tree, conversation } = project({ main: { tools: { allow: ['1-worker.json'] } }, worker: { tools: { allow: ['1-main.json'] } } });
+    const { tree, conversation } = project({ main: { agents: ['1-worker.json'] }, worker: { agents: ['1-main.json'] } });
     let mainTurn = 0;
     const script: Script = (req, _n, agent) => {
       if (agent === 'main' && !inThread(req)) {
@@ -127,7 +127,7 @@ describe('agents messaging each other in threads', () => {
   });
 
   test('several messages in one turn run in parallel, across agents and threads', async () => {
-    const { tree, conversation } = project({ main: { tools: { allow: ['2-worker.json', '1-other.json'] } }, worker: {}, other: {} });
+    const { tree, conversation } = project({ main: { agents: ['2-worker.json', '1-other.json'] }, worker: {}, other: {} });
     let running = 0;
     let peak = 0;
     const script: Script = (req, _n, agent) => {
@@ -159,7 +159,7 @@ describe('agents messaging each other in threads', () => {
   });
 
   test('agents talk back and forth while both work, and ungranted agents cannot be messaged', async () => {
-    const { tree, dir, conversation } = project({ main: { tools: { allow: ['1-worker.json'] } }, worker: {}, other: {} });
+    const { tree, dir, conversation } = project({ main: { agents: ['1-worker.json'] }, worker: {}, other: {} });
     const content = (m: unknown) => String((m as { content?: unknown }).content ?? '');
     const script: Script = (req, _n, agent) => {
       const last = req.messages[req.messages.length - 1]!;
@@ -206,7 +206,7 @@ describe('agents messaging each other in threads', () => {
       const last = req.messages[req.messages.length - 1]!;
       if (last.role === 'user' && /blue/.test(String((last as { content: string }).content))) return { text: 'Painting it blue.' };
       if (last.role === 'tool') return { text: 'no answer' };
-      return { toolCalls: [{ name: 'message', args: { to: 'user', questions: [{ question: 'Which color?', options: ['red', 'blue'] }], timeout_seconds: 5 } }] };
+      return { toolCalls: [{ name: 'message', args: { to: 'user', questions: [{ question: 'Which color?', options: ['red', 'blue'] }], timeout_seconds: 5, section: 'keep' } }] };
     };
     const { runtime } = start(tree, script, conversation);
     const session = runtime.createSession();
@@ -249,7 +249,7 @@ describe('agents messaging each other in threads', () => {
     assert.match(out[0]!, /must NOT have more than 6 items/);
     assert.match(out[1]!, /Say who it is for/);
     assert.match(out[2]!, /params\/to must be equal to one of the allowed values/);
-    assert.match(out[3]!, /Sent\. Keep working/);
-    assert.match(out[4]!, /"wait": true alone/);
+    assert.match(out[3]!, /"section" is required/);
+    assert.match(out[4]!, /Say who it is for/);
   });
 });

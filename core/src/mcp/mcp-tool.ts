@@ -5,20 +5,17 @@
  *
  * Adapted for SF Agents from qwen-code packages/core/src/tools/mcp-tool.ts
  * (`DiscoveredMCPTool`, `transformMcpContentToParts`, `getDisplayFromParts`).
- * Keeps: per-server trust, MCP confirmation details, normalization of text,
+ * Keeps: normalization of text,
  * image/audio, embedded resource, resource link and structuredContent
  * blocks, and isError handling. Output is text because OpenAI-compatible
  * tool messages are text; binary blocks are summarized. Removed: MCP apps,
- * classifier projection, progress streaming, persisted output files.
+ * classifier projection, progress streaming, persisted output files, and
+ * MCP tools as model tools (agents reach MCP through `sfa-mcp`, ./sfa-mcp.ts).
  */
 
 import { createHash } from 'node:crypto';
-import type { ToolInvocation, ToolResult, PermissionDecision, ToolCallConfirmationDetails, JsonSchema } from '../tools/tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools/tools.js';
-import { ToolErrorType } from '../tools/tool-error.js';
 import { MCP_TOOL_PREFIX } from '../tools/tool-names.js';
-import type { McpCallResult, McpManager, McpToolInfo } from './manager.js';
-import { getErrorMessage, isAbortError } from '../utils/errors.js';
+import type { McpCallResult } from './manager.js';
 
 const MAX_FUNCTION_NAME = 64;
 
@@ -82,103 +79,4 @@ export function transformMcpResult(toolName: string, result: McpCallResult): str
   // Servers may already include the serialized structured payload as text.
   if (structuredText !== undefined && !parts.includes(structuredText)) parts.unshift(structuredText);
   return parts.join('\n');
-}
-
-export interface McpToolParams {
-  [key: string]: unknown;
-}
-
-class McpToolInvocation extends BaseToolInvocation<McpToolParams, ToolResult> {
-  constructor(
-    private readonly tool: DiscoveredMcpTool,
-    params: McpToolParams,
-  ) {
-    super(params);
-  }
-
-  getDescription(): string {
-    const args = JSON.stringify(this.params);
-    return `${this.tool.serverName}.${this.tool.serverToolName}(${args.length > 200 ? `${args.slice(0, 200)}…` : args})`;
-  }
-
-  override async getDefaultPermission(): Promise<PermissionDecision> {
-    return this.tool.trusted ? 'allow' : 'ask';
-  }
-
-  override async getConfirmationDetails(): Promise<ToolCallConfirmationDetails> {
-    return {
-      type: 'mcp',
-      title: `Confirm MCP tool: ${this.tool.serverToolName} (server ${this.tool.serverName})`,
-      serverName: this.tool.serverName,
-      toolName: this.tool.serverToolName,
-      toolDisplayName: this.tool.name,
-      args: this.params,
-    };
-  }
-
-  async execute(signal: AbortSignal): Promise<ToolResult> {
-    let result: McpCallResult;
-    try {
-      result = await this.tool.manager.callTool(this.tool.serverName, this.tool.serverToolName, this.params, signal);
-    } catch (error) {
-      if (isAbortError(error) || signal.aborted) {
-        return {
-          llmContent: `MCP tool call ${this.tool.serverToolName} was cancelled.`,
-          returnDisplay: 'Cancelled',
-          error: { message: 'cancelled', type: ToolErrorType.EXECUTION_CANCELLED },
-        };
-      }
-      const message = `MCP tool '${this.tool.serverToolName}' on server '${this.tool.serverName}' failed: ${getErrorMessage(error)}`;
-      return { llmContent: message, returnDisplay: message, error: { message, type: ToolErrorType.MCP_TOOL_ERROR } };
-    }
-    const text = transformMcpResult(this.tool.serverToolName, result);
-    if (result.isError) {
-      const message = `MCP tool '${this.tool.serverToolName}' reported an error: ${text}`;
-      return { llmContent: message, returnDisplay: message, error: { message, type: ToolErrorType.MCP_TOOL_ERROR } };
-    }
-    const firstLine = text.split('\n')[0] ?? '';
-    return {
-      llmContent: text,
-      returnDisplay: firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine || '(empty result)',
-    };
-  }
-}
-
-function normalizeInputSchema(schema: Record<string, unknown>): JsonSchema {
-  const copy: Record<string, unknown> = { ...schema };
-  if (copy['type'] !== 'object') copy['type'] = 'object';
-  if (typeof copy['properties'] !== 'object' || copy['properties'] === null) copy['properties'] = {};
-  return copy;
-}
-
-/** One MCP tool as seen by one agent. */
-export class DiscoveredMcpTool extends BaseDeclarativeTool<McpToolParams, ToolResult> {
-  constructor(
-    readonly manager: McpManager,
-    readonly serverName: string,
-    readonly serverToolName: string,
-    info: McpToolInfo,
-    functionName: string,
-    readonly trusted: boolean,
-  ) {
-    super(
-      functionName,
-      `${serverName}.${serverToolName}`,
-      `${info.description || `MCP tool ${serverToolName}`} (MCP server: ${serverName})`,
-      Kind.Other,
-      normalizeInputSchema(info.inputSchema),
-    );
-  }
-
-  override get deferrable(): boolean {
-    return true;
-  }
-
-  get approvalKey(): string {
-    return mcpApprovalKey(this.serverName, this.serverToolName);
-  }
-
-  protected createInvocation(params: McpToolParams): ToolInvocation<McpToolParams, ToolResult> {
-    return new McpToolInvocation(this, params);
-  }
 }

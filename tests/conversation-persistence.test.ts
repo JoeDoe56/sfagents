@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
+  hostWorkspacesDir,
   AgentRuntime,
   AgentTerminateMode,
   ConversationService,
@@ -14,16 +15,20 @@ import {
   ToolErrorType,
   type ChatMessage,
 } from '@sfagents/core';
-import { baseAgent, CLI_ENTRY, lastToolContent, makeTempDir, runCli, scriptedFactory, startMockOpenAI, writeJson, type MockChatHandler, type Script, writeAgent, catFile, useAnySandbox, writeFileCommand } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, CLI_ENTRY, lastToolContent, makeTempDir, runCli, scriptedFactory, startMockOpenAI, writeJson, type MockChatHandler, type Script, writeAgent, catFile, stdioServerConfig, writeFileCommand } from './helpers.js';
 
-const realSandbox = await useAnySandbox();
 
 const isWin = process.platform === 'win32';
 
+/** The test's folder in /workspaces (commands start in /workspaces). */
+let work = '';
+const w = (f: string) => `${path.basename(work)}/${f}`;
+
 function project(agent: Record<string, unknown> = {}, extraFiles: Record<string, unknown> = {}) {
   const dir = makeTempDir();
-  fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
-  writeAgent(dir, { ...baseAgent('main'), workspace: { roots: ['work'] }, ...agent });
+  fs.mkdirSync(hostWorkspacesDir(), { recursive: true });
+  work = fs.mkdtempSync(path.join(hostWorkspacesDir(), 'persist-'));
+  writeAgent(dir, { ...baseAgent('main'), ...agent });
   for (const [f, v] of Object.entries(extraFiles)) writeJson(path.join(dir, f), v);
   return { dir, file: path.join(dir, '.sfagents', 'conversation.md') };
 }
@@ -49,13 +54,13 @@ function roles(messages: readonly ChatMessage[]): string {
 }
 
 describe('persistent conversation (runtime)', () => {
-  test('a tool exchange and reasoning blocks survive a restart and replay validly', async () => {
-    const { dir, file } = project({ tools: { allow: ['shell'] } });
-    fs.writeFileSync(path.join(dir, 'work', 'fact.txt'), 'The launch code is AZURE-7.\n');
+  test('a tool exchange and reasoning blocks survive a restart and replay validly', { skip: NO_CONTAINER_TESTS }, async () => {
+    const { dir, file } = project({});
+    fs.writeFileSync(path.join(work, 'fact.txt'), 'The launch code is AZURE-7.\n');
     const details = [{ type: 'reasoning.text', format: 'anthropic-claude-v1', index: 0, text: 'read it', signature: 'sig123' }];
     const first = openRuntime(dir, (req, n) =>
       n === 0
-        ? { toolCalls: [{ name: 'shell', args: { command: catFile('fact.txt') } }], reasoningDetails: details }
+        ? { toolCalls: [{ name: 'shell', args: { command: catFile(w('fact.txt')) } }], reasoningDetails: details }
         : { text: `Found: ${/Stdout: (.*)/.exec(lastToolContent(req) ?? '')?.[1]?.trim()}` },
     );
     const r1 = await first.runtime.createSession().run('What is the launch code?');
@@ -71,7 +76,7 @@ describe('persistent conversation (runtime)', () => {
     const sent = second.providers.get('main')!.requests[0]!.messages as ChatMessage[];
     assert.equal(roles(sent), 'suatau', 'system, user, assistant(tool call), tool, assistant, user');
     const assistant = sent[2] as Extract<ChatMessage, { role: 'assistant' }>;
-    assert.equal(assistant.tool_calls![0]!.function.arguments, JSON.stringify({ command: catFile('fact.txt') }));
+    assert.equal(assistant.tool_calls![0]!.function.arguments, JSON.stringify({ command: catFile(w('fact.txt')) }));
     assert.deepEqual(assistant.reasoning_details, details, 'opaque payload replayed unchanged to the same model');
     assert.equal((sent[3] as { tool_call_id: string }).tool_call_id, assistant.tool_calls![0]!.id);
     assert.match((sent[3] as { content: string }).content, /AZURE-7/);
@@ -88,11 +93,11 @@ describe('persistent conversation (runtime)', () => {
   });
 
   test('crash before execution: the call is marked never-started and is not repeated', async () => {
-    const { dir } = project({ tools: { allow: ['shell'] } });
+    const { dir } = project({});
     const failOn = 'sfa:tool_start';
     const first = openRuntime(
       dir,
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('side-effect.txt') } }] } : { text: 'done' }),
+      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand(w('side-effect.txt')) } }] } : { text: 'done' }),
       {
         approveAll: true,
         io: {
@@ -106,7 +111,7 @@ describe('persistent conversation (runtime)', () => {
     const r = await first.runtime.createSession().run('write it');
     assert.equal(r.status, AgentTerminateMode.ERROR);
     assert.match(r.error!, /Conversation storage failed: .*simulated crash.*Stopped before any further action/);
-    assert.equal(fs.existsSync(path.join(dir, 'work', 'side-effect.txt')), false, 'the tool never ran');
+    assert.equal(fs.existsSync(path.join(work, 'side-effect.txt')), false, 'the tool never ran');
     await first.runtime.dispose();
     first.conversation.close();
 
@@ -116,15 +121,15 @@ describe('persistent conversation (runtime)', () => {
     await second.runtime.createSession().run('what happened?');
     const sent = second.providers.get('main')!.requests[0]!.messages as ChatMessage[];
     assert.equal((sent[3] as { content: string }).content, INTERRUPTED_NOT_STARTED);
-    assert.equal(fs.existsSync(path.join(dir, 'work', 'side-effect.txt')), false, 'still not executed after reopening');
+    assert.equal(fs.existsSync(path.join(work, 'side-effect.txt')), false, 'still not executed after reopening');
     await second.close();
   });
 
-  test('crash after execution but before the result is stored: outcome is unknown, not repeated', async () => {
-    const { dir } = project({ tools: { allow: ['shell'] } });
+  test('crash after execution but before the result is stored: outcome is unknown, not repeated', { skip: NO_CONTAINER_TESTS }, async () => {
+    const { dir } = project({});
     const first = openRuntime(
       dir,
-      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand('once.txt') } }] } : { text: 'done' }),
+      (_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand(w('once.txt')) } }] } : { text: 'done' }),
       {
         approveAll: true,
         io: {
@@ -136,7 +141,7 @@ describe('persistent conversation (runtime)', () => {
       },
     );
     await first.runtime.createSession().run('write it');
-    assert.equal(fs.existsSync(path.join(dir, 'work', 'once.txt')), true, 'the side effect happened');
+    assert.equal(fs.existsSync(path.join(work, 'once.txt')), true, 'the side effect happened');
     await first.runtime.dispose();
     first.conversation.close();
 
@@ -153,7 +158,7 @@ describe('persistent conversation (runtime)', () => {
   });
 
   test('threads between agents are stored as their own files and linked from the conversation', async () => {
-    const { dir } = project({ tools: { allow: ['1-helper.json'] } }, { 'agents/helper.json': baseAgent('helper', { description: 'helps' }) });
+    const { dir } = project({ agents: ['1-helper.json'] }, { 'agents/helper.json': baseAgent('helper', { description: 'helps' }) });
     const first = openRuntime(dir, (req, n, agent) =>
       agent === 'main'
         ? n === 0
@@ -198,31 +203,13 @@ describe('persistent conversation (runtime)', () => {
     assert.ok(state.lastResetSeq > 0);
   });
 
-  test('conversation state is invisible to shell commands', { skip: !realSandbox && 'no OS sandbox on this machine' }, async () => {
-    const { dir } = project({ workspace: { roots: ['.'] }, tools: { allow: ['shell'] } });
-    const rt = openRuntime(dir, (req) => {
-      const last = req.messages[req.messages.length - 1]!;
-      if (last.role === 'user' && last.content === 'read the history file') {
-        return { toolCalls: [{ name: 'shell', args: { command: 'cat .sfagents/conversation.md; grep -r SECRET-PHRASE . || echo "No matches"' } }] };
-      }
-      return { text: lastToolContent(req) ?? 'ok' };
-    });
-    await rt.runtime.createSession().run('SECRET-PHRASE lives in history');
-    await rt.runtime.createSession().run('read the history file');
-    const sent = rt.providers.get('main')!.requests.at(-1)!.messages as ChatMessage[];
-    const output = (sent.at(-1) as { content: string }).content.split('\n').slice(1).join('\n');
-    assert.match(output, /No matches/);
-    assert.doesNotMatch(output, /SECRET-PHRASE lives/);
-    await rt.close();
-  });
-
-  test('"always allow" approvals do not survive a restart', async () => {
-    const { dir } = project({ tools: { allow: ['shell'], ask: true } });
+  test('"always allow" approvals do not survive a restart', { skip: NO_CONTAINER_TESTS }, async () => {
+    const { dir } = project({ tools: { mcpServers: ['local'] } }, { 'mcp.json': { mcpServers: { local: stdioServerConfig() } } });
     let asked = 0;
     for (let round = 0; round < 2; round++) {
       const tree = loadAgentTree(dir);
       const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
-      const { factory } = scriptedFactory((_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: writeFileCommand(`f${round}.txt`) } }] } : { text: 'ok' }));
+      const { factory } = scriptedFactory((_req, n) => (n === 0 ? { toolCalls: [{ name: 'shell', args: { command: `sfa-mcp call local echo '{"text":"r${round}"}'` } }] } : { text: 'ok' }));
       const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation, confirm: async () => (asked++, 'allow_always') });
       await runtime.createSession().run('write');
       await runtime.dispose();
@@ -244,14 +231,13 @@ describe('persistent conversation (CLI)', () => {
 
   function cliProject(agent: Record<string, unknown> = {}) {
     const dir = makeTempDir();
-    fs.mkdirSync(path.join(dir, 'work'));
     writeAgent(dir, {
       id: 'main',
+      network: 'off',
       provider: 'openai-compatible',
       providerOptions: { baseUrl: mock.baseUrl, apiKeyEnv: 'MOCK_API_KEY' },
       model: 'mock/model',
       systemPrompt: 'You are main.',
-      workspace: { roots: ['work'] },
       ...agent,
     });
     fs.writeFileSync(path.join(dir, '.env'), 'MOCK_API_KEY=test-key\n');
@@ -319,7 +305,7 @@ describe('persistent conversation (CLI)', () => {
     assert.equal(third.code, 0, third.stderr);
   });
 
-  test('a process killed mid-tool leaves an interrupted run that is reported, not repeated', { skip: !realSandbox && 'no OS sandbox on this machine' }, async () => {
+  test('a process killed mid-tool leaves an interrupted run that is reported, not repeated', { skip: NO_CONTAINER_TESTS }, async () => {
     const sleepCmd = isWin ? 'ping -n 30 127.0.0.1' : 'sleep 30';
     let calls = 0;
     handler = (body) => {
@@ -332,8 +318,8 @@ describe('persistent conversation (CLI)', () => {
       const tools = body.messages.filter((m) => m['role'] === 'tool').map((m) => String(m['content']));
       return { text: `I see: ${tools.join(' | ')}` };
     };
-    const dir = cliProject({ tools: { allow: ['shell'] } });
-    const file = path.join(dir, '.sfagents', 'conversation.md');
+    const dir = cliProject({});
+    const file = path.join(dir, 'userdata', '.sfagents', 'conversation.md');
     const child = spawn(process.execPath, [CLI_ENTRY, 'start', '--yes'], { cwd: dir, env: { ...process.env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin.write('run the slow command\n');
     await new Promise<void>((resolve, reject) => {

@@ -10,11 +10,10 @@
  * is rejected the same way as one that was filtered out.
  */
 
-import type { AnyDeclarativeTool, AnyToolInvocation, ToolResult } from '../tools/tools.js';
+import type { AnyDeclarativeTool, AnyToolInvocation, ToolImage, ToolResult } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ParsedToolCall, ToolMessage } from '../providers/types.js';
-import { DiscoveredMcpTool } from '../mcp/mcp-tool.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { PersistenceFailure } from './recorder.js';
 import type { ToolMessageStatus } from '../conversation/types.js';
@@ -49,6 +48,10 @@ export interface ToolExecutionOutcome {
   message: ToolMessage;
   activity: ToolActivity;
   status: ToolMessageStatus;
+  /** Images the call showed (sfa-view), sent after the results. */
+  images?: ToolImage[];
+  /** The tool's metadata (what message said to the person, for the run's answer). */
+  metadata?: Record<string, unknown>;
 }
 
 function statusOf(result: ToolResult): ToolMessageStatus {
@@ -62,9 +65,6 @@ function isAutoApproved(tool: AnyDeclarativeTool, ctx: ToolExecutionContext): bo
   if (ctx.approveAll) return true;
   if (ctx.sessionApprovals.has(tool.name)) return true;
   if (ctx.autoApprove.includes(tool.name)) return true;
-  if (tool instanceof DiscoveredMcpTool) {
-    return ctx.autoApprove.includes(tool.approvalKey) || ctx.autoApprove.includes(`mcp__${tool.serverName}__*`);
-  }
   return false;
 }
 
@@ -129,6 +129,8 @@ export async function executeToolCall(
     },
     activity: { name: call.name, ok, errorType: result.error?.type },
     status: statusOf(result),
+    ...(result.images?.length ? { images: result.images } : {}),
+    ...(result.metadata ? { metadata: result.metadata } : {}),
   };
 }
 

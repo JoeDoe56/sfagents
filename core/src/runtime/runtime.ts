@@ -1,3 +1,7 @@
+import { containerManager } from '../container/containers.js';
+import { UiService, ContainerUiAdapter, WindowsUiAdapter } from '../ui/ui.js';
+import { FullControlManager, RollbackJournal } from './full-control.js';
+import { GitHubPullRequests } from '../git/github.js';
 /**
  * The SF Agents runtime: model turns, the tool loop and child execution.
  *
@@ -9,19 +13,24 @@
  */
 
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentDefinition } from '../agents/definition.js';
 import { artifactAccess, conversationAccess, mcpGrants } from '../agents/definition.js';
-import { CHAT_GUIDANCE, ChatToolNames, createChatTools } from '../conversation/chat-tools.js';
-import { ConversationToolNames, createConversationTools, MAX_SECTION_REMINDERS, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER } from '../conversation/tools.js';
+import { ORGANIZE_GUIDANCE } from '../conversation/tools.js';
 import { ARTIFACT_COMMAND, ARTIFACT_GUIDANCE, artifactCommand, artifactIndex } from '../conversation/artifacts.js';
-import { availableHostCommands, hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
+import { hostCommandSchema, type HostCommands } from '../tools/host-commands.js';
+import type { GitWorkspaces } from '../git/workspaces.js';
+import { DEFAULT_VIEW_IMAGES } from '../tools/sfa-view.js';
+import { toolImagesMessage, type ShownImage } from '../conversation/attachments.js';
 import type { AttachmentRef, MessageRecord } from '../conversation/types.js';
+import type { ConversationState } from '../conversation/state.js';
 import type { AgentNode, AgentTree } from '../agents/loader.js';
 import {
   AGENT_MESSAGING_GUIDANCE,
   MESSAGE_USER_GUIDANCE,
   MessageTool,
+  messageAction,
   THREAD_MESSAGING_GUIDANCE,
   USER,
   mailText,
@@ -36,20 +45,19 @@ import { newRunId, toChatMessages } from '../conversation/service.js';
 import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { TOOL_SEARCH, ToolSearchTool, calledToolNames, deferredToolNames, deferredToolsNote } from '../tools/tool-search.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
 import { ShellTool } from '../tools/shell.js';
-import { WorkspaceContext } from '../permissions/workspace.js';
-import { buildSandboxPolicy } from '../sandbox/policy.js';
-import type { SandboxPolicy } from '../sandbox/sandbox.js';
-import { DEFAULT_WEB_REQUESTS } from '../sandbox/host-channel.js';
+import { DEFAULT_WEB_REQUESTS } from '../tools/host-commands.js';
+import { AppSettings } from '../settings/settings.js';
+import { sfagentsHome } from '../settings/home.js';
 import { BrightDataWeb, type WebAccess } from '../web/brightdata.js';
 import { ProviderRegistry } from '../providers/registry.js';
-import { McpManager } from '../mcp/manager.js';
-import { DiscoveredMcpTool, mcpFunctionName } from '../mcp/mcp-tool.js';
+import { patchFormatFor, type PatchFormat } from '../tools/sfa-patch.js';
+import { McpManager, type McpToolInfo } from '../mcp/manager.js';
+import { mcpApprover, type McpGrant, type McpServerGrant } from '../mcp/sfa-mcp.js';
 import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
-import { createDefaultProviderFactory, credentialEnvNames, type ProviderFactory } from '../providers/factory.js';
-import { executeToolCall, type ToolExecutionOutcome } from './tool-executor.js';
+import { createDefaultProviderFactory, credentialEnvNames, providerChoices, type ProviderFactory } from '../providers/factory.js';
+import { executeToolCall } from './tool-executor.js';
 import {
   AgentTerminateMode,
   type AgentRunResult,
@@ -66,7 +74,28 @@ export const DEFAULT_MAX_TURNS = 40;
 export const DEFAULT_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_TOOL_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * What a model request adds to the stored messages. The system prompt gets
+ * only text that rarely changes (the network level), so providers can keep
+ * reusing their cached copy of the prompt. Text that changes every step (the
+ * full-control countdown) goes on the newest message instead.
+ */
+export function withStepContext(messages: readonly ChatMessage[], system: string, step?: string): ChatMessage[] {
+  const out = messages.map((m, i) => (i === 0 && m.role === 'system' ? { ...m, content: `${m.content}\n\n${system}` } : m));
+  const last = out.at(-1);
+  if (!step || !last || out.length < 2) return out;
+  const note = `[SF Agents] ${step}`;
+  if (last.role === 'tool') out[out.length - 1] = { ...last, content: `${last.content}\n\n${note}` };
+  else if (last.role === 'user') out[out.length - 1] = { ...last, content: typeof last.content === 'string' ? `${last.content}\n\n${note}` : [...last.content, { type: 'text', text: note }] };
+  return out;
+}
+
 export interface RuntimeOptions {
+  fullControl?: FullControlManager;
+  ui?: UiService;
+  pullRequests?: () => boolean;
+  fullControlMinutes?: () => number;
+  onFullControlChange?: (status: import('./full-control.js').FullControlStatus | null) => void;
   tree: AgentTree;
   /** Defaults to OpenRouter / OpenAI-compatible providers keyed from `env`. */
   providerFactory?: ProviderFactory;
@@ -74,6 +103,8 @@ export interface RuntimeOptions {
   /** Approve every tool call that would otherwise ask (CLI --yes). */
   approveAll?: boolean;
   env?: NodeJS.ProcessEnv;
+  /** Speech to text for `sfa-view transcript` (the web app's dictation model). */
+  transcribe?: (wav: Buffer, signal: AbortSignal) => Promise<string>;
   /** Inject an MCP manager (tests); defaults to one built from tree.mcp. */
   mcpManager?: McpManager;
   /**
@@ -81,8 +112,10 @@ export interface RuntimeOptions {
    * keeps an ephemeral in-memory conversation.
    */
   conversation?: ConversationService;
-  /** Web access for agents with "web" (default: Bright Data, with the key added in Settings). */
+  /** Web access for agents at network level "on" (default: Bright Data, with the key added in Settings). */
   web?: WebAccess;
+  /** Git workspaces for sfa-git and sfa-ci, and the checkpoint after each run. */
+  git?: GitWorkspaces;
 }
 
 interface RunParams {
@@ -146,22 +179,17 @@ function addUsage(total: TokenUsage, add?: TokenUsage): void {
   }
 }
 
-/** A call other than a section choice, made after a section reminder: refused without running. */
-function sectionOnlyOutcome(call: ParsedToolCall): ToolExecutionOutcome {
-  const content = `Not run: only keep_section or add_section can be called now. Your reply was already delivered.`;
-  return { message: { role: 'tool', tool_call_id: call.id, content }, activity: { name: call.name, ok: false }, status: 'error' };
-}
-
-/** Whether the agent's shell has `sf-artifact` (it then gets the artifact guidance). */
+/** Whether the agent's shell has `sfa-artifact` (it then gets the artifact guidance). */
 /** A message to another agent (these run in parallel). */
 function toAgent(call: ParsedToolCall): boolean {
-  return call.name === ToolNames.MESSAGE && typeof call.args['to'] === 'string' && call.args['to'] !== USER;
+  return call.name === ToolNames.MESSAGE && messageAction(call.args) === 'send' && typeof call.args['to'] === 'string' && call.args['to'] !== USER;
 }
 
 /** What the system prompt explains, from the tools an agent has. */
-function features(tools: ReadonlyMap<string, AnyDeclarativeTool>): { artifacts: boolean; toUser: boolean } {
+function features(tools: ReadonlyMap<string, AnyDeclarativeTool>): { artifacts: boolean; toUser: boolean; organizes: boolean } {
   const message = tools.get(ToolNames.MESSAGE);
-  return { artifacts: hasArtifactCommand(tools), toUser: message instanceof MessageTool && message.canMessageUser };
+  const m = message instanceof MessageTool ? message : undefined;
+  return { artifacts: hasArtifactCommand(tools), toUser: !!m?.canMessageUser, organizes: !!m?.conversationActions?.organizes };
 }
 
 function hasArtifactCommand(tools: ReadonlyMap<string, AnyDeclarativeTool>): boolean {
@@ -169,26 +197,23 @@ function hasArtifactCommand(tools: ReadonlyMap<string, AnyDeclarativeTool>): boo
   return shell instanceof ShellTool && shell.commandNames.includes(ARTIFACT_COMMAND);
 }
 
-export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean; toUser?: boolean } = {}): string {
+export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean; toUser?: boolean; organizes?: boolean } = {}): string {
   const d = node.definition;
   const env = [
     `Agent id: ${node.id}`,
     `Date: ${new Date().toISOString().slice(0, 10)}`,
     `Platform: ${process.platform} (${os.release()})`,
-    node.roots.length
-      ? `Workspace roots (shell commands run in a sandbox confined to these; relative paths resolve against the first): ${node.roots.join(', ')}`
-      : 'Workspace: none (this agent has no filesystem access)',
+    `Shell: your own Linux container. Work in /workspaces (shared with the other agents); the person's project folders are read-only under /roots. Network level: ${d.network}.`,
     `Tools available to you: ${toolNames.length ? toolNames.join(', ') : '(none)'}`,
   ];
   const partner = link?.partner?.id;
   const agents = [...new Set([...node.grants.keys(), ...(partner ? [partner] : [])])];
   if (toolNames.includes(ToolNames.MESSAGE) && agents.length) env.push(`Agents you can message with ${ToolNames.MESSAGE}: ${agents.join(', ')}`);
-  let guidance = toolNames.includes('add_section') ? `\n\n${ORGANIZE_GUIDANCE}` : '';
+  let guidance = features.organizes ? `\n\n${ORGANIZE_GUIDANCE}` : '';
   if (toolNames.includes(ToolNames.MESSAGE) && node.grants.size > 0) guidance += `\n\n${AGENT_MESSAGING_GUIDANCE}`;
   if (partner && toolNames.includes(ToolNames.MESSAGE)) guidance += `\n\n${THREAD_MESSAGING_GUIDANCE}`;
   if (features.toUser && toolNames.includes(ToolNames.MESSAGE)) guidance += `\n\n${MESSAGE_USER_GUIDANCE}`;
   if (features.artifacts) guidance += `\n\n${ARTIFACT_GUIDANCE}`;
-  if (toolNames.includes(ChatToolNames.REACT)) guidance += `\n\n${CHAT_GUIDANCE}`;
   return `${d.systemPrompt.trim()}\n\n<environment>\n${env.join('\n')}\n</environment>${guidance}${extra ? `\n\n${extra}` : ''}`;
 }
 
@@ -206,6 +231,7 @@ export class AgentRuntime implements AgentMessenger {
   private readonly providerFactory: ProviderFactory;
   private readonly confirm?: ConfirmationHandler;
   private readonly approveAll: boolean;
+  private readonly transcribe?: (wav: Buffer, signal: AbortSignal) => Promise<string>;
   private secretEnvNames: readonly string[];
   private readonly env: NodeJS.ProcessEnv;
   private readonly ownsMcp: boolean;
@@ -219,9 +245,24 @@ export class AgentRuntime implements AgentMessenger {
   private disposed = false;
   readonly conversation?: ConversationService;
   private readonly web: WebAccess;
+  readonly git?: GitWorkspaces;
+  readonly fullControl: FullControlManager;
+  readonly ui: UiService;
+  private readonly pullRequests: () => boolean;
 
   constructor(options: RuntimeOptions) {
     this.tree = options.tree;
+    this.ui = options.ui ?? new UiService();
+    this.pullRequests = options.pullRequests ?? (() => new AppSettings().get<boolean>('agents.pullRequests'));
+    let warmControl: AbortController | undefined;
+    let releaseWarm: (() => void) | undefined;
+    this.fullControl = options.fullControl ?? new FullControlManager({ ...(options.confirm ? { confirm: options.confirm } : {}), minutes: options.fullControlMinutes ?? (() => new AppSettings().get<number>('agents.fullControlMinutes')), journal: new RollbackJournal(undefined, [options.tree.agentsDir, options.tree.promptsDir, path.join(options.tree.dataDir, STATE_DIR_NAME), ...options.tree.secretFiles, ...options.tree.protectedFiles, ...(options.conversation?.protectedPaths() ?? []), sfagentsHome()]), onChange: (status) => {
+      options.onFullControlChange?.(status);
+      if (status) {
+        const controller = new AbortController(); warmControl = controller;
+        void this.ui.warm(controller.signal).then((release) => { if (controller.signal.aborted) release(); else releaseWarm = release; }).catch(() => undefined);
+      } else { warmControl?.abort(); warmControl = undefined; releaseWarm?.(); releaseWarm = undefined; }
+    } });
     const env = options.env ?? process.env;
     this.env = env;
     this.secretEnvNames = credentialEnvNames([...this.tree.byId.values()].map((n) => n.definition));
@@ -230,9 +271,11 @@ export class AgentRuntime implements AgentMessenger {
     this.providerFactory = options.providerFactory ?? createDefaultProviderFactory(env);
     this.confirm = options.confirm;
     this.approveAll = options.approveAll ?? false;
+    this.transcribe = options.transcribe;
     this.conversation = options.conversation;
     this.threads = new ThreadService(options.conversation?.dir);
     this.web = options.web ?? new BrightDataWeb(() => new ProviderRegistry().webKey());
+    if (options.git) this.git = options.git;
   }
 
   /**
@@ -254,91 +297,142 @@ export class AgentRuntime implements AgentMessenger {
     link: RunLink = idleLink(node.id),
   ): Promise<Map<string, AnyDeclarativeTool>> {
     const d = node.definition;
+    const current = () => this.tree.byId.get(node.id)?.definition;
+    const level = () => current()?.network ?? 'off';
+    const runtime = this;
     // Access defaults depend on where the agent works (see conversationAccess).
     const depth = role === 'main' ? 0 : 1;
     const tools = new Map<string, AnyDeclarativeTool>();
-    const allow = d.tools?.allow ?? [];
-    const sandbox = this.sandboxPolicy(node);
-    const workspace = node.roots.length
-      ? new WorkspaceContext(node.roots, this.tree.protectedFiles, [...this.tree.secretFiles, ...(this.conversation?.protectedPaths() ?? [])], sandbox.rules)
-      : undefined;
-    // SF Agents' own commands: sf-web ("web" in tools.allow) and sf-artifact (artifacts.access "create").
+    // SF Agents' own commands: sfa-web (network "on") and sfa-artifact (artifacts.access "create").
     const commands: HostCommands = {
-      ...(allow.includes(ToolNames.WEB) ? { web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS } } : {}),
-      ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined, workspace) } : {}),
+      networkLevel: level,
+      web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS },
+      ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined) } : {}),
     };
     if (!commands.artifact) delete commands.artifact;
-    // "shell" in tools.allow is the general shell (in the sandbox); without it, an agent
-    // with web access or artifacts gets a shell that runs only those commands.
-    const fullShell = allow.includes(ToolNames.SHELL) && !!workspace;
-    // Pushing (and fetching private repositories) with the person's Git credentials, on the host.
-    if (fullShell && workspace) commands.git = { agent: node.id, workspace };
-    if (fullShell || availableHostCommands(commands).length) {
-      const ctx: ToolContext = {
-        ...(workspace ? { workspace } : {}),
-        maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
-        secretEnvNames: this.secretEnvNames,
-        shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
-        sandbox,
-        askShell: d.tools?.ask === true,
-        commands,
-        shellMode: fullShell ? 'full' : 'helpers',
+    commands.view = { maxImages: d.limits?.viewImages ?? DEFAULT_VIEW_IMAGES, ...(this.transcribe ? { transcribe: this.transcribe } : {}) };
+    const mcp = await this.mcpGrant(node, agentPath, emit);
+    if (mcp) commands.mcp = mcp;
+    if (this.git) {
+      const confirm = this.confirm;
+      const approveAll = this.approveAll;
+      commands.git = {
+        ...(role === 'main' && agentPath.length === 1 ? { pullInto: async (repo: string, task: string, folder: string) => {
+          const lease = this.fullControl.require(link);
+          if (!this.projectFolders(node.id).includes(folder)) throw new Error('Pick one of this agent’s Project Folders.');
+          return this.git!.pullInto(repo, task, folder, async (q) => this.fullControl.approveAction(link, node.id, q, link.signal), AbortSignal.any([link.signal, lease]));
+        } } : {}),
+        workspaces: this.git,
+        pullRequests: new GitHubPullRequests(this.git, this.pullRequests),
         agentId: node.id,
+        get level() { return level(); },
+        approve: async (question) => {
+          if (approveAll) return true;
+          if (!confirm) return false;
+          const answer = await confirm({ agentPath: [...agentPath], toolName: 'sfa-git', details: { type: 'info', title: 'Git', prompt: question } }, new AbortController().signal);
+          return answer !== 'deny';
+        },
       };
-      tools.set(ToolNames.SHELL, new ShellTool(ctx));
     }
-
-    for (const [server, grantedTools] of mcpGrants(d)) {
-      const cfg = this.tree.mcp.servers[server];
-      if (!cfg) continue;
-      let discovered;
-      try {
-        discovered = await this.mcp.getTools(server);
-      } catch (error) {
-        emit({ type: 'warning', agentPath, message: `${getErrorMessage(error)}. Its tools are unavailable for this turn.` });
-        continue;
-      }
-      const names = new Set(discovered.map((t) => t.name));
-      for (const wanted of grantedTools ?? []) {
-        if (!names.has(wanted)) {
-          emit({ type: 'warning', agentPath, message: `MCP server "${server}" does not expose granted tool "${wanted}" (or the server's includeTools/excludeTools filters it).` });
-        }
-      }
-      for (const info of discovered) {
-        if (grantedTools && !grantedTools.has(info.name)) continue;
-        const fnName = mcpFunctionName(server, info.name);
-        tools.set(fnName, new DiscoveredMcpTool(this.mcp, server, info.name, info, fnName, cfg.trust === true));
-      }
-    }
+    const ctx: ToolContext = {
+      agentId: node.id,
+      ...(role === 'main' && agentPath.length === 1 ? { fullControl: { manager: this.fullControl, owner: link } } : {}),
+      maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
+      secretEnvNames: this.secretEnvNames,
+      shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
+      get container() { return { level: level(), roots: runtime.projectFolders(node.id), hidden: runtime.hiddenPaths(), ...current()?.container }; },
+      patchFormat: this.patchFormat(d),
+      commands,
+    };
+    const hostGrant = role === 'main' && agentPath.length === 1 ? { manager: this.fullControl, owner: link } : undefined;
+    commands.ui = {
+      container: new ContainerUiAdapter(() => ({ agentId: node.id, ...ctx.container })),
+      ...(hostGrant ? { host: new WindowsUiAdapter(), fullControl: hostGrant } : {}), service: this.ui,
+    };
+    tools.set(ToolNames.SHELL, new ShellTool(ctx));
 
     // The agent replying to the person can talk with them mid-turn (and ask them questions).
     const toUser = role === 'main' && !!conversation && conversation === this.conversation;
-    if (toUser || node.grants.size > 0 || link.partner) tools.set(ToolNames.MESSAGE, new MessageTool(this, node, this.tree.byId, agentPath, emit, conversation, link, toUser));
-    // Sections only matter for a persistent conversation; one-shot ephemeral runs skip them.
-    if (conversation?.file) {
-      for (const tool of createConversationTools(conversation, conversationAccess(d, depth))) tools.set(tool.name, tool);
-      // Reactions and inline replies: the agent talking with the person.
-      if (role === 'main' && conversation === this.conversation) for (const tool of createChatTools(conversation)) tools.set(tool.name, tool);
-    }
+    // Every agent has message: talking with the person and agents, and (in the persistent conversation) searching and filing it.
+    tools.set(ToolNames.MESSAGE, new MessageTool(this, node, this.tree.byId, agentPath, emit, conversation, link, toUser, conversation?.file ? conversationAccess(d, depth) : 'none', role === 'main' && agentPath.length === 1 ? { manager: this.fullControl, owner: link } : undefined));
     return tools;
   }
 
-  /** What one agent's shell commands can reach. */
-  sandboxPolicy(node: AgentNode): SandboxPolicy {
-    const state = this.conversation?.protectedPaths() ?? [];
-    const stateDir = this.conversation?.dir && path.basename(this.conversation.dir) === STATE_DIR_NAME ? this.conversation.dir : undefined;
-    return buildSandboxPolicy({
-      roots: node.roots,
-      secretFiles: this.tree.secretFiles,
-      // The .sfagents folder is hidden whether or not this run keeps a conversation in it.
-      stateDirs: [stateDir ?? path.join(this.tree.dataDir, STATE_DIR_NAME), ...state.filter((p) => p !== stateDir && !path.extname(p))],
-      stateFiles: state.filter((p) => p !== stateDir && !!path.extname(p)),
-      protectedFiles: this.tree.protectedFiles,
-      agentsDir: this.tree.agentsDir,
-      promptsDir: this.tree.promptsDir,
-      access: node.access,
-      network: node.definition.workspace?.network === true,
+  /**
+   * The agent's MCP servers for `sfa-mcp`: the servers in mcp.json it was
+   * granted. A server that does not start shows up in `sfa-mcp list` as
+   * unavailable; a granted tool the server lacks is a warning.
+   */
+  private async mcpGrant(node: AgentNode, agentPath: readonly string[], emit: (event: RuntimeEvent) => void): Promise<McpGrant | undefined> {
+    const d = node.definition;
+    const servers = new Map<string, McpServerGrant>();
+    for (const [server, grantedTools] of mcpGrants(d)) {
+      const cfg = this.tree.mcp.servers[server];
+      if (!cfg) continue;
+      servers.set(server, { ...(grantedTools ? { tools: grantedTools } : {}), trusted: cfg.trust === true });
+      if (!grantedTools?.size || !this.mcp.isStarted(server)) continue;
+      try {
+        const names = new Set((await this.mcp.getTools(server)).map((t) => t.name));
+        for (const wanted of grantedTools) {
+          if (!names.has(wanted)) emit({ type: 'warning', agentPath, message: `MCP server "${server}" does not expose granted tool "${wanted}" (or the server's includeTools/excludeTools filters it).` });
+        }
+      } catch {
+        // sfa-mcp reports it when the agent uses the server
+      }
+    }
+    if (!servers.size) return undefined;
+    const sessionApprovals = this.sessionApprovals.get(node.id) ?? new Set<string>();
+    this.sessionApprovals.set(node.id, sessionApprovals);
+    return {
+      manager: this.mcp,
+      servers,
+      approve: mcpApprover(servers, { agentPath, autoApprove: d.tools?.autoApprove ?? [], sessionApprovals, approveAll: this.approveAll, ...(this.confirm ? { confirm: this.confirm } : {}) }),
+    };
+  }
+
+  /** One agent's mounted folders; without an id, the union for the person's file/review UI. */
+  projectFolders(agentId?: string): string[] {
+    const folders = agentId === undefined
+      ? [...new Set([...this.tree.byId.values()].flatMap((n) => n.definition.folders ?? []))]
+      : this.tree.byId.get(agentId)?.definition.folders ?? [];
+    return folders.filter((f) => {
+      try {
+        return fs.statSync(f).isDirectory();
+      } catch {
+        return false;
+      }
     });
+  }
+
+  /**
+   * What agents never see inside the project folders: SF Agents' own data
+   * (the project's data folder with agents, prompts, mcp.json, .env and the
+   * conversation, and the per-user folder). Secret files such as .env and
+   * keys are hidden too, wherever they are (see findSecretFiles).
+   */
+  hiddenPaths(): string[] {
+    return [...new Set([
+      this.tree.dataDir,
+      this.tree.agentsDir,
+      this.tree.promptsDir,
+      ...this.tree.secretFiles,
+      ...this.tree.protectedFiles,
+      ...(this.conversation?.dir ? [this.conversation.dir] : []),
+      ...(this.conversation?.protectedPaths() ?? []),
+      sfagentsHome(),
+    ].map((p) => path.resolve(p)))];
+  }
+
+  /** The edit format for the model an agent replies with: apply_patch for GPT and Codex, search/replace for the rest. */
+  private patchFormat(d: Readonly<AgentDefinition>): PatchFormat {
+    try {
+      const registry = new ProviderRegistry();
+      const choice = providerChoices(d, registry)[0];
+      const record = choice ? registry.find(choice.provider) : undefined;
+      return patchFormatFor(choice?.model ?? d.model, record?.kind === 'openai' ? 'codex' : undefined);
+    } catch {
+      return patchFormatFor(d.model);
+    }
   }
 
   private provider(definition: Readonly<AgentDefinition>): ModelProvider {
@@ -348,12 +442,14 @@ export class AgentRuntime implements AgentMessenger {
   /** Runs one agent until it answers, fails, times out, runs out of turns or is cancelled. */
   /**
    * Takes newly loaded agents (their files or mcp.json changed). Runs in
-   * progress finish with what they started with; the next turn of every
-   * session uses the new definitions. MCP servers restart only when mcp.json
+   * progress keep their definitions, except network levels take effect on the
+   * next request and revoke existing tunnels. The next turn uses all new
+   * definitions. MCP servers restart only when mcp.json
    * changed, and the old connections close once no run uses them.
    */
   reload(tree: AgentTree): { mcpChanged: boolean } {
     const mcpChanged = JSON.stringify(tree.mcp.servers) !== JSON.stringify(this.tree.mcp.servers);
+    for (const id of this.tree.byId.keys()) containerManager().setNetworkLevel(id, tree.byId.get(id)?.definition.network ?? 'off');
     this.tree = tree;
     this.secretEnvNames = credentialEnvNames([...tree.byId.values()].map((n) => n.definition));
     if (mcpChanged && this.ownsMcp) {
@@ -373,10 +469,14 @@ export class AgentRuntime implements AgentMessenger {
 
   async run(params: RunParams): Promise<AgentRunResult> {
     this.activeRuns++;
+    params.link ??= idleLink(params.node.id);
     try {
       return await this.runAgent(params);
     } finally {
       this.activeRuns--;
+      if (params.link) this.fullControl.endRun(params.link);
+      // Every task this agent touched gets a checkpoint commit, so the run can be undone and reviewed.
+      if (this.git) await this.git.checkpointAgent(params.node.id, params.task.replace(/\s+/g, ' ').slice(0, 72)).catch(() => undefined);
       this.closeRetired();
     }
   }
@@ -419,6 +519,7 @@ export class AgentRuntime implements AgentMessenger {
 
     const finish = (status: AgentTerminateMode, error?: string): AgentRunResult => {
       clearTimeout(timer);
+      this.fullControl.endRun(link);
       params.signal.removeEventListener('abort', onParentAbort);
       if (link.children.size) children.abort(new Error('The agent that started this one stopped.'));
       let result: AgentRunResult = {
@@ -471,20 +572,15 @@ export class AgentRuntime implements AgentMessenger {
       throw e;
     }
 
-    // Deferred tools stay out of the requests until tool_search loads them.
-    const deferred = new Map([...deferredToolNames(tools, d.tools?.defer)].map((name) => [name, tools.get(name)!]));
-    const loadedTools = new Set<string>();
-    if (deferred.size) tools.set(TOOL_SEARCH, new ToolSearchTool(deferred, loadedTools));
-    const activeNames = () => [...tools.keys()].filter((name) => !deferred.has(name) || loadedTools.has(name));
+    const activeNames = () => [...tools.keys()];
     const declarations = () => activeNames().map((name) => tools.get(name)!.schema);
-    const deferredNote = deferred.size ? deferredToolsNote(deferred) : undefined;
-    let systemExtra: string | undefined = deferredNote;
+    let systemExtra: string | undefined;
     if (params.prepareContext) {
       try {
-        const base = buildSystemPrompt(node, activeNames(), deferredNote, link, features(tools));
+        const base = buildSystemPrompt(node, activeNames(), undefined, link, features(tools));
         const prepared = params.prepareContext(base + JSON.stringify(declarations()));
         messages.splice(0, messages.length, ...prepared.messages);
-        systemExtra = [deferredNote, prepared.systemExtra].filter(Boolean).join('\n\n') || undefined;
+        systemExtra = prepared.systemExtra || undefined;
         if (prepared.report) emit({ type: 'context', agentPath, ...prepared.report });
       } catch (error) {
         const message = getErrorMessage(error);
@@ -496,8 +592,6 @@ export class AgentRuntime implements AgentMessenger {
       const index = artifactIndex(params.conversation);
       if (index) systemExtra = systemExtra ? `${systemExtra}\n\n${index}` : index;
     }
-    // Tools called earlier in the conversation stay loaded (their calls are in the history).
-    for (const name of calledToolNames(messages)) if (deferred.has(name)) loadedTools.add(name);
     const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link, features(tools));
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
@@ -506,18 +600,10 @@ export class AgentRuntime implements AgentMessenger {
     this.sessionApprovals.set(node.id, approvals);
 
     try {
-    // An organizing agent must settle every turn's section; a turn that ends without it is sent back, at most twice.
-    const mustChooseSection = tools.has(ConversationToolNames.KEEP);
-    let sectionChosen = false;
-    let sectionReminders = 0;
-    // The reminder and the round it starts are bookkeeping: they stay out of the record (section changes are their own records).
-    const recordTurn: typeof record = (fn) => {
-      if (sectionReminders === 0) record(fn);
-    };
+    const recordTurn = record;
     // Messages the person sent meanwhile join the run before the next request.
     // So do messages from other agents (replies, questions, follow-ups).
     const takeInbox = (): boolean => {
-      if (sectionReminders > 0) return false;
       const arrived = params.inbox?.() ?? [];
       for (const item of link.mailbox.take()) {
         recordTurn(() => item.record?.());
@@ -526,7 +612,6 @@ export class AgentRuntime implements AgentMessenger {
       }
       if (!arrived.length) return false;
       messages.push(...arrived);
-      sectionChosen = false;
       return true;
     };
     while (turns < maxTurns) {
@@ -538,7 +623,7 @@ export class AgentRuntime implements AgentMessenger {
       try {
         for await (const event of provider.stream({
           model: d.model,
-          messages,
+          messages: withStepContext(messages, `Network level now: ${this.tree.byId.get(node.id)?.definition.network ?? 'off'} (the current editor setting overrides earlier network descriptions).`, this.fullControl.holds(link) ? this.fullControl.context(link) : undefined),
           tools: declarations(),
           reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,
@@ -574,26 +659,16 @@ export class AgentRuntime implements AgentMessenger {
       const finishReason = done.finishReason;
       recordTurn((r) => r.assistant(assistantMessage, finishReason));
       messages.push(done.message);
-      // After a section reminder the reply has already been given; keep it as the result.
-      if (done.message.content && sectionReminders === 0) lastText = done.message.content;
+      if (done.message.content) lastText = done.message.content;
 
       if (done.toolCalls.length === 0) {
         // A message that arrived while the model answered gets its own answer in this run.
-        if (done.finishReason !== 'length' && (!mustChooseSection || sectionChosen) && takeInbox()) continue;
+        if (done.finishReason !== 'length' && takeInbox()) continue;
         if (done.finishReason === 'length') {
           return finish(AgentTerminateMode.GOAL, 'The model hit its output token limit; the answer may be incomplete.');
         }
-        if (mustChooseSection && !sectionChosen) {
-          if (sectionReminders < MAX_SECTION_REMINDERS) {
-            sectionReminders++;
-            messages.push({ role: 'user', content: SECTION_REMINDER });
-            continue;
-          }
-          emit({ type: 'warning', agentPath, message: 'The model ended its turn without keep_section or add_section; this turn stays in the current section.' });
-        }
         // Agents it started are still working: the turn waits for what they send, then goes on.
         if (link.children.size > 0) {
-          sectionReminders = 0;
           let arrived = false;
           while (link.children.size > 0 && !(arrived = takeInbox())) {
             try {
@@ -626,6 +701,8 @@ export class AgentRuntime implements AgentMessenger {
         beforeExecute: (callId: string, tool: string) => recordTurn((r) => r.toolStart(callId, tool)),
       };
       const pending: ParsedToolCall[] = [...done.toolCalls];
+      // Images the calls show (sfa-view) follow all of this step's results.
+      const shown: Array<{ callId: string; images: ShownImage[] }> = [];
       while (pending.length > 0) {
         if (signal.aborted) {
           // Keep the conversation valid: every tool call gets a response.
@@ -643,21 +720,20 @@ export class AgentRuntime implements AgentMessenger {
           while (pending[0] && toAgent(pending[0])) batch.push(pending.shift()!);
         }
         const outcomes = await Promise.all(
-          batch.map((call) =>
-            // After a reminder only the section choice is left to do.
-            sectionReminders > 0 && !SECTION_CHOICE_TOOLS.includes(call.name)
-              ? Promise.resolve(sectionOnlyOutcome(call))
-              : executeToolCall(call, execContext, signal),
-          ),
+          batch.map((call) => executeToolCall(call, execContext, signal)),
         );
         batch.forEach((call, i) => {
           const outcome = outcomes[i]!;
-          recordTurn((r) => r.toolResult(outcome.message, call.name, outcome.status));
+          recordTurn((r) => r.toolResult(outcome.message, call.name, outcome.status, outcome.images));
           messages.push(outcome.message);
-          if (sectionReminders === 0) activity.push(outcome.activity);
-          if (outcome.status === 'ok' && SECTION_CHOICE_TOOLS.includes(call.name)) sectionChosen = true;
+          if (outcome.images?.length) shown.push({ callId: call.id, images: outcome.images.map((i) => ({ label: i.label ?? 'image', mime: i.mime, data: i.data })) });
+          activity.push(outcome.activity);
+          // What the agent said to the person is the run's answer.
+          const said = outcome.metadata?.['said'];
+          if (outcome.status === 'ok' && typeof said === 'string' && said.trim() && !outcome.metadata?.['replyTo']) lastText = said;
         });
       }
+      if (shown.length) messages.push(toolImagesMessage(shown));
     }
     } catch (e) {
       if (e instanceof PersistenceFailure) return storageStop(e);
@@ -676,6 +752,11 @@ export class AgentRuntime implements AgentMessenger {
    * thread is listed as an artifact of the main conversation the first time
    * it is used there.
    */
+  /** A thread's records (the message tool's "thread" action). */
+  readThread(key: string): ConversationState | undefined {
+    return this.threads.read(key);
+  }
+
   async messageAgent(params: {
     from: AgentNode;
     fromPath: readonly string[];
@@ -813,6 +894,8 @@ export class AgentRuntime implements AgentMessenger {
   }
 
   async dispose(): Promise<void> {
+    this.fullControl.stop('runtime closed');
+    this.ui.stop();
     if (this.disposed) return;
     this.disposed = true;
     this.threads.close();
@@ -911,25 +994,30 @@ export class AgentSession {
     const definition = this.node.definition;
     const conversation = this.conversation;
     const tools = await this.runtime.buildTools(this.node, [this.node.id], () => undefined, undefined, conversation);
-    // Deferred tools are not sent until loaded: only tool_search and the prompt's list of them count.
-    const deferred = new Map([...deferredToolNames(tools, definition.tools?.defer)].map((name) => [name, tools.get(name)!]));
-    const loaded = new Set(conversation.state.records.flatMap((r) => (r.kind === 'message' && r.tool ? [r.tool] : [])));
-    for (const name of deferred.keys()) if (!loaded.has(name)) tools.delete(name);
-    if (deferred.size) tools.set(TOOL_SEARCH, new ToolSearchTool(deferred, new Set()));
     const list: ContextTool[] = [...tools.entries()].map(([name, tool]) => ({
       name,
-      group: tool instanceof DiscoveredMcpTool ? 'mcp' : name === ToolNames.MESSAGE ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
-      ...(tool instanceof DiscoveredMcpTool ? { server: tool.serverName } : {}),
+      group: name === ToolNames.MESSAGE ? 'agents' : (Object.values(ToolNames) as string[]).includes(name) ? 'builtin' : 'conversation',
       schema: tool.schema,
     }));
     // SF Agents' commands are part of the shell tool; listed so they can be found.
     const shell = tools.get(ToolNames.SHELL);
     if (shell instanceof ShellTool) {
       for (const name of shell.commandNames) list.push({ name, group: 'builtin', partOf: ToolNames.SHELL, schema: hostCommandSchema(name) });
+      // MCP tools are reached through sfa-mcp: listed by server, costing nothing until used.
+      for (const [server, granted] of mcpGrants(definition)) {
+        if (!this.runtime.tree.mcp.servers[server]) continue;
+        let tools: McpToolInfo[] = [];
+        try {
+          tools = await this.runtime.mcp.getTools(server);
+        } catch {
+          continue;
+        }
+        for (const t of tools) if (!granted || granted.has(t.name)) list.push({ name: `${server}.${t.name}`, group: 'mcp', server, partOf: ToolNames.SHELL, schema: { name: t.name, description: t.description, parameters: t.inputSchema } });
+      }
     }
     const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
     const index = conversation.file && artifactAccess(definition, 0) !== 'none' ? artifactIndex(conversation) : undefined;
-    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], deferred.size ? deferredToolsNote(deferred) : undefined, undefined, features(tools)), list, {
+    const breakdown = contextBreakdown(conversation.state, replayTarget(definition), definition.context ?? {}, buildSystemPrompt(this.node, [...tools.keys()], undefined, undefined, features(tools)), list, {
       retrievable,
       resolveAttachment: (ref) => conversation.readAttachment(ref),
       ...(index ? { extraSystem: index } : {}),

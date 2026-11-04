@@ -26,3 +26,5 @@ web/native/screen/moonlight-web/backend/third_party/libdatachannel/
 web/native/screen/moonlight-web/backend/third_party/moonlight-common-c/
 web/native/screen/moonlight-web/backend/native-host/third_party/opus/
 web/native/screen/moonlight-web/backend/native-host/third_party/openh264/
+
+.test-temp/

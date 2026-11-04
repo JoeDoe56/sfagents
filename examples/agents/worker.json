@@ -1,27 +1,14 @@
 {
-  "description": "Read-only helper: searches and reads files in the workspace with the shell (the workspace is read-only for it) and can use the local echo/add MCP tools.",
+  "description": "Helper: searches and reads files in /workspaces and the project folders under /roots with the shell, and can use the local echo/add MCP tools.",
   "provider": "openrouter",
   "model": "anthropic/claude-haiku-5.5",
   "systemPrompt": [
     "@worker-agent.txt",
     "@working-rules.txt",
-    "You are read-only: use the shell (cat, grep, find, ls) to find facts in the workspace and report them precisely, quoting file paths. If you cannot find something, say so."
+    "Use the shell (cat, grep, find, ls) to find facts in /workspaces and under /roots and report them precisely, quoting file paths. Do not change files unless asked. If you cannot find something, say so."
   ],
-  "workspace": {
-    "roots": [
-      "."
-    ],
-    "access": [
-      {
-        "path": ".",
-        "mode": "read"
-      }
-    ]
-  },
+  "network": "off",
   "tools": {
-    "allow": [
-      "shell"
-    ],
     "mcpServers": [
       {
         "server": "local-tools",

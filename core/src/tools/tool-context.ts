@@ -1,35 +1,33 @@
-import type { WorkspaceContext } from '../permissions/workspace.js';
-import type { SandboxPolicy } from '../sandbox/sandbox.js';
+import type { FullControlManager } from '../runtime/full-control.js';
+import type { NetworkLevel } from '../container/network.js';
 import type { HostCommands } from './host-commands.js';
+import type { PatchFormat } from './sfa-patch.js';
 
 /**
  * Everything a built-in tool needs from its owning agent. Replaces upstream's
- * `Config` god-object: tools see only their agent's workspace policy and
- * limits, never another agent's.
+ * `Config` god-object: tools see only their agent's container and limits,
+ * never another agent's.
  */
 export interface ToolContext {
-  /** The agent's folders; undefined for an agent with none (it then has only SF Agents' commands). */
-  readonly workspace?: WorkspaceContext;
+  /** The agent's id: it names its container. */
+  readonly agentId: string;
+  readonly fullControl?: { manager: FullControlManager; owner: object };
   /** Upper bound on the text returned to the model from one tool call. */
   readonly maxOutputChars: number;
-  /** Environment variable names removed from spawned processes. */
+  /** Environment variable names removed from spawned processes (MCP servers). */
   readonly secretEnvNames: readonly string[];
   /** Default and maximum shell command timeout in milliseconds. */
   readonly shellTimeoutMs: number;
-  /** What shell commands can reach (the agent's roots, minus SF Agents' own files). */
-  readonly sandbox: SandboxPolicy;
-  /** Ask before each shell command (`tools.ask`). */
-  readonly askShell: boolean;
-  /** SF Agents' own commands this agent may run (`sf-web`, `sf-artifact`). */
-  readonly commands?: HostCommands;
   /**
-   * "full": any command, in the OS sandbox ("shell" in tools.allow).
-   * "helpers": only SF Agents' own commands, run directly (an agent with web
-   * access or artifacts but no general shell).
+   * The agent's container: its network level, the project folders it reads
+   * (read-only, at /roots/<name>), and files and folders in them it never sees
+   * (secrets, SF Agents' own data).
    */
-  readonly shellMode?: 'full' | 'helpers';
-  /** The agent's id, for the package proxy's log. */
-  readonly agentId?: string;
+  readonly container: { readonly level: NetworkLevel; readonly roots: readonly string[]; readonly hidden: readonly string[]; readonly memoryMb?: number; readonly cpus?: number };
+  /** The edit format the shell's description teaches (from the model's family). */
+  readonly patchFormat?: PatchFormat;
+  /** SF Agents' own commands this agent may run (`sfa-web`, `sfa-artifact`). */
+  readonly commands?: HostCommands;
 }
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 30_000;

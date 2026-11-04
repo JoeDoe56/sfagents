@@ -116,7 +116,29 @@ export class OpenAICompatibleProvider implements ModelProvider {
     return body;
   }
 
+  /**
+   * Streams one model turn. A request that fails before anything arrived
+   * with a retryable error (rate limit, overload, network) is retried a few
+   * times with growing pauses.
+   */
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamEvent> {
+    for (let attempt = 0; ; attempt++) {
+      let yielded = false;
+      try {
+        for await (const event of this.streamOnce(request)) {
+          yielded = true;
+          yield event;
+        }
+        return;
+      } catch (error) {
+        const delay = RETRY_DELAYS_MS[attempt];
+        if (yielded || delay === undefined || !(error instanceof ProviderError) || !error.retryable || request.signal?.aborted) throw error;
+        await sleep(delay, request.signal);
+      }
+    }
+  }
+
+  private async *streamOnce(request: ModelRequest): AsyncIterable<ModelStreamEvent> {
     let stream: AsyncIterable<ChatCompletionChunk>;
     try {
       stream = (await this.client.chat.completions.create(
@@ -136,9 +158,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
     try {
       for await (const chunk of stream) {
-        const errorPayload = (chunk as unknown as { error?: { message?: string; code?: number } }).error;
+        const errorPayload = (chunk as unknown as { error?: ErrorBody }).error;
         if (errorPayload) {
-          throw new ProviderError(`Provider stream error: ${errorPayload.message ?? JSON.stringify(errorPayload)}`, errorPayload.code);
+          const code = typeof errorPayload.code === 'number' ? errorPayload.code : undefined;
+          throw new ProviderError(`Provider stream error: ${describeErrorBody(errorPayload)}`, code, isRetryableStatus(code));
         }
         if (chunk.usage) {
           const u = chunk.usage as typeof chunk.usage & { cost?: number };
@@ -201,15 +224,57 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 }
 
+const RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+interface ErrorBody {
+  message?: unknown;
+  code?: unknown;
+  metadata?: { raw?: unknown; provider_name?: unknown };
+}
+
+function isRetryableStatus(status: number | undefined): boolean {
+  return status === undefined || status === 408 || status === 429 || status >= 500;
+}
+
+/**
+ * The message of an error body, with what OpenRouter adds: the upstream
+ * provider and its own error text ("Provider returned error" alone says
+ * nothing).
+ */
+function describeErrorBody(body: ErrorBody): string {
+  let text = typeof body.message === 'string' ? body.message : JSON.stringify(body.message ?? body);
+  const raw = body.metadata?.raw;
+  const provider = typeof body.metadata?.provider_name === 'string' ? body.metadata.provider_name : undefined;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const rawText = (typeof raw === 'string' ? raw : JSON.stringify(raw)).slice(0, 500);
+    text += ` (${provider ? `${provider}: ` : ''}${rawText})`;
+  } else if (provider) {
+    text += ` (${provider})`;
+  }
+  if (typeof body.code === 'number' || typeof body.code === 'string') text += ` [code ${body.code}]`;
+  return text;
+}
+
 function toProviderError(error: unknown): Error {
   if (isAbortError(error)) return error as Error;
   if (error instanceof OpenAI.APIError) {
-    const status = error.status;
-    const retryable = status === undefined || status === 408 || status === 429 || status >= 500;
-    let detail = error.message;
-    const body = error.error as { message?: string; metadata?: { raw?: string } } | undefined;
-    if (body?.metadata?.raw) detail += ` (${body.metadata.raw})`;
-    return new ProviderError(`Model request failed${status ? ` (HTTP ${status})` : ''}: ${detail}`, status, retryable);
+    const body = error.error as ErrorBody | undefined;
+    // A stream error has no HTTP status; OpenRouter puts it in the body's code.
+    const status = error.status ?? (typeof body?.code === 'number' ? body.code : undefined);
+    const detail = body && typeof body === 'object' ? describeErrorBody(body) : error.message;
+    return new ProviderError(`Model request failed${status ? ` (HTTP ${status})` : ''}: ${detail}`, status, isRetryableStatus(status));
   }
   return new ProviderError(`Model request failed: ${getErrorMessage(error)}`, undefined, true);
 }

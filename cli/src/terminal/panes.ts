@@ -34,6 +34,8 @@ export interface Pane {
   selected: number;
   /** Top line, for panes with nothing to pick (text). */
   scroll: number;
+  /** A form: Tab moves between its fields (not the tabs). */
+  form?: boolean;
 }
 
 export interface Attachment {
@@ -748,7 +750,7 @@ export function settingsPane(host: PaneHost): Pane {
         { pick: true, value: { add: 'anthropic' }, lines: [`  ${color.cyan('+')} Sign in with Claude`] },
         { pick: true, value: { add: 'openrouter' }, lines: [`  ${color.cyan('+')} Add an OpenRouter key`] },
         { pick: true, value: { add: 'custom' }, lines: [`  ${color.cyan('+')} Add an OpenAI-compatible endpoint`] },
-        { pick: true, value: { web: true }, lines: [`  ${color.bold('Bright Data key')} ${color.dim(d.providers.web.brightData ? 'set (for sf-web)' : 'not set (sf-web needs it)')}`] },
+        { pick: true, value: { web: true }, lines: [`  ${color.bold('Bright Data key')} ${color.dim(d.providers.web.brightData ? 'set (for sfa-web)' : 'not set (sfa-web needs it)')}`] },
       );
       rows.push(heading('Speech'));
       const s = d.speech;
@@ -1213,6 +1215,480 @@ export function stepPane(host: PaneHost, id: string, title = 'Step'): Pane {
       // A step still running: read it again when one ends.
       if (name === 'activity_end' && p.data?.status === 'running') p.reload();
     },
+  });
+  return p;
+}
+
+// ------------------------------------------------------------------ agents
+
+interface AgentFormData {
+  name: string;
+  description: string;
+  provider: string;
+  model: string;
+  instructions: string;
+  network: string | null;
+  folders: string[];
+  mcpServers: string[];
+  memoryMb: number;
+  cpus: number;
+  speak: boolean;
+}
+
+interface AgentEditorData {
+  original: string | null;
+  form: AgentFormData;
+  problem?: string;
+  onlyAgent: boolean;
+  voice: { clip: boolean; transcript?: string; corrected?: boolean; transcribing?: boolean };
+  choices: {
+    networkLevels: Array<{ value: string; text: string }>;
+    mcpServers: string[];
+    promptFiles: Array<{ name: string; chars: number }>;
+    memoryMb: { min: number; max: number; step: number };
+    cpus: { min: number; max: number; step: number };
+    providers: Array<{ name: string; kind: string; models: string[] }>;
+  };
+}
+
+const NETWORK_NAMES: Record<string, string> = { off: 'Off', pkg: 'Packages', git: 'Packages and Git', on: 'Internet' };
+const memoryText = (mb: number) => (mb >= 1024 ? `${(mb / 1024).toFixed(mb % 1024 ? 1 : 0)} GB` : `${mb} MB`);
+
+/** The project's agents: Enter edits one, n makes a new one. */
+export function agentsPane(host: PaneHost): Pane {
+  type Info = { current: string; agents: Array<{ id: string; description: string; model: string }>; skipped: Array<{ file: string; error: string }> };
+  const p = loading(host, {
+    title: 'Agents',
+    hint: '↑↓ move · Enter edits · n new agent · Esc goes back',
+    load: () => host.api<Info>('GET', 'agents'),
+    view: (d, w) => [
+      blank,
+      ...d.agents.map((a) => ({
+        pick: true,
+        value: a.id,
+        lines: [`  ${color.bold(clean(a.id))}${a.id === d.current ? color.green(' (replying)') : ''} ${color.dim(clean(a.model ?? ''))}`, ...(a.description ? wrap(clean(a.description), w - 8).slice(0, 2).map((l) => `    ${color.dim(l)}`) : [])],
+      })),
+      ...d.skipped.map((sk) => ({ pick: true, value: sk.file.split(/[\\/]/).pop()!.replace(/\.json$/i, ''), lines: [`  ${color.red(clean(sk.file))} ${color.dim('did not load: Enter fixes it')}`] })),
+      { pick: true, value: null, lines: [`  ${color.cyan('+')} New agent`] },
+    ],
+    enter: (row) => host.open(agentEditorPane(host, (row.value as string | null) ?? undefined, () => p.reload())),
+    key: (ch) => (ch === 'n' ? (host.open(agentEditorPane(host, undefined, () => p.reload())), true) : false),
+    event: (name) => {
+      if (name === 'agents') p.reload();
+    },
+  });
+  return p;
+}
+
+/**
+ * The agent editor, as the web app's (agenteditor.js): the same fields and
+ * the same checks, saved to the same file. Enter edits or chooses, ←/→
+ * change a choice or a slider, Ctrl+S saves; d duplicates, r resets the
+ * environment, x deletes.
+ */
+export function agentEditorPane(host: PaneHost, agent: string | undefined, changed: () => void): Pane {
+  let data: AgentEditorData | undefined;
+  let form: AgentFormData | undefined;
+  let saved = '';
+  let errors: Record<string, string> = {};
+  let failed: string | undefined;
+  const load = (name: string | undefined) =>
+    host.api<AgentEditorData>('GET', `agent-editor${name ? `?agent=${encodeURIComponent(name)}` : ''}`).then(
+      (d) => {
+        data = d;
+        form = structuredClone(d.form);
+        saved = JSON.stringify(d.form);
+        p.title = d.original ? `Agent: ${d.original}` : 'New agent';
+        host.redraw();
+      },
+      (e: unknown) => {
+        failed = e instanceof Error ? e.message : String(e);
+        host.redraw();
+      },
+    );
+  const dirty = () => !!form && (JSON.stringify(form) !== saved || !data?.original);
+  const set = <K extends keyof AgentFormData>(k: K, v: AgentFormData[K]) => {
+    form![k] = v;
+    delete errors[k];
+  };
+  const field = (key: keyof AgentFormData | string, label: string, value: string, w: number, extra: string[] = []): Row => ({
+    pick: true,
+    value: key,
+    lines: [
+      `  ${color.bold(label.padEnd(14))}${truncate(value, Math.max(8, w - 20))}`,
+      ...extra,
+      ...(errors[key] ? wrap(errors[key]!, w - 8).map((l) => `    ${color.red(l)}`) : []),
+    ],
+  });
+  const count = () => {
+    let n = 0;
+    for (const line of form!.instructions.split('\n')) {
+      const t = line.trim();
+      const ref = /^@[^\s/\\]+$/.test(t) ? data!.choices.promptFiles.find((f) => f.name === t.slice(1)) : undefined;
+      n += (ref ? ref.chars : line.length) + 1;
+    }
+    return Math.max(0, n - 1);
+  };
+  const p: Pane = pane({
+    title: agent ? `Agent: ${agent}` : 'New agent',
+    hint: '↑↓/Tab move · Enter edits · ←→ change · Ctrl+S saves · d duplicate · r reset environment · x delete · Esc drops changes',
+    form: true,
+    rows: (w) => {
+      if (!form || !data) return [note(failed ? `Couldn’t read it: ${failed}` : 'Reading…', w)];
+      const f = form;
+      const c = data.choices;
+      const rows: Row[] = [];
+      if (data.problem) rows.push(note(`This agent’s file did not load: ${data.problem}. Saving replaces what is wrong.`, w));
+      rows.push(heading('Agent'));
+      rows.push(field('name', 'Name', f.name || color.dim('(required)'), w));
+      rows.push(field('description', 'Description', f.description || color.dim('(none)'), w));
+      rows.push(heading('Model'));
+      rows.push(field('provider', 'Provider', f.provider || 'Any (picked in the app)', w));
+      const models = c.providers.find((x) => x.name.toLowerCase() === f.provider.toLowerCase())?.models ?? [];
+      rows.push(field('model', 'Model', f.model || color.dim(f.provider ? '(required)' : 'the provider’s default'), w, models.length ? [`    ${color.dim(`Suggested: ${models.join(', ')}`)}`] : []));
+      rows.push(heading(`Instructions ${color.dim(`(${count().toLocaleString()} characters)`)}`));
+      const lines = f.instructions ? f.instructions.split('\n') : [];
+      rows.push(field('instructions', 'Instructions', lines.length ? `${color.dim(`${lines.length} line${lines.length === 1 ? '' : 's'}`)}` : color.dim('(required)'), w, lines.slice(0, 6).map((l) => `    ${color.dim(truncate(clean(l), w - 8))}`).concat(lines.length > 6 ? [`    ${color.dim('…')}`] : [])));
+      if (c.promptFiles.length) rows.push({ pick: true, value: 'prompt', lines: [`  ${color.cyan('+')} Insert a prompt file ${color.dim(`(${c.promptFiles.map((x) => x.name).join(', ')})`)}`] });
+      rows.push(heading('Network (required)'));
+      for (const l of c.networkLevels) {
+        rows.push({ pick: true, value: `network:${l.value}`, lines: [`  ${f.network === l.value ? color.green('●') : '○'} ${color.bold(NETWORK_NAMES[l.value] ?? l.value)} ${color.dim(truncate(l.text, Math.max(10, w - 30)))}`] });
+      }
+      if (errors['network']) rows.push({ lines: [`    ${color.red(errors['network'])}`] });
+      rows.push(heading('Project folders (read-only)'));
+      rows.push(field('folders', 'Folders', f.folders.length ? f.folders.join('; ') : '(none)', w,
+        wrap('Only this agent sees these folders at /roots/<name>. Separate full paths with semicolons or new lines; clear to remove all.', w - 8).map((l) => `    ${color.dim(l)}`)));
+      rows.push(heading('MCP servers'));
+      if (!c.mcpServers.length) rows.push(note('No MCP servers are set up (mcp.json).', w));
+      for (const s of [...new Set([...c.mcpServers, ...f.mcpServers])]) {
+        rows.push({ pick: true, value: `mcp:${s}`, lines: [`  ${f.mcpServers.includes(s) ? color.green('[x]') : '[ ]'} ${clean(s)}${c.mcpServers.includes(s) ? '' : color.red(' not in mcp.json')}`] });
+      }
+      if (errors['mcpServers']) rows.push({ lines: [`    ${color.red(errors['mcpServers'])}`] });
+      rows.push(heading('Container'));
+      const slider = (v: number, r: { min: number; max: number }) => bar((v - r.min) / Math.max(1e-9, r.max - r.min), 20);
+      rows.push(field('memoryMb', 'Memory', `${slider(f.memoryMb, c.memoryMb)} ${memoryText(f.memoryMb)} ${color.dim(`(up to ${memoryText(c.memoryMb.max)}; ←→)`)}`, w));
+      rows.push(field('cpus', 'Processors', `${slider(f.cpus, c.cpus)} ${f.cpus} ${color.dim(`(up to ${c.cpus.max}; ←→)`)}`, w));
+      rows.push(heading('Voice'));
+      rows.push(field('speak', 'Read aloud', f.speak ? color.green('on') : 'off', w));
+      rows.push(note('Enables manual Speak Response and custom voices. Replies never play automatically.', w));
+      if (f.speak) rows.push({ lines: [`  ${color.dim('Voice clip'.padEnd(14))}${data.voice.clip ? `set${data.voice.transcript ? `: “${truncate(clean(data.voice.transcript), w - 30)}”` : ''}` : 'none (set one in the web app’s agent editor)'}`] });
+      if (f.speak && data.voice.clip) rows.push({ pick: true, value: 'transcript', lines: [`  ${color.cyan('✎')} Correct the transcript`] });
+      rows.push(blank);
+      rows.push({ pick: true, value: 'save', lines: [`  ${dirty() ? color.cyan(color.bold('Save')) : color.dim('Save')} ${color.dim('(Ctrl+S)')}`] });
+      if (data.original) {
+        rows.push({ pick: true, value: 'duplicate', lines: ['  Duplicate (d)'] });
+        rows.push({ pick: true, value: 'reset', lines: ['  Reset environment (r)'] });
+        if (!data.onlyAgent) rows.push({ pick: true, value: 'delete', lines: [`  ${color.red('Delete agent (x)')}`] });
+      }
+      return rows;
+    },
+    enter: (row) => act(String(row.value), 0),
+    key: (ch, row) => {
+      if (!form) return false;
+      if (ch === 'save') return (save(), true);
+      if (ch === 'left' || ch === 'right') return act(String(row?.value ?? ''), ch === 'left' ? -1 : 1, true);
+      if (data?.original && ch === 'd') return (act('duplicate', 0), true);
+      if (data?.original && ch === 'r') return (act('reset', 0), true);
+      if (data?.original && ch === 'x') return (act('delete', 0), true);
+      return false;
+    },
+  });
+
+  function act(what: string, step: number, arrow = false): boolean {
+    if (!form || !data) return false;
+    const f = form;
+    const c = data.choices;
+    const ask = (k: 'name' | 'description' | 'model', label: string) => host.ask(label, f[k], (t) => (set(k, t.trim()), host.redraw()));
+    if (what.startsWith('network:')) {
+      if (arrow) {
+        const levels = c.networkLevels.map((l) => l.value);
+        const at = levels.indexOf(f.network ?? '');
+        set('network', levels[Math.max(0, Math.min(levels.length - 1, (at < 0 ? 0 : at + step)))]!);
+      } else set('network', what.slice(8));
+      return true;
+    }
+    if (what.startsWith('mcp:')) {
+      if (arrow) return false;
+      const s = what.slice(4);
+      set('mcpServers', f.mcpServers.includes(s) ? f.mcpServers.filter((x) => x !== s) : [...f.mcpServers, s].sort());
+      return true;
+    }
+    switch (what) {
+      case 'name':
+        if (!arrow) ask('name', 'Name (the file name in userdata/agents):');
+        return !arrow;
+      case 'description':
+        if (!arrow) ask('description', 'Description:');
+        return !arrow;
+      case 'model':
+        if (!arrow) ask('model', 'Model:');
+        return !arrow;
+      case 'provider': {
+        const names = ['', ...c.providers.map((x) => x.name)];
+        if (!arrow) step = 1;
+        const at = names.findIndex((n) => n.toLowerCase() === f.provider.toLowerCase());
+        const next = names[((at < 0 ? 0 : at) + step + names.length) % names.length]!;
+        set('provider', next);
+        if (!next) set('model', '');
+        else if (!f.model) set('model', c.providers.find((x) => x.name === next)?.models[0] ?? '');
+        return true;
+      }
+      case 'instructions':
+        if (arrow) return false;
+        host.ask('Instructions (Alt+Enter or Shift+Enter for a new line; a line @name.txt pulls in a prompt file):', f.instructions, (t) => (set('instructions', t.replace(/\r\n/g, '\n')), host.redraw()));
+        return true;
+      case 'folders':
+        if (arrow) return false;
+        host.ask('Project folders (full paths, separated by semicolons or new lines; empty removes all):', f.folders.join('; '), (t) => (set('folders', t.split(/[;\r\n]+/).map((s) => s.trim()).filter(Boolean)), host.redraw()));
+        return true;
+      case 'prompt':
+        if (arrow) return false;
+        host.ask(`Prompt file to add (${c.promptFiles.map((x) => x.name).join(', ')}):`, c.promptFiles[0]?.name ?? '', (t) => {
+          const name = t.trim().replace(/^@/, '');
+          if (!name) return;
+          set('instructions', `${f.instructions}${f.instructions && !f.instructions.endsWith('\n') ? '\n' : ''}@${name}`);
+          host.redraw();
+        });
+        return true;
+      case 'memoryMb': {
+        const r = c.memoryMb;
+        if (!arrow) {
+          host.ask(`Memory in MB (${r.min}–${r.max}):`, String(f.memoryMb), (t) => (set('memoryMb', Number(t.trim())), host.redraw()));
+          return true;
+        }
+        set('memoryMb', Math.max(r.min, Math.min(r.max, f.memoryMb + step * r.step)));
+        return true;
+      }
+      case 'cpus': {
+        const r = c.cpus;
+        if (!arrow) {
+          host.ask(`Processors (${r.min}–${r.max}):`, String(f.cpus), (t) => (set('cpus', Number(t.trim())), host.redraw()));
+          return true;
+        }
+        set('cpus', Math.max(r.min, Math.min(r.max, f.cpus + step * r.step)));
+        return true;
+      }
+      case 'speak':
+        set('speak', arrow ? step > 0 : !f.speak);
+        return true;
+      case 'transcript':
+        if (arrow) return false;
+        host.ask('What is said in the voice clip (empty goes back to Qwen3-ASR’s transcript):', data.voice.transcript ?? '', (t) => {
+          host.api<{ voice: AgentEditorData['voice'] }>('POST', 'agent-editor', { action: 'voice-text', agent: data!.original, text: t }).then((r) => {
+            data!.voice = r.voice;
+            host.notice('Transcript saved.');
+          }, host.fail);
+        });
+        return true;
+      case 'save':
+        if (!arrow) save();
+        return !arrow;
+      case 'duplicate':
+        if (arrow) return false;
+        host.api<AgentEditorData>('POST', 'agent-editor', { action: 'duplicate', agent: data.original }).then((d) => {
+          host.notice(`Made “${d.original}”.`);
+          changed();
+          host.back();
+          host.open(agentEditorPane(host, d.original ?? undefined, changed));
+        }, host.fail);
+        return true;
+      case 'reset':
+        if (arrow) return false;
+        host.confirm(`Reset ${data.original}’s environment? Its container and home folder are made again; /workspaces stays.`, () => {
+          host.api('POST', 'agent-editor', { action: 'reset', agent: data!.original }).then(() => host.notice('Environment reset.'), host.fail);
+        });
+        return true;
+      case 'delete':
+        if (arrow) return false;
+        host.confirm(`Delete ${data.original}? Its agent file, container and voice are removed; /workspaces and the conversation stay.`, () => {
+          host.api('POST', 'agent-editor', { action: 'delete', agent: data!.original }).then(() => {
+            host.notice(`Deleted “${data!.original}”.`);
+            changed();
+            host.back();
+          }, host.fail);
+        });
+        return true;
+    }
+    return false;
+  }
+
+  function save(): void {
+    if (!form || !data) return;
+    host.api<AgentEditorData>('POST', 'agent-editor', { action: 'save', form, ...(data.original ? { original: data.original } : {}) }).then(
+      (d) => {
+        host.notice(data!.original ? `Saved “${d.original}”.` : `Made “${d.original}”.`);
+        errors = {};
+        data = d;
+        form = structuredClone(d.form);
+        saved = JSON.stringify(d.form);
+        p.title = `Agent: ${d.original}`;
+        changed();
+        host.redraw();
+      },
+      (e: unknown) => {
+        const body = (e as { body?: { errors?: Record<string, string> } }).body;
+        if (body?.errors) {
+          errors = body.errors;
+          host.notice(`Not saved: ${Object.values(errors).join(' ')}`, 'error');
+          host.redraw();
+        } else host.fail(e);
+      },
+    );
+  }
+
+  void load(agent);
+  return p;
+}
+
+// ------------------------------------------------------------------ Git task workspaces
+
+type WorkspaceRow = { repo: string; task: string; agent: string; branch: string; defaultBranch: string; ahead: number; behind: number; checkpoints: number; changed: number; added?: number; removed?: number; dirty: boolean; ci?: { state: string }; pr?: { number: number; checks: string; sha: string; comments: string } };
+type WorkspaceReview = { message: string; files: Array<{ path: string; status: string; hunks: Array<{ header: string; lines: string[] }>; binary?: boolean }> };
+
+const workspaceState = (w: WorkspaceRow) => `${w.ahead} ahead, ${w.behind} behind ${w.defaultBranch}${w.checkpoints ? ` · ${w.checkpoints} checkpoint(s)` : ''}${w.dirty ? ' · uncommitted' : ''}${w.ci ? ` · CI ${w.ci.state}` : ''}${w.pr ? ` · PR #${w.pr.number} ${w.pr.checks}` : ''}`;
+
+/** The task workspaces (sfa-git), as the web app's Workspaces sheet. */
+export function workspacesPane(host: PaneHost): Pane {
+  const p = loading(host, {
+    title: 'Workspaces',
+    hint: '↑↓ move · Enter reviews · Esc goes back',
+    load: () => host.api<{ workspaces: WorkspaceRow[]; foldersByAgent: Record<string, string[]> }>('GET', 'workspaces'),
+    view: (d, w) =>
+      d.workspaces.length
+        ? [
+            blank,
+            ...d.workspaces.map((x) => ({
+              pick: true,
+              value: x,
+              lines: [`  ${color.bold(clean(`${x.repo}/${x.task}`))} ${color.dim(clean(x.agent))}`, `    ${color.dim(truncate(`${x.changed} file(s) · ${workspaceState(x)}`, w - 6))}`],
+            })),
+          ]
+        : [note('No task workspaces yet. An agent at network level Git or Internet starts one with sfa-git clone <url>, then sfa-git task <repo> <task>.', w)],
+    enter: (row) => host.open(workspacePane(host, row.value as WorkspaceRow, p.data?.foldersByAgent[(row.value as WorkspaceRow).agent] ?? [], () => p.reload())),
+    event: (name) => {
+      if (name === 'workspaces') p.reload();
+    },
+  });
+  return p;
+}
+
+/**
+ * One task's review, as the web app's: the changes hunk by hunk (r rejects
+ * the hunk at the cursor), s squashes with the drafted message, u undoes the
+ * last run, m updates from main, p pushes the branch, P pushes to main, f
+ * pulls into a Project Folder, x removes the workspace.
+ */
+export function workspacePane(host: PaneHost, w: WorkspaceRow, folders: string[], changed: () => void): Pane {
+  const path = `workspaces/${encodeURIComponent(w.repo)}/${encodeURIComponent(w.task)}`;
+  let current = w;
+  const act = (action: string, extra: Record<string, unknown> = {}) => {
+    const send = (approve: boolean) =>
+      host.api<{ text?: string; question?: string; workspaces?: WorkspaceRow[] }>('POST', path, { action, ...extra, ...(approve ? { approve: true } : {}) }).then(
+        (out) => {
+          if (out.question) return host.confirm(out.question, () => void send(true));
+          if (out.text) host.notice(out.text);
+          changed();
+          const next = out.workspaces?.find((x) => x.repo === w.repo && x.task === w.task);
+          if (!next) return host.back();
+          current = next;
+          p.reload();
+        },
+        (e: unknown) => host.fail(e),
+      );
+    void send(false);
+  };
+  const p = loading(host, {
+    title: `${w.repo}/${w.task}`,
+    hint: 'r reject · s squash · u undo · m update · p push · P main · f pull · o open/refresh PR · v send reviews · M merge PR · x remove · Esc',
+    load: () => host.api<WorkspaceReview>('GET', path),
+    view: (d, width) => {
+      const rows: Row[] = [{ lines: [`  ${color.dim(truncate(`${current.branch} · ${workspaceState(current)}`, width - 4))}`] }, blank];
+      if (current.pr?.comments) rows.push(note(current.pr.comments, width), blank);
+      if (!d.files.length) rows.push(note('No changes since the last commit.', width));
+      for (const f of d.files) {
+        rows.push({ lines: [`  ${color.bold(clean(f.path))} ${color.dim(f.status)}${f.binary ? color.dim(' (binary)') : ''}`] });
+        f.hunks.forEach((h, i) =>
+          rows.push({
+            pick: true,
+            value: { file: f.path, hunk: i },
+            lines: [`  ${color.cyan(truncate(h.header, width - 4))}`, ...h.lines.slice(0, 40).map((l) => `  ${(l.startsWith('+') ? color.green : l.startsWith('-') ? color.red : color.dim)(truncate(clean(l), width - 4))}`), ...(h.lines.length > 40 ? [`  ${color.dim(`… ${h.lines.length - 40} more lines`)}`] : [])],
+          }),
+        );
+      }
+      rows.push(blank, { lines: [`  ${color.bold('Drafted message')}`] }, ...wrap(clean(d.message), Math.max(10, width - 6)).map((l) => ({ lines: [`    ${l}`] })));
+      return rows;
+    },
+    key: (ch, row) => {
+      switch (ch) {
+        case 'o':
+          act(current.pr ? 'pr-refresh' : 'pr-open');
+          return true;
+        case 'v':
+          act('pr-reviews');
+          return true;
+        case 'M':
+          if (current.pr) host.confirm(`Merge PR #${current.pr.number} at ${current.pr.sha.slice(0, 7)}?`, () => act('pr-merge', { sha: current.pr!.sha }));
+          return true;
+        case 'r': {
+          const v = row?.value as { file: string; hunk: number } | undefined;
+          if (v) host.confirm(`Reject this change in ${v.file}?`, () => act('reject', v));
+          return true;
+        }
+        case 's':
+          host.ask('Commit message (squashes the run checkpoints):', (p.data?.message ?? '').split('\n')[0] ?? '', (message) => message.trim() && act('finish', { message }));
+          return true;
+        case 'u':
+          host.confirm('Undo the last run? Its changes stay recoverable in Git.', () => act('undo'));
+          return true;
+        case 'm':
+          act('update');
+          return true;
+        case 'p':
+          act('push');
+          return true;
+        case 'P':
+          host.confirm(`Push to ${current.defaultBranch}? Only a fast-forward.`, () => act('push-main'));
+          return true;
+        case 'f':
+          if (!folders.length) host.notice('Add the checkout under Project Folders in this workspace agent’s editor first.');
+          else if (folders.length === 1) host.confirm(`Fast-forward ${folders[0]} to ${current.branch}?`, () => act('pull-into', { folder: folders[0] }));
+          else host.ask(`Folder (${folders.join('; ')}):`, folders[0]!, (folder) => act('pull-into', { folder: folder.trim() }));
+          return true;
+        case 'x':
+          host.confirm('Remove this workspace and its local branch?', () => act('remove'));
+          return true;
+      }
+      return false;
+    },
+    event: (name) => {
+      if (name === 'workspaces') p.reload();
+    },
+  });
+  return p;
+}
+
+/** The same Stop and rollback actions as the web banner and journal sheet. */
+export function fullControlPane(host: PaneHost): Pane {
+  type Journal = { id: string; agent: string; started: string; ended?: string; reason?: string };
+  const p = loading(host, {
+    title: 'Full Control', hint: 's Stop · Enter review files · u undo selected session · Esc',
+    load: () => host.api<{ status: { agent: string; expires: number } | null; journals: Journal[] }>('GET', 'full-control'),
+    view: (d, w) => [note(d.status ? `${d.status.agent} has full control until ${new Date(d.status.expires).toLocaleTimeString()}. Press s to stop.` : 'No full-control session.', w), blank,
+      ...d.journals.map((j) => ({ pick: true, value: j, lines: [`  ${clean(j.agent)} · ${j.started} · ${j.reason ?? 'Active'}`] }))],
+    enter: (row) => {
+      const j = row.value as Journal;
+      host.api<{ files: Array<{ path: string; before: string | null; after: string | null }> }>('GET', `full-control-diff?id=${encodeURIComponent(j.id)}`).then((d) => host.open(plainPane('Session File Changes', d.files.map((f) => `${f.before === null ? '+' : f.after === null ? '−' : '~'} ${f.path}`).join('\n') || 'No file changes.')), (e) => host.fail(e));
+    },
+    key: (key, row) => {
+      if (key === 's') { host.api('POST', 'full-control', { action: 'stop' }).then(() => p.reload(), (e) => host.fail(e)); return true; }
+      if (key === 'u' && row) {
+        const j = row.value as Journal;
+        if (j.ended) host.confirm('Undo files changed in this session? Later edits stop the undo.', () => { host.api('POST', 'full-control', { action: 'undo', id: j.id }).then(() => p.reload(), (e) => host.fail(e)); });
+        return true;
+      }
+      return false;
+    },
+    event: (name) => { if (name === 'full-control') p.reload(); },
   });
   return p;
 }

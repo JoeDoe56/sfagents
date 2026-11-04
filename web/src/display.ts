@@ -6,7 +6,7 @@
  */
 
 import path from 'node:path';
-import { ChatToolNames, chatEffects, threadKey, type ArtifactView, type AttachmentRef, type ConfirmationRequest, type ConversationState, type MessageRecord } from '@sfagents/core';
+import { ChatToolNames, chatEffectOf, chatEffects, threadKey, type ArtifactView, type AttachmentRef, type ConfirmationRequest, type ConversationState, type MessageRecord } from '@sfagents/core';
 
 export interface DisplayAttachment {
   id: string;
@@ -106,7 +106,7 @@ export function describeCall(name: string, argsJson: string): string {
       const cmd = str(args['command'])?.trim() ?? '';
       if (args['background'] === true) return `Started \`${clip(cmd, 60)}\` in the background`;
       const words = cmd.split(/\s+/);
-      if (words[0] === 'sf-artifact') {
+      if (words[0] === 'sfa-artifact') {
         const flag = (f: string) => {
           const i = words.indexOf(f);
           return i >= 0 && words[i + 1] ? words[i + 1]!.replace(/^["']|["']$/g, '') : undefined;
@@ -117,7 +117,7 @@ export function describeCall(name: string, argsJson: string): string {
         if (flag('--port')) return `Opened ${t ? `“${clip(t, 60)}”` : 'an app'} (port ${flag('--port')})`;
         return `Created ${t ? `“${clip(t, 60)}”` : 'an artifact'}`;
       }
-      if (words[0] === 'sf-web') {
+      if (words[0] === 'sfa-web') {
         const rest = clip(words.slice(2).join(' ').replace(/^["']|["']$/g, ''), 60);
         if (words[1] === 'search') return `Searched the web${rest ? ` for “${rest}”` : ''}`;
         if (words[1] === 'markdown' || words[1] === 'html') return `Read ${rest || 'a page'}`;
@@ -128,7 +128,17 @@ export function describeCall(name: string, argsJson: string): string {
       return `Asked ${str(args['agent']) ?? str(args['child']) ?? 'a child agent'}${str(args['task']) ? `: ${clip(String(args['task']), 60)}` : ''}`;
     case 'message': {
       const to = str(args['to']);
-      if (!to) return 'Waited for messages';
+      const action = str(args['action']) ?? (to ? 'send' : 'wait');
+      if (action === 'react') return `Reacted ${str(args['emoji']) ?? ''}${to ? ` to ${to}` : ''}`.trim();
+      if (action === 'search') return `Searched the conversation${str(args['query']) ? ` for “${clip(String(args['query']), 50)}”` : ''}`;
+      if (action === 'history') return 'Looked back in the conversation';
+      if (action === 'thread') return `Read the thread with ${str(args['agent']) ?? 'an agent'}`;
+      if (action === 'sections') {
+        if (Array.isArray(args['merge']) && args['merge'].length) return `Merged topics${str(args['title']) ? ` into “${clip(String(args['title']), 50)}”` : ''}`;
+        if (str(args['op']) === 'add' || str(args['title'])) return str(args['section']) ? (str(args['title']) ? `Renamed a topic to “${clip(String(args['title']), 50)}”` : 'Reorganized topics') : `Started topic ${str(args['title']) ? `“${clip(String(args['title']), 50)}”` : ''}`.trim();
+        return 'Looked back in the conversation';
+      }
+      if (action === 'wait' || !to) return 'Waited for messages';
       if (to === 'user') return Array.isArray(args['questions']) ? 'Asked you' : 'Sent a message';
       return `Messaged ${to}${str(args['text']) ? `: ${clip(String(args['text']), 60)}` : ''}`;
     }
@@ -190,7 +200,9 @@ export function messageToUser(name: string, argsJson: string): { text?: string; 
   } catch {
     return undefined;
   }
-  if (name === 'message' && args.to !== 'user') return undefined;
+  // An inline reply ("reply_to") shows under its message, not as a bubble.
+  const a = args as { action?: unknown; reply_to?: unknown };
+  if (name === 'message' && (args.to !== 'user' || (a.action ?? 'send') !== 'send' || a.reply_to !== undefined)) return undefined;
   const text = typeof args.text === 'string' && args.text.trim() ? args.text : undefined;
   const questions = Array.isArray(args.questions)
     ? (args.questions as Array<{ question?: unknown; options?: unknown; multiple?: unknown }>)
@@ -229,7 +241,7 @@ function threadOf(name: string, argsJson: string, from: string): { thread?: stri
 
 /** The artifact a create_artifact (or older update_artifact) call made or changed. */
 function artifactOf(name: string, argsJson: string, created: string | undefined): { artifact?: string } {
-  // The record a call wrote (sf-artifact in a shell call, or the older tools) names its artifact.
+  // The record a call wrote (sfa-artifact in a shell call, or the older tools) names its artifact.
   if (created) return { artifact: created };
   if (name === 'create_app_artifact') return {};
   // update_artifact is from older conversations; create_artifact with "id" replaced it.
@@ -299,7 +311,8 @@ export function displayItems(
         const replyTo = roots.runs.get(m.run);
         if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
         for (const c of m.toolCalls ?? []) {
-          if (c.name === 'keep_section' || c.name === ChatToolNames.REACT) continue; // the topic; a reaction shows as its badge
+          const effect = chatEffectOf(c.name, c.arguments);
+          if (c.name === 'keep_section' || (effect && 'react' in effect)) continue; // the topic; a reaction shows as its badge
           const inline = chat.replies.get(`${m.id}:${c.id}`);
           if (inline) {
             items.push({ kind: 'assistant', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: inline.text, agent: m.agent, replyTo: roots.messages.get(inline.messageId) ?? inline.messageId });

@@ -10,7 +10,8 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectSandbox, SECTION_REMINDER, setSandboxForTesting } from '@sfagents/core';
+import { after } from 'node:test';
+import { containerManager } from '@sfagents/core';
 import type {
   AgentDefinition,
   AssistantMessage,
@@ -32,6 +33,20 @@ export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 export const MCP_SERVER_SCRIPT = path.join(REPO_ROOT, 'tests', 'fixtures', 'test-mcp-server.mjs');
 export const CLI_ENTRY = path.join(REPO_ROOT, 'cli', 'bin', 'sfagents.js');
 
+// Agent commands run through a stand-in for Docker (tests/fixtures/fake-docker.mjs):
+// SF Agents' real bridge and commands, with the command run here by bash.
+// Never the real engine or the real /workspaces: on Windows the stand-in cannot run, so
+// the tests that run commands are skipped there (NO_CONTAINER_TESTS).
+if (!process.env['SFAGENTS_DOCKER']) {
+  process.env['SFAGENTS_DOCKER'] = path.join(REPO_ROOT, 'tests', 'fixtures', 'fake-docker.mjs');
+  process.env['SFA_FAKE_DOCKER_STATE'] = fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-docker-'));
+  process.env['SFAGENTS_WORKSPACES_DIR'] = fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-workspaces-'));
+}
+/** A skip reason for tests that run commands in an agent container, where the stand-in for Docker cannot run. */
+export const NO_CONTAINER_TESTS: string | false = process.platform === 'win32' && 'the stand-in for Docker needs bash and Unix process groups';
+// The container bridge runs until SF Agents stops it.
+after(() => containerManager().bridge.stop());
+
 export interface ScriptStep {
   text?: string;
   reasoning?: string;
@@ -47,24 +62,8 @@ export interface ScriptStep {
 export type Script = (request: ModelRequest, call: number, agentId: string) => ScriptStep;
 
 export interface ScriptOptions {
-  /**
-   * Leave the runtime's "settle this turn's section" reminders to the
-   * script. By default the provider answers them itself (keep_section, then
-   * an empty reply) without counting them as script calls, so scripts that
-   * are not about sections stay as they are.
-   */
+  /** Kept for older call sites: there are no section reminders any more. */
   scriptSectionReminders?: boolean;
-}
-
-function lastIsSectionReminder(request: ModelRequest): boolean {
-  const last = request.messages[request.messages.length - 1];
-  return last?.role === 'user' && last.content === SECTION_REMINDER;
-}
-
-function answersSectionReminder(request: ModelRequest): boolean {
-  const n = request.messages.length;
-  const prev = request.messages[n - 2];
-  return request.messages[n - 1]?.role === 'tool' && prev?.role === 'assistant' && prev.tool_calls?.[0]?.function.name === 'keep_section' && request.messages[n - 3]?.role === 'user' && (request.messages[n - 3] as { content: string }).content === SECTION_REMINDER;
 }
 
 /** Message ids the main conversation shows the model ("[m12] "), removed so scripts see the text as typed. */
@@ -83,7 +82,6 @@ export class ScriptedProvider implements ModelProvider {
   readonly id = 'scripted';
   readonly requests: Array<{ agentId: string; request: ModelRequest; messages: unknown[] }> = [];
   private calls = new Map<string, number>();
-  private reminders = 0;
 
   constructor(
     private readonly script: Script,
@@ -93,17 +91,6 @@ export class ScriptedProvider implements ModelProvider {
 
   async *stream(original: ModelRequest): AsyncIterable<ModelStreamEvent> {
     const request: ModelRequest = { ...original, messages: withoutIds(original.messages) };
-    if (!this.options.scriptSectionReminders && (lastIsSectionReminder(request) || answersSectionReminder(request))) {
-      // Not a script call: answer the reminder with keep_section, then end the turn.
-      const keep = lastIsSectionReminder(request);
-      const id = `call_${this.agentId}_keep_${this.reminders++}`;
-      const message: AssistantMessage = keep
-        ? { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'keep_section', arguments: '{}' } }] }
-        : { role: 'assistant', content: null };
-      const toolCalls: ParsedToolCall[] = keep ? [{ id, name: 'keep_section', args: {}, rawArguments: '{}' }] : [];
-      yield { type: 'done', message, toolCalls, finishReason: keep ? 'tool_calls' : 'stop', usage: { totalTokens: 1 } };
-      return;
-    }
     const n = this.calls.get(this.agentId) ?? 0;
     this.calls.set(this.agentId, n + 1);
     this.requests.push({ agentId: this.agentId, request, messages: structuredClone(request.messages) as unknown[] });
@@ -161,6 +148,16 @@ export function scriptedFactory(script: Script, options: ScriptOptions = {}) {
 }
 
 /** Last tool message content in a request, if any. */
+/** A shell call that runs one MCP tool through sfa-mcp. */
+export function mcpCall(server: string, tool: string, args: Record<string, unknown> = {}): { name: string; args: Record<string, unknown> } {
+  return { name: 'shell', args: { command: `sfa-mcp call ${server} ${tool} '${JSON.stringify(args).replace(/'/g, "'\\''")}'` } };
+}
+
+/** The stdout part of a shell result ("" when there is none). */
+export function shellStdout(content: string | undefined): string {
+  return /Stdout: ([\s\S]*?)\nStderr:/.exec(content ?? '')?.[1]?.trim() ?? '';
+}
+
 export function lastToolContent(request: ModelRequest): string | undefined {
   for (let i = request.messages.length - 1; i >= 0; i--) {
     const m = request.messages[i]!;
@@ -180,8 +177,7 @@ export function makeTempDir(prefix = 'sfagents-test-'): string {
 /** Writes an agent definition to <project>/agents/<id>.json (the id defaults to "main"). */
 export function writeAgent(projectDir: string, definition: Record<string, unknown>): string {
   const file = path.join(projectDir, 'agents', `${String(definition['id'] ?? 'main')}.json`);
-  // Agents have no workspace unless their file gives one; most tests grant the project folder.
-  writeJson(file, 'workspace' in definition ? definition : { ...definition, workspace: { roots: ['.'] } });
+  writeJson(file, 'network' in definition ? definition : { network: 'off', ...definition });
   return file;
 }
 
@@ -196,6 +192,7 @@ export function baseAgent(id: string, extra: Record<string, unknown> = {}): Reco
     provider: 'openrouter',
     model: 'test/model',
     systemPrompt: `You are ${id}.`,
+    network: 'off',
     ...extra,
   };
 }
@@ -263,13 +260,8 @@ export async function startMockOpenAI(handler: MockChatHandler): Promise<{ baseU
       }
       const body = JSON.parse(raw);
       body.messages = withoutIds(body.messages);
-      // Section reminders are answered here (keep_section, then an empty reply) and not counted as requests.
-      const msgs = body.messages as Array<{ role: string; content?: string; tool_calls?: Array<{ function: { name: string } }> }>;
-      const n = msgs.length;
-      const reminder = msgs[n - 1]?.role === 'user' && msgs[n - 1]?.content === SECTION_REMINDER;
-      const answered = msgs[n - 1]?.role === 'tool' && msgs[n - 2]?.tool_calls?.[0]?.function.name === 'keep_section' && msgs[n - 3]?.content === SECTION_REMINDER;
-      if (!reminder && !answered) requests.push(body);
-      const step: ScriptStep = reminder ? { toolCalls: [{ name: 'keep_section', id: `call_keep_${n}` }] } : answered ? {} : handler(body);
+      requests.push(body);
+      const step: ScriptStep = handler(body);
       if (step.error) {
         res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { message: step.error.message } }));
         return;
@@ -329,17 +321,6 @@ export function runCli(args: string[], options: { cwd?: string; env?: NodeJS.Pro
     });
     child.stdin.end(options.input ?? '');
   });
-}
-
-/**
- * Lets tests that use the shell as an ordinary tool run on any machine: the
- * real sandbox when there is one, else a stand-in that runs commands as they
- * are. Sandbox behaviour itself is tested against the real one only.
- */
-export async function useAnySandbox(): Promise<boolean> {
-  const real = (await detectSandbox()).ok;
-  if (!real) setSandboxForTesting({ ok: true, sandbox: { name: 'test pass-through', wrap: (command) => command } });
-  return real;
 }
 
 /** A command that prints a file, for the platform's shell. */

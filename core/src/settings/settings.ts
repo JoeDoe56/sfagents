@@ -16,7 +16,7 @@ export interface SettingSpec {
   label: string;
   /** One line shown under the control. */
   hint: string;
-  group: 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'STT & TTS' | 'Terminal output';
+  group: 'Agents' | 'Web server' | 'Remote Desktop' | 'Push to Talk' | 'STT & TTS' | 'Terminal output';
   type: 'port' | 'host' | 'boolean' | 'hotkey' | 'number' | 'text' | 'origins';
   default: SettingValue;
   /** Applies on the next start of `sfagents web` (or `start`), not at once. */
@@ -30,6 +30,32 @@ export interface SettingSpec {
 }
 
 export const SETTINGS: readonly SettingSpec[] = [
+  { key: 'agents.pullRequests', label: 'Pull Requests', hint: 'Draft GitHub pull requests from task branches, read checks and review comments, and merge from the review sheet.', group: 'Agents', type: 'boolean', default: false, restart: false },
+  {
+    key: 'agents.fullControlMinutes',
+    label: 'Full Control Maximum',
+    hint: 'The longest an agent may keep full control of this computer (its own shell and apps here) once you allow it, in minutes. It ends sooner when the agent is done.',
+    group: 'Agents',
+    type: 'number',
+    default: 5,
+    min: 1,
+    max: 120,
+    step: 1,
+    restart: false,
+  },
+  {
+    key: 'containers.wslMemoryGb',
+    label: 'WSL Memory Cap',
+    hint: 'The memory WSL (and so every agent container, and Docker Desktop) may use together, in GB. Written to .wslconfig; it takes effect the next time WSL starts.',
+    group: 'Agents',
+    type: 'number',
+    default: 16,
+    min: 2,
+    max: 1024,
+    step: 1,
+    restart: false,
+    platform: 'win32',
+  },
   { key: 'web.port', label: 'Port', hint: 'The port the web interface listens on.', group: 'Web server', type: 'port', default: 8093, restart: true },
   {
     key: 'web.host',
@@ -62,15 +88,6 @@ export const SETTINGS: readonly SettingSpec[] = [
     key: 'dictation.glossary',
     label: 'Glossary',
     hint: 'Names and terms Qwen3-ASR should spell your way, separated by commas.',
-    group: 'STT & TTS',
-    type: 'text',
-    default: '',
-    restart: false,
-  },
-  {
-    key: 'speech.referenceText',
-    label: 'Reference Transcript',
-    hint: 'What is said in the reference voice clip (its first 15 seconds), which Qwen3-TTS needs to copy the voice. Qwen3-ASR fills it in when the clip is set; correct it where it misheard.',
     group: 'STT & TTS',
     type: 'text',
     default: '',

@@ -8,18 +8,18 @@ import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { ConversationService, MemorySecretStore, ProviderRegistry, ensureProject, loadAgentTree, parseSetting } from '@sfagents/core';
 import { WebServer, Up2kStore, up2kChunkSize, chunkHash, describeCall, parsePublicOrigin } from '@sfagents/web';
-import { baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, useAnySandbox, writeJson, type Script, writeAgent } from './helpers.js';
+import { NO_CONTAINER_TESTS, baseAgent, CLI_ENTRY, REPO_ROOT, lastToolContent, makeTempDir, scriptedFactory, stdioServerConfig, writeJson, type Script, writeAgent, mcpCall } from './helpers.js';
 
-await useAnySandbox();
 
-function project(agent: Record<string, unknown> = {}) {
+function project(agent: Record<string, unknown> = {}, files: Record<string, unknown> = {}) {
   const dir = makeTempDir('sfagents-web-');
   writeAgent(dir, { ...baseAgent('main'), ...agent });
+  for (const [f, v] of Object.entries(files)) writeJson(path.join(dir, f), v);
   return dir;
 }
 
-async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string; publicOrigins?: string[] } = {}) {
-  const dir = project(agent);
+async function startServer(script: Script, agent: Record<string, unknown> = {}, extra: { maxUploadBytes?: number; publicOrigin?: string; publicOrigins?: string[] } = {}, files: Record<string, unknown> = {}) {
+  const dir = project(agent, files);
   const tree = loadAgentTree(dir);
   const conversation = ConversationService.open(path.join(dir, '.sfagents', 'conversation.md'), { configDir: tree.configDir });
   const server = new WebServer({ tree, conversation, port: 0, providerFactory: scriptedFactory(script).factory, watchAgents: false, auth: false, ...extra });
@@ -295,6 +295,29 @@ describe('web server', () => {
     }
   });
 
+  test('Read Replies Aloud enables manual reading without requesting automatic playback', async () => {
+    const s = await startServer(() => ({ text: 'A reply to read manually.' }), { voice: { speak: true } });
+    const received: Array<[string, any]> = [];
+    const stop = s.server.subscribe((name, data) => received.push([name, data]));
+    try {
+      const initial = received.find(([name]) => name === 'state')![1];
+      assert.deepEqual(initial.speechAgents, ['main']);
+      assert.equal(initial.agent.speak, true);
+      assert.equal(s.server.canSpeak('main'), true);
+      s.server.sendMessage('Reply.'); await s.server.idle();
+      const end = received.find(([name]) => name === 'run_end')![1];
+      assert.equal(end.speak, undefined, 'finishing a run must never request playback');
+      const form = JSON.parse((await request(s.base, '/api/agent-editor?agent=main')).body.toString()).form;
+      const saved = await postJson(s.base, '/api/agent-editor', { action: 'save', original: 'main', form: { ...form, speak: false } });
+      assert.equal(saved.status, 200);
+      assert.equal(s.server.canSpeak('main'), false);
+      const update = received.filter(([name]) => name === 'agents').at(-1)![1];
+      assert.equal(update.agents.find((a: { id: string }) => a.id === 'main').speak, false);
+      const next = JSON.parse((await request(s.base, '/api/state')).body.toString());
+      assert.deepEqual(next.speechAgents, []);
+    } finally { stop(); await s.stop(); }
+  });
+
   test('the Files window\'s favorites and view are shared by every page', async () => {
     const s = await startServer(() => ({ text: 'ok' }));
     try {
@@ -346,9 +369,9 @@ describe('web server', () => {
     }
   });
 
-  test('a message streams over SSE, creates an artifact, and the artifact can be pinned and served sandboxed', async () => {
+  test('a message streams over SSE, creates an artifact, and the artifact can be pinned and served sandboxed', { skip: NO_CONTAINER_TESTS }, async () => {
     const script: Script = (req, call) => {
-      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'shell', args: { command: 'sf-artifact --title Page --content "<h1>hi</h1>" index.html' } }] };
+      if (call === 0) return { delayMs: 300, text: 'Working on it. ', toolCalls: [{ name: 'shell', args: { command: 'sfa-artifact --title Page --content "<h1>hi</h1>" index.html' } }] };
       return { text: `Done (${lastToolContent(req)?.slice(0, 20)})` };
     };
     const s = await startServer(script);
@@ -456,7 +479,7 @@ describe('web server', () => {
       const last = msgs[msgs.length - 1]!;
       requests.push({ system: String(msgs[0]!.content), last: typeof last.content === 'string' ? last.content : '', ids: '' });
       if (call === 0) return { text: 'Here is the plan.' };
-      if (call === 1) return { toolCalls: [{ name: 'react_to_message', args: { message_id: 'm2', emoji: '👍' } }, { name: 'reply_inline', args: { message_id: 'm2', text: 'Noted, aside.' } }] };
+      if (call === 1) return { toolCalls: [{ name: 'message', args: { action: 'react', message_id: 'm2', emoji: '👍' } }, { name: 'message', args: { action: 'send', to: 'user', reply_to: 'm2', text: 'Noted, aside.' } }] };
       return {};
     });
     const ev = events(s.base);
@@ -466,7 +489,7 @@ describe('web server', () => {
       const end1 = await ev.wait((e) => e.event === 'run_end');
       const items1 = end1.data['items'] as Array<{ kind: string; id: string }>;
       const answer = items1.find((i) => i.kind === 'assistant')!.id;
-      assert.match(requests[0]!.system, /<chat>/);
+      assert.match(requests[0]!.system, /<talking_with_the_person>/);
       // Activity on a page: the agent's reply counts as read.
       assert.equal((await postJson(s.base, '/api/presence', {})).status, 200);
       const seen = await ev.wait((e) => e.event === 'seen');
@@ -521,16 +544,18 @@ describe('web server', () => {
     }
   });
 
-  test('approvals are asked in the browser; denial and cancellation work', async () => {
+  test('approvals are asked in the browser; denial and cancellation work', { skip: NO_CONTAINER_TESTS }, async () => {
     const s = await startServer(
       (req, call) => {
-        if (call === 0) return { toolCalls: [{ name: 'shell', args: { command: 'echo approved-run' } }] };
+        if (call === 0) return { toolCalls: [mcpCall('local', 'echo', { text: 'approved-run' })] };
         if (call === 1) return { text: `result: ${lastToolContent(req)}` };
-        if (call === 2) return { toolCalls: [{ name: 'shell', args: { command: 'echo nope' } }] };
+        if (call === 2) return { toolCalls: [mcpCall('local', 'echo', { text: 'nope' })] };
         if (call === 3) return { text: `second: ${lastToolContent(req)}` };
         return { text: 'slow', delayMs: 5000 };
       },
-      { tools: { allow: ['shell'], ask: true } },
+      { tools: { mcpServers: ['local'] } },
+      {},
+      { 'mcp.json': { mcpServers: { local: stdioServerConfig() } } },
     );
     const ev = events(s.base);
     try {
@@ -538,8 +563,8 @@ describe('web server', () => {
       await postJson(s.base, '/api/messages', { text: 'run it' });
       const ask = await ev.wait((e) => e.event === 'approval');
       const approval = ask.data['approval'] as { id: string; detail: string; tool: string };
-      assert.equal(approval.tool, 'shell');
-      assert.match(approval.detail, /echo approved-run/);
+      assert.equal(approval.tool, 'mcp__local__echo');
+      assert.match(approval.detail, /approved-run/);
       assert.equal((await postJson(s.base, `/api/approvals/${approval.id}`, { decision: 'maybe' })).status, 400);
       assert.equal((await postJson(s.base, `/api/approvals/${approval.id}`, { decision: 'allow_once' })).status, 200);
       const end1 = await ev.wait((e) => e.event === 'run_end');
@@ -548,7 +573,8 @@ describe('web server', () => {
       await postJson(s.base, '/api/messages', { text: 'again' });
       const ask2 = await ev.wait((e) => e.event === 'approval' && (e.data['approval'] as { id: string }).id !== approval.id);
       await postJson(s.base, `/api/approvals/${(ask2.data['approval'] as { id: string }).id}`, { decision: 'deny' });
-      await ev.wait((e) => e.event === 'run_end' && e !== end1);
+      const end2 = await ev.wait((e) => e.event === 'run_end' && e !== end1);
+      assert.match(JSON.stringify(end2.data['items']), /did not allow local echo/);
 
       await postJson(s.base, '/api/messages', { text: 'slow one' });
       await ev.wait((e) => e.event === 'run_start' && ev.received.filter((x) => x.event === 'run_start').length === 3);
@@ -556,7 +582,6 @@ describe('web server', () => {
       const end3 = await ev.wait((e) => e.event === 'run_end' && e.data['status'] === 'CANCELLED');
       assert.ok(end3);
       const items = end3.data['items'] as Array<{ kind: string; text: string; status?: string }>;
-      assert.ok(items.some((i) => i.kind === 'activity' && i.status === 'denied'));
       assert.ok(items.some((i) => i.kind === 'notice' && i.text === 'Stopped'));
     } finally {
       ev.close();
@@ -566,9 +591,9 @@ describe('web server', () => {
 
   test('the topic index follows the sections the model creates', async () => {
     const s = await startServer((req, call) => {
-      if (call === 0) return { toolCalls: [{ name: 'add_section', args: { title: 'Kiln schedule', messages: ['current_exchange'] } }] };
+      if (call === 0) return { toolCalls: [{ name: 'message', args: { action: 'send', to: 'user', text: 'Filed.', section: 'new: Kiln schedule' } }] };
       if (call === 1) return { text: 'Filed under Kiln schedule.' };
-      if (call === 2) return { toolCalls: [{ name: 'add_section', args: { title: 'Cone 6 glazes', parent: 's1', messages: ['current_exchange'] } }] };
+      if (call === 2) return { toolCalls: [{ name: 'message', args: { action: 'send', to: 'user', text: 'Filed.', section: 'new under s1: Cone 6 glazes' } }] };
       return { text: 'ok' };
     });
     const ev = events(s.base);
@@ -788,12 +813,12 @@ describe('agent settings and context', () => {
       const byId = Object.fromEntries(c.categories.map((x: { id: string }) => [x.id, x]));
       assert.ok(byId.system.tokens > 0);
       assert.ok(byId.messages.tokens > 0);
-      assert.ok(byId.conversation.items.some((t: { name: string }) => t.name === 'search_conversation'));
-      // sf-artifact is listed with the tools, as a command in the shell (its tokens are the shell's).
+      assert.ok(byId.agents.items.some((t: { name: string }) => t.name === 'message'));
+      // sfa-artifact is listed with the tools, as a command in the shell (its tokens are the shell's).
       type Item = { name: string; tokens: number; partOf?: string; schema: { usage?: string } };
-      const art = (byId.builtin.items as Item[]).find((t) => t.name === 'sf-artifact')!;
+      const art = (byId.builtin.items as Item[]).find((t) => t.name === 'sfa-artifact')!;
       assert.equal(art.partOf, 'shell');
-      assert.match(art.schema.usage!, /sf-artifact --port/);
+      assert.match(art.schema.usage!, /sfa-artifact --port/);
       assert.equal(byId.builtin.tokens, (byId.builtin.items as Item[]).filter((t) => !t.partOf).reduce((a, t) => a + t.tokens, 0));
       assert.equal(c.exchanges.included, 1);
       assert.equal(c.modelWindow, null);

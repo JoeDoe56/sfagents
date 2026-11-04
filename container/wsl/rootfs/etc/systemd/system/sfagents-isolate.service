@@ -1,0 +1,19 @@
+# WSL mounts folders it shares between all distros: /mnt/wsl (where Docker
+# Desktop keeps its engine sockets) and /mnt/wslg (the Windows desktop's
+# display sockets). SF Agents' distro needs neither, so they are unmounted
+# before its Docker Engine starts. WSL points /etc/resolv.conf at
+# /mnt/wsl/resolv.conf (and re-links it on every wsl.exe call), so /mnt/wsl
+# becomes a private tmpfs holding only a copy of that file.
+[Unit]
+Description=SF Agents: unmount WSL's shared folders
+DefaultDependencies=no
+After=local-fs.target
+Before=sfagents-docker.service containerd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sfagents-isolate
+
+[Install]
+WantedBy=multi-user.target

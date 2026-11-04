@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadAgentTree, describeTree, ConfigError, ensureProject, locateProject, withRoot, buildSandboxPolicy, accessFor, moveUserData, defaultConversationFile } from '@sfagents/core';
+import { loadAgentTree, describeTree, ConfigError, ensureProject, locateProject, withRoot, moveUserData, defaultConversationFile } from '@sfagents/core';
 import { baseAgent, makeTempDir, writeJson, writeAgent, stdioServerConfig } from './helpers.js';
 
 /** A project: files are relative to it (agents go in "agents/"). */
@@ -27,18 +27,20 @@ function skippedError(dir: string, pattern: RegExp, extra: Record<string, unknow
 }
 
 describe('agents folder', () => {
-  test('loads every valid file, named by its file name, with grants and roots', () => {
+  test('loads every valid file, named by its file name, with its network level and grants', () => {
     const dir = setup(
       {
         'agents/main.json': baseAgent('main', {
-          workspace: { roots: ['work'] },
-          tools: { allow: ['shell', '2-Research Helper.json'], mcpServers: ['local'] },
+          network: 'pkg',
+          agents: ['2-Research Helper.json'],
+          tools: { mcpServers: ['local'] },
         }),
         'agents/Research Helper.json': {
           ...baseAgent('ignored-label'),
           description: 'does research',
-          workspace: { roots: ['work/sub'] },
-          tools: { allow: ['shell', '1-main.json'], mcpServers: [{ server: 'local', tools: ['echo'] }] },
+          network: 'on',
+          agents: ['1-main.json'],
+          tools: { mcpServers: [{ server: 'local', tools: ['echo'] }] },
         },
         'agents/plain.json': baseAgent('plain'),
       },
@@ -47,22 +49,15 @@ describe('agents folder', () => {
     const tree = loadAgentTree(dir);
     assert.equal(tree.root.id, 'main', '"main" replies by default');
     assert.deepEqual([...tree.byId.keys()].sort(), ['Research Helper', 'main', 'plain']);
-    assert.deepEqual(tree.root.roots, [path.join(dir, 'work')]);
+    assert.equal(tree.root.definition.network, 'pkg');
     const helper = tree.byId.get('Research Helper')!;
     assert.equal(helper.definition.name, 'ignored-label', 'an id that differs from the file name is a label');
-    assert.deepEqual(helper.roots, [path.join(dir, 'work', 'sub')]);
+    assert.equal(helper.definition.network, 'on');
     assert.deepEqual([...tree.root.grants], [['Research Helper', 2]]);
     assert.deepEqual([...helper.grants], [['main', 1]], 'grants may point back: any graph is allowed');
-    assert.ok(helper.definition.tools?.allow?.includes('shell'), 'any agent may have the shell');
-    assert.deepEqual(tree.byId.get('plain')!.roots, [], 'no workspace unless the file gives one');
     assert.ok(Object.isFrozen(tree.root.definition), 'definitions are frozen');
     assert.match(describeTree(tree), /\* main[\s\S]*message:Research Helper×2/);
     assert.ok(tree.protectedFiles.includes(path.join(dir, 'agents', 'plain.json')));
-  });
-
-  test('an agent whose file names no folders has no workspace: where SF Agents runs gives it nothing', () => {
-    const dir = setup({ 'agents/main.json': baseAgent('main') });
-    assert.deepEqual(loadAgentTree(dir).root.roots, []);
   });
 
   test('picks the agent to start with: --agent, an agent file, "main", else the first', () => {
@@ -96,7 +91,7 @@ describe('agents folder', () => {
   });
 
   test('a grant to an agent that is not loaded is dropped with a note', () => {
-    const dir = setup({ 'agents/main.json': baseAgent('main', { tools: { allow: ['3-ghost.json', '1-bad.json'] } }), 'agents/bad.json': '{' });
+    const dir = setup({ 'agents/main.json': baseAgent('main', { agents: ['3-ghost.json', '1-bad.json'] }), 'agents/bad.json': '{' });
     const tree = loadAgentTree(dir);
     assert.equal(tree.root.grants.size, 0);
     assert.equal(tree.warnings.length, 2);
@@ -115,11 +110,23 @@ describe('agents folder', () => {
 
   test('validates fields, grants and MCP servers per file', () => {
     let dir = setup({});
-    skippedError(dir, /\[tools.allow\[1\]\]: duplicate entry/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['shell', 'shell'] } }), 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /\[network\]: is required: one of "off", "pkg", "git", "on"/, { 'agents/a.json': { ...baseAgent('a'), network: undefined }, 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
-    skippedError(dir, /unknown tool "web_fetch"/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['web_fetch'] } }), 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /\[network\]: must be one of/, { 'agents/a.json': baseAgent('a', { network: 'yes' }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
-    skippedError(dir, /agent grants name a file in the agents folder/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['1-../x.json'] } }), 'agents/ok.json': baseAgent('ok') });
+    skippedError(dir, /\[agents\[1\]\]: "x" is granted twice/, { 'agents/a.json': baseAgent('a', { agents: ['1-x.json', '2-x.json'] }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[agents\[0\]\]: must look like "N-name.json"/, { 'agents/a.json': baseAgent('a', { agents: ['shell'] }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /names a file in the agents folder, without a path/, { 'agents/a.json': baseAgent('a', { agents: ['1-../x.json'] }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[workspace\]: was removed: every agent works in its own container/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[tools.allow\]: was removed/, { 'agents/a.json': baseAgent('a', { tools: { allow: ['shell'] } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /\[tools.ask\]: was removed/, { 'agents/a.json': baseAgent('a', { tools: { ask: true } }), 'agents/ok.json': baseAgent('ok') });
+    dir = setup({});
+    skippedError(dir, /lists MCP tools only/, { 'agents/a.json': baseAgent('a', { tools: { autoApprove: ['shell'] } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
     skippedError(dir, /\[provider\]: must name at least one provider/, { 'agents/a.json': baseAgent('a', { provider: [] }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
@@ -129,71 +136,15 @@ describe('agents folder', () => {
     dir = setup({});
     skippedError(dir, /unknown MCP server "nope"/, { 'agents/a.json': baseAgent('a', { tools: { mcpServers: ['nope'] } }), 'agents/ok.json': baseAgent('ok') });
     dir = setup({});
-    skippedError(dir, /"shell" is not in tools.allow/, { 'agents/a.json': baseAgent('a', { tools: { allow: [], autoApprove: ['shell'] } }), 'agents/ok.json': baseAgent('ok') });
-    dir = setup({});
-    skippedError(dir, /\[workspace.access\[0\].mode\]: must be "read", "write" or "none"/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], access: [{ path: 'x', mode: 'rw' }] } }), 'agents/ok.json': baseAgent('ok') });
-    dir = setup({});
-    skippedError(dir, /\[workspace.network\]: must be true or false/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], network: 'yes' } }), 'agents/ok.json': baseAgent('ok') });
-    dir = setup({});
-    skippedError(dir, /\[tools.ask\]: must be true or false/, { 'agents/a.json': baseAgent('a', { tools: { ask: 1 } }), 'agents/ok.json': baseAgent('ok') });
-    dir = setup({});
     skippedError(dir, /providerOptions\]: is required/, { 'agents/a.json': baseAgent('a', { provider: 'openai-compatible' }), 'agents/ok.json': baseAgent('ok') });
-    dir = setup({});
-    skippedError(dir, /workspace.roots\[0\]\]: Directory does not exist/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['does-not-exist'] } }), 'agents/ok.json': baseAgent('ok') });
   });
 
-  test('workspace.paths: absolute folders with r/w/d letters; the outermost granted ones are the roots, in order', () => {
-    const outside = makeTempDir();
-    fs.mkdirSync(path.join(outside, 'a', 'sensitive'), { recursive: true });
-    fs.mkdirSync(path.join(outside, 'b', 'project'), { recursive: true });
-    const dir = setup({});
-    const real = (p: string) => fs.realpathSync(p);
-    writeJson(path.join(dir, 'agents', 'main.json'), baseAgent('main', {
-      workspace: {
-        paths: {
-          [path.join(outside, 'b')]: 'rw',
-          [path.join(outside, 'a')]: 'r',
-          [path.join(outside, 'a', 'sensitive')]: '',
-          [path.join(outside, 'b', 'project')]: 'rwd',
-          [dir]: 'rwd',
-        },
-      },
-    }));
-    const tree = loadAgentTree(dir);
-    const main = tree.byId.get('main')!;
-    assert.deepEqual(main.roots, [real(path.join(outside, 'b')), real(path.join(outside, 'a')), real(dir)]);
-    assert.deepEqual(main.access.map((r) => [path.relative(real(outside), r.path) || '.', r.access]).slice(0, 4), [
-      ['b', 'edit'],
-      ['a', 'read'],
-      [path.join('a', 'sensitive'), 'none'],
-      [path.join('b', 'project'), 'write'],
-    ]);
-    assert.ok(!tree.warnings.some((w) => /still allows deleting/.test(w)), 'no "rw" folder inside an "rwd" one');
-    const policy = buildSandboxPolicy({ roots: main.roots, access: main.access });
-    const at = (...p: string[]) => accessFor(policy.rules, path.join(real(outside), ...p));
-    assert.deepEqual([at('a', 'sensitive', 'x'), at('a', 'notes.md'), at('b', 'x.md'), at('b', 'project', 'x.md'), at('c')], ['none', 'read', 'edit', 'write', 'none']);
-
-    const bad = (paths: unknown, pattern: RegExp) => {
-      const d = setup({});
-      skippedError(d, pattern, { 'agents/a.json': baseAgent('a', { workspace: { paths } }), 'agents/ok.json': baseAgent('ok') });
-    };
-    bad({ work: 'rw' }, /must be an absolute path/);
-    bad({ [outside]: 'wr' + 'x' }, /may only use the letters r \(read\), w \(write\) and d \(delete\)/);
-    bad({ [outside]: 'w' }, /"w" needs "r" too/);
-    bad({ [outside]: 'rd' }, /"d" needs "w" too/);
-    bad({ [outside]: '' }, /must give at least one folder a permission/);
-    bad({ [path.join(outside, 'missing')]: 'r' }, /Directory does not exist/);
-    bad(['x'], /must be an object of folder/);
-    const both = setup({});
-    skippedError(both, /replaces roots and access/, { 'agents/a.json': baseAgent('a', { workspace: { roots: ['.'], paths: { [outside]: 'r' } } }), 'agents/ok.json': baseAgent('ok') });
-  });
-
-  test('a new project\'s agent gets no folders until the person gives it some', () => {
+  test('a new project\'s agent has a network level and no folders of its own', () => {
     const dir = makeTempDir();
     ensureProject(dir);
-    const def = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'main.json'), 'utf8')) as { workspace?: unknown };
+    const def = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'main.json'), 'utf8')) as { workspace?: unknown; network?: unknown };
     assert.equal(def.workspace, undefined);
-    assert.deepEqual(loadAgentTree(dir).root.roots, []);
+    assert.equal(def.network, 'pkg');
   });
 
   test('a project\'s data moves into userdata/, all of it or none, and is found there', () => {
@@ -299,7 +250,7 @@ describe('prompts folder', () => {
     });
     const tree = loadAgentTree(dir);
     assert.equal(tree.byId.get('a')!.definition.systemPrompt, 'Rule one.\nBe brief.\n\nYou are a.\n\nReview carefully.');
-    assert.deepEqual(tree.byId.get('a')!.definition.prompts, ['prompts/rules.txt', 'prompts/style.md', 'prompts/Code Review.txt']);
+    assert.deepEqual(tree.byId.get('a')!.definition.prompts!.map((p) => p.replace(/\\/g, '/')), ['prompts/rules.txt', 'prompts/style.md', 'prompts/Code Review.txt']);
     // A bare "@name" that names no file is ordinary text.
     assert.equal(tree.byId.get('b')!.definition.systemPrompt, 'You are b.\nRule one.\nBe brief.\nMail @someone if stuck.\n@nobody');
     // Prompt files are protected from agents, like agent files.

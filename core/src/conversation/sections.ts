@@ -153,7 +153,7 @@ function checkRevision(state: ConversationState, expected: number | undefined, r
   }
   if (expected !== state.structureRevision) {
     throw new SectionOperationError(
-      `Stale edit: you based this on revision ${expected}, but the sections are now at revision ${state.structureRevision}. Call list_sections and retry against the current structure.`,
+      `Stale edit: you based this on revision ${expected}, but the sections are now at revision ${state.structureRevision}. List the sections again (message action "sections") and retry against the current structure.`,
     );
   }
   return expected;
@@ -365,7 +365,7 @@ export function formatSearchResult(query: string, r: SearchResult): string {
     ...lines,
     ...(r.page < r.pages ? [`… more on page ${r.page + 1}.`] : []),
     ...(r.truncatedScan ? ['(Scan limit reached; older messages were not searched. Narrow the search with a section.)'] : []),
-    'Use fetch_section to read a section in full.',
+    'Use message action "sections" with op "fetch" to read a section in full.',
   ].join('\n');
 }
 
@@ -448,7 +448,7 @@ export function fetchSection(state: ConversationState, section: string, options:
       '---',
       body || '(no messages)',
       '---',
-      page < pages ? `More: fetch_section with page ${page + 1}.` : 'End of section.',
+      page < pages ? `More: the same fetch with page ${page + 1}.` : 'End of section.',
     ].join('\n'),
     page,
     pages,

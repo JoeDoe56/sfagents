@@ -14,7 +14,8 @@
   },
   "files": [
     "dist",
-    "native/bin"
+    "native/bin",
+    "native/ui"
   ],
   "engines": {
     "node": ">=20.12"

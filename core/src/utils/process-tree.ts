@@ -1,12 +1,11 @@
 /**
  * Stops every process this one started, and the ones those started, so that
  * quitting SF Agents leaves nothing running: speech servers, screen mirroring's
- * helper, sensor workers, terminals, shell commands, MCP servers, the sandbox.
+ * helper, sensor workers, terminals, shell commands (docker clients), MCP servers.
  *
  * Each part closes its own processes first (the server's close()); this is
  * the backstop for whatever is still alive after that, and it also takes
- * sandboxed commands an earlier SF Agents left behind (on Windows their
- * sfagents-sandbox.exe stays locked, and the next build fails with EBUSY). On Windows,
+ * helpers an earlier SF Agents left behind. On Windows,
  * `taskkill /T /F` takes each process with its tree. Elsewhere, SIGTERM and,
  * after a moment, SIGKILL for anything left.
  */
@@ -54,20 +53,13 @@ export function orphansOf(rows: ProcessEntry[], match: (command: string) => bool
   return rows.filter((r) => match(r.command) && !pids.has(r.ppid));
 }
 
-/** A sandboxed shell command's helper (sfagents-sandbox.exe run --policy …), which locks the helper's file while it runs. */
-export function isSandboxRun(command: string): boolean {
-  return /sfagents-sandbox(?:\.exe)?"?\s+run\s/i.test(command);
-}
-
 /**
  * One of SF Agents' own programs, by its command line, that is left running
- * when its SF Agents is gone: a sandboxed command (isSandboxRun), the
- * keyboard and sensor programs (SfAgents.Input/Sensors), the keyboard worker,
+ * when its SF Agents is gone: the keyboard and sensor programs (SfAgents.Input/Sensors), the keyboard worker,
  * screen mirroring's helper, or a speech server whose config is in SF Agents'
  * folder (@p home).
  */
 export function isLeftover(command: string, home: string): boolean {
-  if (isSandboxRun(command)) return true;
   const c = command.toLowerCase();
   if (/sfagents\.(?:input|sensors)(?:\.exe)?\b|keyboard-worker\.js|sfagents-screen/.test(c)) return true;
   return c.includes('audiocpp_server') && c.includes(home.toLowerCase());

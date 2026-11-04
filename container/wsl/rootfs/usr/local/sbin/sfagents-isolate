@@ -1,0 +1,11 @@
+#!/bin/sh
+# See /etc/systemd/system/sfagents-isolate.service.
+resolv="$(cat /mnt/wsl/resolv.conf 2>/dev/null)"
+[ -n "$resolv" ] || resolv="nameserver 10.255.255.254"
+for m in /tmp/.X11-unix /mnt/wslg/distro /mnt/wslg /mnt/wsl; do
+  while mountpoint -q "$m"; do umount -l "$m" || break; done
+done
+mkdir -p /mnt/wsl
+mount -t tmpfs -o size=1m,mode=755,nosuid,nodev,noexec sfagents-wsl /mnt/wsl
+printf '%s\n' "$resolv" > /mnt/wsl/resolv.conf
+exit 0

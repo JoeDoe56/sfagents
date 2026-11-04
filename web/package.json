@@ -16,6 +16,7 @@
     "dist",
     "public",
     "native/bin",
+    "native/folder-dialog.ps1",
     "native/windows/*.cs",
     "native/windows/*.csproj",
     "native/windows/NuGet.Config",

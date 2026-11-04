@@ -132,7 +132,7 @@ export function openSettingsSheet(device) {
       signInBox = el('div');
       versionBox = el('p', 'st-version');
       body.append(
-        el('p', 'sf-section-note st-note', 'Agents and MCP servers are set up in their own files (the gear in the agent sheet opens an agent’s file).'),
+        el('p', 'sf-section-note st-note', 'Agents are set up in the agent sheet: the gear edits the agent, and its menu makes a new one. MCP servers are in mcp.json.'),
         providersBox,
         marker,
         deviceSection.el,
@@ -224,7 +224,7 @@ export function openSettingsSheet(device) {
     });
     providersBox.replaceChildren(
       section('Providers', rows, data ? note : ''),
-      section('Web Access', [webRow], 'Agents with "web" in tools.allow search and fetch pages with `sf-web` in their shell, through Bright Data. The key stays in the keyring and in SF Agents; the sandbox never sees it.'),
+      section('Web Access', [webRow], 'Agents at network level "on" search and fetch pages with `sfa-web` in their shell, through Bright Data. The key stays in the keyring and in SF Agents; agents never see it.'),
     );
     ctx.refresh();
   }

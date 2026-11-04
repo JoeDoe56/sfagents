@@ -1,3 +1,4 @@
+import { setFullControl } from './full-control.js';
 /**
  * SF Agents web client: iMessage-style conversation, an Apple Maps-style
  * bottom bar that pulls up into a sheet of artifacts, up2k uploads and
@@ -34,6 +35,7 @@ import { onHold } from './menu.js';
 import { installBubbleMenus } from './bubblemenu.js';
 import { springAnimate, springyScroll } from './springs.js';
 import { createChatDock, renderDiff } from './chatdock.js';
+import { workspacePills, openWorkspace } from './workspaces.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
 configureUi({ scheme: 'dark' });
@@ -61,6 +63,7 @@ const params = new URLSearchParams(location.search);
 
 const state = {
   agent: null,
+  speechAgents: [],
   items: [],
   more: false,
   artifacts: [],
@@ -237,7 +240,7 @@ dock = createChatDock({
   bar: composer.bar.el,
   chat,
   thread,
-  onOpenDiff: (repo, pill) => openDiff(repo, pill),
+  onOpenDiff: (repo, pill) => (repo.workspace ? openWorkspace(repo.workspace, pill) : openDiff(repo, pill)),
   onLayout: (space) => {
     Object.assign(dockSpace, space);
     layoutAboveBar();
@@ -246,6 +249,12 @@ dock = createChatDock({
 dock.setBar({ clearance, covered: false });
 
 /** A repository's uncommitted changes, in a sheet that grows out of its pill. */
+/** The pills above the composer: uncommitted changes in the project folders, and task workspaces with work. */
+const pills = { diffs: [], workspaces: [] };
+function showPills() {
+  dock.setRepos([...pills.diffs, ...workspacePills(pills.workspaces)]);
+}
+
 function openDiff(repo, pill) {
   openSheet({
     title: repo.name,
@@ -368,6 +377,7 @@ const msgEntry = (it, side) => ({
   type: 'msg',
   side,
   text: it.text,
+  agent: it.agent,
   attachments: it.attachments,
   rich: side === 'in',
   root: it.replyTo,
@@ -906,7 +916,7 @@ const bubbleHooks = {
   message(row) {
     const e = entryByKey.get(row.dataset.key);
     if (!e || e.type !== 'msg' || !e.id || !e.text?.trim()) return null;
-    return { id: e.id, text: e.text, side: e.side };
+    return { id: e.id, text: e.text, side: e.side, agent: e.agent, speak: state.speechAgents.includes(e.agent) };
   },
   reaction: (id) => state.reactions[id],
   onReply: (msg) => openReplies(msg.id, { to: msg.id, focus: true }),
@@ -1046,7 +1056,7 @@ function buildApproval(a, decision) {
   actions.className = 'actions';
   for (const [label, value, primary] of [
     ["Don't Allow", 'deny', false],
-    ['Always Allow', 'allow_always', false],
+    ...(['full_control', 'host_action'].includes(a.tool) ? [] : [['Always Allow', 'allow_always', false]]),
     ['Allow Once', 'allow_once', true],
   ]) {
     const b = document.createElement('button');
@@ -1215,6 +1225,7 @@ function applySnapshot(s) {
   }
   pageBuild ??= s.build ?? null;
   state.agent = s.agent;
+  state.speechAgents = s.speechAgents ?? [];
   state.reactions = s.reactions ?? {};
   state.outbox = [];
   state.pending = s.pending ?? [];
@@ -1228,7 +1239,9 @@ function applySnapshot(s) {
   if (s.view) fileManager.applyView(s.view.files);
   state.limits = s.limits || state.limits;
   setArtifacts(s.artifacts);
-  dock.setRepos(s.diffs ?? []);
+  pills.diffs = s.diffs ?? [];
+  pills.workspaces = s.workspaces ?? [];
+  showPills();
   setSections(s.sections);
   if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
   for (const n of s.notices || []) typeof n === 'string' ? notice(n) : notice(n.text, n.level);
@@ -1349,6 +1362,7 @@ document.addEventListener('visibilitychange', presence);
 
 function listen() {
   stream.addEventListener('state', (e) => {
+    setFullControl(JSON.parse(e.data).fullControl);
     state.connected = true;
     applySnapshot(JSON.parse(e.data));
   });
@@ -1410,6 +1424,7 @@ function listen() {
     if (seg && artifact) seg.artifact = artifact;
     render();
   });
+  stream.addEventListener('full-control', (e) => setFullControl(JSON.parse(e.data).status));
   stream.addEventListener('approval', (e) => {
     const { approval } = JSON.parse(e.data);
     if (!state.approvals.some((a) => a.id === approval.id)) state.approvals.push(approval);
@@ -1431,6 +1446,9 @@ function listen() {
     setGradientSeed(info.model);
     agentSheet?.setAgent?.(info);
   });
+  stream.addEventListener('agents', (e) => {
+    state.speechAgents = (JSON.parse(e.data).agents ?? []).filter((a) => a.speak).map((a) => a.id);
+  });
   // The receipt and the context are the same on every page.
   stream.addEventListener('read', (e) => {
     state.read = JSON.parse(e.data);
@@ -1449,7 +1467,14 @@ function listen() {
     notice(text, level === 'error' ? 'error' : '');
   });
   stream.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
-  stream.addEventListener('diffs', (e) => dock.setRepos(JSON.parse(e.data).repos));
+  stream.addEventListener('diffs', (e) => {
+    pills.diffs = JSON.parse(e.data).repos ?? [];
+    showPills();
+  });
+  stream.addEventListener('workspaces', (e) => {
+    pills.workspaces = JSON.parse(e.data).workspaces ?? [];
+    showPills();
+  });
   stream.addEventListener('reactions', (e) => {
     state.reactions = JSON.parse(e.data).reactions ?? {};
     render();
@@ -1457,6 +1482,8 @@ function listen() {
   stream.addEventListener('threads', () => refreshTranscript());
   for (const name of ['signin', 'providers', 'settings']) stream.addEventListener(name, (e) => settingsEvent(name, JSON.parse(e.data)));
   stream.addEventListener('terminals', () => terminalsChanged());
+  // An agent's voice clip was transcribed (the agent editor shows the transcript).
+  stream.addEventListener('agent-voice', (e) => window.dispatchEvent(new CustomEvent('sfa-agent-voice', { detail: JSON.parse(e.data) })));
   stream.addEventListener('sections', (e) => setSections(JSON.parse(e.data).sections));
   stream.addEventListener('run_end', (e) => {
     const data = JSON.parse(e.data);

@@ -57,6 +57,36 @@ export function replyPreamble(quoted: string): string {
   return `[Inline reply to this earlier message: "${one.length > 400 ? `${one.slice(0, 399)}…` : one}"]\n\n`;
 }
 
+/** One shown image: its label and the data (undefined when it is no longer stored). */
+export interface ShownImage {
+  label: string;
+  mime: string;
+  data: Buffer | undefined;
+}
+
+/**
+ * The user message that carries the images tool calls showed (sfa-view),
+ * sent right after the calls' results: tool results are text for most
+ * providers, so the images follow as the next message.
+ */
+export function toolImagesMessage(shown: ReadonlyArray<{ callId: string; images: readonly ShownImage[] }>): UserMessage {
+  let text = '[Images from your tool call' + (shown.length > 1 ? 's' : '') + ', in order:';
+  const parts: UserContentPart[] = [];
+  let n = 0;
+  for (const { callId, images } of shown) {
+    for (const image of images) {
+      n++;
+      if (!image.data) {
+        text += `\n${n}. ${image.label} (call ${callId}): no longer available`;
+        continue;
+      }
+      text += `\n${n}. ${image.label} (call ${callId})`;
+      parts.push({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.data.toString('base64')}` } });
+    }
+  }
+  return { role: 'user', content: [{ type: 'text', text: `${text}]` }, ...parts] };
+}
+
 /** What the model is told about a message the person sent from a GenUI view. */
 export function viewPreamble(id: string, view: { title: string } | undefined, state: string | undefined): string {
   const name = view ? ` "${view.title.replace(/\s+/g, ' ')}"` : '';

@@ -60,7 +60,7 @@ export function createTerminalConfirm(
           const onAbort = () => resolve(null);
           signal.addEventListener('abort', onAbort, { once: true });
           rl.once('close', onAbort);
-          rl.question(color.bold('  Allow? [y]es once / [a]lways for this tool / [n]o: '), (value) => {
+          rl.question(color.bold(['full_control', 'host_action'].includes(request.toolName) ? '  Allow? [y]es once / [n]o: ' : '  Allow? [y]es once / [a]lways for this tool / [n]o: '), (value) => {
             signal.removeEventListener('abort', onAbort);
             rl.removeListener('close', onAbort);
             resolve(value);
@@ -69,7 +69,7 @@ export function createTerminalConfirm(
         if (answer === null) return 'deny';
         const a = answer.trim().toLowerCase();
         if (a === 'y' || a === 'yes') return 'allow_once';
-        if (a === 'a' || a === 'always') return 'allow_always';
+        if ((a === 'a' || a === 'always') && !['full_control', 'host_action'].includes(request.toolName)) return 'allow_always';
         if (a === 'n' || a === 'no' || a === '') return 'deny';
       }
     };

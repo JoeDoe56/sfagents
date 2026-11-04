@@ -174,11 +174,6 @@ export abstract class DeclarativeTool<
     readonly parameterSchema: JsonSchema,
   ) {}
 
-  /** Whether the tool may be left out of requests until tool_search loads it (see tools.defer). */
-  get deferrable(): boolean {
-    return false;
-  }
-
   get schema(): FunctionDeclaration {
     return {
       name: this.name,
@@ -263,6 +258,14 @@ export abstract class BaseDeclarativeTool<
 /** A declarative tool whose parameter and result types are not known. */
 export type AnyDeclarativeTool = DeclarativeTool<object, ToolResult>;
 
+/** An image a tool shows the model (sfa-view). */
+export interface ToolImage {
+  mime: string;
+  data: Buffer;
+  /** What it shows ("clip.mp4 at 0:12"). */
+  label?: string;
+}
+
 export interface ToolResult {
   /**
    * Content sent back to the model as the tool response. Kept as text:
@@ -281,6 +284,9 @@ export interface ToolResult {
 
   /** Structured data for callers inside the runtime (not sent to the model). */
   metadata?: Record<string, unknown>;
+
+  /** Images for the model, sent right after the call's result. */
+  images?: ToolImage[];
 }
 
 export interface ToolExecuteConfirmationDetails {

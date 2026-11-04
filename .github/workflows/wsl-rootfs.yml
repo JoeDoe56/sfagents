@@ -1,0 +1,69 @@
+# Builds the root filesystem of SF Agents' WSL2 distro "sfagents"
+# (container/wsl) and publishes it as a release asset, which SF Agents
+# downloads on Windows and imports with `wsl --import`
+# (core/src/container/wsl.ts, WSL_ROOTFS_URL).
+#
+# Release tag: wsl-rootfs-<branch>. Assets: sfagents-wsl.tar.gz and its
+# .sha256, which SF Agents checks before importing.
+name: WSL distro
+
+on:
+  push:
+    branches: [main, docker]
+    paths:
+      - container/wsl/**
+      - .github/workflows/wsl-rootfs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wsl-rootfs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build
+        run: docker build --progress=plain -t sfagents-wsl:ci container/wsl
+
+      # A distro must have Docker enabled, its own socket and no Windows drives.
+      - name: Check
+        run: |
+          docker run --rm sfagents-wsl:ci sh -c '
+            set -e
+            test -x /opt/sfagents/bin/docker
+            systemctl is-enabled sfagents-docker.service
+            systemctl is-enabled sfagents-isolate.service
+            test "$(systemctl is-enabled docker.service 2>/dev/null || true)" = masked
+            grep -q "^enabled *= *false" /etc/wsl.conf
+            grep -q "unix:///run/sfagents/docker.sock" /etc/systemd/system/sfagents-docker.service
+            test "$(stat -c %u /srv/sfagents/workspaces)" = 1000
+            echo ok'
+
+      - name: Export
+        run: |
+          id=$(docker create sfagents-wsl:ci)
+          docker export "$id" | gzip -9 > sfagents-wsl.tar.gz
+          docker rm "$id"
+          sha256sum sfagents-wsl.tar.gz | cut -d' ' -f1 > sfagents-wsl.tar.gz.sha256
+          ls -l sfagents-wsl.tar.gz
+          echo "Size: $(du -h sfagents-wsl.tar.gz | cut -f1), sha256 $(cat sfagents-wsl.tar.gz.sha256)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="wsl-rootfs-${GITHUB_REF_NAME//\//-}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --prerelease \
+              --title "SF Agents WSL distro ($GITHUB_REF_NAME)" \
+              --notes "Root filesystem of the sfagents WSL2 distro, built from container/wsl. SF Agents downloads and imports it on Windows."
+          fi
+          gh release upload "$tag" sfagents-wsl.tar.gz sfagents-wsl.tar.gz.sha256 --clobber

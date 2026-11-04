@@ -56,7 +56,7 @@ describe('working context', () => {
       if (msg.role === 'assistant' && msg.tool_calls) assert.equal(m[i + 1]!.role, 'tool');
       if (msg.role === 'tool') assert.ok(m[i - 1]!.role === 'assistant');
     });
-    assert.match(byWindow.systemExtra!, /25 earlier exchange\(s\) since the last context reset are not shown[\s\S]*search_conversation or fetch_section/);
+    assert.match(byWindow.systemExtra!, /25 earlier exchange\(s\) since the last context reset are not shown[\s\S]*action "search" or "sections"/);
 
     const byBudget = buildWorkingContext(conv.state, TARGET, { recentExchanges: 100, maxInputTokens: 1500 }, '', { retrievable: true });
     assert.ok(byBudget.report.includedExchanges < 10 && byBudget.report.includedExchanges >= 1);
@@ -90,7 +90,7 @@ describe('working context', () => {
     assert.ok(ctx.messages.length <= 24);
     assert.ok(ctx.report.indexEntries <= 60 && ctx.report.indexEntries > 10, `${ctx.report.indexEntries}`);
     assert.equal(ctx.report.indexTotal, 150);
-    assert.match(ctx.systemExtra!, /more section\(s\) not listed — use list_sections \(paginated\)/);
+    assert.match(ctx.systemExtra!, /more section\(s\) not listed — message action "sections" lists them \(paginated\)/);
     assert.match(ctx.systemExtra!, /\[s150\] Topic 149 detail .* ← current/);
     assert.match(ctx.systemExtra!, /\[s146\] Topic 145 area/, 'the current section\'s parent is shown');
     assert.match(ctx.systemExtra!, /current section \[s150\] has 2 earlier message\(s\) outside this context/);
@@ -114,9 +114,9 @@ describe('working context', () => {
     assert.deepEqual(searchConversation(conv.state, 'OPS-4471'), before, 'search results come from the Markdown alone');
     const script: Script = (req) => {
       const last = req.messages[req.messages.length - 1]!;
-      if (last.role === 'user') return { toolCalls: [{ name: 'search_sections', args: { query: 'migration' } }] };
+      if (last.role === 'user') return { toolCalls: [{ name: 'message', args: { action: 'search', query: 'migration', sections: true } }] };
       const out = lastToolContent(req)!;
-      if (out.startsWith('Sections matching')) return { toolCalls: [{ name: 'fetch_section', args: { section: /\[(s\d+)\]/.exec(out)![1] } }] };
+      if (out.startsWith('Sections matching')) return { toolCalls: [{ name: 'message', args: { action: 'sections', op: 'fetch', section: /\[(s\d+)\]/.exec(out)![1] } }] };
       return { text: `The ticket is ${/OPS-\d+/.exec(out)?.[0]}, window ${/Sunday \d\d:\d\d UTC/.exec(out)?.[0]}.` };
     };
     const { factory, providers } = scriptedFactory(script);

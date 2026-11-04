@@ -4,8 +4,9 @@
 
 export * from './agents/definition.js';
 export * from './agents/loader.js';
-export { MessageTool, MAX_QUESTION_OPTIONS, USER, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText } from './agents/message-agent.js';
-export type { MessageParams, MessageQuestion } from './agents/message-agent.js';
+export * from './agents/editor.js';
+export { MessageTool, MAX_QUESTION_OPTIONS, USER, toReplyPayload, MAX_AGENT_MESSAGE_CHARS, AGENT_MESSAGING_GUIDANCE, MESSAGE_USER_GUIDANCE, THREAD_MESSAGING_GUIDANCE, mailText, messageAction, MESSAGE_ACTIONS, USER_REACTIONS } from './agents/message-agent.js';
+export type { MessageAction, MessageParams, MessageQuestion } from './agents/message-agent.js';
 export type { AgentReplyPayload, AgentMessenger } from './agents/message-agent.js';
 export { watchProject } from './agents/watch.js';
 export { PROMPTS_DIR_NAME, PromptReferenceError, defaultPromptsDir, ensurePrompts, expandPrompt, isPromptReference } from './agents/prompts.js';
@@ -14,7 +15,7 @@ export type { ProjectWatcher } from './agents/watch.js';
 export { ThreadService, ThreadRecorder, ThreadBusyError, threadKey, threadPair, threadMessages, THREADS_DIR_NAME } from './agents/threads.js';
 export type { ThreadInfo, ThreadLease } from './agents/threads.js';
 export * from './runtime/events.js';
-export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS } from './runtime/runtime.js';
+export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS, withStepContext } from './runtime/runtime.js';
 export type { InboxItem, SendOptions } from './runtime/runtime.js';
 export type { RuntimeOptions } from './runtime/runtime.js';
 export * from './providers/types.js';
@@ -66,17 +67,16 @@ export type { ProviderFactory } from './providers/factory.js';
 export * from './mcp/config.js';
 export { McpManager } from './mcp/manager.js';
 export type { McpServerState, McpToolInfo, McpServerStatus } from './mcp/manager.js';
-export { mcpFunctionName, transformMcpResult } from './mcp/mcp-tool.js';
-export { WorkspaceContext } from './permissions/workspace.js';
+export { mcpFunctionName, mcpApprovalKey, transformMcpResult } from './mcp/mcp-tool.js';
+export { MCP_COMMAND, MCP_USAGE, mcpApprover, runMcpCommand, type McpGrant, type McpServerGrant } from './mcp/sfa-mcp.js';
 export * from './tools/tools.js';
 export { ToolErrorType } from './tools/tool-error.js';
-export { ToolNames, BUILTIN_TOOL_IDS } from './tools/tool-names.js';
-export { TOOL_SEARCH, AUTO_DEFER_MIN, ToolSearchTool, deferredToolNames, matchesToolPattern } from './tools/tool-search.js';
+export { ToolNames } from './tools/tool-names.js';
 export { stripAnsiAndControl } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
 export { openInBrowser } from './utils/open-url.js';
 export { removeDir } from './utils/remove-dir.js';
-export { descendantsOf, isLeftover, isSandboxRun, killProcessTree, orphansOf, parseProcessList, type ProcessEntry } from './utils/process-tree.js';
+export { descendantsOf, isLeftover, killProcessTree, orphansOf, parseProcessList, type ProcessEntry } from './utils/process-tree.js';
 export * from './conversation/types.js';
 export { parseConversation, serializeConversation, serializeRecord, decorationFor } from './conversation/format.js';
 export { ConversationState, SemanticError } from './conversation/state.js';
@@ -130,9 +130,9 @@ export {
   CURRENT_EXCHANGE,
 } from './conversation/sections.js';
 export type { SectionEntry, SectionPage, SearchHit, SearchResult, FetchResult } from './conversation/sections.js';
-export { createConversationTools, ConversationToolNames, ORGANIZE_GUIDANCE, SECTION_CHOICE_TOOLS, SECTION_REMINDER, MAX_SECTION_REMINDERS } from './conversation/tools.js';
+export { ConversationActions, conversationActions, ORGANIZE_GUIDANCE, SECTION_CHOICE_HELP } from './conversation/tools.js';
 export type { ConversationAccess } from './conversation/tools.js';
-export { AGENT_REACTIONS, CHAT_GUIDANCE, ChatToolNames, chatEffects, createChatTools } from './conversation/chat-tools.js';
+export { AGENT_REACTIONS, ChatToolNames, chatEffectOf, chatEffects } from './conversation/chat-tools.js';
 export {
   buildWorkingContext,
   contextBreakdown,
@@ -169,8 +169,8 @@ export {
   validateGenui,
   writeGenuiState,
 } from './conversation/genui.js';
-export { availableHostCommands, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, splitCommandLine, WEB_COMMAND } from './tools/host-commands.js';
-export type { HostCommandReply, HostCommands } from './tools/host-commands.js';
+export { availableHostCommands, DEFAULT_WEB_REQUESTS, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, WEB_COMMAND } from './tools/host-commands.js';
+export type { HostCommandReply, HostCommands, WebGrant } from './tools/host-commands.js';
 export {
   IMAGE_TOKEN_ESTIMATE,
   looksLikeText,
@@ -180,17 +180,24 @@ export {
   userMessageFor,
 } from './conversation/attachments.js';
 export { estimateMessages } from './conversation/context.js';
-export { detectSandbox, setSandboxForTesting, accessFor, HOST_CHANNEL_ENV, SANDBOX_RUN_DIR } from './sandbox/sandbox.js';
-export type { Sandbox, SandboxPolicy, SandboxRule, SandboxAccess, SandboxStatus, SandboxCommand, WrappedCommand } from './sandbox/sandbox.js';
-export { buildSandboxPolicy, GIT_PROTECTED } from './sandbox/policy.js';
-export { BubblewrapSandbox, bubblewrapCommand, findBubblewrap, LINUX_SYSTEM_PATHS } from './sandbox/linux.js';
-export { findPython, landlockCommand } from './sandbox/landlock.js';
-export { SeatbeltSandbox, seatbeltProfile } from './sandbox/macos.js';
-export { WindowsSandbox, detectWindowsSandbox, windowsSandboxPath } from './sandbox/windows.js';
-export { openHostChannel, hostCommandTools, hostCommandScript, DEFAULT_WEB_REQUESTS } from './sandbox/host-channel.js';
-export { packageProxy, PackageProxy, PACKAGE_HOSTS, hostAllowed, parseTarget, type NetworkLogEntry } from './sandbox/package-proxy.js';
-export { applyPatch, applyPatchScript, APPLY_PATCH_COMMAND } from './sandbox/apply-patch.js';
-export { GIT_COMMAND, GIT_USAGE, refusal as gitRefusal, httpsHost as httpsGitHost } from './tools/host-git.js';
-export type { HostChannel, WebGrant } from './sandbox/host-channel.js';
+export { NetworkLog, networkLog, type NetworkLogEntry } from './container/network-log.js';
+export { sfaPatch, sfaPatchScript, patchFormatFor, patchGuidance, SFA_PATCH_COMMAND, APPLY_PATCH_COMMAND, type PatchFormat } from './tools/sfa-patch.js';
+export { GIT_IDENTITY_VARS, gitIdentityEnv } from './tools/shell.js';
 export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
 export type { WebAccess, WebOperation } from './web/brightdata.js';
+export { ContainerBridge, BridgeStream, encodeFrame, FrameReader, lazyDuplex, BRIDGE_CONTAINER, RUN_VOLUME } from './container/bridge.js';
+export { ContainerManager, containerManager, setContainerManagerForTesting, containerIdFor, containerName, containerIdFromAppHost, rootMounts, hostToContainerPath, containerToHostPath, findSecretFiles, hostWorkspacesDir, agentImage, APP_HOST_SUFFIX, CONTAINER_COMMANDS, CONTAINER_CAPS, type AgentContainerSpec, type RootMount } from './container/containers.js';
+export { CommandDockerCli, defaultDockerCli, docker, WSL_DISTRO, type DockerCli, type DockerResult } from './container/docker.js';
+export { handleProxyConnection, levelAllows, isPrivateAddress, isNetworkLevel, networkLevelOf, NETWORK_LEVELS, NETWORK_LEVEL_TEXT, PACKAGE_HOSTS as CONTAINER_PACKAGE_HOSTS, GIT_HOSTS, HOST_CHANNEL_NAME, type NetworkLevel, type NetworkEvent } from './container/network.js';
+export { BRIDGE_SOURCE, INIT_SOURCE, CLIENT_SOURCE, EXEC_SOURCE, KILL_SOURCE, FRAME } from './container/scripts.js';
+export { wslStatus, setupDistro, mergeWslConfig, wslConfigPath, wslConfigSettings, writeWslMemoryCap, wslMemoryMb, mountRootsInDistro, WSLCONFIG_SETTINGS, type WslStatus } from './container/wsl.js';
+export { GitWorkspaces, GitError, CHECKPOINT_PREFIX, TASK_BRANCH_PREFIX, CONTAINER_WORKSPACES_DIR, taskOfPath, repoNameOf, githubRepo, hostGitCredential, parsePatch, type GitRunner, type GitCredential, type TaskRecord, type RepoRecord, type WorkspaceInfo, type ReviewFile, type ReviewHunk } from './git/workspaces.js';
+export { GIT_COMMAND, CI_COMMAND, GIT_USAGE, CI_USAGE, runGitCommand, runCiCommand, type GitGrant } from './git/sfa-git.js';
+export { defaultGitWorkspaces } from './git/default.js';
+
+export { GitHubPullRequests, githubApi } from './git/github.js';
+
+export { FullControlManager, RollbackJournal, runHostShell, type FullControlPlan, type FullControlStatus } from './runtime/full-control.js';
+
+export { UiService, ContainerUiAdapter, WindowsUiAdapter, runUiCommand, riskyControl, UI_COMMAND, UI_USAGE, type UiAdapter, type UiControl, type UiGrant, type UiReply } from './ui/ui.js';
+export { StartLux, type UiDecider, type DecisionQuestion, type DecisionAnswer } from './ui/startlux.js';

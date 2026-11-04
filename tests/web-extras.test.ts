@@ -130,7 +130,7 @@ describe('settings and providers in the web interface', () => {
 });
 
 describe('speech settings and the voice', () => {
-  test('the STT & TTS settings are checked, the reference clip is kept, and speaking asks for the model first', async () => {
+  test('the STT & TTS settings are checked, each agent\'s voice clip is kept, and speaking asks for the model first', async () => {
     const dictation = new Dictation({ dir: makeTempDir() });
     const app = await start({ dictation });
     try {
@@ -145,8 +145,10 @@ describe('speech settings and the voice', () => {
       const clip = Buffer.concat([Buffer.from('RIFF\0\0\0\0WAVEfmt '), Buffer.alloc(40)]);
       const put = await fetch(`${app.base}/api/voice`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: clip });
       assert.equal(put.status, 200);
-      assert.equal(((await put.json()) as { voice: { reference: boolean } }).voice.reference, true);
-      const got = await fetch(`${app.base}/api/voice`);
+      assert.equal(((await put.json()) as { clip: boolean }).clip, true);
+      assert.equal((await req(app.base, '/api/voice?agent=other')).status, 404, 'another agent has its own');
+      assert.equal((await req(app.base, '/api/agent-editor?agent=main')).json.voice.clip, true, 'the editor shows it');
+      const got = await fetch(`${app.base}/api/voice?agent=main`);
       assert.ok(Buffer.from(await got.arrayBuffer()).equals(clip));
       // Safari on iPhone asks for byte ranges and plays nothing without them.
       const part = await fetch(`${app.base}/api/voice`, { headers: { Range: 'bytes=0-1' } });
@@ -156,7 +158,7 @@ describe('speech settings and the voice', () => {
       const bad = await fetch(`${app.base}/api/voice`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: 'not audio' });
       assert.equal(bad.status, 400);
       const del = await fetch(`${app.base}/api/voice`, { method: 'DELETE' });
-      assert.equal(((await del.json()) as { voice: { reference: boolean } }).voice.reference, false);
+      assert.equal(((await del.json()) as { clip: boolean }).clip, false);
 
       const spoken = await req(app.base, '/api/speak', { body: { text: 'Hello.' } });
       assert.equal(spoken.status, 409, 'the voice model is not downloaded');

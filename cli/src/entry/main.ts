@@ -9,7 +9,6 @@
  *   sfagents web                   serve the web interface (default http://127.0.0.1:8093)
  */
 
-import { spawnSync } from 'node:child_process';
 import readline from 'node:readline';
 import { parseArgs } from 'node:util';
 import {
@@ -31,15 +30,15 @@ import {
   getErrorMessage,
   KeyringUnavailableError,
   isLeftover,
-  isSandboxRun,
+  containerManager,
   killProcessTree,
   sfagentsHome,
-  windowsSandboxPath,
   mcpGrants,
   MissingCredentialError,
   stripAnsiAndControl,
   type AgentTree,
   type ConfirmationHandler,
+  defaultGitWorkspaces,
 } from '@sfagents/core';
 import { loadConfig, loadEnvFile, locateConfig } from '../config/load.js';
 import { EventRenderer } from '../terminal/render.js';
@@ -59,6 +58,7 @@ import type { ConversationService } from '@sfagents/core';
 import { DEFAULT_HOST, DEFAULT_PORT, LogBook, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
 import { startTui } from '../terminal/tui.js';
 import { providersCommand, settingsCommand } from './providers.js';
+import { containersCommand } from './containers.js';
 
 export const VERSION = '0.1.0';
 
@@ -84,6 +84,8 @@ Usage:
                                         App settings (web port and address, sensors, terminal output)
   sfagents conversation [info|sections|show <id>|search <words>|artifacts|unlock]
                                         Inspect the stored conversation (or remove a stale lock)
+  sfagents containers [status|setup]    Agent containers: check them, or set them up (Windows: the sfagents
+                                        WSL distro; everywhere: the agent image)
 
 Options:
   -c, --config <dir|file>   Project directory (holding the agents folder), or one agent file in it (default: .)
@@ -112,7 +114,7 @@ Environment:
   SFAGENTS_HOME             Folder for settings.json and providers.json (default: the per-user app folder)
   SFAGENTS_DEBUG=1          Debug logging to stderr`;
 
-interface Streams {
+export interface Streams {
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
 }
@@ -187,6 +189,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
   // Provider and settings commands don't need a project.
   if (command === 'providers') return providersCommand(positionals.slice(1), streams, { name: values.name, url: values.url });
   if (command === 'settings') return settingsCommand(positionals.slice(1), streams);
+  if (command === 'containers') return containersCommand(positionals.slice(1), streams);
   const appSettings = new AppSettings();
   let stored: ReturnType<AppSettings['stored']> = {};
   try {
@@ -326,6 +329,7 @@ export async function main(argv: string[], streams: Streams = { stdout: process.
         confirm: (request, signal) => (bound ? bound(request, signal) : Promise.resolve('deny')),
         conversation,
         providerFactory: providers().factory,
+        git: defaultGitWorkspaces(),
       });
       registerCleanup(() => runtime.dispose());
       if (conversation) registerCleanup(() => conversation.close());
@@ -405,8 +409,12 @@ async function runOnce(
     confirm: rl ? createTerminalConfirm(rl, streams.stderr, renderer) : undefined,
     conversation: opts.conversation,
     providerFactory: providers().factory,
+    git: defaultGitWorkspaces(),
   });
   registerCleanup(() => runtime.dispose());
+  // The bridge to the agents' containers keeps a docker exec open; end it so
+  // the process can exit. The containers keep running for the next request.
+  registerCleanup(() => containerManager().bridge.stop());
   if (opts.conversation) {
     const conversation = opts.conversation;
     registerCleanup(() => conversation.close());
@@ -522,6 +530,8 @@ async function serveWeb(
   });
   // Cleanups run in reverse: stop the server (and any run) before closing the conversation.
   registerCleanup(() => conversation.close());
+  // Quitting stops the agents' containers (after the server and any run).
+  registerCleanup(() => containerManager().stopAll());
   registerCleanup(() => server.close());
   let url: string;
   try {
@@ -583,15 +593,12 @@ async function stopEverything(code: number, streams: Streams): Promise<never> {
   await runExitCleanup();
   try {
     // Turning off screen mirroring's virtual display is left to finish on its own.
-    // What an earlier SF Agents left behind goes too: sandboxed commands (they
-    // lock the helper's file), the keyboard and sensor programs, the keyboard
+    // What an earlier SF Agents left behind goes too: the keyboard and sensor programs, the keyboard
     // worker, the screen helper and speech servers whose parent is gone.
     const home = sfagentsHome();
     const stopped = await killProcessTree({ graceMs: 2_000, keep: (command) => command.includes('--vdisplay-off'), orphans: (command) => isLeftover(command, home) });
     if (stopped.length) {
       streams.stderr.write(`Stopped ${stopped.length} process${stopped.length === 1 ? '' : 'es'} left running.\n`);
-      // A sandboxed command killed this way skipped the helper's own cleanup: put its permission changes back.
-      if (process.platform === 'win32' && stopped.some((p) => isSandboxRun(p.command))) spawnSync(windowsSandboxPath(), ['recover'], { windowsHide: true, timeout: 30_000 });
       // Lets exit handlers that were waiting on them run (the virtual display's).
       await new Promise((resolve) => setTimeout(resolve, 300));
     }

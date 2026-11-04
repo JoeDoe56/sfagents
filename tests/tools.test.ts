@@ -5,16 +5,15 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import {
   AgentRuntime,
-  detectSandbox,
+  hostWorkspacesDir,
   loadAgentTree,
   ToolErrorType,
   type AnyDeclarativeTool,
   type ToolResult,
 } from '@sfagents/core';
-import { baseAgent, makeTempDir, writeJson, writeAgent } from './helpers.js';
+import { baseAgent, makeTempDir, NO_CONTAINER_TESTS, writeJson, writeAgent } from './helpers.js';
 
 const isWin = process.platform === 'win32';
-const sandboxed = (await detectSandbox()).ok;
 
 interface Fixture {
   dir: string;
@@ -23,15 +22,16 @@ interface Fixture {
   tools: Map<string, AnyDeclarativeTool>;
 }
 
-async function fixture(allow: string[], limits: Record<string, unknown> = {}): Promise<Fixture> {
+/** An agent whose test folder is a folder in /workspaces (commands run there with `directory`). */
+async function fixture(limits: Record<string, unknown> = {}): Promise<Fixture> {
   const dir = makeTempDir();
-  const work = path.join(dir, 'work');
+  fs.mkdirSync(hostWorkspacesDir(), { recursive: true });
+  const work = fs.mkdtempSync(path.join(hostWorkspacesDir(), 'tools-'));
   fs.mkdirSync(path.join(work, 'src'), { recursive: true });
   fs.writeFileSync(path.join(work, 'src', 'a.txt'), 'alpha\nbeta\ngamma\n');
   fs.writeFileSync(path.join(work, 'src', 'b.ts'), 'export const Beta = 2;\n');
   const outside = makeTempDir();
-  fs.writeFileSync(path.join(outside, 'secret.txt'), 'TOP SECRET beta\n');
-  writeAgent(dir, baseAgent('main', { workspace: { roots: ['work'] }, tools: { allow }, limits }));
+  writeAgent(dir, baseAgent('main', { limits }));
   const tree = loadAgentTree(dir);
   const runtime = new AgentRuntime({ tree, providerFactory: () => { throw new Error('unused'); } });
   const tools = await runtime.buildTools(tree.root, ['main'], () => {});
@@ -49,51 +49,29 @@ async function call(f: Fixture, name: string, args: Record<string, unknown>): Pr
   return { permission, result: await invocation.execute(signal) };
 }
 
-describe('removed file tools', () => {
-  test('old agent files still load: the file tools become shell, read-only when none of them could write', async () => {
-    const ro = await fixture(['read_file', 'glob', 'grep', 'list_directory']);
-    assert.deepEqual([...ro.tools.keys()], ['shell']);
-    const rw = await fixture(['read_file', 'edit']);
-    assert.deepEqual([...rw.tools.keys()], ['shell']);
-    const tree = loadAgentTree(ro.dir);
-    assert.ok(tree.warnings.some((w) => /read_file, glob, grep, list_directory were replaced by shell.*read-only/.test(w)), tree.warnings.join('\n'));
-    assert.deepEqual(tree.root.access.map((r) => r.access), ['read']);
-    assert.deepEqual(loadAgentTree(rw.dir).root.access, []);
-    if (!sandboxed) return;
-    const denied = await call(ro, 'shell', { command: isWin ? 'type src\\a.txt && echo x>src\\a.txt' : 'cat src/a.txt && echo x > src/a.txt' });
-    assert.match(denied.result!.llmContent, /alpha/);
-    assert.equal(fs.readFileSync(path.join(ro.work, 'src', 'a.txt'), 'utf8'), 'alpha\nbeta\ngamma\n');
-    await call(rw, 'shell', { command: isWin ? 'echo changed>src\\a.txt' : 'echo changed > src/a.txt' });
-    assert.equal(fs.readFileSync(path.join(rw.work, 'src', 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'changed\n');
-  });
-
-  test('auto-approval entries for removed tools are ignored', async () => {
-    const dir = makeTempDir();
-    writeAgent(dir, baseAgent('main', { tools: { allow: ['write_file'], autoApprove: ['write_file'] } }));
-    assert.deepEqual(loadAgentTree(dir).root.definition.tools?.autoApprove, []);
-  });
-
-  test('schema validation rejects bad arguments', async () => {
-    const f = await fixture(['shell']);
+describe('shell tool', () => {
+  test('every agent has the shell; schema validation rejects bad arguments', async () => {
+    const f = await fixture();
+    assert.ok(f.tools.has('shell'));
     assert.throws(() => f.tools.get('shell')!.build({}), /Command cannot be empty/);
     assert.throws(() => f.tools.get('shell')!.build({ job_action: 'restart' }), /job_action|must be equal to one of/);
   });
 });
 
-describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () => {
-  test('runs an allowed command in the sandbox without asking, and reports exit codes', async () => {
-    const f = await fixture(['shell']);
-    const ok = await call(f, 'shell', { command: isWin ? 'echo hello' : 'echo hello && pwd' });
+describe('shell (in the agent container)', { skip: NO_CONTAINER_TESTS }, () => {
+  test('runs a command in the container without asking, and reports exit codes', async () => {
+    const f = await fixture();
+    const ok = await call(f, 'shell', { command: 'echo hello && pwd', directory: path.basename(f.work) });
     assert.equal(ok.permission, 'allow');
     assert.match(ok.result!.llmContent, /Stdout: hello/);
     assert.match(ok.result!.llmContent, /Exit Code: 0/);
-    if (!isWin) assert.match(ok.result!.llmContent, new RegExp(f.work.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(ok.result!.llmContent, /Directory: \/workspaces\/tools-/);
     const fail = await call(f, 'shell', { command: 'exit 3' });
     assert.match(fail.result!.llmContent, /Exit Code: 3/);
   });
 
   test('times out and kills long commands', async () => {
-    const f = await fixture(['shell'], { shellTimeoutSeconds: 1 });
+    const f = await fixture({ shellTimeoutSeconds: 1 });
     const started = Date.now();
     const r = await call(f, 'shell', { command: isWin ? 'ping -n 30 127.0.0.1' : 'sleep 30' });
     assert.equal(r.result!.error?.type, ToolErrorType.EXECUTION_TIMEOUT);
@@ -101,7 +79,7 @@ describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () =>
   });
 
   test('runs a command in the background, reads its new output and stops it', async () => {
-    const f = await fixture(['shell']);
+    const f = await fixture();
     // Inline: Node cannot resolve a script file's path under the temp folder inside the Windows sandbox.
     const started = await call(f, 'shell', { command: `"${process.execPath}" -e "let n = 0; console.log('ready'); setInterval(() => console.log('tick ' + ++n), 200)"`, background: true, timeout_seconds: 2 });
     assert.equal(started.result!.error, undefined, started.result!.llmContent);
@@ -121,10 +99,10 @@ describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () =>
     assert.match(done.result!.llmContent, /State: exited with code 0[\s\S]*quick/);
   });
 
-  test('edits files with apply_patch and a patch on stdin', async () => {
-    const f = await fixture(['shell']);
+  test('edits files with sfa-patch (apply_patch format) on stdin', async () => {
+    const f = await fixture();
     const patch = '*** Begin Patch\n*** Update File: src/a.txt\n@@\n alpha\n-beta\n+beta with "quotes" || pipes & ampersands\n*** Add File: src/c.txt\n+new file\n*** End Patch\n';
-    const r = await call(f, 'shell', { command: 'apply_patch', stdin: patch });
+    const r = await call(f, 'shell', { command: 'sfa-patch', stdin: patch, directory: path.basename(f.work) });
     assert.equal(r.result!.error, undefined, r.result!.llmContent);
     assert.match(r.result!.llmContent, /M src\/a\.txt/);
     assert.equal(fs.readFileSync(path.join(f.work, 'src', 'a.txt'), 'utf8'), 'alpha\nbeta with "quotes" || pipes & ampersands\ngamma\n');
@@ -134,13 +112,13 @@ describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () =>
   test("commands get the person's Git name and email, so commits work in the empty home", async (t) => {
     const name = spawnSync('git', ['config', '--global', 'user.name'], { encoding: 'utf8' }).stdout?.trim();
     if (!name) return t.skip('no global Git user.name here');
-    const f = await fixture(['shell']);
+    const f = await fixture();
     const r = await call(f, 'shell', { command: isWin ? 'echo %GIT_AUTHOR_NAME%' : 'echo "$GIT_AUTHOR_NAME"' });
     assert.match(r.result!.llmContent, new RegExp(`Stdout: ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   });
 
   test('does not leak the provider API key into commands', async () => {
-    const f = await fixture(['shell']);
+    const f = await fixture();
     process.env['OPENROUTER_API_KEY'] = 'should-not-leak';
     try {
       const r = await call(f, 'shell', { command: isWin ? 'echo %OPENROUTER_API_KEY%' : 'echo "key=${OPENROUTER_API_KEY:-unset}"' });
@@ -150,8 +128,9 @@ describe('shell', { skip: !sandboxed && 'no OS sandbox on this machine' }, () =>
     }
   });
 
-  test('working directory outside the roots is denied', async () => {
-    const f = await fixture(['shell']);
-    assert.equal((await call(f, 'shell', { command: 'echo hi', directory: f.outside })).permission, 'deny');
+  test('a missing working folder is explained', async () => {
+    const f = await fixture();
+    const r = await call(f, 'shell', { command: 'echo hi', directory: 'no-such-folder' });
+    assert.match(r.result!.llmContent, /does not exist in the container/);
   });
 });

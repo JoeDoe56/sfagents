@@ -1,3 +1,4 @@
+import { openFullControlJournal } from './full-control.js';
 /**
  * The send button's sheet: the agent, its reasoning effort and how full its
  * working context is. The medium detent shows the agent (a pop-up button
@@ -15,6 +16,8 @@ import { applySymbol } from './vendor/sfgl/src/symbols.js';
 import { showError, confirmDialog, toast } from './dialogs.js';
 import { showMenu } from './menu.js';
 import { openAgentTree } from './agenttree.js';
+import { openAgentEditor } from './agenteditor.js';
+import { openWorkspaces } from './workspaces.js';
 
 const LEVEL_NAMES = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
 const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
@@ -368,13 +371,23 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     showMenu({ anchor: parts.accountRow.anchor, align: 'end', placement: 'cover', title: listed.length > 1 ? 'In order: the next takes over at a limit' : undefined, groups: [listed.map(item), others.map(item)] });
   }
 
+  /** The agent editor; the sheet shows what it saved. */
+  function editAgent(name) {
+    openAgentEditor({
+      ...(name ? { agent: name } : {}),
+      onEditFile,
+      onSaved: () => (loadAgent(), loadContext()),
+      onDeleted: () => loadAgent(),
+    });
+  }
+
   function pickAgent() {
-    if (!agents.length) return;
     showMenu({
       anchor: parts.agentRow.anchor,
       align: 'end',
       placement: 'cover',
       groups: [
+        [{ label: 'New Agent…', symbol: 'plus', action: () => editAgent() }],
         agents.map((a) => ({
           label: a.name ?? a.id,
           detail: a.model,
@@ -396,6 +409,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     const tree = openAgentTree({
       current: staged.agent ?? info?.id,
       onEditFile,
+      onEditAgent: (id) => editAgent(id),
       // Picking an agent in the tree stages it here, as the menu does.
       onUseAgent: (id) => {
         const a = agentById(id);
@@ -409,14 +423,14 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
     });
   }
 
-  // The gear opens the agent's file in the file manager's editor.
+  // The gear opens the agent editor.
   const gear = createButton({
     symbol: 'gear',
-    aria: 'Edit the agent file',
+    aria: 'Edit the agent',
     size: 'large',
     onClick: () => {
       const a = stagedAgent();
-      if (a?.file) onEditFile?.(a.file);
+      if (a?.id) editAgent(a.id);
     },
   });
   const ctx = openSheet({
@@ -434,7 +448,9 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       parts.treeRow = createRow({ icon: 'person.2', iconTint: '#5e5ce6', title: 'Agent Tree', accessory: 'chevron', onTap: showTree });
       parts.agentSection = createSection({ rows: [parts.agentRow, parts.accountRow], note: info?.model ?? '' });
       const line = parts.agentSection.el;
-      const treeSection = createSection({ rows: [parts.treeRow] }).el;
+      const workspacesRow = createRow({ icon: 'folder', iconTint: '#ff9f0a', title: 'Workspaces', accessory: 'chevron', onTap: () => openWorkspaces() });
+      const fullControlRow = createRow({ icon: 'clock', iconTint: '#ff9f0a', title: 'Full Control Files', accessory: 'chevron', onTap: () => openFullControlJournal() });
+      const treeSection = createSection({ rows: [parts.treeRow, workspacesRow, fullControlRow] }).el;
 
       const effort = el('div', 'ag-effort');
       const label = el('p', 'ag-label ag-unit');
@@ -543,7 +559,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
         const meta = el('p', 'ag-tool-meta', item.partOf ? `Counted in ${item.partOf} · ${item.detail}` : `${tokensText(item.tokens)} tokens${item.detail ? ` · ${item.detail}` : ''}`);
         const desc = el('p', 'ag-tool-desc', schema.description || 'No description.');
         if (item.partOf) {
-          // A command run through another tool (sf-web, sf-artifact in the shell).
+          // A command run through another tool (sfa-web, sfa-artifact in the shell).
           sheet.body.append(meta, desc, el('h3', 'ag-tool-label', 'Usage'), el('pre', 'ag-tool-json', schema.usage ?? ''));
           return;
         }
@@ -647,7 +663,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       sections.push(createSection({ title: 'Tools', group }).el);
     }
 
-    // What the shell reached through the package and Git proxy (offline agents).
+    // What the agents' containers connected to, allowed or refused (the Network log).
     if (network) {
       const entries = network.entries.slice(0, 30);
       const rows = entries.map((e) => createRow({
@@ -662,7 +678,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       sections.push(createSection({
         title: 'Network',
         rows,
-        note: `With the network off, shell commands can reach only package registries and Git hosts over HTTPS (${network.hosts.join(', ')}); everything else is blocked. Newest first.`,
+        note: `This agent's network level is "${network.level}": ${{ off: 'no network', pkg: 'package registries only', git: 'package registries and Git hosts', on: 'the internet' }[network.level] ?? network.level}. This computer and the local network are never reachable. Every agent's connections, newest first.`,
       }).el);
     }
 
