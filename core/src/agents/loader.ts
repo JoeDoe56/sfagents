@@ -174,7 +174,7 @@ export function ensureProject(project: string): string[] {
   const file = path.join(agentsDir, `${DEFAULT_AGENT_NAME}.json`);
   // With the default prompt files at hand, the new agent uses them.
   const shared = DEFAULT_AGENT_PROMPTS.every((name) => fs.existsSync(path.join(projectDir, PROMPTS_DIR_NAME, name)));
-  // The agent works in its own container: /workspaces, and the Project Folders setting read-only under /roots.
+  // The agent works in /workspaces; its own folders can be added read-only under /roots.
   const agent = { ...DEFAULT_AGENT, ...(shared ? { systemPrompt: DEFAULT_AGENT_PROMPTS.map((name) => `@${name}`) } : {}) };
   fs.writeFileSync(file, `${JSON.stringify(agent, null, 2)}\n`, { flag: 'wx' });
   created.push(file);

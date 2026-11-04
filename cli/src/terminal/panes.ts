@@ -807,10 +807,9 @@ export function settingsPane(host: PaneHost): Pane {
   const editSetting = (st: Setting) => {
     if (st.type === 'boolean') return void save(st.key, st.value !== true);
     const current = Array.isArray(st.value) ? st.value.join(', ') : st.value === null || st.value === undefined ? '' : String(st.value);
-    const shown = st.type === 'folders' && Array.isArray(st.value) ? st.value.join('; ') : current;
-    host.ask(`${st.label}${st.type === 'origins' ? ' (separate with commas)' : st.type === 'folders' ? ' (separate with semicolons)' : ''}:`, shown, (text) => {
+    host.ask(`${st.label}${st.type === 'origins' ? ' (separate with commas)' : ''}:`, current, (text) => {
       const t = text.trim();
-      const value = st.type === 'origins' ? (t ? t.split(/[\s,]+/).filter(Boolean) : []) : st.type === 'folders' ? (t ? t.split(';').map((f) => f.trim()).filter(Boolean) : []) : st.type === 'number' || st.type === 'port' ? Number(t) : t;
+      const value = st.type === 'origins' ? (t ? t.split(/[\s,]+/).filter(Boolean) : []) : st.type === 'number' || st.type === 'port' ? Number(t) : t;
       void save(st.key, value);
     });
   };
@@ -1229,6 +1228,7 @@ interface AgentFormData {
   model: string;
   instructions: string;
   network: string | null;
+  folders: string[];
   mcpServers: string[];
   memoryMb: number;
   cpus: number;
@@ -1355,6 +1355,9 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
         rows.push({ pick: true, value: `network:${l.value}`, lines: [`  ${f.network === l.value ? color.green('●') : '○'} ${color.bold(NETWORK_NAMES[l.value] ?? l.value)} ${color.dim(truncate(l.text, Math.max(10, w - 30)))}`] });
       }
       if (errors['network']) rows.push({ lines: [`    ${color.red(errors['network'])}`] });
+      rows.push(heading('Project folders (read-only)'));
+      rows.push(field('folders', 'Folders', f.folders.length ? f.folders.join('; ') : '(none)', w,
+        wrap('Only this agent sees these folders at /roots/<name>. Separate full paths with semicolons or new lines; clear to remove all.', w - 8).map((l) => `    ${color.dim(l)}`)));
       rows.push(heading('MCP servers'));
       if (!c.mcpServers.length) rows.push(note('No MCP servers are set up (mcp.json).', w));
       for (const s of [...new Set([...c.mcpServers, ...f.mcpServers])]) {
@@ -1432,6 +1435,10 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
       case 'instructions':
         if (arrow) return false;
         host.ask('Instructions (Alt+Enter or Shift+Enter for a new line; a line @name.txt pulls in a prompt file):', f.instructions, (t) => (set('instructions', t.replace(/\r\n/g, '\n')), host.redraw()));
+        return true;
+      case 'folders':
+        if (arrow) return false;
+        host.ask('Project folders (full paths, separated by semicolons or new lines; empty removes all):', f.folders.join('; '), (t) => (set('folders', t.split(/[;\r\n]+/).map((s) => s.trim()).filter(Boolean)), host.redraw()));
         return true;
       case 'prompt':
         if (arrow) return false;
@@ -1544,7 +1551,7 @@ export function workspacesPane(host: PaneHost): Pane {
   const p = loading(host, {
     title: 'Workspaces',
     hint: '↑↓ move · Enter reviews · Esc goes back',
-    load: () => host.api<{ workspaces: WorkspaceRow[]; folders: string[] }>('GET', 'workspaces'),
+    load: () => host.api<{ workspaces: WorkspaceRow[]; foldersByAgent: Record<string, string[]> }>('GET', 'workspaces'),
     view: (d, w) =>
       d.workspaces.length
         ? [
@@ -1556,7 +1563,7 @@ export function workspacesPane(host: PaneHost): Pane {
             })),
           ]
         : [note('No task workspaces yet. An agent at network level Git or Internet starts one with sfa-git clone <url>, then sfa-git task <repo> <task>.', w)],
-    enter: (row) => host.open(workspacePane(host, row.value as WorkspaceRow, p.data?.folders ?? [], () => p.reload())),
+    enter: (row) => host.open(workspacePane(host, row.value as WorkspaceRow, p.data?.foldersByAgent[(row.value as WorkspaceRow).agent] ?? [], () => p.reload())),
     event: (name) => {
       if (name === 'workspaces') p.reload();
     },
@@ -1642,7 +1649,7 @@ export function workspacePane(host: PaneHost, w: WorkspaceRow, folders: string[]
           host.confirm(`Push to ${current.defaultBranch}? Only a fast-forward.`, () => act('push-main'));
           return true;
         case 'f':
-          if (!folders.length) host.notice('Add the checkout as a Project Folder in /settings first.');
+          if (!folders.length) host.notice('Add the checkout under Project Folders in this workspace agent’s editor first.');
           else if (folders.length === 1) host.confirm(`Fast-forward ${folders[0]} to ${current.branch}?`, () => act('pull-into', { folder: folders[0] }));
           else host.ask(`Folder (${folders.join('; ')}):`, folders[0]!, (folder) => act('pull-into', { folder: folder.trim() }));
           return true;

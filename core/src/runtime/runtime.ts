@@ -114,8 +114,6 @@ export interface RuntimeOptions {
   conversation?: ConversationService;
   /** Web access for agents at network level "on" (default: Bright Data, with the key added in Settings). */
   web?: WebAccess;
-  /** The project folders every agent reads (default: the Project Folders setting). */
-  folders?: () => string[];
   /** Git workspaces for sfa-git and sfa-ci, and the checkpoint after each run. */
   git?: GitWorkspaces;
 }
@@ -247,7 +245,6 @@ export class AgentRuntime implements AgentMessenger {
   private disposed = false;
   readonly conversation?: ConversationService;
   private readonly web: WebAccess;
-  private readonly folders?: () => string[];
   readonly git?: GitWorkspaces;
   readonly fullControl: FullControlManager;
   readonly ui: UiService;
@@ -278,7 +275,6 @@ export class AgentRuntime implements AgentMessenger {
     this.conversation = options.conversation;
     this.threads = new ThreadService(options.conversation?.dir);
     this.web = options.web ?? new BrightDataWeb(() => new ProviderRegistry().webKey());
-    if (options.folders) this.folders = options.folders;
     if (options.git) this.git = options.git;
   }
 
@@ -323,7 +319,7 @@ export class AgentRuntime implements AgentMessenger {
       commands.git = {
         ...(role === 'main' && agentPath.length === 1 ? { pullInto: async (repo: string, task: string, folder: string) => {
           const lease = this.fullControl.require(link);
-          if (!this.projectFolders().includes(folder)) throw new Error('Pick one of the Project Folders.');
+          if (!this.projectFolders(node.id).includes(folder)) throw new Error('Pick one of this agent’s Project Folders.');
           return this.git!.pullInto(repo, task, folder, async (q) => this.fullControl.approveAction(link, node.id, q, link.signal), AbortSignal.any([link.signal, lease]));
         } } : {}),
         workspaces: this.git,
@@ -344,7 +340,7 @@ export class AgentRuntime implements AgentMessenger {
       maxOutputChars: d.limits?.maxToolOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
       secretEnvNames: this.secretEnvNames,
       shellTimeoutMs: (d.limits?.shellTimeoutSeconds ?? DEFAULT_SHELL_TIMEOUT_MS / 1000) * 1000,
-      get container() { return { level: level(), roots: runtime.projectFolders(), hidden: runtime.hiddenPaths(), ...current()?.container }; },
+      get container() { return { level: level(), roots: runtime.projectFolders(node.id), hidden: runtime.hiddenPaths(), ...current()?.container }; },
       patchFormat: this.patchFormat(d),
       commands,
     };
@@ -394,14 +390,11 @@ export class AgentRuntime implements AgentMessenger {
     };
   }
 
-  /** The project folders every agent reads (Settings → Project Folders), those that exist. */
-  projectFolders(): string[] {
-    let folders: string[] = [];
-    try {
-      folders = this.folders ? this.folders() : new AppSettings().get<string[]>('agents.folders');
-    } catch {
-      // unreadable settings: no folders
-    }
+  /** One agent's mounted folders; without an id, the union for the person's file/review UI. */
+  projectFolders(agentId?: string): string[] {
+    const folders = agentId === undefined
+      ? [...new Set([...this.tree.byId.values()].flatMap((n) => n.definition.folders ?? []))]
+      : this.tree.byId.get(agentId)?.definition.folders ?? [];
     return folders.filter((f) => {
       try {
         return fs.statSync(f).isDirectory();

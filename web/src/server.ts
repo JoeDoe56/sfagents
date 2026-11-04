@@ -1097,7 +1097,7 @@ export class WebServer {
         return sendJson(res, 200, this.agentsInfo());
       case 'GET workspaces': {
         this.checkFetchSite(req);
-        if (!parts[1]) return sendJson(res, 200, { workspaces: await this.listWorkspaces(), folders: this.runtime.projectFolders(), pullRequests: this.appSettings.get<boolean>('agents.pullRequests') });
+        if (!parts[1]) return sendJson(res, 200, { workspaces: await this.listWorkspaces(), foldersByAgent: Object.fromEntries([...this.runtime.tree.byId.keys()].map((id) => [id, this.runtime.projectFolders(id)])), pullRequests: this.appSettings.get<boolean>('agents.pullRequests') });
         if (!this.runtime.git || !parts[2]) throw new HttpError(404, 'No such workspace.');
         try {
           return sendJson(res, 200, await this.runtime.git.review(parts[1], parts[2]));
@@ -2027,6 +2027,7 @@ export class WebServer {
           model: String(form.model ?? ''),
           instructions: String(form.instructions ?? '').replace(/\r\n/g, '\n'),
           network: (form.network ?? null) as AgentForm['network'],
+          folders: form.folders ?? [],
           mcpServers: Array.isArray(form.mcpServers) ? form.mcpServers.map(String) : [],
           memoryMb: Number(form.memoryMb),
           cpus: Number(form.cpus),
@@ -2381,7 +2382,8 @@ export class WebServer {
           break;
         case 'pull-into': {
           const folder = str('folder');
-          if (!this.runtime.projectFolders().includes(folder)) throw new HttpError(400, 'Pick one of your Project Folders.');
+          const workspace = (await git.list()).find((w) => w.repo === repo && w.task === task);
+          if (!workspace || !this.runtime.projectFolders(workspace.agent).includes(folder)) throw new HttpError(400, 'Pick one of the workspace agent’s Project Folders.');
           text = await git.pullInto(repo, task, folder, approve);
           this.refreshDiffs(0);
           break;

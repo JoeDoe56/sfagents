@@ -78,6 +78,24 @@ describe('the agent editor (core)', () => {
     assert.equal(f.network, null);
     assert.equal(f.memoryMb, 2048);
     assert.equal(f.cpus, 2);
+    assert.deepEqual(f.folders, []);
+  });
+
+  test('project folders save on the agent, survive duplication, and reject invalid paths', () => {
+    const { dir, tree } = project();
+    const folder = makeTempDir('agent project-');
+    const f = form({ folders: [folder, `${folder}${path.sep}.`] });
+    saveAgentForm(tree(), f, LIMITS);
+    assert.deepEqual(agentFile(dir, 'writer')['folders'], [folder]);
+    assert.deepEqual(tree().byId.get('writer')!.definition.folders, [folder]);
+    assert.deepEqual(readAgentForm(tree(), 'writer').folders, [folder]);
+    const copy = duplicateAgentFile(tree(), 'writer');
+    assert.deepEqual(readAgentForm(tree(), copy).folders, [folder]);
+    assert.match(validateAgentForm(tree(), form({ folders: ['relative/folder'] }), LIMITS).folders!, /full path/);
+    assert.match(validateAgentForm(tree(), form({ folders: 'bad' as unknown as string[] }), LIMITS).folders!, /array of strings/);
+    assert.throws(() => parseAgentDefinition(baseAgent('a', { folders: [17] }), 'a.json'), /folders\[0\].*string/);
+    saveAgentForm(tree(), { ...readAgentForm(tree(), 'writer'), folders: [] }, LIMITS, 'writer');
+    assert.equal(agentFile(dir, 'writer')['folders'], undefined);
   });
 
   test('each field says what is wrong with it', () => {
@@ -180,6 +198,8 @@ describe('the WSL memory cap', () => {
     assert.equal(s.get('agents.fullControlMinutes'), 5);
     assert.equal(s.get('containers.wslMemoryGb'), 16);
     assert.throws(() => s.set({ 'agents.fullControlMinutes': 0 }), /from 1 to 120/);
+    assert.equal(s.all().some((v) => v.key === 'agents.folders'), false);
+    assert.throws(() => s.set({ 'agents.folders': [] }), /Unknown setting/);
   });
 });
 

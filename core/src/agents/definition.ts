@@ -5,6 +5,7 @@
  * instead of silently granting or dropping permissions.
  */
 
+import path from 'node:path';
 import { isNetworkLevel, NETWORK_LEVEL_TEXT, NETWORK_LEVELS, type NetworkLevel } from '../container/network.js';
 import { MCP_TOOL_PREFIX } from '../tools/tool-names.js';
 import { REASONING_EFFORTS, type ReasoningEffort } from '../providers/types.js';
@@ -76,10 +77,11 @@ export interface AgentDefinition {
   /**
    * What the agent's shell can reach on the network: "off", "pkg" (package
    * registries), "git" (pkg plus Git hosts) or "on" (the internet, and
-   * sfa-web). The only permission an agent has; every agent runs its
-   * commands in its own container.
+   * sfa-web). Every agent runs its commands in its own container.
    */
   network: NetworkLevel;
+  /** Host folders mounted read-only in this agent's container under /roots/<name>. */
+  folders?: string[];
   /** Agents this one may message ("N-name.json" entries of agents). */
   agents?: AgentGrant[];
   tools?: {
@@ -170,6 +172,7 @@ const TOP_LEVEL_KEYS = new Set([
   'temperature',
   'maxOutputTokens',
   'network',
+  'folders',
   'agents',
   'tools',
   'conversation',
@@ -252,6 +255,22 @@ class FieldChecker {
   }
 }
 
+/** Normalize the agent's host paths; missing folders may be on an offline drive. */
+export function parseAgentFolders(value: unknown, file: string): string[] {
+  const c = new FieldChecker(file);
+  const entries = c.stringArray(value, 'folders', { nonEmptyItems: true }) ?? [];
+  if (entries.length > 64) c.fail('folders', 'lists at most 64 folders');
+  const folders: string[] = [];
+  for (const [i, raw] of entries.entries()) {
+    const folder = raw.trim().replace(/^"(.*)"$/, '$1');
+    if (/[\x00-\x1f]/.test(folder) || !path.isAbsolute(folder)) c.fail(`folders[${i}]`, 'must be a full path to a folder on this computer');
+    const resolved = path.resolve(folder);
+    const key = (p: string) => process.platform === 'win32' ? p.toLowerCase() : p;
+    if (!folders.some((p) => key(p) === key(resolved))) folders.push(resolved);
+  }
+  return folders;
+}
+
 /**
  * Validates one parsed agent JSON document. Cross-file rules (children,
  * escalation, MCP server existence, roots on disk) are checked by the loader.
@@ -264,7 +283,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       c.fail('spawn', 'is no longer used: let an agent message another by adding "N-name.json" to agents (N = how many it may run at once)');
     }
     if (key === 'workspace') {
-      c.fail('workspace', 'was removed: every agent works in its own container, with /workspaces (shared, read-write) and the project folders from Settings (read-only). Set "network" instead');
+      c.fail('workspace', 'was removed: every agent works in its own container, with /workspaces (shared, read-write) and its "folders" (read-only). Set "network" for network access');
     }
     if (!TOP_LEVEL_KEYS.has(key)) {
       c.fail(key, `unknown field. Allowed fields: ${[...TOP_LEVEL_KEYS].filter((k) => k !== '$schema').join(', ')}`);
@@ -353,6 +372,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
   if (raw['network'] === undefined) c.fail('network', `is required: one of ${NETWORK_LEVELS.map((l) => `"${l}"`).join(', ')} (${NETWORK_LEVELS.map((l) => `${l}: ${NETWORK_LEVEL_TEXT[l]}`).join('; ')})`);
   if (!isNetworkLevel(raw['network'])) c.fail('network', `must be one of ${NETWORK_LEVELS.map((l) => `"${l}"`).join(', ')}`);
   const network = raw['network'] as NetworkLevel;
+  const folders = parseAgentFolders(raw['folders'], file);
 
   let agents: AgentGrant[] | undefined;
   if (raw['agents'] !== undefined) {
@@ -501,6 +521,7 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
     temperature,
     maxOutputTokens,
     network,
+    ...(folders.length ? { folders } : {}),
     ...(agents ? { agents } : {}),
     tools,
     conversation,

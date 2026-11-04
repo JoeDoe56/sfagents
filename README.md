@@ -158,7 +158,7 @@ Every agent has exactly two native tools: shell (in its own container) and messa
 Every agent's shell commands run in its own Linux container (Debian, with the common languages and tools installed), never on your computer directly:
 
 - **`/workspaces`** is where commands start and where agents write. It is one folder shared by all agents and kept between runs (on Windows inside SF Agents' WSL distro, on Linux and macOS in `workspaces/` in SF Agents' folder). Clone or copy a project into its own folder there.
-- **`/roots/<name>`** holds your project folders, read-only. Choose them in **Settings → Agents → Project Folders** (or `agents.folders` in the TUI settings); every agent sees the same ones. Secret files in them (`.env`, keys, credentials) and SF Agents' own files are hidden.
+- **`/roots/<name>`** holds this agent's project folders, read-only. Add or remove them under **Project Folders in the agent editor** (web or TUI). Each agent has its own list, saved as `folders` in its agent file; no folders are mounted by default. Saving applies the mounts at its next command, recreating that container while keeping its home and `/workspaces`. Secret files in them (`.env`, keys, credentials) and SF Agents' own files are hidden. The former global `agents.folders` setting is no longer used; choose folders separately for each agent.
 - **The network** is cut off except through SF Agents' proxy, which allows what the agent's `network` level allows and logs every request (the agent sheet's Network log).
 - **The home folder** (`/home/agent`) is the agent's own and kept; the agent has passwordless `sudo` inside its container.
 - `sfa-artifact` and `sfa-web` are commands in the container that ask SF Agents to show an artifact or fetch a page.

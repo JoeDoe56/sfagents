@@ -69,13 +69,17 @@ export class WindowsUiAdapter implements UiAdapter {
 
 export class ContainerUiAdapter implements UiAdapter {
   private started?: Promise<string>;
+  private specKey?: string;
   constructor(private readonly spec: AgentContainerSpec | (() => AgentContainerSpec)) {}
   async request(p: Record<string, unknown>, signal: AbortSignal): Promise<UiReply> {
     signal.throwIfAborted();
     const { containerManager } = await import('../container/containers.js');
     const manager = containerManager();
+    const spec = typeof this.spec === 'function' ? this.spec() : this.spec;
+    const key = JSON.stringify(spec);
+    if (this.specKey !== key) { this.started = undefined; this.specKey = key; }
     this.started ??= (async () => {
-      const name = await manager.prepare(typeof this.spec === 'function' ? this.spec() : this.spec);
+      const name = await manager.prepare(spec);
       const start = await manager.cli.run(['exec', '-d', '-u', 'agent', name, 'bash', '/run/sfa/bin/sfa-desktop'], { timeoutMs: 15_000 });
       if (start.code !== 0) throw new Error('The container desktop could not start. Pull the new agent image and Reset Environment.');
       for (let i = 0; i < 30; i++) {

@@ -177,6 +177,9 @@ export async function openAgentEditor(o = {}) {
       );
       body.append(createSection({ title: 'Network', rows: parts.network, note: 'What commands in the agent’s container can reach. Each level includes the one before. Never this computer or your local network.' }).el, errorNode('network'));
 
+      parts.folders = folderSection();
+      body.append(parts.folders.el, errorNode('folders'));
+
       // MCP servers: attaching one is the permission.
       const servers = choices.mcpServers.map((s) =>
         createRow({
@@ -234,6 +237,38 @@ export async function openAgentEditor(o = {}) {
     const models = modelsFor(form.provider);
     parts.models.el.hidden = !models.length;
     if (parts.model.input) parts.model.input.placeholder = form.provider ? 'model id' : 'the provider’s default';
+  }
+
+  function folderSection() {
+    const rows = form.folders.map((folder) => createRow({
+      title: folder, wrap: true, accessory: 'menu',
+      onTap: (anchor) => showMenu({ anchor, align: 'end', groups: [[{ label: 'Remove', symbol: 'minus.circle', destructive: true, action: () => {
+        set('folders', form.folders.filter((f) => f !== folder));
+        refreshFolders();
+      } }]] }),
+    }));
+    rows.push(createRow({ title: 'Add Folder', icon: 'plus.circle.fill', tintTitle: true, onTap: () => {
+      let addSheet;
+      const input = createRow({ title: 'Folder', input: { value: '', placeholder: 'Full path on this computer', autocomplete: 'off', onInput: (value) => addSheet?.setDirty(!!value.trim()) } });
+      addSheet = openSheet({ title: 'Add Project Folder', detents: ['medium'], className: 'st-sheet', z: 1200,
+        build(sheet) { sheet.body.append(createSection({ rows: [input], note: 'Only this agent will have this folder mounted read-only at /roots/<name>.' }).el); },
+        onConfirm: () => {
+          const folder = input.input.value.trim();
+          if (!folder) return false;
+          set('folders', [...new Set([...form.folders, folder])]);
+          refreshFolders();
+          return true;
+        },
+      });
+    } }));
+    return createSection({ title: 'Project Folders', rows, note: 'Mounted read-only in this agent’s container at /roots/<name>. It makes changes in /workspaces. Secret files and SF Agents’ own data stay hidden. Save to apply at its next command.' });
+  }
+
+  function refreshFolders() {
+    const next = folderSection();
+    parts.folders.el.replaceWith(next.el);
+    parts.folders = next;
+    ctx.refresh?.();
   }
 
   function modelsFor(provider) {

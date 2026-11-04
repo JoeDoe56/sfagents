@@ -337,10 +337,14 @@ describe('terminal interface', () => {
       for (let i = 0; i < 8 && !/› +● Off|› +○ Off/.test(term.screen()); i++) await term.keys(TAB);
       await term.keys('\r', '\u001b[C');
       await until('network chosen', () => /● Packages\b/.test(term.screen()));
+      for (let i = 0; i < 8 && !/› +Folders\b/.test(term.screen()); i++) await term.keys(TAB);
+      await term.keys('\r');
+      const folder = makeTempDir('agent project-');
+      await term.type(folder);
       await term.keys(CTRL_S);
       await until('saved', () => fs.existsSync(path.join(dir, 'agents', 'tester.json')));
       const raw = JSON.parse(fs.readFileSync(path.join(dir, 'agents', 'tester.json'), 'utf8'));
-      assert.deepEqual(raw, { systemPrompt: 'You test.', network: 'pkg' });
+      assert.deepEqual(raw, { systemPrompt: 'You test.', network: 'pkg', folders: [folder] });
       await until('the title', () => term.screen().includes('Agent: tester'));
     } finally {
       tui.quit();

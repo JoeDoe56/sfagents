@@ -129,7 +129,7 @@ export function openWorkspace(w, from) {
         return b;
       };
       const pullButton = button('Pull into My Folder', async () => {
-        if (!folders.length) return showError('Add the checkout as a Project Folder in Settings first.', 'No Project Folders');
+        if (!folders.length) return showError('Add the checkout under Project Folders in this workspace agent’s editor first.', 'No Project Folders');
         const pull = (folder) => run('Pull into My Folder', 'pull-into', { folder }, `Push ${current.branch} and fast-forward ${folder} to it? Nothing changes there if it has uncommitted changes or other commits.`);
         if (folders.length === 1) return pull(folders[0]);
         showMenu({ anchor: pullButton, align: 'start', groups: [folders.map((f) => ({ label: f, action: () => pull(f) }))] });
@@ -146,8 +146,8 @@ export function openWorkspace(w, from) {
 
       async function load() {
         const [review, all] = await Promise.all([getJson(`/api/workspaces/${enc(w.repo)}/${enc(w.task)}`), getJson('/api/workspaces')]);
-        folders = all.folders ?? [];
         current = all.workspaces.find((x) => x.repo === w.repo && x.task === w.task) ?? current;
+        folders = all.foldersByAgent?.[current.agent] ?? [];
         prActions.replaceChildren();
         const pr = current.pr;
         prInfo.textContent = pr ? `PR #${pr.number} · ${pr.state} · checks ${pr.checks}\n${pr.comments || 'No review comments.'}` : '';

@@ -5,6 +5,7 @@
 ## Shipped behavior
 
 - The editor core can create the first agent without loading an agent tree (`loadAgentEditor`).
+- Project Folders belongs to each agent's editor (web and TUI), saved as `folders` in its JSON. Only that agent receives those read-only `/roots` mounts. The global setting is removed; existing global lists do not grant mounts. Host diff browsing collects the configured folders, and workspace pull destinations follow the owning agent.
 - Pull Requests is a working, optional setting, off by default. Draft creation, check/review refresh, feedback delivery to the workspace's agent, and SHA-checked merge are available in the web sheet and TUI. A Merge click can mark a draft ready. The agent has `sfa-git pr open|status`; merge is a person action.
 - CI results and PR check state persist with workspace metadata and appear on task pills. Changing the worktree marks old results stale. A CI run with no workflow is recorded separately from a pending run.
 - Only a main run can request a full-control lease. A one-time approval card is required, including with `--yes`. The lease ends at idle, Stop, timeout, or runtime disposal. Its cancellation signal reaches host commands and host UI calls. Each model step receives the remaining time on its newest message, so the system prompt stays cacheable.
@@ -18,9 +19,11 @@
 
 ## Verification
 
-Final Windows `npm test`: **311 passed, 24 skipped, 0 failed** (335 tests). The final focused verification also passed, including the real host-command cancellation and web approval/undo round trip. Live network-edit tests cover already-built tools, preserved web quotas and command channels, tunnel revocation, and revocation during DNS lookup.
+Per-agent folders follow-up: type checking and the focused Windows suites passed (**30 passed, 2 skipped, 0 failed**), covering editor persistence/validation, API isolation, the removed global setting, active grants and terminal editing. Focused Linux editor, artifact and container suites also passed (**43 passed, 0 failed**). A headless Chromium run verified add → save → reopen → remove → save. Two real containers verified independent read-only roots, hidden `.env` files, applying edits through shell/UI, removing mounts, and preserving home data. Disposable containers and temporary WSL mounts were removed.
 
-Final Linux `npm test`: **373 passed, 4 skipped, 0 failed** (377 tests), in a disposable container on the SF Agents-owned engine. This included the Unix container stand-ins, bundled sensor runtime, real X11 keyboard hook and terminal tests. Speech-model downloads were disabled for this test run with `SFAGENTS_SKIP_SPEECH=1`; the test workspace/container/home were removed afterwards.
+At the initial completion (`f44601f`), Windows `npm test`: **311 passed, 24 skipped, 0 failed** (335 tests). The focused verification also passed, including the real host-command cancellation and web approval/undo round trip. Live network-edit tests cover already-built tools, preserved web quotas and command channels, tunnel revocation, and revocation during DNS lookup.
+
+At the initial completion, Linux `npm test`: **373 passed, 4 skipped, 0 failed** (377 tests), in a disposable container on the SF Agents-owned engine. This included the Unix container stand-ins, bundled sensor runtime, real X11 keyboard hook and terminal tests. Speech-model downloads were disabled for this test run with `SFAGENTS_SKIP_SPEECH=1`; the test workspace/container/home were removed afterwards.
 
 Run `npm test` on Windows or Linux. Container stand-in suites are skipped on Windows because they require Unix process groups. Tests use disposable settings and keyring service names. Test temp folders should be outside this repository: nesting them inside a dirty checkout makes the diff discovery tests legitimately find the parent checkout.
 

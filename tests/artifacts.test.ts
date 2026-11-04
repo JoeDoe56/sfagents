@@ -159,7 +159,7 @@ describe('artifacts: model tools and grants', () => {
       }
     };
     const { factory, providers } = scriptedFactory(script);
-    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation, folders: () => [] });
+    const runtime = new AgentRuntime({ tree, providerFactory: factory, conversation });
     const session = runtime.createSession();
     const r1 = await session.run('Write a haiku and show the numbers');
     assert.match(r1.text, /Created artifact a\d+ "Numbers" shows docs\/existing.csv/);
@@ -221,6 +221,7 @@ describe('artifacts: model tools and grants', () => {
 
   test('sfa-artifact writes without asking, only in /workspaces; app artifacts record the address', { skip: NO_CONTAINER_TESTS }, async () => {
     const dir = project();
+    writeAgent(dir, baseAgent('main', { folders: [dir] }));
     const ws = workspace();
     const { tree, conversation } = open(dir);
     let asked = 0;
@@ -234,7 +235,7 @@ describe('artifacts: model tools and grants', () => {
             ],
           }
         : { text: 'ok' };
-    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => (asked++, 'allow_once'), folders: () => [dir] });
+    const runtime = new AgentRuntime({ tree, providerFactory: scriptedFactory(script).factory, conversation, confirm: async () => (asked++, 'allow_once') });
     await runtime.createSession().run('go');
     assert.equal(asked, 0, 'the container is the boundary');
     assert.equal(fs.readFileSync(path.join(ws, 'plan.md'), 'utf8'), '# Plan');

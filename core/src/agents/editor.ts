@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { AGENT_GRANT_PATTERN, AGENT_NAME_PATTERN, CONTAINER_LIMITS, ConfigError, parseAgentDefinition } from './definition.js';
+import { AGENT_GRANT_PATTERN, AGENT_NAME_PATTERN, CONTAINER_LIMITS, ConfigError, parseAgentDefinition, parseAgentFolders } from './definition.js';
 import { expandPrompt, isPromptReference, PromptReferenceError } from './prompts.js';
 import type { AgentTree } from './loader.js';
 import { dataDirFor } from './loader.js';
@@ -35,6 +35,7 @@ export interface AgentForm {
   instructions: string;
   /** Required: null until chosen. */
   network: NetworkLevel | null;
+  folders: string[];
   mcpServers: string[];
   memoryMb: number;
   cpus: number;
@@ -121,6 +122,7 @@ export function newAgentForm(limits?: AgentFormLimits): AgentForm {
     model: '',
     instructions: '',
     network: null,
+    folders: [],
     mcpServers: [],
     memoryMb: Math.min(CONTAINER_LIMITS.memoryMb.default, limits?.maxMemoryMb ?? Infinity),
     cpus: Math.min(CONTAINER_LIMITS.cpus.default, limits?.maxCpus ?? Infinity),
@@ -148,6 +150,7 @@ export function readAgentForm(tree: AgentEditorContext, name: string): AgentForm
     model,
     instructions: Array.isArray(prompt) ? prompt.filter((p) => typeof p === 'string').join('\n\n') : str(prompt),
     network: isNetworkLevel(raw['network']) ? raw['network'] : null,
+    folders: Array.isArray(raw['folders']) ? raw['folders'].filter((f): f is string => typeof f === 'string') : [],
     mcpServers: Array.isArray(tools['mcpServers']) ? (tools['mcpServers'] as unknown[]).map((g) => (typeof g === 'string' ? g : str((g as Record<string, unknown>)?.['server']))).filter(Boolean) : [],
     memoryMb: typeof container['memoryMb'] === 'number' ? container['memoryMb'] : CONTAINER_LIMITS.memoryMb.default,
     cpus: typeof container['cpus'] === 'number' ? container['cpus'] : CONTAINER_LIMITS.cpus.default,
@@ -193,6 +196,8 @@ export function validateAgentForm(tree: AgentEditorContext, form: AgentForm, lim
   }
   if (!form.network) errors.network = 'Choose what the agent’s container can reach.';
   else if (!isNetworkLevel(form.network)) errors.network = `Choose one of ${NETWORK_LEVELS.join(', ')}.`;
+  try { parseAgentFolders(form.folders, 'agent'); }
+  catch (error) { errors.folders = error instanceof Error ? error.message.replace(/^agent \[.*?\]: /, '') : String(error); }
   const unknown = form.mcpServers.filter((s) => !tree.mcp.servers[s]);
   if (unknown.length) errors.mcpServers = `Not in mcp.json: ${unknown.join(', ')}.`;
   const m = CONTAINER_LIMITS.memoryMb;
@@ -241,6 +246,8 @@ function rawFor(form: AgentForm, before: Record<string, unknown>, renamed: boole
   const beforePrompt = raw['systemPrompt'];
   if (!(Array.isArray(beforePrompt) && beforePrompt.join('\n\n') === form.instructions)) raw['systemPrompt'] = form.instructions;
   raw['network'] = form.network;
+  const folders = parseAgentFolders(form.folders, 'agent');
+  set('folders', folders.length ? folders : undefined);
   // MCP servers: per-tool lists of servers that stay are kept; auto-approvals of removed ones go.
   const tools = { ...((raw['tools'] as Record<string, unknown> | undefined) ?? {}) };
   const grants = Array.isArray(tools['mcpServers']) ? (tools['mcpServers'] as unknown[]) : [];
@@ -275,6 +282,7 @@ function formField(field: string | undefined): keyof AgentForm | undefined {
     model: 'model',
     systemPrompt: 'instructions',
     network: 'network',
+    folders: 'folders',
     tools: 'mcpServers',
     container: field.includes('cpus') ? 'cpus' : 'memoryMb',
     voice: 'speak',
