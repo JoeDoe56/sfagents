@@ -206,7 +206,7 @@ export async function openAgentEditor(o = {}) {
       body.append(createSection({ title: 'Container', rows: [parts.memory.el, parts.cpus.el], note: `Up to ${memoryText(m.max)}, which every agent's container shares (on Windows, the WSL Memory Cap in Settings). A change takes effect at the agent's next command: its container is made again, and /workspaces stays.` }).el, errorNode('memoryMb'), errorNode('cpus'));
 
       // Voice.
-      parts.speak = createRow({ title: 'Read Replies Aloud', subtitle: 'On the device you are using', wrap: true, toggle: { checked: form.speak, onChange: (on) => set('speak', on) } });
+      parts.speak = createRow({ title: 'Read Replies Aloud', subtitle: 'Enable Speak Response in the hold menu', wrap: true, toggle: { checked: form.speak, onChange: (on) => { set('speak', on); showVoice(); } } });
       parts.clip = createRow({ title: 'Voice', wrap: true, accessory: 'ellipsis', onTap: () => clipMenu() });
       parts.transcript = createRow({ title: 'Transcript', wrap: true, input: { value: voice.transcript ?? '', placeholder: 'Filled in from the clip', onInput: () => {} } });
       parts.transcript.input?.addEventListener('change', () => saveTranscript());
@@ -216,7 +216,7 @@ export async function openAgentEditor(o = {}) {
         createSection({
           title: 'Voice',
           rows: [parts.speak, parts.clip, parts.transcript, parts.again, parts.sample],
-          note: 'Qwen3-TTS copies the voice from a clean recording of one speaker, at least 10 seconds long (its first 15 seconds), and what is said in it. Qwen3-ASR writes the transcript; correct it where it misheard. The clip changes at once.',
+          note: 'Replies play only when you choose Speak Response. Enable this option to add a custom voice. Qwen3-TTS copies a clean recording of one speaker, at least 10 seconds long (its first 15 seconds). Qwen3-ASR writes the transcript; correct it where it misheard. The clip changes at once.',
         }).el,
         errorNode('speak'),
       );
@@ -423,20 +423,21 @@ export async function openAgentEditor(o = {}) {
 
   function showVoice() {
     const has = !!original;
-    parts.clip.update({ subtitle: !has ? 'Save the agent first' : voice.clip ? 'Set: Qwen3-TTS copies this voice' : 'None: its replies are not read aloud', disabled: !has });
+    parts.clip.el.hidden = !form.speak;
+    parts.clip.update({ subtitle: !has ? 'Save the agent first' : voice.clip ? 'Set: Qwen3-TTS copies this voice' : 'Choose a custom voice', disabled: !has || !form.speak });
     if (parts.transcript.input && document.activeElement !== parts.transcript.input) parts.transcript.input.value = voice.transcript ?? '';
-    parts.transcript.el.hidden = !voice.clip;
-    parts.again.el.hidden = !voice.clip;
+    parts.transcript.el.hidden = !form.speak || !voice.clip;
+    parts.again.el.hidden = !form.speak || !voice.clip;
     parts.again.update({ title: voice.transcribing ? 'Transcribing…' : 'Transcribe Again' });
     parts.again.setDisabled(!!voice.transcribing);
-    parts.sample.el.hidden = !voice.clip;
+    parts.sample.el.hidden = !form.speak || !voice.clip;
     ctx?.refresh?.();
   }
 
   const voiceUrl = () => `/api/voice?agent=${encodeURIComponent(original)}`;
 
   function clipMenu() {
-    if (!original) return;
+    if (!original || !form.speak) return;
     showMenu({
       anchor: parts.clip.el,
       align: 'end',
@@ -449,12 +450,13 @@ export async function openAgentEditor(o = {}) {
   }
 
   function chooseClip() {
+    if (!form.speak) return;
     const input = el('input');
     input.type = 'file';
     input.accept = 'audio/*,.wav,.mp3,.m4a,.flac,.ogg,.opus,.webm';
     input.addEventListener('change', async () => {
       const file = input.files?.[0];
-      if (!file) return;
+      if (!file || !form.speak) return;
       try {
         // Whatever the format, Qwen3-TTS gets a mono WAV at its own rate.
         const wav = await toWav(file, { rate: CLIP_RATE, maxSeconds: CLIP_SECONDS });
@@ -472,7 +474,7 @@ export async function openAgentEditor(o = {}) {
   }
 
   async function removeClip() {
-    if (!(await confirmDialog('Remove the voice?', 'This agent’s replies are not read aloud without one.', 'Remove', true))) return;
+    if (!(await confirmDialog('Remove the voice?', 'Remove this agent’s custom voice clip?', 'Remove', true))) return;
     try {
       const res = await fetch(voiceUrl(), { method: 'DELETE' });
       const out = await res.json().catch(() => ({}));

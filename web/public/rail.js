@@ -2,12 +2,10 @@
  * Semantic scroll rail: one small dot per conversation section along the
  * right edge, oldest at the top and the newest at the bottom.
  *
- * Press and hold on the dots and they expand into the section titles. While
- * the finger (or mouse button) stays down, moving it only highlights a
- * title; nothing scrolls yet. Holding near the top or bottom edge scrolls
- * the list of titles so long histories stay reachable. Releasing jumps the
- * conversation to the highlighted section. Like the letter index in iOS
- * lists, but for topics. Keyboard: focus the rail, Enter or an arrow key
+ * Mouse hover expands the titles and highlights the title under the pointer;
+ * clicking jumps, and the wheel scrolls the title list. Touch/pen retain
+ * press-drag-release navigation, with edge scrolling for long histories.
+ * Keyboard: focus the rail, Enter or an arrow key
  * opens it, arrows move, Enter jumps, Escape closes.
  */
 
@@ -20,6 +18,9 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
   let sections = [];
   let open = false;
   let pointer = null; // { id, y }
+  let hovering = false;
+  let mouseY = null;
+  let mousePressed = false;
   let highlight = -1;
   let active = null; // section id currently in view
   let raf = 0;
@@ -110,6 +111,7 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
   function collapse(jump) {
     if (!open) return;
     open = false;
+    mousePressed = false;
     cancelAnimationFrame(raf);
     raf = 0;
     root.classList.remove('open');
@@ -138,9 +140,30 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
 
   // ------------------------------------------------------------ pointer
 
+  root.addEventListener('pointerenter', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    hovering = true;
+    mouseY = e.clientY;
+    expand();
+    if (open) setHighlight(rowAt(mouseY));
+  });
+  root.addEventListener('pointerleave', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    hovering = false;
+    mouseY = null;
+    mousePressed = false;
+    if (!pointer) collapse(false);
+  });
   root.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || sections.length === 0) return;
     e.preventDefault();
+    if (e.pointerType === 'mouse') {
+      mousePressed = true;
+      mouseY = e.clientY;
+      expand();
+      setHighlight(rowAt(mouseY));
+      return;
+    }
     pointer = { id: e.pointerId, y: e.clientY };
     try {
       root.setPointerCapture(e.pointerId);
@@ -152,6 +175,11 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     if (!raf) raf = requestAnimationFrame(tick);
   });
   root.addEventListener('pointermove', (e) => {
+    if (!pointer && e.pointerType === 'mouse' && open) {
+      mouseY = e.clientY;
+      setHighlight(rowAt(mouseY));
+      return;
+    }
     if (!pointer || e.pointerId !== pointer.id) return;
     pointer.y = e.clientY;
     setHighlight(rowAt(e.clientY));
@@ -164,6 +192,12 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
   };
   root.addEventListener('pointerup', release);
   root.addEventListener('pointercancel', release);
+  root.addEventListener('click', (e) => {
+    if (!mousePressed || !open) return;
+    mousePressed = false;
+    setHighlight(rowAt(e.clientY));
+    collapse(true);
+  });
   root.addEventListener('lostpointercapture', (e) => {
     if (pointer && e.pointerId === pointer.id) {
       pointer = null;
@@ -176,8 +210,10 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     (e) => {
       if (!open) return;
       e.preventDefault();
-      list.scrollTop += e.deltaY;
-      if (pointer) setHighlight(rowAt(pointer.y));
+      e.stopPropagation();
+      list.scrollTop += e.deltaY * (e.deltaMode === 1 ? ROW_HEIGHT : e.deltaMode === 2 ? list.clientHeight : 1);
+      const y = pointer?.y ?? mouseY;
+      if (y !== null) setHighlight(rowAt(y));
     },
     { passive: false },
   );
@@ -211,7 +247,7 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     }
   });
   root.addEventListener('blur', () => {
-    if (!pointer) collapse(false);
+    if (!pointer && !hovering) collapse(false);
   });
 
   new ResizeObserver(() => {
@@ -223,7 +259,15 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     setSections(next) {
       sections = next || [];
       root.hidden = sections.length === 0;
+      if (!sections.length) collapse(false);
       if (!open) renderDots();
+      else {
+        const top = list.scrollTop;
+        highlight = Math.min(highlight, sections.length - 1);
+        renderList();
+        list.scrollTop = top;
+        if (highlight >= 0) root.setAttribute('aria-activedescendant', `rail-${sections[highlight].id}`);
+      }
     },
     /** Marks the section currently in view. */
     setActive(id) {

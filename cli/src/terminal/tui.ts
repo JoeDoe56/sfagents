@@ -246,12 +246,6 @@ export class Tui {
 
   private open(): void {
     const { server, logs } = this.options;
-    // An agent set to read its replies aloud: through this computer's speakers, when the message came from here.
-    server.emitSpeak = (reply) => {
-      if (Date.now() - this.sentHere > 30 * 60_000) return;
-      this.sentHere = 0;
-      server.speakAloud(reply.text, reply.agent).catch(() => {});
-    };
     // Anything else written to the terminal while the interface is up (warnings from
     // libraries, debug output) goes to the Logs tab instead of over the screen.
     if (this.options.captureOutput !== false) {
@@ -897,7 +891,7 @@ export class Tui {
         });
         return done();
       case 's':
-        if (message) this.speak(pick.text);
+        if (pick.kind === 'assistant') this.speak(pick.text, pick.agent);
         return done();
       case 'c':
         this.copy(pick.text);
@@ -946,9 +940,10 @@ export class Tui {
   }
 
   /** Speaks text aloud on this computer (Qwen3-TTS, through its speakers). */
-  private speak(text: string): void {
+  private speak(text: string, agent = this.agent?.id): void {
+    if (!agent || !this.options.server.canSpeak(agent)) return this.notice('Enable Read Replies Aloud in this agent’s settings to read a response.');
     this.notice('Speaking… (/speak stop stops it)');
-    this.options.server.speakAloud(text).catch((error: unknown) => {
+    this.options.server.speakAloud(text, agent).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.notice(`Couldn’t speak it: ${message}${/not set up|not installed|missing/i.test(message) ? ' /settings → Speech installs the voice.' : ''}`, 'error');
     });
@@ -1037,12 +1032,8 @@ export class Tui {
     this.send(text);
   }
 
-  /** When a message was last sent from this terminal (its reply is read aloud here). */
-  private sentHere = 0;
-
   /** Sends a message, with the reply and attachments being written. */
   private send(text: string): void {
-    this.sentHere = Date.now();
     // While the agent works the message waits, Delivered, and the agent reads it at its next step.
     const replyTo = this.replyTo;
     const attachments = this.attachments;
@@ -1158,7 +1149,7 @@ export class Tui {
         if (arg === 'stop') return this.notice(server.stopSpeaking() ? 'Stopped speaking.' : 'Nothing is being spoken.');
         const last = [...this.items].reverse().find((i) => i.kind === 'assistant');
         if (!last || last.kind !== 'assistant') return this.notice('No reply to speak yet.');
-        return this.speak(last.text);
+        return this.speak(last.text, last.agent);
       }
       default:
         this.notice(`Unknown command ${cmd}. /help lists them.`, 'error');
@@ -1288,7 +1279,7 @@ export class Tui {
     else {
       if (this.picked) {
         const pick = this.picks.find((p) => p.id === this.picked);
-        const keys = pick?.kind === 'activity' ? ` Enter opens · d shows the command and output · c copy · ↑↓ move · Esc back to typing` : ' r reply · e react · s speak · c copy · Enter opens · ↑↓ move · Esc back to typing';
+        const keys = pick?.kind === 'activity' ? ` Enter opens · d shows the command and output · c copy · ↑↓ move · Esc back to typing` : ` r reply · e react${pick?.kind === 'assistant' && this.options.server.canSpeak(pick.agent ?? this.agent?.id ?? '') ? ' · s speak' : ''} · c copy · Enter opens · ↑↓ move · Esc back to typing`;
         above.push(color.dim(truncate(keys, width)));
       }
       if (this.replyTo) above.push(`${color.cyan(' ↳ ')}${color.dim(truncate(`Replying to ${this.replyTo.who}: ${clean(this.replyTo.text).replace(/\s+/g, ' ')}`, width - 18))}${color.dim(' · Esc cancels')}`);

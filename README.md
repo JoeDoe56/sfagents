@@ -232,6 +232,10 @@ Artifacts are recorded in the conversation (`artifact`, `artifact_update` and `a
 
 ## Web interface
 
+**Read Replies Aloud** in an agent's editor enables **Speak Response** in that agent's reply hold menu and the custom voice controls. Replies play only when you choose the action. Switching the option off keeps the saved voice clip for later. The terminal's manual Speak action uses the same setting.
+
+Hover over the section dots on the side to expand the labels. Hover a label to highlight it, then click to jump to that section. The mouse wheel scrolls the expanded label list without scrolling the conversation. Moving away closes it. Touch retains press-drag-release navigation, and keyboard navigation still uses arrows and Enter.
+
 ```sh
 npx sfagents web            # http://127.0.0.1:8093
 npx sfagents web --port 9000

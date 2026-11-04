@@ -105,7 +105,7 @@ function selectWordAt(bubble, x, y) {
  * Wires bubbles under `root`.
  * @param {HTMLElement} root  a list of `.msg[data-key]` rows
  * @param {{
- *   message: (row: HTMLElement) => ({id: string, text: string, side: 'in'|'out'} | null),
+ *   message: (row: HTMLElement) => ({id: string, text: string, side: 'in'|'out', agent?: string, speak?: boolean} | null),
  *   reaction: (id: string) => string | undefined,
  *   onReply: (msg: {id: string}) => void,
  *   onReact: (msg: {id: string}, emoji: string | null) => void,
@@ -260,7 +260,7 @@ export function installBubbleMenus(root, o) {
       item('Add Reaction', 'react', () => openPicker());
       if (side === 'in') {
         if (speaking()) item('Stop Speaking', 'stop', () => (stopSpeaking(), close()));
-        else
+        else if (msg.speak)
           item('Speak Response', 'speak', () => {
             close();
             speak(msg.text, msg.agent).catch((error) => toast(`Could not read it aloud: ${error.message}`, { symbol: 'exclamationmark.triangle', timeout: 5000 }));

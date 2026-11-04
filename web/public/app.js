@@ -33,7 +33,6 @@ import { setupDictation, dictationEvent } from './dictation.js';
 import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installBubbleMenus } from './bubblemenu.js';
-import { speak } from './speech.js';
 import { springAnimate, springyScroll } from './springs.js';
 import { createChatDock, renderDiff } from './chatdock.js';
 import { workspacePills, openWorkspace } from './workspaces.js';
@@ -64,6 +63,7 @@ const params = new URLSearchParams(location.search);
 
 const state = {
   agent: null,
+  speechAgents: [],
   items: [],
   more: false,
   artifacts: [],
@@ -377,6 +377,7 @@ const msgEntry = (it, side) => ({
   type: 'msg',
   side,
   text: it.text,
+  agent: it.agent,
   attachments: it.attachments,
   rich: side === 'in',
   root: it.replyTo,
@@ -915,7 +916,7 @@ const bubbleHooks = {
   message(row) {
     const e = entryByKey.get(row.dataset.key);
     if (!e || e.type !== 'msg' || !e.id || !e.text?.trim()) return null;
-    return { id: e.id, text: e.text, side: e.side };
+    return { id: e.id, text: e.text, side: e.side, agent: e.agent, speak: state.speechAgents.includes(e.agent) };
   },
   reaction: (id) => state.reactions[id],
   onReply: (msg) => openReplies(msg.id, { to: msg.id, focus: true }),
@@ -1224,6 +1225,7 @@ function applySnapshot(s) {
   }
   pageBuild ??= s.build ?? null;
   state.agent = s.agent;
+  state.speechAgents = s.speechAgents ?? [];
   state.reactions = s.reactions ?? {};
   state.outbox = [];
   state.pending = s.pending ?? [];
@@ -1444,6 +1446,9 @@ function listen() {
     setGradientSeed(info.model);
     agentSheet?.setAgent?.(info);
   });
+  stream.addEventListener('agents', (e) => {
+    state.speechAgents = (JSON.parse(e.data).agents ?? []).filter((a) => a.speak).map((a) => a.id);
+  });
   // The receipt and the context are the same on every page.
   stream.addEventListener('read', (e) => {
     state.read = JSON.parse(e.data);
@@ -1492,8 +1497,6 @@ function listen() {
     render();
     updateComposer();
     if (agentSheetOpen()) agentSheet?.refresh();
-    // The agent reads its replies aloud: on the device in use (the focused page), not on every open one.
-    if (data.speak && document.visibilityState === 'visible' && document.hasFocus()) speak(data.speak.text, data.speak.agent).catch(() => {});
   });
   stream.addEventListener('ping', () => {});
   stream.addEventListener('down', () => {

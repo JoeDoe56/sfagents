@@ -129,9 +129,9 @@ export interface AgentDefinition {
     memoryMb?: number;
     cpus?: number;
   };
-  /** Reading replies aloud (Qwen3-TTS), in the voice clip set for this agent. */
+  /** Manual reading aloud (Qwen3-TTS), in the voice clip set for this agent. */
   voice?: {
-    /** Each finished reply is read aloud. */
+    /** Enables Speak Response and custom voice controls; never automatic playback. */
     speak?: boolean;
   };
 }

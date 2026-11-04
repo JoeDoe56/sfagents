@@ -1370,8 +1370,9 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
       rows.push(field('cpus', 'Processors', `${slider(f.cpus, c.cpus)} ${f.cpus} ${color.dim(`(up to ${c.cpus.max}; ←→)`)}`, w));
       rows.push(heading('Voice'));
       rows.push(field('speak', 'Read aloud', f.speak ? color.green('on') : 'off', w));
-      rows.push({ lines: [`  ${color.dim('Voice clip'.padEnd(14))}${data.voice.clip ? `set${data.voice.transcript ? `: “${truncate(clean(data.voice.transcript), w - 30)}”` : ''}` : 'none (set one in the web app’s agent editor)'}`] });
-      if (data.voice.clip) rows.push({ pick: true, value: 'transcript', lines: [`  ${color.cyan('✎')} Correct the transcript`] });
+      rows.push(note('Enables manual Speak Response and custom voices. Replies never play automatically.', w));
+      if (f.speak) rows.push({ lines: [`  ${color.dim('Voice clip'.padEnd(14))}${data.voice.clip ? `set${data.voice.transcript ? `: “${truncate(clean(data.voice.transcript), w - 30)}”` : ''}` : 'none (set one in the web app’s agent editor)'}`] });
+      if (f.speak && data.voice.clip) rows.push({ pick: true, value: 'transcript', lines: [`  ${color.cyan('✎')} Correct the transcript`] });
       rows.push(blank);
       rows.push({ pick: true, value: 'save', lines: [`  ${dirty() ? color.cyan(color.bold('Save')) : color.dim('Save')} ${color.dim('(Ctrl+S)')}`] });
       if (data.original) {

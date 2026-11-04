@@ -295,6 +295,29 @@ describe('web server', () => {
     }
   });
 
+  test('Read Replies Aloud enables manual reading without requesting automatic playback', async () => {
+    const s = await startServer(() => ({ text: 'A reply to read manually.' }), { voice: { speak: true } });
+    const received: Array<[string, any]> = [];
+    const stop = s.server.subscribe((name, data) => received.push([name, data]));
+    try {
+      const initial = received.find(([name]) => name === 'state')![1];
+      assert.deepEqual(initial.speechAgents, ['main']);
+      assert.equal(initial.agent.speak, true);
+      assert.equal(s.server.canSpeak('main'), true);
+      s.server.sendMessage('Reply.'); await s.server.idle();
+      const end = received.find(([name]) => name === 'run_end')![1];
+      assert.equal(end.speak, undefined, 'finishing a run must never request playback');
+      const form = JSON.parse((await request(s.base, '/api/agent-editor?agent=main')).body.toString()).form;
+      const saved = await postJson(s.base, '/api/agent-editor', { action: 'save', original: 'main', form: { ...form, speak: false } });
+      assert.equal(saved.status, 200);
+      assert.equal(s.server.canSpeak('main'), false);
+      const update = received.filter(([name]) => name === 'agents').at(-1)![1];
+      assert.equal(update.agents.find((a: { id: string }) => a.id === 'main').speak, false);
+      const next = JSON.parse((await request(s.base, '/api/state')).body.toString());
+      assert.deepEqual(next.speechAgents, []);
+    } finally { stop(); await s.stop(); }
+  });
+
   test('the Files window\'s favorites and view are shared by every page', async () => {
     const s = await startServer(() => ({ text: 'ok' }));
     try {

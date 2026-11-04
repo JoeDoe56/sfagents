@@ -39,7 +39,7 @@ export interface AgentForm {
   mcpServers: string[];
   memoryMb: number;
   cpus: number;
-  /** Read each finished reply aloud. */
+  /** Enable manual reading and a custom voice. */
   speak: boolean;
 }
 

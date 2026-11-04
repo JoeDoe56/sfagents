@@ -3,7 +3,7 @@
  * dictation, Qwen3-TTS for reading replies aloud) and their settings: the
  * glossary Qwen3-ASR should know, and where each model runs (chosen at each
  * start: dictation.ts). Each agent's voice (the clip Qwen3-TTS copies, and
- * whether its replies are read aloud) is set in the agent editor
+ * whether manual reading is available) is set in the agent editor
  * (agenteditor.js). The check button saves the settings; the model download
  * happens at once, like adding a provider.
  */
@@ -95,7 +95,7 @@ export function openSpeechSheet(o) {
       placeRow = createRow({ icon: 'gauge', iconTint: '#8e8e93', title: 'Placement', subtitle: placeLine(status), wrap: true });
       sheet.body.append(
         createSection({ title: 'Speech to Text', rows: [asrRow, glossary], note: spec['dictation.glossary']?.hint }).el,
-        createSection({ title: 'Text to Speech', rows: [voiceRow, sampleRow], note: 'Each agent has its own voice: set the clip Qwen3-TTS copies, and whether its replies are read aloud, in the agent’s settings (the gear in the agent sheet).' }).el,
+        createSection({ title: 'Text to Speech', rows: [voiceRow, sampleRow], note: 'Enable Read Replies Aloud in an agent’s settings to add its voice and offer Speak Response in the hold menu. Replies play only when you choose that action.' }).el,
         createSection({ title: 'Where They Run', rows: [placeRow], note: 'Both models load when SF Agents starts and stay loaded. Each start puts them where they fit with room to spare: both on the graphics card; else Qwen3-TTS on the graphics card and Qwen3-ASR on the processor, where it is still faster than real time; else both on the processor.' }).el,
       );
     },

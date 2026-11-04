@@ -368,14 +368,17 @@ button { -webkit-tap-highlight-color: transparent; }
   bottom: 0;
   right: 0;
   width: min(74vw, 340px);
-  overflow: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: none;
   pointer-events: none;
   visibility: hidden;
   opacity: 0;
   transition: opacity 0.24s ease, visibility 0s linear 0.24s;
 }
+.rail-list::-webkit-scrollbar { display: none; }
 .rail.open .rail-dots { opacity: 0; }
-.rail.open .rail-list { visibility: visible; opacity: 1; transition: opacity 0.24s ease; }
+.rail.open .rail-list { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity 0.24s ease; }
 .rail::before {
   content: "";
   position: fixed;
