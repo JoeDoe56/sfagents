@@ -29,7 +29,7 @@
     "native/licenses"
   ],
   "engines": {
-    "node": ">=20.12"
+    "node": ">=22"
   },
   "dependencies": {
     "@sfagents/core": "0.1.0",

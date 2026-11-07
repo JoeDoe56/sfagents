@@ -6,7 +6,7 @@ SF Agents started as an extraction of the minimal runtime from Qwen Code's `pack
 
 ## Requirements
 
-- Node.js 20.12 or newer (developed and tested on Node 22).
+- Node.js 22 or newer.
 - Docker, for the agents' containers: on Windows SF Agents installs its own engine in a WSL distro (`sfagents containers setup`, see [Agent containers](#agent-containers)); on Linux and macOS, the `docker` command with a running engine.
 - A model provider: an OpenRouter API key, a ChatGPT plan, a Claude plan, or an OpenAI-compatible endpoint.
 - An operating-system keyring for provider keys and sign-ins: Windows Credential Manager and the macOS Keychain are built in; on Linux, a Secret Service (GNOME Keyring, KWallet or KeePassXC). Without one, providers can't be added (environment-variable keys still work).

@@ -14,7 +14,7 @@
     "cli"
   ],
   "engines": {
-    "node": ">=20.12"
+    "node": ">=22"
   },
   "scripts": {
     "prepare": "node scripts/prepare-sensors.mjs && tsc -b web cli tests && node scripts/stamp-version.mjs && node scripts/prepare-speech.mjs",
