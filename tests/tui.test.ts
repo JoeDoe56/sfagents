@@ -67,6 +67,13 @@ async function until<T>(what: string, check: () => T | undefined | false, ms = 5
 }
 
 describe('terminal interface', () => {
+  test('composer cursor advances over trailing spaces', () => {
+    const tui = Object.create(Tui.prototype) as any;
+    Object.assign(tui, { confirming: null, tab: 'Chat', panes: [], notices: [], prompt: null, picked: null, replyTo: null, attachments: [], text: 'hello  ', cursor: 7, agent: null, live: false });
+    tui.openQuestions = () => null;
+    const footer = tui.footer(80);
+    assert.equal(footer.cursor.col, 9);
+  });
   test('numbers answer an agent’s questions as the web page does', () => {
     const one = [{ question: 'Which color?', options: ['red', 'blue', 'green'] }];
     assert.equal(numberedAnswer(one, '2'), 'blue');

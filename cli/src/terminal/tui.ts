@@ -1290,9 +1290,10 @@ export class Tui {
     // The composer shows several lines when the text has them (or is long), at most 5.
     const shownText = this.text.replace(/\n/g, '⏎\n');
     const lines = wrap(shownText, avail);
-    const before = wrap(this.text.slice(0, this.cursor).replace(/\n/g, '⏎\n'), avail);
+    // A sentinel keeps wrap from trimming spaces immediately before the cursor.
+    const before = wrap(this.text.slice(0, this.cursor).replace(/\n/g, '⏎\n') + '│', avail);
     const curRow = before.length - 1;
-    const curCol = textWidth(before[curRow] ?? '');
+    const curCol = Math.max(0, textWidth(before[curRow] ?? '') - 1);
     const first = Math.max(0, Math.min(curRow - 4, lines.length - 5));
     const visible = lines.slice(first, first + 5);
     const asked = this.openQuestions();

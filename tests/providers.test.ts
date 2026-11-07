@@ -401,6 +401,14 @@ describe('app settings', () => {
 });
 
 describe('Windows: busy folders never break sign-in or removal', () => {
+  test('Claude sign-in accepts a complete unterminated token after the process exits', { skip: process.platform === 'win32' }, async () => {
+    const dir = makeTempDir();
+    const script = path.join(dir, 'claude');
+    const token = `sk-ant-oat01-${'a'.repeat(60)}`;
+    fs.writeFileSync(script, `#!/bin/sh\necho 'https://claude.ai/oauth/authorize?state=test'\nsleep 0.4\nprintf '${token}'\n`, { mode: 0o755 });
+    const signIn = await ClaudeSignIn.start({ executable: script, timeoutMs: 5000, signInTimeoutMs: 5000 });
+    assert.equal(await signIn.done, token);
+  });
   test('Claude sign-in waits for a complete token line across delayed PTY chunks', { skip: process.platform === 'win32' }, async () => {
     const dir = makeTempDir();
     const script = path.join(dir, 'claude');

@@ -121,7 +121,7 @@ export class ClaudeSignIn {
         // A PTY can split one token across arbitrarily delayed data events.
         // Do not accept a prefix at the end of the buffer: wait for the
         // token's line to be complete before saving and killing the process.
-        const token = /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}(?=[ \t]*\n)/.exec(text)?.[0];
+        const token = (this.exited ? /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}(?=[ \t]*(?:\n|$))/ : /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}(?=[ \t]*\n)/).exec(text)?.[0];
         if (token) finish(null, token);
         else if (/OAuth error|invalid_grant|code (?:has )?expired|Login failed/i.test(text)) finish(new ProviderError('Claude did not complete the sign-in. Start again.', 400));
         else if (this.exited) finish(new ProviderError('Claude sign-in ended without a token.', 400));
