@@ -142,6 +142,10 @@ export async function openAgentEditor(o = {}) {
       parts.models = createRow({ title: 'Suggested Models', tintTitle: true, onTap: () => pickModel() });
       body.append(createSection({ title: 'Model', rows: [parts.provider, parts.model, parts.models], note: 'With Any, the agent replies with the account picked in the agent sheet (or the first provider added in Settings).' }).el, errorNode('provider'), errorNode('model'));
 
+      const maxContext = createRow({ title: 'Max input tokens', input: { value: String(form.maxInputTokens), inputMode: 'numeric', onInput: (v) => set('maxInputTokens', v.trim() ? Number(v) : NaN) } });
+      const oldMessages = createRow({ title: 'Old messages %', input: { value: form.oldMessagesPercent == null ? '' : String(form.oldMessagesPercent), placeholder: 'No extra limit', inputMode: 'numeric', onInput: (v) => set('oldMessagesPercent', v.trim() ? Number(v) : null) } });
+      body.append(createSection({ title: 'Context', rows: [maxContext, oldMessages], note: 'Estimated input tokens before trimming history. Old messages are capped at this percentage of the budget; the current exchange is always kept. Blank keeps the existing default.' }).el, errorNode('maxInputTokens'), errorNode('oldMessagesPercent'));
+
       // Instructions.
       const area = el('textarea', 'ae-instructions');
       area.value = form.instructions;

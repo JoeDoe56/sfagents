@@ -41,6 +41,16 @@ function exchange(conv: ConversationService, root: AgentNode, user: string, assi
 }
 
 describe('working context', () => {
+  test('caps old exchanges by percentage without excluding the current exchange', () => {
+    const { tree: t } = tree();
+    const conv = ConversationService.memory(t.configDir);
+    for (let i = 0; i < 5; i++) exchange(conv, t.root, `question ${i}`, 'x'.repeat(400));
+    const none = buildWorkingContext(conv.state, TARGET, { maxInputTokens: 2000, oldMessagesPercent: 0 }, '', { retrievable: false });
+    assert.equal(none.report.includedExchanges, 1);
+    assert.match(JSON.stringify(none.messages), /question 4/);
+    const some = buildWorkingContext(conv.state, TARGET, { maxInputTokens: 2000, oldMessagesPercent: 10 }, '', { retrievable: false });
+    assert.ok(some.report.includedExchanges > 1 && some.report.includedExchanges < 5);
+  });
   test('keeps the most recent complete exchanges within the window and budget', () => {
     const { tree: t } = tree();
     const conv = ConversationService.memory(t.configDir);

@@ -1226,6 +1226,8 @@ interface AgentFormData {
   description: string;
   provider: string;
   model: string;
+  maxInputTokens: number;
+  oldMessagesPercent: number | null;
   instructions: string;
   network: string | null;
   folders: string[];
@@ -1346,6 +1348,9 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
       rows.push(field('provider', 'Provider', f.provider || 'Any (picked in the app)', w));
       const models = c.providers.find((x) => x.name.toLowerCase() === f.provider.toLowerCase())?.models ?? [];
       rows.push(field('model', 'Model', f.model || color.dim(f.provider ? '(required)' : 'the provider’s default'), w, models.length ? [`    ${color.dim(`Suggested: ${models.join(', ')}`)}`] : []));
+      rows.push(heading('Context'));
+      rows.push(field('maxInputTokens', 'Max input tokens', String(f.maxInputTokens), w));
+      rows.push(field('oldMessagesPercent', 'Old messages %', f.oldMessagesPercent === null ? '(no extra limit)' : String(f.oldMessagesPercent), w));
       rows.push(heading(`Instructions ${color.dim(`(${count().toLocaleString()} characters)`)}`));
       const lines = f.instructions ? f.instructions.split('\n') : [];
       rows.push(field('instructions', 'Instructions', lines.length ? `${color.dim(`${lines.length} line${lines.length === 1 ? '' : 's'}`)}` : color.dim('(required)'), w, lines.slice(0, 6).map((l) => `    ${color.dim(truncate(clean(l), w - 8))}`).concat(lines.length > 6 ? [`    ${color.dim('…')}`] : [])));
@@ -1422,6 +1427,12 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
         return !arrow;
       case 'model':
         if (!arrow) ask('model', 'Model:');
+        return !arrow;
+      case 'maxInputTokens':
+        if (!arrow) host.ask('Max input tokens (2000–10000000):', String(f.maxInputTokens), (t) => (set('maxInputTokens', t.trim() ? Number(t) : NaN), host.redraw()));
+        return !arrow;
+      case 'oldMessagesPercent':
+        if (!arrow) host.ask('Old messages % (0–100; blank for no extra limit):', f.oldMessagesPercent === null ? '' : String(f.oldMessagesPercent), (t) => (set('oldMessagesPercent', t.trim() ? Number(t) : null), host.redraw()));
         return !arrow;
       case 'provider': {
         const names = ['', ...c.providers.map((x) => x.name)];

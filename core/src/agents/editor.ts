@@ -14,6 +14,7 @@ import type { AgentTree } from './loader.js';
 import { dataDirFor } from './loader.js';
 import { loadMcpConfig } from '../mcp/config.js';
 import { isNetworkLevel, NETWORK_LEVELS, NETWORK_LEVEL_TEXT, type NetworkLevel } from '../container/network.js';
+import { DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
 
 /** Editing needs directories and choices, not a running agent. Also works before the first save. */
 export type AgentEditorContext = Pick<AgentTree, 'agentsDir' | 'promptsDir' | 'mcp'>;
@@ -31,6 +32,8 @@ export interface AgentForm {
   /** "" lets the agent reply with the provider picked in the app (or the first one added). */
   provider: string;
   model: string;
+  maxInputTokens: number;
+  oldMessagesPercent: number | null;
   /** The instructions; a line "@name.txt" pulls in a file from the prompts folder. */
   instructions: string;
   /** Required: null until chosen. */
@@ -120,6 +123,8 @@ export function newAgentForm(limits?: AgentFormLimits): AgentForm {
     description: '',
     provider: '',
     model: '',
+    maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
+    oldMessagesPercent: null,
     instructions: '',
     network: null,
     folders: [],
@@ -143,11 +148,14 @@ export function readAgentForm(tree: AgentEditorContext, name: string): AgentForm
   const tools = (raw['tools'] ?? {}) as Record<string, unknown>;
   const container = (raw['container'] ?? {}) as Record<string, unknown>;
   const voice = (raw['voice'] ?? {}) as Record<string, unknown>;
+  const context = (raw['context'] ?? {}) as Record<string, unknown>;
   return {
     name: path.basename(file).replace(/\.json$/i, ''),
     description: str(raw['description']),
     provider,
     model,
+    maxInputTokens: typeof context['maxInputTokens'] === 'number' ? context['maxInputTokens'] : DEFAULT_MAX_INPUT_TOKENS,
+    oldMessagesPercent: typeof context['oldMessagesPercent'] === 'number' ? context['oldMessagesPercent'] : null,
     instructions: Array.isArray(prompt) ? prompt.filter((p) => typeof p === 'string').join('\n\n') : str(prompt),
     network: isNetworkLevel(raw['network']) ? raw['network'] : null,
     folders: Array.isArray(raw['folders']) ? raw['folders'].filter((f): f is string => typeof f === 'string') : [],
@@ -185,6 +193,8 @@ export function validateAgentForm(tree: AgentEditorContext, form: AgentForm, lim
     }
     if (!form.model.trim()) errors.model = 'Choose a model for this provider.';
   } else if (form.model.trim()) errors.provider = 'Choose the provider this model is from.';
+  if (!Number.isInteger(form.maxInputTokens) || form.maxInputTokens < 2000 || form.maxInputTokens > 10_000_000) errors.maxInputTokens = 'Enter 2,000 to 10,000,000 tokens.';
+  if (form.oldMessagesPercent !== null && (!Number.isInteger(form.oldMessagesPercent) || form.oldMessagesPercent < 0 || form.oldMessagesPercent > 100)) errors.oldMessagesPercent = 'Enter a whole percentage from 0 to 100, or leave blank.';
   if (!form.instructions.trim()) errors.instructions = 'Write the agent’s instructions.';
   else {
     try {
@@ -265,6 +275,12 @@ function rawFor(form: AgentForm, before: Record<string, unknown>, renamed: boole
   if (form.memoryMb !== CONTAINER_LIMITS.memoryMb.default) container['memoryMb'] = form.memoryMb;
   if (form.cpus !== CONTAINER_LIMITS.cpus.default) container['cpus'] = form.cpus;
   set('container', Object.keys(container).length ? container : undefined);
+  const context = { ...((raw['context'] as Record<string, unknown> | undefined) ?? {}) };
+  if (form.maxInputTokens !== DEFAULT_MAX_INPUT_TOKENS) context['maxInputTokens'] = form.maxInputTokens;
+  else delete context['maxInputTokens'];
+  if (form.oldMessagesPercent !== null) context['oldMessagesPercent'] = form.oldMessagesPercent;
+  else delete context['oldMessagesPercent'];
+  set('context', Object.keys(context).length ? context : undefined);
   set('voice', form.speak ? { speak: true } : undefined);
   return raw;
 }
@@ -280,6 +296,7 @@ function formField(field: string | undefined): keyof AgentForm | undefined {
     provider: 'provider',
     providerOptions: 'provider',
     model: 'model',
+    context: field.includes('oldMessagesPercent') ? 'oldMessagesPercent' : 'maxInputTokens',
     systemPrompt: 'instructions',
     network: 'network',
     folders: 'folders',

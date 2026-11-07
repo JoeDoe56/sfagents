@@ -224,7 +224,7 @@ export class ThreadService {
  * Oldest exchanges drop off to stay within `budget` estimated tokens; the
  * newest message is always kept.
  */
-export function threadMessages(state: ConversationState, agent: string, target: ReplayTarget, budget: number): { messages: ChatMessage[]; omitted: number } {
+export function threadMessages(state: ConversationState, agent: string, target: ReplayTarget, budget: number, oldBudget?: number): { messages: ChatMessage[]; omitted: number } {
   const runAgent = (m: MessageRecord) => state.runs.get(m.run)?.start?.agent;
   // Exchanges: a message from the other agent and the run that answered it.
   const exchanges: ChatMessage[][] = [];
@@ -279,6 +279,7 @@ export function threadMessages(state: ConversationState, agent: string, target: 
   };
   let start = 0;
   while (start < exchanges.length - 1 && estimateMessages(flat(exchanges.slice(start))) > budget) start++;
+  while (oldBudget !== undefined && start < exchanges.length - 1 && estimateMessages(flat(exchanges.slice(start, -1))) > oldBudget) start++;
   return { messages: flat(exchanges.slice(start)), omitted: start };
 }
 

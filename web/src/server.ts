@@ -2047,6 +2047,8 @@ export class WebServer {
           description: String(form.description ?? ''),
           provider: String(form.provider ?? ''),
           model: String(form.model ?? ''),
+          maxInputTokens: Number(form.maxInputTokens ?? 48000),
+          oldMessagesPercent: form.oldMessagesPercent == null ? null : Number(form.oldMessagesPercent),
           instructions: String(form.instructions ?? '').replace(/\r\n/g, '\n'),
           network: (form.network ?? null) as AgentForm['network'],
           folders: form.folders ?? [],
