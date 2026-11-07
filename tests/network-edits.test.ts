@@ -24,7 +24,7 @@ test('tools already built for a running agent use an edited network level on the
 
 test('host web commands recheck the current setting without resetting their quota', async () => {
   let level: NetworkLevel = 'off'; let calls = 0;
-  const commands: HostCommands = { networkLevel: () => level, web: { remaining: 2, access: { request: async () => { calls++; return 'ok'; }, async close() {} } } };
+  const commands: HostCommands = { networkLevel: () => level, web: { remaining: 2, access: { request: async () => { calls++; return { text: 'ok' }; }, async close() {} } } };
   const call = () => runHostCommand(['sfa-web', 'search', 'test'], commands, { signal: new AbortController().signal });
   assert.equal((await call()).ok, false); assert.equal(calls, 0); assert.equal(availableHostCommands(commands).includes('sfa-web'), false);
   level = 'on'; assert.equal((await call()).ok, true); assert.equal(calls, 1); assert.equal(commands.web!.remaining, 1);

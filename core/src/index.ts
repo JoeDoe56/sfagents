@@ -169,7 +169,7 @@ export {
   validateGenui,
   writeGenuiState,
 } from './conversation/genui.js';
-export { availableHostCommands, DEFAULT_WEB_REQUESTS, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, WEB_COMMAND } from './tools/host-commands.js';
+export { availableHostCommands, DEFAULT_WEB_REQUESTS, HOST_COMMAND_NAMES, MAX_WEB_RESULT_BYTES, runHostCommand, WEB_COMMAND, parseWebCommand } from './tools/host-commands.js';
 export type { HostCommandReply, HostCommands, WebGrant } from './tools/host-commands.js';
 export {
   IMAGE_TOKEN_ESTIMATE,
@@ -183,8 +183,8 @@ export { estimateMessages } from './conversation/context.js';
 export { NetworkLog, networkLog, type NetworkLogEntry } from './container/network-log.js';
 export { sfaPatch, sfaPatchScript, patchFormatFor, patchGuidance, SFA_PATCH_COMMAND, APPLY_PATCH_COMMAND, type PatchFormat } from './tools/sfa-patch.js';
 export { GIT_IDENTITY_VARS, gitIdentityEnv } from './tools/shell.js';
-export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError } from './web/brightdata.js';
-export type { WebAccess, WebOperation } from './web/brightdata.js';
+export { BrightDataWeb, BRIGHT_DATA_MCP_URL, WebAccessError, WEB_FORMATS, MAX_WEB_BATCH, formatWebResult, unwrapUntrusted } from './web/brightdata.js';
+export type { WebAccess, WebFormat, WebReply, WebRequest, WebSearch, SearchEngine, TimeRange } from './web/brightdata.js';
 export { ContainerBridge, BridgeStream, encodeFrame, FrameReader, lazyDuplex, BRIDGE_CONTAINER, RUN_VOLUME } from './container/bridge.js';
 export { ContainerManager, containerManager, setContainerManagerForTesting, containerIdFor, containerName, containerIdFromAppHost, rootMounts, hostToContainerPath, containerToHostPath, findSecretFiles, hostWorkspacesDir, agentImage, APP_HOST_SUFFIX, CONTAINER_COMMANDS, CONTAINER_CAPS, type AgentContainerSpec, type RootMount } from './container/containers.js';
 export { CommandDockerCli, defaultDockerCli, docker, WSL_DISTRO, type DockerCli, type DockerResult } from './container/docker.js';

@@ -301,12 +301,20 @@ cross-origin writes. The sign-in gate still applies, and the session cookie is m
 An agent with `"network": "on"` also has the `sfa-web` command in its container:
 
 ```sh
-sfa-web search kiln firing schedule cone 6 > results.json   # Google results, as JSON
-sfa-web markdown https://example.com/glazes > glazes.md      # a page as Markdown
-sfa-web html https://example.com/glazes                      # a page as HTML
+sfa-web search kiln firing schedule cone 6 > results.json        # Google results, as JSON
+sfa-web search --engine bing --country de --time week glaze      # Bing, German results, past week
+sfa-web search --each "cone 6 glaze" "cone 10 glaze"             # up to 5 searches at once (JSON array)
+sfa-web markdown https://example.com/glazes > glazes.md          # a page as Markdown
+sfa-web text https://example.com/a https://example.com/b         # up to 5 pages at once (JSON array)
+sfa-web html https://example.com/glazes                          # raw HTML
+sfa-web ld_json https://example.com/kiln                         # schema.org data: price, rating, author...
 ```
 
-`sfa-web` asks SF Agents, which makes the request with [Bright Data](https://brightdata.com)'s hosted MCP server (`search_engine`, `scrape_as_markdown`, `scrape_as_html`). Add the Bright Data API key in **Settings → Providers → Web Access**, or with `sfagents providers web-key`. It is kept in the system keyring and never enters a container. Each run may make `limits.webRequests` requests (default 25); a result is cut at 1 MB, and a request times out after 90 seconds. Bright Data includes 5,000 free requests a month, then bills per request: set a spend limit in its control panel.
+Search options: `--engine google|bing` (default Google), `--country <two-letter code>`, `--time hour|day|week|month|year` (Bing: day, week, year) and `--page <n>` (10 results a page, from 0). One page prints as its content; several print as a JSON array of `{url, title, format, content}` or `{url, error}`. When a page has nothing in the asked format, Bright Data returns Markdown or plain text instead and `sfa-web` says so on stderr. `sfa-web --help` lists it all.
+
+`sfa-web` asks SF Agents, which makes the request with [Bright Data](https://brightdata.com)'s hosted MCP server (`search_engine`, `search_engine_batch`, `scrape_as_markdown`, `scrape_batch`). Add the Bright Data API key in **Settings → Providers → Web Access**, or with `sfagents providers web-key`. It is kept in the system keyring and never enters a container. Each run may make `limits.webRequests` requests (default 25); each search and each page counts as one, also in a batch. A result is cut at 1 MB, and a request times out after 90 seconds. Bright Data includes 5,000 free requests a month, then bills per result (about $1.50 per 1,000): set a spend limit in its control panel.
+
+Bright Data fetches pages without running JavaScript. For a page that comes back empty or thin, the agent loads it with Playwright and headless Chromium, which are in the image and go through the same network proxy; its instructions say so. Bright Data's unblocking (CAPTCHAs, bot checks) only applies to `sfa-web`.
 
 ## Showing images to the model: sfa-view
 

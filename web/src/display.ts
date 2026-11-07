@@ -118,9 +118,14 @@ export function describeCall(name: string, argsJson: string): string {
         return `Created ${t ? `“${clip(t, 60)}”` : 'an artifact'}`;
       }
       if (words[0] === 'sfa-web') {
-        const rest = clip(words.slice(2).join(' ').replace(/^["']|["']$/g, ''), 60);
+        const args: string[] = [];
+        for (let i = 2; i < words.length; i++) {
+          if (['--engine', '--country', '--time', '--page'].includes(words[i]!)) i++;
+          else if (!words[i]!.startsWith('--')) args.push(words[i]!);
+        }
+        const rest = clip(args.join(' ').replace(/^["']|["']$/g, ''), 60);
         if (words[1] === 'search') return `Searched the web${rest ? ` for “${rest}”` : ''}`;
-        if (words[1] === 'markdown' || words[1] === 'html') return `Read ${rest || 'a page'}`;
+        if (['markdown', 'html', 'text', 'ld_json'].includes(words[1] ?? '')) return `Read ${rest || 'a page'}`;
       }
       return `Ran ${cmd ? `\`${clip(cmd, 60)}\`` : 'a command'}`;
     }

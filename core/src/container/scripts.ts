@@ -318,6 +318,7 @@ function run(name) {
     }
     process.stdout.write(reply.text.endsWith('\n') ? reply.text : reply.text + '\n');
     if (reply.truncated) process.stderr.write(name + ': the result was cut at 1 MB.\n');
+    for (const note of reply.notes || []) process.stderr.write(name + ': ' + note + '\n');
   };
   if (args.includes('--stdin')) {
     let input = '';

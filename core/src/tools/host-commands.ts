@@ -9,7 +9,7 @@ import { UI_COMMAND, UI_USAGE, runUiCommand, type UiGrant } from '../ui/ui.js';
 
 import { ArtifactError, ARTIFACT_COMMAND, ARTIFACT_USAGE, type ArtifactCommand, type ArtifactContainer } from '../conversation/artifacts.js';
 import { getErrorMessage } from '../utils/errors.js';
-import type { WebAccess } from '../web/brightdata.js';
+import { MAX_WEB_BATCH, SEARCH_ENGINES, TIME_RANGES, WEB_FORMATS, type SearchEngine, type TimeRange, type WebAccess, type WebFormat, type WebRequest, type WebSearch } from '../web/brightdata.js';
 import { MCP_COMMAND, MCP_USAGE, runMcpCommand, type McpGrant } from '../mcp/sfa-mcp.js';
 import { runViewCommand, VIEW_COMMAND, VIEW_USAGE, type ViewGrant } from './sfa-view.js';
 import type { ToolImage } from './tools.js';
@@ -30,7 +30,22 @@ export interface WebGrant {
 export const MAX_WEB_RESULT_BYTES = 1024 * 1024;
 export const WEB_REQUEST_TIMEOUT_MS = 90_000;
 
-export const WEB_USAGE = 'Usage:\n  sfa-web search <query>   Google results (JSON)\n  sfa-web markdown <url>   a page as Markdown\n  sfa-web html <url>       a page as HTML';
+export const WEB_USAGE = [
+  'Usage:',
+  '  sfa-web search [options] <query>              search results (JSON: organic link, title, description)',
+  '  sfa-web search [options] --each <q1> <q2>...  up to 5 searches at once, each query quoted (JSON array)',
+  '    --engine google|bing   default google',
+  '    --country <cc>         two-letter country code, e.g. us, de',
+  '    --time hour|day|week|month|year   recent results only (bing: day, week, year)',
+  '    --page <n>             results page from 0, 10 per page',
+  '  sfa-web markdown <url> [url...]   a page as Markdown',
+  '  sfa-web html <url> [url...]       a page as raw HTML',
+  '  sfa-web text <url> [url...]       a page as plain text (smallest)',
+  '  sfa-web ld_json <url> [url...]    a page\'s schema.org data (price, rating, author...)',
+  'One page prints as its content; up to 5 pages print as a JSON array of {url, title, format, content} or {url, error}.',
+  'Pages are fetched without running JavaScript: if one comes back empty or thin, load it with Playwright (headless Chromium) instead.',
+  'Each search and each page counts as one web request.',
+].join('\n');
 
 /** What one agent's commands may use in this run. */
 export interface HostCommands {
@@ -55,23 +70,23 @@ export function hostCommandSchema(name: string): { name: string; description: st
   if (name === CI_COMMAND) return { name, description: 'Pushes the task and reports its GitHub Actions results and artifacts (public repositories). A command in the shell tool.', usage: CI_USAGE };
   if (name === VIEW_COMMAND) return { name, description: 'Shows images, video (contact sheets, frames, crops), image diffs and PDF pages to the model, and transcribes speech. A command in the shell tool.', usage: VIEW_USAGE };
   if (name === MCP_COMMAND) return { name, description: 'The agent\'s MCP servers: lists their tools and calls them. A command in the shell tool.', usage: MCP_USAGE };
-  if (name === WEB_COMMAND) return { name, description: 'Web search and pages, fetched by SF Agents (Bright Data). A command in the shell tool, for agents at network level "on".', usage: WEB_USAGE };
+  if (name === WEB_COMMAND) return { name, description: 'Web search (Google or Bing) and pages (Markdown, HTML, text or schema.org data), fetched by SF Agents (Bright Data). A command in the shell tool, for agents at network level "on".', usage: WEB_USAGE };
   return { name, description: 'Shows a file, a folder or a web app running in the agent\'s container as an artifact, or changes one. A command in the shell tool.', usage: ARTIFACT_USAGE };
 }
 
-export type HostCommandReply = { ok: true; text: string; truncated?: boolean } | { ok: false; error: string };
+export type HostCommandReply = { ok: true; text: string; truncated?: boolean; notes?: string[] } | { ok: false; error: string };
 
 /** The commands this agent has, by name. */
 export function availableHostCommands(cmds: HostCommands): string[] {
   return [...(cmds.web && (!cmds.networkLevel || cmds.networkLevel() === 'on') ? [WEB_COMMAND] : []), ...(cmds.artifact ? [ARTIFACT_COMMAND] : []), ...(cmds.mcp ? [MCP_COMMAND] : []), ...(cmds.view ? [VIEW_COMMAND] : []), ...(cmds.git ? [GIT_COMMAND, CI_COMMAND] : []), ...(cmds.ui ? [UI_COMMAND] : [])];
 }
 
-async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
-  const [op, ...rest] = args;
-  if ((op !== 'search' && op !== 'markdown' && op !== 'html') || !rest.length) return { ok: false, error: WEB_USAGE };
-  const arg = rest.join(' ').trim();
-  if (!arg || arg.length > 4000) return { ok: false, error: 'Missing or too long argument.' };
-  if (op !== 'search') {
+type ParsedWeb = { ok: true; req: WebRequest } | { ok: false; error: string };
+
+function parseUrls(args: readonly string[], format: WebFormat): ParsedWeb {
+  if (!args.length) return { ok: false, error: WEB_USAGE };
+  if (args.length > MAX_WEB_BATCH) return { ok: false, error: `At most ${MAX_WEB_BATCH} pages at once.` };
+  for (const arg of args) {
     let url: URL;
     try {
       url = new URL(arg);
@@ -79,13 +94,75 @@ async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal
       return { ok: false, error: `Not an address: ${arg}` };
     }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return { ok: false, error: 'Only http and https addresses can be fetched.' };
+    if (arg.length > 4000) return { ok: false, error: 'Address too long.' };
   }
+  return { ok: true, req: { op: 'fetch', format, urls: [...args] } };
+}
+
+function parseSearch(args: readonly string[]): ParsedWeb {
+  let engine: SearchEngine = 'google';
+  let country: string | undefined;
+  let timeRange: TimeRange | undefined;
+  let page: number | undefined;
+  let each = false;
+  const words: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const value = (): string | undefined => args[++i];
+    if (a === '--') {
+      words.push(...args.slice(i + 1));
+      break;
+    }
+    if (a === '--each') each = true;
+    else if (a === '--engine') {
+      const v = value();
+      if (!SEARCH_ENGINES.includes(v as SearchEngine)) return { ok: false, error: `--engine must be ${SEARCH_ENGINES.join(' or ')}.` };
+      engine = v as SearchEngine;
+    } else if (a === '--country') {
+      const v = value();
+      if (!v || !/^[a-zA-Z]{2}$/.test(v)) return { ok: false, error: '--country takes a two-letter country code, e.g. us.' };
+      country = v.toLowerCase();
+    } else if (a === '--time') {
+      const v = value();
+      if (!TIME_RANGES.includes(v as TimeRange)) return { ok: false, error: `--time must be one of ${TIME_RANGES.join(', ')}.` };
+      timeRange = v as TimeRange;
+    } else if (a === '--page') {
+      const v = Number(value());
+      if (!Number.isInteger(v) || v < 0 || v > 100) return { ok: false, error: '--page takes a number from 0.' };
+      page = v;
+    } else if (a.startsWith('--')) return { ok: false, error: `Unknown option ${a}.\n${WEB_USAGE}` };
+    else words.push(a);
+  }
+  if (engine === 'bing' && timeRange && !['day', 'week', 'year'].includes(timeRange)) return { ok: false, error: 'Bing supports --time day, week or year; use --engine google for hour or month.' };
+  const queries = (each ? words : [words.join(' ')]).map((q) => q.trim());
+  if (!queries.length || queries.some((q) => !q)) return { ok: false, error: WEB_USAGE };
+  if (queries.some((q) => q.length > 2000)) return { ok: false, error: 'Query too long.' };
+  if (queries.length > MAX_WEB_BATCH) return { ok: false, error: `At most ${MAX_WEB_BATCH} searches at once.` };
+  const searches: WebSearch[] = queries.map((query) => ({ query, engine, ...(country ? { country } : {}), ...(page ? { page } : {}), ...(timeRange ? { timeRange } : {}) }));
+  return { ok: true, req: { op: 'search', searches } };
+}
+
+/** Reads an sfa-web command line into a request. */
+export function parseWebCommand(args: readonly string[]): ParsedWeb {
+  const [op, ...rest] = args;
+  if (op === 'search') return parseSearch(rest);
+  if (WEB_FORMATS.includes(op as WebFormat)) return parseUrls(rest, op as WebFormat);
+  return { ok: false, error: WEB_USAGE };
+}
+
+async function web(grant: WebGrant, args: readonly string[], signal: AbortSignal): Promise<HostCommandReply> {
+  if (args.includes('--help') || args.includes('-h') || !args.length) return args.length ? { ok: true, text: WEB_USAGE } : { ok: false, error: WEB_USAGE };
+  const parsed = parseWebCommand(args);
+  if (!parsed.ok) return parsed;
+  const count = parsed.req.op === 'search' ? parsed.req.searches.length : parsed.req.urls.length;
   if (grant.remaining <= 0) return { ok: false, error: 'This run has used all of its web requests (limits.webRequests in the agent file).' };
-  grant.remaining--;
-  const text = await grant.access.request(op, arg, AbortSignal.any([signal, AbortSignal.timeout(WEB_REQUEST_TIMEOUT_MS)]));
+  if (grant.remaining < count) return { ok: false, error: `This run has ${grant.remaining} web request${grant.remaining === 1 ? '' : 's'} left (limits.webRequests in the agent file); each search or page is one.` };
+  grant.remaining -= count;
+  const { text, notes } = await grant.access.request(parsed.req, AbortSignal.any([signal, AbortSignal.timeout(WEB_REQUEST_TIMEOUT_MS)]));
+  const extra = notes?.length ? { notes } : {};
   const bytes = Buffer.from(text, 'utf8');
-  if (bytes.length <= MAX_WEB_RESULT_BYTES) return { ok: true, text };
-  return { ok: true, text: bytes.subarray(0, MAX_WEB_RESULT_BYTES).toString('utf8'), truncated: true };
+  if (bytes.length <= MAX_WEB_RESULT_BYTES) return { ok: true, text, ...extra };
+  return { ok: true, text: bytes.subarray(0, MAX_WEB_RESULT_BYTES).toString('utf8'), truncated: true, ...extra };
 }
 
 /**
