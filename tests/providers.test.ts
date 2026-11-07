@@ -401,6 +401,15 @@ describe('app settings', () => {
 });
 
 describe('Windows: busy folders never break sign-in or removal', () => {
+  test('Claude sign-in waits for a complete token line across delayed PTY chunks', { skip: process.platform === 'win32' }, async () => {
+    const dir = makeTempDir();
+    const script = path.join(dir, 'claude');
+    const first = 'a'.repeat(30);
+    const last = 'b'.repeat(30);
+    fs.writeFileSync(script, `#!/bin/sh\necho 'https://claude.ai/oauth/authorize?state=test'\nsleep 0.4\nprintf 'sk-ant-oat01-${first}'\nsleep 0.7\nprintf '${last}\\n'\nsleep 2\n`, { mode: 0o755 });
+    const signIn = await ClaudeSignIn.start({ executable: script, timeoutMs: 5000, signInTimeoutMs: 5000 });
+    assert.equal(await signIn.done, `sk-ant-oat01-${first}${last}`);
+  });
   /** Makes fs.rmSync fail like Windows does on a folder a process still holds. */
   const busy = (match: (p: string) => boolean): (() => void) => {
     const real = fs.rmSync;
