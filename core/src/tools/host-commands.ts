@@ -25,6 +25,8 @@ export const DEFAULT_WEB_REQUESTS = 25;
 export interface WebGrant {
   access: WebAccess;
   remaining: number;
+  /** False when web access is not set up (no Bright Data key), so the prompt says so. */
+  ready?: boolean;
 }
 
 export const MAX_WEB_RESULT_BYTES = 1024 * 1024;

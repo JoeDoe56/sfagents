@@ -197,13 +197,20 @@ function hasArtifactCommand(tools: ReadonlyMap<string, AnyDeclarativeTool>): boo
   return shell instanceof ShellTool && shell.commandNames.includes(ARTIFACT_COMMAND);
 }
 
+/** The person's operating system, named for the model. */
+function hostOsName(): string {
+  if (process.platform === 'win32') return `Windows (${os.release()})`;
+  if (process.platform === 'darwin') return `macOS (Darwin ${os.release()})`;
+  return `${process.platform === 'linux' ? 'Linux' : process.platform} (${os.release()})`;
+}
+
 export function buildSystemPrompt(node: AgentNode, toolNames: readonly string[], extra?: string, link?: RunLink, features: { artifacts?: boolean; toUser?: boolean; organizes?: boolean } = {}): string {
   const d = node.definition;
   const env = [
     `Agent id: ${node.id}`,
     `Date: ${new Date().toISOString().slice(0, 10)}`,
-    `Platform: ${process.platform} (${os.release()})`,
-    `Shell: your own Linux container. Work in /workspaces (shared with the other agents); the person's project folders are read-only under /roots. Network level: ${d.network}.`,
+    `The person's computer: ${hostOsName()} (your commands do not run there; see the shell tool)`,
+    `Shell: your own Linux container. Its folders, network (level "${d.network}") and SF Agents commands are listed in the shell tool's description; those are all you have.`,
     `Tools available to you: ${toolNames.length ? toolNames.join(', ') : '(none)'}`,
   ];
   const partner = link?.partner?.id;
@@ -306,7 +313,7 @@ export class AgentRuntime implements AgentMessenger {
     // SF Agents' own commands: sfa-web (network "on") and sfa-artifact (artifacts.access "create").
     const commands: HostCommands = {
       networkLevel: level,
-      web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS },
+      web: { access: this.web, remaining: d.limits?.webRequests ?? DEFAULT_WEB_REQUESTS, ready: (await this.web.ready?.().catch(() => false)) ?? true },
       ...(conversation?.file ? { artifact: artifactCommand(conversation, artifactAccess(d, depth), role === 'main' ? recorder?.runId : undefined) } : {}),
     };
     if (!commands.artifact) delete commands.artifact;

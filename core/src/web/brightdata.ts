@@ -42,6 +42,8 @@ export interface WebReply {
 export interface WebAccess {
   /** Runs one request; throws with a message for the model when it fails. */
   request(req: WebRequest, signal?: AbortSignal): Promise<WebReply>;
+  /** Whether requests can work at all (a key was added); undefined counts as yes. */
+  ready?(): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -130,6 +132,10 @@ export class BrightDataWeb implements WebAccess {
 
   /** @param key Reads the API key (null when none was added). */
   constructor(private readonly key: () => Promise<string | null>, private readonly url = BRIGHT_DATA_MCP_URL) {}
+
+  async ready(): Promise<boolean> {
+    return !!(await this.key().catch(() => null));
+  }
 
   private async connect(): Promise<Client> {
     const key = await this.key();
