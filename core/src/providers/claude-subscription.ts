@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import xtermHeadless from '@xterm/headless';
 import { removeDir } from '../utils/remove-dir.js';
 import {
   ProviderError,
@@ -30,10 +31,13 @@ import { ensureDir } from '../settings/home.js';
 import { toEpochMs, toPercent, type PlanUsage, type PlanUsageStore, type UsageWindow } from './usage.js';
 
 const require = createRequire(import.meta.url);
+const { Terminal } = xtermHeadless;
 const PREFIX = 'mcp__sfagents__';
 const GUARDRAIL =
   'Act as a language model completing the supplied conversation. Answer the last message. Do not inspect this computer or execute tools yourself: call the supplied functions, whose results the client returns in a later message.';
 const BLOCKED = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Agent', 'Task', 'Skill', 'NotebookEdit', 'TodoWrite'];
+const SIGN_IN_COLS = 1000;
+const SIGN_IN_ROWS = 60;
 const AUTH_ORIGINS = ['https://claude.com', 'https://claude.ai', 'https://platform.claude.com', 'https://console.anthropic.com'];
 
 export const CLAUDE_MODEL_ALIASES: Record<string, string> = {
@@ -94,15 +98,16 @@ export class ClaudeSignIn {
   /** The sign-in address Claude printed (for display only: it ends with a code to paste, which SF Agents does not take). */
   readonly url: string;
   readonly done: Promise<string>;
-  private output = '';
-  private exited = false;
+  private screen: ClaudeScreen | null;
+  private exitedAt = 0;
   private finished = false;
   private readonly dir: string;
 
   private constructor(private readonly pty: Pty, url: string, dir: string, output: string, timeoutMs: number) {
     this.url = url;
     this.dir = dir;
-    this.output = output;
+    this.screen = new ClaudeScreen();
+    this.screen.write(output);
     this.done = new Promise<string>((resolve, reject) => {
       const finish = (error: Error | null, token?: string) => {
         if (this.finished) return;
@@ -116,24 +121,34 @@ export class ClaudeSignIn {
       };
       const timer = setTimeout(() => finish(new ProviderError('Sign-in timed out after 10 minutes. Start again.', 408)), timeoutMs);
       timer.unref?.();
+      let checking = false;
       const poll = setInterval(() => {
-        const text = strip(this.output);
-        // A PTY can split one token across arbitrarily delayed data events.
-        // Do not accept a prefix at the end of the buffer: wait for the
-        // token's line to be complete before saving and killing the process.
-        const token = (this.exited ? /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}(?=[ \t]*(?:\n|$))/ : /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}(?=[ \t]*\n)/).exec(text)?.[0];
-        if (token) finish(null, token);
-        else if (/OAuth error|invalid_grant|code (?:has )?expired|Login failed/i.test(text)) finish(new ProviderError('Claude did not complete the sign-in. Start again.', 400));
-        else if (this.exited) finish(new ProviderError('Claude sign-in ended without a token.', 400));
+        if (checking || !this.screen) return;
+        checking = true;
+        const exitedAt = this.exitedAt;
+        void this.screen
+          .text()
+          .then((text) => {
+            const token = findSetupToken(text, exitedAt > 0);
+            if (token) finish(null, token);
+            else if (/OAuth error|invalid_grant|code (?:has )?expired|Login failed/i.test(text)) finish(new ProviderError(`Claude did not complete the sign-in. Start again.${lastWords(text)}`, 400));
+            // A terminal can deliver its last output after the exit (Windows
+            // ConPTY does): give it a moment before giving up.
+            else if (exitedAt && Date.now() - exitedAt > EXIT_GRACE_MS) finish(new ProviderError(`Claude sign-in ended without a token.${lastWords(text)}`, 400));
+          })
+          .catch(() => {})
+          .finally(() => {
+            checking = false;
+          });
       }, 200);
       this.abort = (e) => finish(e);
     });
     this.done.catch(() => {});
     pty.onData((d) => {
-      this.output = (this.output + d).slice(-65536);
+      this.screen?.write(d);
     });
     pty.onExit(() => {
-      this.exited = true;
+      this.exitedAt = Date.now();
     });
   }
 
@@ -149,7 +164,7 @@ export class ClaudeSignIn {
     const executable = options.executable ?? claudeExecutable();
     // A throwaway profile: setup-token prints the token and must not keep one.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sfagents-claude-signin-'));
-    const child = pty.spawn(executable, ['setup-token'], { name: 'xterm-256color', cols: 1000, rows: 60, cwd: dir, env: claudeEnv(dir) as Record<string, string> });
+    const child = pty.spawn(executable, ['setup-token'], { name: 'xterm-256color', cols: SIGN_IN_COLS, rows: SIGN_IN_ROWS, cwd: dir, env: claudeEnv(dir) as Record<string, string> });
     let output = '';
     const sub = child.onData((d) => {
       output = (output + d).slice(-65536);
@@ -194,8 +209,9 @@ export class ClaudeSignIn {
 
   /** Stops Claude and deletes the throwaway profile; never throws (on Windows the folder may stay busy for a moment). */
   private cleanUp(): void {
-    this.output = '';
-    if (!this.exited) {
+    this.screen?.dispose();
+    this.screen = null;
+    if (!this.exitedAt) {
       try {
         this.pty.kill();
       } catch {
@@ -206,12 +222,72 @@ export class ClaudeSignIn {
   }
 }
 
-function strip(s: string): string {
-  return s
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ' ')
-    .replace(/\x1b\[[0-9;?<>=]*[ -/]*[@-~]/g, '')
-    .replace(/\x1b[78=>]/g, '')
-    .replace(/[\r\n]+/g, '\n');
+const EXIT_GRACE_MS = 1500;
+const TOKEN = /sk-ant-oat\d*-[A-Za-z0-9_-]{20,}/;
+
+/**
+ * Claude's screen as a terminal would show it. Claude Code draws with cursor
+ * moves (words placed by column jumps, the success screen painted over the
+ * previous frame, and on Windows ConPTY repaints rows by position), so its
+ * raw output is not text: emulate the terminal and read the rows instead.
+ */
+class ClaudeScreen {
+  private readonly term = new Terminal({ cols: SIGN_IN_COLS, rows: SIGN_IN_ROWS, scrollback: 2000, allowProposedApi: true });
+
+  write(data: string): void {
+    this.term.write(data);
+  }
+
+  /** The rows on screen and in scrollback, once everything written so far is drawn. */
+  text(): Promise<string> {
+    return new Promise((resolve) => {
+      this.term.write('', () => {
+        const buffer = this.term.buffer.active;
+        const rows: string[] = [];
+        for (let i = 0; i < buffer.length; i++) {
+          const line = buffer.getLine(i);
+          if (!line) continue;
+          const text = line.translateToString(true);
+          if (line.isWrapped && rows.length) rows[rows.length - 1] += text;
+          else rows.push(text);
+        }
+        resolve(rows.join('\n'));
+      });
+    });
+  }
+
+  dispose(): void {
+    this.term.dispose();
+  }
+}
+
+/**
+ * The setup token on Claude's screen. While Claude runs, a token counts only
+ * once the screen shows more after it (the line below it), so a token still
+ * arriving in pieces is never taken short; after Claude exits, any token.
+ */
+export function findSetupToken(screen: string, exited: boolean): string | null {
+  const rows = screen.split('\n');
+  for (let i = 0; i < rows.length; i++) {
+    const m = TOKEN.exec(rows[i]!);
+    if (!m) continue;
+    const after = rows[i]!.slice(m.index + m[0].length);
+    // Something else glued to the token on its row: not a token we trust.
+    if (after && !/^\s/.test(after)) continue;
+    if (exited || after.trim() || rows.slice(i + 1).some((r) => r.trim())) return m[0];
+  }
+  return null;
+}
+
+/** The end of what Claude showed, for an error (any token hidden). */
+function lastWords(screen: string): string {
+  const lines = screen
+    .split('\n')
+    .map((l) => l.replace(new RegExp(TOKEN.source, 'g'), '[token]').trim())
+    .filter(Boolean)
+    .slice(-4);
+  const text = lines.join(' / ').slice(-400);
+  return text ? ` Claude showed: "${text}"` : '';
 }
 
 export function findAuthUrl(raw: string): string | null {

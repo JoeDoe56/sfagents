@@ -409,6 +409,46 @@ describe('Windows: busy folders never break sign-in or removal', () => {
     const signIn = await ClaudeSignIn.start({ executable: script, timeoutMs: 5000, signInTimeoutMs: 5000 });
     assert.equal(await signIn.done, token);
   });
+  test('Claude sign-in reads the token from a screen redrawn with cursor moves', { skip: process.platform === 'win32' }, async () => {
+    // What Claude Code 2.1.x really sends: words placed with column jumps
+    // (ESC[nG) instead of spaces, and the success screen drawn over the old
+    // frame with cursor moves instead of newlines, then an exit 500 ms later.
+    const dir = makeTempDir();
+    const script = path.join(dir, 'claude');
+    const token = `sk-ant-oat01-${'Ab9_-'.repeat(20)}`;
+    const frame1 = [
+      '\x1b[2G\x1b[1mThis\x1b[7Gwill\x1b[12Gguide\x1b[18Gyou\x1b[22mthrough\r\r\n',
+      '\r\r\n',
+      '\x1b[2G\x1b[38;5;246mBrowser\x1b[10Gdidn\'t\x1b[17Gopen?\x1b[39m\r\r\n',
+      '\r\r\n',
+      '\x1b]8;id=x;https://claude.com/cai/oauth/authorize?code=true&state=abc\x07https://claude.com/cai/oauth/authorize?code=true&state=abc\x1b]8;;\x07\r\r\n',
+      '\r\r\n',
+      '\x1b[2GPaste\x1b[8Gcode\x1b[13Ghere\x1b[18Gif\x1b[21Gprompted\x1b[30G>\r\r\n',
+    ].join('');
+    // Rows placed by absolute position with no carriage return, as Windows
+    // ConPTY repaints them: stripping escapes would glue "Store" to the token.
+    const frame2 = [
+      '\x1b[1;1H\x1b[2K\x1b[2G\x1b[32m\u2713\x1b[4GLong-lived\x1b[15Gauthentication\x1b[30Gtoken\x1b[36Gcreated\x1b[39m',
+      '\x1b[3;1H\x1b[2K\x1b[2GYour\x1b[7GOAuth\x1b[13Gtoken\x1b[19G(valid\x1b[26Gfor\x1b[30G1\x1b[32Gyear):',
+      `\x1b[5;1H\x1b[2K\x1b[2G\x1b[33m${token}\x1b[39m`,
+      '\x1b[7;1H\x1b[2K\x1b[2G\x1b[2mStore this token securely.\x1b[22m',
+      '\x1b[8;1H\x1b[2K\x1b[2G\x1b[2mUse\x1b[6Gthis\x1b[11Gtoken\x1b[22m',
+    ].join('');
+    fs.writeFileSync(
+      script,
+      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(frame1)});\nsetTimeout(() => process.stdout.write(${JSON.stringify(frame2)}), 400);\nsetTimeout(() => process.exit(0), 900);\n`,
+      { mode: 0o755 },
+    );
+    const signIn = await ClaudeSignIn.start({ executable: script, timeoutMs: 5000, signInTimeoutMs: 5000 });
+    assert.equal(await signIn.done, token);
+  });
+  test('Claude sign-in that ends without a token says what Claude printed', { skip: process.platform === 'win32' }, async () => {
+    const dir = makeTempDir();
+    const script = path.join(dir, 'claude');
+    fs.writeFileSync(script, `#!/bin/sh\necho 'https://claude.ai/oauth/authorize?state=test'\nsleep 0.4\necho 'Your organization does not allow this.'\n`, { mode: 0o755 });
+    const signIn = await ClaudeSignIn.start({ executable: script, timeoutMs: 5000, signInTimeoutMs: 5000 });
+    await assert.rejects(signIn.done, /ended without a token.*Your organization does not allow this\./s);
+  });
   test('Claude sign-in waits for a complete token line across delayed PTY chunks', { skip: process.platform === 'win32' }, async () => {
     const dir = makeTempDir();
     const script = path.join(dir, 'claude');
