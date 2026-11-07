@@ -430,7 +430,7 @@ button { -webkit-tap-highlight-color: transparent; }
 
 /* ------------------------------------------------------------------ composer (the main bar's header: sfgl bar, field, buttons) */
 
-.composer-field { color: #fff; padding-block: 0; }
+.composer-field { color: #fff; padding-block: 0; border-radius: 22px !important; }
 .composer-field .sf-field-input { padding: 11px 0; line-height: 22px; max-height: none; caret-color: var(--send); touch-action: pan-y; }
 .composer-field .sf-field-input::placeholder { color: rgba(235, 235, 245, 0.45); }
 .composer-icon { color: rgba(235, 235, 245, 0.6); }

@@ -31,6 +31,7 @@ const MAX_INDEX_ENTRIES = 60;
 export interface ContextPolicy {
   maxInputTokens?: number;
   recentExchanges?: number;
+  oldMessagesPercent?: number;
 }
 
 export interface ContextReport {
@@ -159,6 +160,7 @@ export function buildWorkingContext(
     );
   }
   remaining -= currentTokens;
+  if (policy.oldMessagesPercent !== undefined) remaining = Math.min(remaining, Math.floor(budget * policy.oldMessagesPercent / 100));
   const included: ChatMessage[][] = [current];
   for (let i = converted.length - 2; i >= 0 && included.length < window; i--) {
     const cost = estimateMessages(converted[i]!);

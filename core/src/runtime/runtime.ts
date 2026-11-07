@@ -813,7 +813,8 @@ export class AgentRuntime implements AgentMessenger {
       const target = replayTarget(d);
       const prepareContext = (fixedText: string) => {
         const usable = Math.floor(budget * (1 - TURN_RESERVE)) - Math.ceil(fixedText.length / 4) - 200;
-        const { messages, omitted } = threadMessages(store.state, to.id, target, Math.max(1000, usable));
+        const oldBudget = d.context?.oldMessagesPercent === undefined ? undefined : Math.floor(budget * d.context.oldMessagesPercent / 100);
+        const { messages, omitted } = threadMessages(store.state, to.id, target, Math.max(1000, usable), oldBudget);
         return { messages, systemExtra: threadNote(to, from.id, omitted) };
       };
       // How the writer and this run reach each other while both work.

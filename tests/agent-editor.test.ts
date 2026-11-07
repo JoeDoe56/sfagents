@@ -65,6 +65,15 @@ describe('agent files: container resources and voice', () => {
 });
 
 describe('the agent editor (core)', () => {
+  test('context settings round trip and validate without losing other context options', () => {
+    const { dir, tree: t } = project([baseAgent('main', { context: { recentExchanges: 7 } })]);
+    const f = readAgentForm(t(), 'main');
+    saveAgentForm(t(), { ...f, maxInputTokens: 32000, oldMessagesPercent: 30 }, LIMITS, 'main');
+    assert.deepEqual(agentFile(dir, 'main')['context'], { recentExchanges: 7, maxInputTokens: 32000, oldMessagesPercent: 30 });
+    assert.equal(readAgentForm(t(), 'main').oldMessagesPercent, 30);
+    assert.ok(validateAgentForm(t(), { ...f, oldMessagesPercent: 101 }, LIMITS, 'main').oldMessagesPercent);
+    assert.ok(validateAgentForm(t(), { ...f, maxInputTokens: 1 }, LIMITS, 'main').maxInputTokens);
+  });
   test('create the first agent without a tree or an agents folder', () => {
     const dir = makeTempDir();
     const editor = loadAgentEditor(dir);
