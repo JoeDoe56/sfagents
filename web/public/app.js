@@ -150,9 +150,13 @@ let dock = null; // the diff pills and the scroll-down circle (created below)
 // What the dock adds above the bar: all of it lifts the rail; the pills also pad the conversation.
 const dockSpace = { height: 0, pills: 0 };
 let sheetT = 0;
+let aboveBarLayout = '';
 /** Places what floats above the bar (the rail, the dock) and pads the conversation's end. */
 function layoutAboveBar(next = clearance) {
   const covered = sheetT > 0.03;
+  const key = `${Math.round(next)}|${covered}|${dockSpace.height}|${dockSpace.pills}`;
+  if (key === aboveBarLayout) return;
+  aboveBarLayout = key;
   railEl.style.bottom = `${Math.round(next + 12 + (covered ? 0 : dockSpace.height))}px`;
   railEl.classList.toggle('covered', covered);
   const pad = Math.round(next + 18 + (covered ? 0 : dockSpace.pills));

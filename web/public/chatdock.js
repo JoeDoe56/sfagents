@@ -59,6 +59,7 @@ export function createChatDock(o) {
   let covered = false;
   let downShown = false;
   let attached = null;
+  let barPlaced = false;
 
   function host() {
     const layer = o.layer();
@@ -286,6 +287,11 @@ export function createChatDock(o) {
     setRepos,
     /** The bar moved (the sheet's onMove): follow it, and hide while the sheet is up. */
     setBar({ clearance: next, covered: isCovered }) {
+      // Sheet springs call onMove every frame, even though their collapsed
+      // bar geometry and the dock's visibility usually have not changed.
+      // Avoid a layout read, scroll check and glass redraw on those frames.
+      if (barPlaced && Math.round(clearance) === Math.round(next) && covered === isCovered) return;
+      barPlaced = true;
       clearance = next;
       covered = isCovered;
       place();
