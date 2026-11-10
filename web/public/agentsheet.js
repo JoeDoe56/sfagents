@@ -279,6 +279,25 @@ export function planBar() {
         if (w?.resetsAt) resets.push(`${key === 'fiveHour' ? '5-hour' : 'Weekly'} limit resets ${resetText(w.resetsAt)}`);
       }
       if (u?.limitReached) resets.unshift('Limit reached');
+      // OpenRouter: credits instead of plan windows.
+      const credits = u?.credits;
+      root.classList.toggle('credits', !!credits);
+      if (credits) {
+        const money = (n) => `$${n.toFixed(2)}`;
+        const f = credits.limit ? credits.used / credits.limit : 0;
+        const p = parts.fiveHour;
+        p.fill.style.width = `${(Math.max(0, Math.min(1, f)) * 100).toFixed(2)}%`;
+        p.seg.classList.toggle('warn', f >= 0.8 && f < 0.9);
+        p.seg.classList.toggle('full', f >= 0.9);
+        p.seg.querySelector('.usage-name').textContent = 'Credits';
+        p.pct.textContent = credits.limit ? pct(f) : money(credits.used);
+        parts.weekly.seg.hidden = true;
+        caption.textContent = [credits.limit ? `${money(credits.used)} of ${money(credits.limit)} used, ${money(credits.remaining ?? credits.limit - credits.used)} left` : `${money(credits.used)} spent`, credits.today !== undefined ? `${money(credits.today)} today` : ''].filter(Boolean).join(' · ');
+        caption.hidden = false;
+        return;
+      }
+      parts.weekly.seg.hidden = false;
+      parts.fiveHour.seg.querySelector('.usage-name').textContent = parts.fiveHour.label;
       caption.textContent = resets.length
         ? resets.join(' · ')
         : info.error
@@ -692,10 +711,21 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
       fact('Recent exchanges kept', `${c.exchanges.included} of ${c.exchanges.sinceReset} (up to ${c.exchanges.recentLimit})`),
       fact('Sections in the index', `${c.sections.shown} of ${c.sections.total}`),
     ];
+    const usageText = (u) => {
+      const split = [];
+      if (u.cacheReadTokens) split.push(`${tokensText(u.cacheReadTokens)} cached`);
+      if (u.cacheWriteTokens) split.push(`${tokensText(u.cacheWriteTokens)} written to cache`);
+      if (Number.isFinite(u.inputTokens) && (u.cacheReadTokens || u.cacheWriteTokens)) split.push(`${tokensText(u.inputTokens)} fresh`);
+      return `${tokensText(u.promptTokens ?? 0)} in${split.length ? ` (${split.join(', ')})` : ''} · ${tokensText(u.completionTokens ?? 0)} out${u.reasoningTokens ? ` (${tokensText(u.reasoningTokens)} reasoning)` : ''}`;
+    };
     if (c.lastRequest) {
       const u = c.lastRequest.usage;
-      facts.push(fact('Last request', `${tokensText(u.promptTokens)} in · ${tokensText(u.completionTokens)} out`));
+      facts.push(fact('Last request', usageText(u)));
       if (Number.isFinite(u.cost)) facts.push(fact('Last request cost', `$${u.cost.toFixed(u.cost < 0.01 ? 4 : 3)}`));
+    }
+    if (c.run?.requests) {
+      facts.push(fact(c.run.running ? 'This reply so far' : 'Last reply', `${usageText(c.run.usage)} · ${c.run.requests} request${c.run.requests === 1 ? '' : 's'}`));
+      if (Number.isFinite(c.run.usage.cost)) facts.push(fact(c.run.running ? 'This reply’s cost' : 'Last reply cost', `$${c.run.usage.cost.toFixed(3)}`));
     }
     sections.push(createSection({ title: 'Window', rows: facts }).el);
 
@@ -716,7 +746,7 @@ export function openAgentSheet({ agent, onSaved, onEditFile } = {}) {
         }
       },
     });
-    sections.push(createSection({ rows: [reset], note: 'Token counts are estimates (about four characters per token); the last request shows what the provider reported.' }).el);
+    sections.push(createSection({ rows: [reset], note: c.calibration ? `Token counts are scaled to what the provider counted for recent requests (×${c.calibration.toFixed(2)} the four-characters-per-token estimate). The last request and reply show the provider's own figures.` : 'Token counts are estimates (about four characters per token) until the provider reports a request; the last request shows what the provider reported.' }).el);
     d.append(...sections);
     ctx.refresh();
   }

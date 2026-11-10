@@ -5,7 +5,8 @@
  * only in its environment).
  *
  * Adapted from the project owner's LLM-Proxy (claude-backend.mjs): each
- * request is stateless and carries the whole conversation; the SDK's own
+ * request is stateless and carries the whole conversation (laid out so the
+ * prompt cache can reuse it: see prepareClaudeRequest); the SDK's own
  * tools are off and SF Agents' tools are offered through an in-process MCP
  * server whose calls are captured and returned to SF Agents to execute.
  */
@@ -25,6 +26,7 @@ import {
   type ModelRequest,
   type ModelStreamEvent,
   type ParsedToolCall,
+  type TokenUsage,
 } from './types.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { ensureDir } from '../settings/home.js';
@@ -70,6 +72,8 @@ export function claudeEnv(configDir: string, token?: string): NodeJS.ProcessEnv 
     if (
       key.startsWith('ANTHROPIC_') ||
       key.startsWith('CLAUDE_CODE_USE_') ||
+      // Never inherit a switch that turns prompt caching off.
+      key.startsWith('DISABLE_PROMPT_CACHING') ||
       ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'CLAUDECODE', 'CLAUDE_CODE_SESSION_ACCESS_TOKEN', 'OPENROUTER_API_KEY'].includes(key)
     )
       delete env[key];
@@ -308,47 +312,77 @@ export function findAuthUrl(raw: string): string | null {
 interface PreparedClaude {
   model: string;
   systemPrompt: string;
+  /** The user message's content blocks: a fixed header, then the conversation, one block per message (images after their message). */
+  blocks: Array<Record<string, unknown>>;
+  /** The text blocks joined (tests and logs). */
   prompt: string;
   images: string[];
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
   effort?: string;
 }
 
+const TRANSCRIPT_HEADER = 'Complete this conversation. Each following block is one message of it as JSON, in order; "tool" messages are results the client returned for your function calls. Answer the last message.';
+
+/**
+ * The conversation as one user message for the SDK, laid out for Anthropic's
+ * prompt cache: the cache matches prefixes block by block, so every message
+ * is its own block that never changes once sent, and each request only adds
+ * blocks at the end. (One block holding the whole transcript changed on
+ * every request, so nothing past the system prompt and tools was ever read
+ * back from the cache, and the whole history was written to it again each
+ * time.) The results of one turn's tool calls share a block.
+ */
 export function prepareClaudeRequest(request: ModelRequest): PreparedClaude {
   const system: string[] = [];
-  const history: unknown[] = [];
+  const blocks: Array<Record<string, unknown>> = [{ type: 'text', text: TRANSCRIPT_HEADER }];
   const images: string[] = [];
+  let toolBlock: { type: 'text'; text: string } | null = null;
+  const text = (value: unknown) => {
+    toolBlock = null;
+    blocks.push({ type: 'text', text: JSON.stringify(value) });
+  };
   for (const m of request.messages as readonly ChatMessage[]) {
     if (m.role === 'system') {
       system.push(m.content);
       continue;
     }
     if (m.role === 'tool') {
-      history.push({ role: 'tool', tool_call_id: m.tool_call_id, content: m.content });
+      const entry = JSON.stringify({ role: 'tool', tool_call_id: m.tool_call_id, content: m.content });
+      if (toolBlock) (toolBlock as { text: string }).text += `\n${entry}`;
+      else {
+        toolBlock = { type: 'text', text: entry };
+        blocks.push(toolBlock);
+      }
       continue;
     }
     if (m.role === 'assistant') {
-      if (m.content) history.push({ role: 'assistant', content: m.content });
-      for (const t of m.tool_calls ?? []) history.push({ role: 'assistant', tool_call: { id: t.id, name: t.function.name, arguments: t.function.arguments } });
+      const calls = (m.tool_calls ?? []).map((t) => ({ id: t.id, name: t.function.name, arguments: t.function.arguments }));
+      if (!m.content && !calls.length) continue;
+      text({ role: 'assistant', ...(m.content ? { content: m.content } : {}), ...(calls.length ? { tool_calls: calls } : {}) });
       continue;
     }
-    const content =
-      typeof m.content === 'string'
-        ? m.content
-        : m.content
-            .map((p) => {
-              if (p.type === 'text') return p.text;
-              images.push(p.image_url.url);
-              return `[Attached image ${images.length}]`;
-            })
-            .join('\n');
-    history.push({ role: 'user', content });
+    if (typeof m.content === 'string') {
+      text({ role: 'user', content: m.content });
+      continue;
+    }
+    const mine: string[] = [];
+    const content = m.content
+      .map((p) => {
+        if (p.type === 'text') return p.text;
+        images.push(p.image_url.url);
+        mine.push(p.image_url.url);
+        return `[Attached image ${images.length}]`;
+      })
+      .join('\n');
+    text({ role: 'user', content });
+    for (const url of mine) blocks.push(imageBlock(url));
   }
   system.push(GUARDRAIL);
   return {
     model: CLAUDE_MODEL_ALIASES[request.model] ?? request.model,
     systemPrompt: system.join('\n\n'),
-    prompt: `Complete this conversation (JSON transcript; "tool" messages are results the client returned for your function calls):\n${JSON.stringify(history)}`,
+    blocks,
+    prompt: blocks.filter((b) => b['type'] === 'text').map((b) => String(b['text'])).join('\n'),
     images,
     tools: (request.tools ?? []).map((t) => ({ name: t.name, description: t.description, parameters: t.parameters as Record<string, unknown> })),
     effort: request.reasoning && ['low', 'medium', 'high', 'xhigh', 'max'].includes(request.reasoning) ? request.reasoning : undefined,
@@ -362,7 +396,7 @@ function imageBlock(url: string): Record<string, unknown> {
 }
 
 /** Messages that mean the plan's limit was reached (another account may serve). */
-const LIMIT_TEXT = /usage limit|rate limit|limit reached|overloaded|out of extra usage|weekly limit|5-hour limit/i;
+const LIMIT_TEXT = /usage limit|rate limit|limit reached|overloaded|out of extra usage|weekly limit|5-hour limit|session limit|opus limit|hit your (?:\w+ )?limit/i;
 const AUTH_TEXT = /invalid api key|oauth token|authenticat|unauthorized|not logged in|please run \/login|401/i;
 
 export class ClaudeSubscriptionProvider implements ModelProvider {
@@ -376,6 +410,12 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
   ) {
     // The SDK keeps settings and caches here; never a credential (the token comes in the environment).
     this.configDir = ensureDir(stateDir);
+  }
+
+  /** A limit error marks the plan as at its limit in the usage bar. */
+  private limited(error: ProviderError): ProviderError {
+    if (error.status === 429 && this.options.usage) this.options.usage.update(this.options.usageKey ?? this.id, { limitReached: true });
+    return error;
   }
 
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamEvent> {
@@ -419,7 +459,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
       });
       servers = { sfagents: { type: 'sdk', name: 'sfagents', instance: server } };
     }
-    const blocks: unknown[] = [{ type: 'text', text: prepared.prompt }, ...prepared.images.map(imageBlock)];
+    const blocks = prepared.blocks;
     async function* prompt() {
       yield { type: 'user', session_id: '', message: { role: 'user', content: blocks }, parent_tool_use_id: null };
     }
@@ -437,7 +477,9 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
       permissionMode: 'default',
       persistSession: false,
       includePartialMessages: true,
-      maxTurns: prepared.tools.length ? 5 : 1,
+      // One API call per SF Agents turn: the loop below stops as soon as the
+      // model's response ends; this is only a backstop.
+      maxTurns: prepared.tools.length ? 2 : 1,
       ...(servers ? { mcpServers: servers } : {}),
       ...(prepared.effort ? { effort: prepared.effort } : {}),
       canUseTool: async (name: string, input: unknown, context: { toolUseID?: string }) => {
@@ -449,13 +491,45 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
     let query: any;
     let text = '';
     let result: any;
+    // Usage per API call, from the stream (it is there even when the call fails or the loop stops early).
+    const meter = new ClaudeMeter();
+    // Tool calls as the stream builds them, by content block index.
+    const building = new Map<number, { id: string; name: string; json: string }>();
+    let stopReason: string | null = null;
+    let apiCalls = 0;
+    const started = Date.now();
+    yield { type: 'log', text: `Claude request: model ${prepared.model}, ${blocks.length} content blocks, ${prepared.tools.length} tools, system prompt ${prepared.systemPrompt.length} chars, transcript ${prepared.prompt.length} chars${prepared.effort ? `, effort ${prepared.effort}` : ''}` };
     try {
       query = sdk.query({ prompt: prompt(), options: sdkOptions });
       for await (const message of query) {
         if (controller.signal.aborted) break;
         if (message.type === 'stream_event') {
-          const delta = message.event?.delta;
-          if (delta?.type === 'text_delta' && delta.text) {
+          const event = message.event ?? {};
+          meter.event(event);
+          if (event.type === 'message_start') apiCalls++;
+          const delta = event.delta;
+          if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+            building.set(event.index, { id: String(event.content_block.id ?? ''), name: String(event.content_block.name ?? ''), json: '' });
+          } else if (event.type === 'content_block_stop' && building.has(event.index)) {
+            const b = building.get(event.index)!;
+            building.delete(event.index);
+            let input: unknown = {};
+            try {
+              input = b.json ? JSON.parse(b.json) : {};
+            } catch {
+              input = undefined;
+            }
+            // Arguments that did not parse wait for the SDK's own message (or canUseTool).
+            if (input !== undefined && b.name.startsWith(PREFIX)) capture(b.name.slice(PREFIX.length), input, b.id);
+          } else if (event.type === 'message_delta' && event.delta?.stop_reason) {
+            stopReason = event.delta.stop_reason;
+          } else if (event.type === 'message_stop') {
+            // The response is complete. With tool calls, stop here: the SDK
+            // would otherwise run its own tool round and ask the model again.
+            if (calls.length) break;
+          } else if (delta?.type === 'input_json_delta' && building.has(event.index)) {
+            building.get(event.index)!.json += delta.partial_json ?? '';
+          } else if (delta?.type === 'text_delta' && delta.text) {
             text += delta.text;
             yield { type: 'text', text: delta.text };
           } else if (delta?.type === 'thinking_delta' && delta.thinking) {
@@ -464,8 +538,13 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
         } else if (message.type === 'rate_limit_event') {
           const u = claudePlanUsage(message.rate_limit_info);
           if (u && this.options.usage) this.options.usage.update(this.options.usageKey ?? this.id, u);
-        } else if (message.type === 'assistant' && !text) {
-          for (const block of message.message?.content ?? []) if (block.type === 'text' && !calls.length) text += block.text;
+          yield { type: 'log', text: `Claude rate limit event: ${JSON.stringify(message.rate_limit_info ?? {})}` };
+        } else if (message.type === 'assistant') {
+          for (const block of message.message?.content ?? []) {
+            if (block.type === 'tool_use' && typeof block.name === 'string' && block.name.startsWith(PREFIX)) capture(block.name.slice(PREFIX.length), block.input, block.id);
+            else if (block.type === 'text' && !text && !calls.length) text += block.text;
+          }
+          if (!meter.seen && message.message?.usage) meter.add(message.message.usage);
         } else if (message.type === 'result') {
           result = message;
           break;
@@ -473,8 +552,9 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
       }
     } catch (error) {
       if (request.signal.aborted || isAbortError(error)) throw request.signal.reason ?? error;
-      if (controller.signal.reason instanceof ProviderError) throw controller.signal.reason;
-      throw classify(getErrorMessage(error));
+      const usage = meter.usage(apiCalls);
+      if (controller.signal.reason instanceof ProviderError) throw withUsage(controller.signal.reason, usage);
+      throw this.limited(classify(getErrorMessage(error), usage));
     } finally {
       clearTimeout(timer);
       request.signal.removeEventListener('abort', abort);
@@ -485,17 +565,97 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
       }
     }
     if (request.signal.aborted) throw request.signal.reason;
-    if (!result) throw new ProviderError('Claude ended without a result.', 502, true);
-    if (result.is_error && !calls.length) throw classify(String(result.result ?? result.subtype ?? 'error'));
-    if (!text && !calls.length && typeof result.result === 'string') {
+    if (!meter.seen && result) meter.fromResult(result);
+    const usage = meter.usage(apiCalls || result?.num_turns);
+    yield {
+      type: 'log',
+      text: `Claude response: ${Date.now() - started} ms, stop ${stopReason ?? result?.stop_reason ?? result?.subtype ?? 'unknown'}, ${calls.length} tool call(s)${result ? `, SDK turns ${result.num_turns ?? '?'}` : ', stopped after the response'}${result?.modelUsage ? `, by model ${JSON.stringify(result.modelUsage)}` : ''}`,
+    };
+    if (!result && !calls.length && !text) throw new ProviderError('Claude ended without a result.', 502, true, usage);
+    if (result?.is_error && !calls.length) throw this.limited(classify(String(result.result ?? result.subtype ?? 'error'), usage));
+    if (!text && !calls.length && typeof result?.result === 'string') {
       text = result.result;
       yield { type: 'text', text };
     }
-    const usage = tokenUsage(result);
+    // A reply came back: the plan is not at its limit (any more).
+    const key = this.options.usageKey ?? this.id;
+    if (this.options.usage?.get(key)?.limitReached) this.options.usage.update(key, { limitReached: false });
     const message: AssistantMessage = { role: 'assistant', content: text || null };
     if (calls.length) message.tool_calls = calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.rawArguments } }));
-    yield { type: 'done', message, toolCalls: calls, finishReason: calls.length ? 'tool_calls' : 'stop', usage };
+    yield { type: 'done', message, toolCalls: calls, finishReason: calls.length ? 'tool_calls' : stopReason === 'max_tokens' ? 'length' : 'stop', usage };
   }
+}
+
+/**
+ * Adds up what each API call used, from the stream's message_start (input
+ * and cache counters) and message_delta (output) events. Usage is per call,
+ * so a request that runs into a limit still reports what it spent.
+ */
+class ClaudeMeter {
+  private input = 0;
+  private cacheRead = 0;
+  private cacheWrite = 0;
+  private output = 0;
+  seen = false;
+
+  event(event: any): void {
+    if (event?.type === 'message_start' && event.message?.usage) this.add(event.message.usage, true);
+    else if (event?.type === 'message_delta' && event.usage) {
+      // message_delta carries the final output count (cumulative for that call).
+      const out = Number(event.usage.output_tokens);
+      if (Number.isFinite(out)) this.output += Math.max(0, out - this.lastStartOutput);
+      this.lastStartOutput = Number.isFinite(out) ? out : this.lastStartOutput;
+    }
+  }
+
+  private lastStartOutput = 0;
+
+  add(u: any, start = false): void {
+    this.seen = true;
+    this.input += num(u.input_tokens);
+    this.cacheRead += num(u.cache_read_input_tokens);
+    this.cacheWrite += num(u.cache_creation_input_tokens);
+    const out = num(u.output_tokens);
+    this.output += out;
+    if (start) this.lastStartOutput = out;
+  }
+
+  /** Without stream events (an older SDK, tests): the result's totals. */
+  fromResult(result: any): void {
+    const values = Object.values(result.modelUsage ?? {}) as any[];
+    if (values.length) {
+      this.seen = true;
+      for (const x of values) {
+        this.input += num(x.inputTokens);
+        this.cacheRead += num(x.cacheReadInputTokens);
+        this.cacheWrite += num(x.cacheCreationInputTokens);
+        this.output += num(x.outputTokens);
+      }
+    } else if (result.usage) this.add(result.usage);
+  }
+
+  usage(requests?: number): TokenUsage | undefined {
+    if (!this.seen) return undefined;
+    const prompt = this.input + this.cacheRead + this.cacheWrite;
+    return {
+      promptTokens: prompt,
+      completionTokens: this.output,
+      totalTokens: prompt + this.output,
+      inputTokens: this.input,
+      cacheReadTokens: this.cacheRead,
+      cacheWriteTokens: this.cacheWrite,
+      ...(requests ? { requests } : {}),
+    };
+  }
+}
+
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function withUsage(error: ProviderError, usage: TokenUsage | undefined): ProviderError {
+  return usage && !error.usage ? new ProviderError(error.message, error.status, error.retryable, usage) : error;
 }
 
 function claudeWindow(utilization: unknown, resetsAt: unknown): UsageWindow | undefined {
@@ -525,18 +685,8 @@ export function claudePlanUsage(info: any): Partial<PlanUsage> | null {
   return out.fiveHour || out.weekly || limited ? out : null;
 }
 
-function classify(detail: string): ProviderError {
-  if (LIMIT_TEXT.test(detail)) return new ProviderError(`Claude: ${detail}`, 429);
-  if (AUTH_TEXT.test(detail)) return new ProviderError(`Claude sign-in was rejected (${detail}). Sign in again in Settings → Providers.`, 401);
-  return new ProviderError(`Claude request failed: ${detail}`, 502, true);
-}
-
-function tokenUsage(result: any) {
-  const values = Object.values(result.modelUsage ?? {}) as any[];
-  const u = result.usage ?? {};
-  const input = values.length
-    ? values.reduce((s, x) => s + (x.inputTokens ?? 0) + (x.cacheReadInputTokens ?? 0) + (x.cacheCreationInputTokens ?? 0), 0)
-    : (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-  const output = values.length ? values.reduce((s, x) => s + (x.outputTokens ?? 0), 0) : (u.output_tokens ?? 0);
-  return { promptTokens: input, completionTokens: output, totalTokens: input + output, ...(Number.isFinite(result.total_cost_usd) ? {} : {}) };
+function classify(detail: string, usage?: TokenUsage): ProviderError {
+  if (LIMIT_TEXT.test(detail)) return new ProviderError(`Claude: ${detail}`, 429, false, usage);
+  if (AUTH_TEXT.test(detail)) return new ProviderError(`Claude sign-in was rejected (${detail}). Sign in again in Settings → Providers.`, 401, false, usage);
+  return new ProviderError(`Claude request failed: ${detail}`, 502, true, usage);
 }

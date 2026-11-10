@@ -29,7 +29,13 @@ import {
   loadAgentTree,
   parseSetting,
   prepareClaudeRequest,
+  ClaudeSubscriptionProvider,
+  chatUsage,
+  codexTokenUsage,
+  withCacheBreakpoints,
+  openRouterCredits,
   toCodexItems,
+  type ChatMessage,
   type CodexConnection,
   type ModelProvider,
   type ModelRequest,
@@ -375,11 +381,111 @@ describe('ChatGPT and Claude adapters', () => {
     assert.equal(p.model, 'claude-haiku-5-5');
     assert.equal(p.effort, 'high');
     assert.match(p.systemPrompt, /^You are main\.[\s\S]*Do not inspect this computer/);
-    assert.match(p.prompt, /"tool_call":\{"id":"t1","name":"shell"/);
+    assert.match(p.prompt, /"tool_calls":\[\{"id":"t1","name":"shell"/);
     assert.deepEqual(p.tools.map((t) => t.name), ['shell']);
     const out = '\x1b]8;id=x;https://claude.com/cai/oauth/authorize?code=true&client_id=a&state=s1\x07https://claude.com/cai/oauth/authorize?code=true&client_id=a&state=s1\x1b]8;;\x07\r\n';
     assert.equal(findAuthUrl(out), 'https://claude.com/cai/oauth/authorize?code=true&client_id=a&state=s1');
     assert.equal(findAuthUrl('https://evil.example/?state=1 '), null);
+  });
+});
+
+describe('prompt caching and usage', () => {
+  const convo = (n: number): ChatMessage[] => {
+    const m: ChatMessage[] = [{ role: 'system', content: 'sys' }, { role: 'user', content: 'start' }];
+    for (let i = 0; i < n; i++) {
+      m.push({ role: 'assistant', content: `step ${i}`, tool_calls: [{ id: `c${i}a`, type: 'function', function: { name: 'shell', arguments: `{"n":${i}}` } }, { id: `c${i}b`, type: 'function', function: { name: 'shell', arguments: '{}' } }] });
+      m.push({ role: 'tool', tool_call_id: `c${i}a`, content: `out ${i}a` }, { role: 'tool', tool_call_id: `c${i}b`, content: `out ${i}b` });
+    }
+    return m;
+  };
+
+  test('Claude requests only add blocks at the end, so the cached prefix is reused', () => {
+    const a = prepareClaudeRequest(request({ messages: convo(3) }));
+    const b = prepareClaudeRequest(request({ messages: convo(4) }));
+    // Every block of the earlier request is unchanged at the same position.
+    assert.deepEqual(b.blocks.slice(0, a.blocks.length), a.blocks);
+    // One turn (assistant + both tool results) adds two blocks: well inside the cache's 20-block lookback.
+    assert.equal(b.blocks.length - a.blocks.length, 2);
+    assert.equal(a.systemPrompt.startsWith('sys'), true);
+    // Images sit after their own message, not at the end.
+    const img = 'data:image/png;base64,AAAA';
+    const c = prepareClaudeRequest(request({ messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image_url', image_url: { url: img } }] }, { role: 'assistant', content: 'seen' }] }));
+    assert.deepEqual(c.blocks.map((x) => x['type']), ['text', 'text', 'image', 'text']);
+  });
+
+
+  test('Claude: one API call per turn, usage from the stream including cache counters, usage kept on failure', async () => {
+    let made = 0;
+    const sdk = (script: (opts: any) => any[]) => ({
+      query: ({ options }: any) => {
+        made++;
+        const events = script(options);
+        return { async *[Symbol.asyncIterator]() { for (const e of events) yield e; }, close() {} };
+      },
+    });
+    const ev = (event: any) => ({ type: 'stream_event', event });
+    const start = (u: any) => ev({ type: 'message_start', message: { usage: { output_tokens: 1, ...u } } });
+    const toolTurn = () => [
+      start({ input_tokens: 50, cache_read_input_tokens: 9000, cache_creation_input_tokens: 400 }),
+      ev({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      ev({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Running it.' } }),
+      ev({ type: 'content_block_stop', index: 0 }),
+      ev({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tu1', name: 'mcp__sfagents__shell' } }),
+      ev({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"command":' } }),
+      ev({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '"ls"}' } }),
+      ev({ type: 'content_block_stop', index: 1 }),
+      ev({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 30 } }),
+      ev({ type: 'message_stop' }),
+      // What the SDK would do next (its own tool round and a second API call) must never be read.
+      start({ input_tokens: 99999 }),
+    ];
+    const dir = makeTempDir();
+    const p = new ClaudeSubscriptionProvider('Claude 1', async () => 'sk-ant-oat01-test', dir, { sdk: sdk(toolTurn), executable: '/bin/true' });
+    const events = await collect(p.stream(request({ tools: [{ name: 'shell', description: 'run', parameters: { type: 'object' } }] })));
+    const done = events.find((e) => e.type === 'done') as Extract<ModelStreamEvent, { type: 'done' }>;
+    assert.equal(made, 1);
+    assert.deepEqual(done.toolCalls.map((c) => [c.id, c.name, c.args]), [['tu1', 'shell', { command: 'ls' }]]);
+    assert.equal(done.message.content, 'Running it.');
+    assert.deepEqual(done.usage, { promptTokens: 9450, completionTokens: 30, totalTokens: 9480, inputTokens: 50, cacheReadTokens: 9000, cacheWriteTokens: 400, requests: 1 });
+    assert.ok(events.some((e) => e.type === 'log' && /Claude request/.test(e.text)));
+
+    const limited = new ClaudeSubscriptionProvider('Claude 1', async () => 'sk-ant-oat01-test', dir, {
+      executable: '/bin/true',
+      sdk: sdk(() => [start({ input_tokens: 10, cache_creation_input_tokens: 70000 }), { type: 'result', is_error: true, result: "You've hit your session limit", num_turns: 1 }]),
+    });
+    await assert.rejects(collect(limited.stream(request())), (e: unknown) => {
+      assert.ok(e instanceof ProviderError);
+      assert.equal(e.status, 429);
+      assert.equal(e.usage?.cacheWriteTokens, 70000);
+      return true;
+    });
+  });
+
+  test('OpenAI and OpenRouter usage carries cache and reasoning counts', () => {
+    assert.deepEqual(chatUsage({ prompt_tokens: 1000, completion_tokens: 50, total_tokens: 1050, cost: 0.002, prompt_tokens_details: { cached_tokens: 800, cache_write_tokens: 100 }, completion_tokens_details: { reasoning_tokens: 20 } }), {
+      promptTokens: 1000, completionTokens: 50, totalTokens: 1050, cost: 0.002, inputTokens: 100, cacheReadTokens: 800, cacheWriteTokens: 100, reasoningTokens: 20, requests: 1,
+    });
+    assert.deepEqual(codexTokenUsage({ input_tokens: 5000, input_tokens_details: { cached_tokens: 4096 }, output_tokens: 70, output_tokens_details: { reasoning_tokens: 40 }, total_tokens: 5070 }), {
+      promptTokens: 5000, completionTokens: 70, totalTokens: 5070, inputTokens: 904, cacheReadTokens: 4096, reasoningTokens: 40, requests: 1,
+    });
+  });
+
+  test('Claude and Gemini on OpenRouter get cache breakpoints; other models are left alone', () => {
+    const m = convo(1);
+    assert.equal(withCacheBreakpoints('openai/gpt-5', m), m);
+    const out = withCacheBreakpoints('anthropic/claude-sonnet-5-5', m) as any[];
+    assert.deepEqual(out[0].content, [{ type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } }]);
+    assert.deepEqual(out.at(-1).content, [{ type: 'text', text: 'out 0b', cache_control: { type: 'ephemeral' } }]);
+    assert.equal(out.filter((x) => Array.isArray(x.content)).length, 2);
+    assert.equal(m[0]!.content, 'sys');
+  });
+
+  test('OpenRouter credits: the key limit, else the account credits', async () => {
+    const answers: Record<string, unknown> = { '/key': { data: { usage: 3.5, limit: null, usage_daily: 0.25 } }, '/credits': { data: { total_credits: 20, total_usage: 7.5 } } };
+    const fetcher = (async (url: string) => ({ ok: true, status: 200, json: async () => answers[new URL(url).pathname.replace('/api/v1', '')] })) as unknown as typeof fetch;
+    assert.deepEqual(await openRouterCredits('https://openrouter.ai/api/v1', 'k', fetcher), { used: 7.5, limit: 20, remaining: 12.5, today: 0.25 });
+    answers['/key'] = { data: { usage: 2, limit: 10, limit_remaining: 8 } };
+    assert.deepEqual(await openRouterCredits('https://openrouter.ai/api/v1', 'k', fetcher), { used: 2, limit: 10, remaining: 8 });
   });
 });
 

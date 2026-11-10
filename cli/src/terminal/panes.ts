@@ -607,7 +607,36 @@ interface ContextInfo {
   model?: string;
   account?: string;
   modelWindow?: number | null;
-  lastRequest?: { usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cost?: number }; at: number };
+  lastRequest?: { usage: RequestUsage; at: number; estimatedTokens?: number };
+  run?: { usage: RequestUsage; started: number; requests: number; running: boolean };
+  calibration?: number;
+}
+
+interface RequestUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cost?: number;
+  inputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  requests?: number;
+}
+
+/** "120k in (98k cached, 2.1k written, 20k fresh) · 1.2k out · $0.01". */
+export function requestUsageText(u: RequestUsage): string {
+  const parts: string[] = [];
+  if (u.promptTokens !== undefined) {
+    const split: string[] = [];
+    if (u.cacheReadTokens) split.push(`${tokens(u.cacheReadTokens)} cached`);
+    if (u.cacheWriteTokens) split.push(`${tokens(u.cacheWriteTokens)} written to cache`);
+    if (u.inputTokens !== undefined && (u.cacheReadTokens || u.cacheWriteTokens)) split.push(`${tokens(u.inputTokens)} fresh`);
+    parts.push(`${tokens(u.promptTokens)} in${split.length ? ` (${split.join(', ')})` : ''}`);
+  }
+  if (u.completionTokens !== undefined) parts.push(`${tokens(u.completionTokens)} out${u.reasoningTokens ? ` (${tokens(u.reasoningTokens)} reasoning)` : ''}`);
+  if (u.cost) parts.push(`$${u.cost.toFixed(4)}`);
+  return parts.join(' · ');
 }
 
 interface UsageWindow {
@@ -619,7 +648,7 @@ export interface UsageInfo {
   account: string;
   kind: string | null;
   supported: boolean;
-  usage: { fiveHour?: UsageWindow; weekly?: UsageWindow; plan?: string; limitReached?: boolean; updated: number } | null;
+  usage: { fiveHour?: UsageWindow; weekly?: UsageWindow; credits?: { used: number; limit?: number; remaining?: number; today?: number }; plan?: string; limitReached?: boolean; updated: number } | null;
   error?: string;
 }
 
@@ -642,6 +671,11 @@ export function usageLines(u: UsageInfo | null): Array<[string, string]> {
   const win = (label: string, w: UsageWindow | undefined) => w && out.push([label, `${bar(w.usedPercent / 100)} ${percentText(w.usedPercent / 100)} ${color.dim(resetText(w.resetsAt))}`]);
   win('5-hour limit', u.usage?.fiveHour);
   win('Weekly limit', u.usage?.weekly);
+  const cr = u.usage?.credits;
+  if (cr) {
+    const money = (n: number) => `$${n.toFixed(2)}`;
+    out.push(['Credits', cr.limit ? `${bar(cr.used / cr.limit)} ${money(cr.used)} of ${money(cr.limit)} ${color.dim(`(${money(cr.remaining ?? cr.limit - cr.used)} left${cr.today !== undefined ? `, ${money(cr.today)} today` : ''})`)}` : `${money(cr.used)} spent${cr.today !== undefined ? color.dim(` (${money(cr.today)} today)`) : ''}`]);
+  }
   if (u.usage?.limitReached) out.push(['Plan', color.red('at its limit now')]);
   if (!out.length) out.push(['Plan usage', color.dim(u.error ? `couldn’t read it: ${u.error}` : 'not reported yet (it shows after a reply)')]);
   return out;
@@ -668,9 +702,10 @@ export function contextPane(host: PaneHost): Pane {
       row('Messages', `${c.exchanges.included} exchange${c.exchanges.included === 1 ? '' : 's'} included${c.exchanges.omitted ? `, ${c.exchanges.omitted} older ones left out (the agent can still look them up)` : ''}`);
       row('Topics', `${c.sections.shown} of ${c.sections.total} in the index`);
       if (c.lastRequest && (c.lastRequest.usage.promptTokens !== undefined || c.lastRequest.usage.completionTokens !== undefined)) {
-        const u = c.lastRequest.usage;
-        row('Last request', `${u.promptTokens !== undefined ? `${tokens(u.promptTokens)} in` : ''}${u.completionTokens !== undefined ? ` · ${tokens(u.completionTokens)} out` : ''}${u.cost ? ` · $${u.cost.toFixed(4)}` : ''} ${color.dim(timeText(new Date(c.lastRequest.at).toISOString()))}`);
+        row('Last request', `${requestUsageText(c.lastRequest.usage)} ${color.dim(timeText(new Date(c.lastRequest.at).toISOString()))}`);
       }
+      if (c.run && c.run.requests) row(c.run.running ? 'This reply' : 'Last reply', `${requestUsageText(c.run.usage)} ${color.dim(`over ${c.run.requests} request${c.run.requests === 1 ? '' : 's'}`)}`);
+      row('Counts', color.dim(c.calibration ? `scaled to the provider's own token counts (×${c.calibration.toFixed(2)} the 4-characters-per-token estimate)` : 'estimates (about 4 characters per token) until the provider reports a request'));
       if (c.problem) out.push('', ...wrap(c.problem, w - 4).map((l) => `  ${color.red(l)}`));
       out.push('', `  ${color.cyan(color.bold('By part'))}`);
       for (const cat of c.categories) {

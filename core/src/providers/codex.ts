@@ -31,6 +31,8 @@ import {
   type ModelStreamEvent,
   type ParsedToolCall,
   type TokenUsage,
+  addTokenUsage,
+  usageText,
 } from './types.js';
 import { toEpochMs, toPercent, type PlanUsage, type PlanUsageStore, type UsageWindow } from './usage.js';
 import { ensureDir } from '../settings/home.js';
@@ -527,11 +529,26 @@ export function codexError(error: Json): ProviderError {
   return new ProviderError(`OpenAI: ${message}`, 502, true);
 }
 
-function tokenUsage(u: Json): TokenUsage | undefined {
-  if (!u) return undefined;
-  const input = Number(u.inputTokens ?? u.input_tokens ?? 0);
-  const output = Number(u.outputTokens ?? u.output_tokens ?? 0);
-  return { promptTokens: input, completionTokens: output, totalTokens: Number(u.totalTokens ?? u.total_tokens ?? input + output) };
+/**
+ * One response's usage (Responses API or Codex's own field names). OpenAI
+ * counts cached tokens inside input_tokens, so "fresh" input is the rest.
+ */
+export function codexTokenUsage(u: Json): TokenUsage | undefined {
+  if (!u || typeof u !== 'object') return undefined;
+  const n = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const input = n(u.inputTokens ?? u.input_tokens);
+  const cached = n(u.cachedInputTokens ?? u.cached_input_tokens ?? u.input_tokens_details?.cached_tokens);
+  const output = n(u.outputTokens ?? u.output_tokens);
+  const reasoning = n(u.reasoningOutputTokens ?? u.reasoning_output_tokens ?? u.output_tokens_details?.reasoning_tokens);
+  return {
+    promptTokens: input,
+    completionTokens: output,
+    totalTokens: n(u.totalTokens ?? u.total_tokens) || input + output,
+    inputTokens: Math.max(0, input - cached),
+    cacheReadTokens: cached,
+    ...(reasoning ? { reasoningTokens: reasoning } : {}),
+    requests: 1,
+  };
 }
 
 export interface CodexProviderOptions extends CodexServerOptions {
@@ -733,16 +750,23 @@ export class CodexProvider implements ModelProvider {
             calls.set(id, { id, name: item.name, args, rawArguments: item.arguments || '{}' });
             break;
           }
-          case 'rawResponse/completed':
+          case 'rawResponse/completed': {
             if (params.turnId !== turnId) break;
-            usage = tokenUsage(params.usage);
+            // Each response of the turn adds up (Codex may retry or continue).
+            const one = codexTokenUsage(params.usage);
+            if (one) usage = addTokenUsage(usage ?? {}, one);
+            yield { type: 'log', text: `Codex response ${params.responseId ?? params.id ?? ''}: ${usageText(one)}`.replace('  ', ' ') };
             if (calls.size && !interrupted) {
               interrupted = true;
               interrupt();
             }
             break;
+          }
           case 'error':
-            if (params?.willRetry) break;
+            if (params?.willRetry) {
+              yield { type: 'log', text: `Codex will retry: ${params?.error?.message ?? 'error'}` };
+              break;
+            }
             failure = codexError(params?.error);
             break;
           case 'turn/completed': {
@@ -769,7 +793,7 @@ export class CodexProvider implements ModelProvider {
       }
     }
     if (request.signal.aborted) throw request.signal.reason;
-    if (failure && !text && !calls.size) throw failure;
+    if (failure && !text && !calls.size) throw usage ? new ProviderError(failure.message, failure.status, failure.retryable, usage) : failure;
     const toolCalls = order.map((id) => calls.get(id)!).filter(Boolean);
     const message: AssistantMessage = { role: 'assistant', content: text || null };
     if (toolCalls.length) message.tool_calls = toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.rawArguments } }));

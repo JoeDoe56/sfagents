@@ -87,6 +87,8 @@ export type RuntimeEvent =
       type: 'model_usage';
       /** Token usage the provider reported for one model request. */
       usage: TokenUsage;
+      /** SF Agents' own estimate of the request's size (characters / 4). */
+      estimatedTokens?: number;
     })
   | (EventBase & {
       type: 'agent_message';

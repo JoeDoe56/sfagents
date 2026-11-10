@@ -19,7 +19,7 @@ export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS, withS
 export type { InboxItem, SendOptions } from './runtime/runtime.js';
 export type { RuntimeOptions } from './runtime/runtime.js';
 export * from './providers/types.js';
-export { OpenAICompatibleProvider, OPENROUTER_BASE_URL, isOpenRouterHostname, mergeReasoningDetails } from './providers/openai-compatible.js';
+export { OpenAICompatibleProvider, OPENROUTER_BASE_URL, isOpenRouterHostname, mergeReasoningDetails, chatUsage, withCacheBreakpoints } from './providers/openai-compatible.js';
 export {
   createDefaultProviderFactory,
   credentialEnvNames,
@@ -33,6 +33,7 @@ export {
   DEFAULT_MODELS,
   providerChoices,
   OPENROUTER_API_KEY_ENV,
+  openRouterCredits,
 } from './providers/factory.js';
 export * from './providers/registry.js';
 export { KeyringSecretStore, MemorySecretStore, KeyringUnavailableError, KEYRING_SERVICE } from './providers/secrets.js';
@@ -49,13 +50,14 @@ export {
   codexError,
   codexExecutable,
   codexPlanUsage,
+  codexTokenUsage,
   codexSignOut,
   defaultAnswer as codexDefaultAnswer,
   isAccountLimitStatus,
   toCodexItems,
 } from './providers/codex.js';
 export type { CodexConnection, CodexProviderOptions, CodexSignInResult } from './providers/codex.js';
-export { PlanUsageStore, toPercent, toEpochMs } from './providers/usage.js';
+export { PlanUsageStore, planUsageText, toPercent, toEpochMs } from './providers/usage.js';
 export type { PlanUsage, UsageWindow } from './providers/usage.js';
 export { ClaudeSignIn, ClaudeSubscriptionProvider, CLAUDE_MODELS, CLAUDE_MODEL_ALIASES, claudeExecutable, claudePlanUsage, findAuthUrl, prepareClaudeRequest } from './providers/claude-subscription.js';
 export { sfagentsHome, writeFileAtomic, readJsonFile } from './settings/home.js';

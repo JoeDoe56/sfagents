@@ -56,6 +56,7 @@ import { patchFormatFor, type PatchFormat } from '../tools/sfa-patch.js';
 import { McpManager, type McpToolInfo } from '../mcp/manager.js';
 import { mcpApprover, type McpGrant, type McpServerGrant } from '../mcp/sfa-mcp.js';
 import type { ChatMessage, ModelProvider, ModelStreamEvent, ParsedToolCall, ReasoningEffort, TokenUsage } from '../providers/types.js';
+import { ProviderError, addTokenUsage, usageText } from '../providers/types.js';
 import { createDefaultProviderFactory, credentialEnvNames, providerChoices, type ProviderFactory } from '../providers/factory.js';
 import { executeToolCall } from './tool-executor.js';
 import {
@@ -91,6 +92,8 @@ export function withStepContext(messages: readonly ChatMessage[], system: string
 }
 
 export interface RuntimeOptions {
+  /** Detailed lines about model requests and usage (the Logs tab and log file). */
+  log?: (line: string) => void;
   fullControl?: FullControlManager;
   ui?: UiService;
   pullRequests?: () => boolean;
@@ -173,10 +176,14 @@ export function replayTarget(definition: Readonly<AgentDefinition>): ReplayTarge
 }
 
 function addUsage(total: TokenUsage, add?: TokenUsage): void {
-  if (!add) return;
-  for (const key of ['promptTokens', 'completionTokens', 'totalTokens', 'cost'] as const) {
-    if (add[key] !== undefined) total[key] = (total[key] ?? 0) + add[key]!;
-  }
+  addTokenUsage(total, add);
+}
+
+/** Rough tokens a request carries (characters / 4), to compare with what the provider reports. */
+export function estimateRequestTokens(messages: readonly ChatMessage[], tools: readonly unknown[]): number {
+  let chars = JSON.stringify(tools).length;
+  for (const m of messages) chars += JSON.stringify(m).length;
+  return Math.round(chars / 4);
 }
 
 /** Whether the agent's shell has `sfa-artifact` (it then gets the artifact guidance). */
@@ -257,7 +264,11 @@ export class AgentRuntime implements AgentMessenger {
   readonly ui: UiService;
   private readonly pullRequests: () => boolean;
 
+  /** Detailed lines about model requests and usage. */
+  readonly log: (line: string) => void;
+
   constructor(options: RuntimeOptions) {
+    this.log = options.log ?? (() => {});
     this.tree = options.tree;
     this.ui = options.ui ?? new UiService();
     this.pullRequests = options.pullRequests ?? (() => new AppSettings().get<boolean>('agents.pullRequests'));
@@ -526,6 +537,7 @@ export class AgentRuntime implements AgentMessenger {
 
     const finish = (status: AgentTerminateMode, error?: string): AgentRunResult => {
       clearTimeout(timer);
+      this.log(`model: ${agentPath.join(' > ')} run ended (${status}${error ? `: ${error}` : ''}) after ${turns} turn(s), ${Math.round((Date.now() - started) / 1000)} s; ${usageText(usage)}`);
       this.fullControl.endRun(link);
       params.signal.removeEventListener('abort', onParentAbort);
       if (link.children.size) children.abort(new Error('The agent that started this one stopped.'));
@@ -627,17 +639,30 @@ export class AgentRuntime implements AgentMessenger {
       turns++;
       let done: Extract<ModelStreamEvent, { type: 'done' }> | undefined;
       let turnText = '';
+      const who = agentPath.join(' > ');
+      const step = this.fullControl.holds(link) ? this.fullControl.context(link) : undefined;
+      const requestMessages = withStepContext(messages, `Network level now: ${this.tree.byId.get(node.id)?.definition.network ?? 'off'} (the current editor setting overrides earlier network descriptions).`, step);
+      // The step note stays in the run's history as sent: a message that
+      // changed after it was sent would break the provider's prompt cache
+      // from that message on, for every later request of the run.
+      if (step && messages.length > 1) messages[messages.length - 1] = requestMessages[requestMessages.length - 1]!;
+      const requestTools = declarations();
+      const estimate = estimateRequestTokens(requestMessages, requestTools);
+      const requestStarted = Date.now();
+      this.log(`model: ${who} turn ${turns}: request to ${provider.id} (${d.model || 'default model'}${(params.reasoning ?? d.reasoning) ? `, effort ${params.reasoning ?? d.reasoning}` : ''}): ${requestMessages.length} messages, ${requestTools.length} tools, about ${estimate} tokens by estimate`);
       try {
         for await (const event of provider.stream({
           model: d.model,
-          messages: withStepContext(messages, `Network level now: ${this.tree.byId.get(node.id)?.definition.network ?? 'off'} (the current editor setting overrides earlier network descriptions).`, this.fullControl.holds(link) ? this.fullControl.context(link) : undefined),
-          tools: declarations(),
+          messages: requestMessages,
+          tools: requestTools,
           reasoning: params.reasoning ?? d.reasoning,
           temperature: d.temperature,
           maxOutputTokens: d.maxOutputTokens,
           signal,
         })) {
-          if (event.type === 'text') {
+          if (event.type === 'log') {
+            this.log(`model: ${who}: ${event.text}`);
+          } else if (event.type === 'text') {
             turnText += event.text;
             emit({ type: 'text', agentPath, text: event.text });
           } else if (event.type === 'reasoning') {
@@ -649,6 +674,13 @@ export class AgentRuntime implements AgentMessenger {
           }
         }
       } catch (error) {
+        // A failed request can still have used tokens (a limit hit mid-run).
+        const spent = error instanceof ProviderError ? error.usage : undefined;
+        if (spent) {
+          addUsage(usage, spent);
+          emit({ type: 'model_usage', agentPath, usage: spent, estimatedTokens: estimate });
+        }
+        this.log(`model: ${who} turn ${turns}: ${signal.aborted || isAbortError(error) ? 'stopped' : 'failed'} after ${Date.now() - requestStarted} ms: ${getErrorMessage(error)}${spent ? ` (used ${usageText(spent)})` : ''}`);
         if (signal.aborted || isAbortError(error)) return finish(...stopReason());
         const message = getErrorMessage(error);
         emit({ type: 'error', agentPath, message });
@@ -661,7 +693,8 @@ export class AgentRuntime implements AgentMessenger {
         return finish(AgentTerminateMode.ERROR, message);
       }
       addUsage(usage, done.usage);
-      if (done.usage) emit({ type: 'model_usage', agentPath, usage: done.usage });
+      if (done.usage) emit({ type: 'model_usage', agentPath, usage: done.usage, estimatedTokens: estimate });
+      this.log(`model: ${who} turn ${turns}: ${done.finishReason ?? 'done'} in ${Date.now() - requestStarted} ms, ${done.toolCalls.length ? `tool calls ${done.toolCalls.map((c) => c.name).join(', ')}` : 'no tool calls'}; ${usageText(done.usage)}; run so far ${usageText(usage)}`);
       const assistantMessage = done.message;
       const finishReason = done.finishReason;
       recordTurn((r) => r.assistant(assistantMessage, finishReason));
@@ -939,6 +972,18 @@ export interface SendOptions {
   note?: () => string | undefined;
 }
 
+/** A context breakdown with its token figures scaled to the provider's own counts. */
+function scaleBreakdown(b: ContextBreakdown, ratio: number): ContextBreakdown {
+  const t = (n: number) => Math.round(n * ratio);
+  const used = t(b.used);
+  return {
+    ...b,
+    used,
+    free: Math.max(0, b.budget - b.reserve - used),
+    categories: b.categories.map((c) => ({ ...c, tokens: t(c.tokens), ...(c.items ? { items: c.items.map((i) => ({ ...i, tokens: t(i.tokens) })) } : {}) })),
+  };
+}
+
 /**
  * A conversation with the root agent, backed by a ConversationService
  * (persistent or in-memory). Each turn's provider context is rebuilt from
@@ -950,7 +995,11 @@ export class AgentSession {
   /** Reasoning effort chosen for this session (overrides the root agent's setting). */
   reasoning: ReasoningEffort | undefined;
   /** The root agent's most recent model request, as the provider reported it. */
-  lastRequest: { usage: TokenUsage; at: number } | undefined;
+  lastRequest: { usage: TokenUsage; at: number; estimatedTokens?: number } | undefined;
+  /** Provider-reported input tokens per estimated token, from recent requests (calibrates the context figures), for one agent and model. */
+  tokenRatio: { key: string; value: number } | undefined;
+  /** What the current or last run of this session used, all requests together. */
+  runUsage: { usage: TokenUsage; started: number; requests: number } | undefined;
 
   private agentId: string;
 
@@ -998,7 +1047,28 @@ export class AgentSession {
    * working-context budget. MCP servers the agent uses are connected if they
    * are not already.
    */
-  async contextUsage(): Promise<ContextBreakdown & { lastRequest?: { usage: TokenUsage; at: number } }> {
+  /** Records one root request's usage: the last request, the run's total, and how estimates compare with real counts. */
+  private noteUsage(usage: TokenUsage, estimated?: number): void {
+    const at = Date.now();
+    this.lastRequest = { usage, at, ...(estimated ? { estimatedTokens: estimated } : {}) };
+    if (this.runUsage) {
+      addTokenUsage(this.runUsage.usage, usage);
+      this.runUsage.requests++;
+    }
+    const real = usage.promptTokens;
+    if (estimated && estimated > 500 && real && real > 0) {
+      const ratio = Math.min(4, Math.max(0.25, real / estimated));
+      const key = this.ratioKey();
+      // Smoothed, so one odd request does not swing the figures.
+      this.tokenRatio = this.tokenRatio?.key === key ? { key, value: this.tokenRatio.value * 0.5 + ratio * 0.5 } : { key, value: ratio };
+    }
+  }
+
+  private ratioKey(): string {
+    return `${this.node.id}\u0000${this.node.definition.model}`;
+  }
+
+  async contextUsage(): Promise<ContextBreakdown & { lastRequest?: { usage: TokenUsage; at: number; estimatedTokens?: number }; run?: { usage: TokenUsage; started: number; requests: number; running: boolean }; calibration?: number }> {
     const definition = this.node.definition;
     const conversation = this.conversation;
     const tools = await this.runtime.buildTools(this.node, [this.node.id], () => undefined, undefined, conversation);
@@ -1030,7 +1100,15 @@ export class AgentSession {
       resolveAttachment: (ref) => conversation.readAttachment(ref),
       ...(index ? { extraSystem: index } : {}),
     });
-    return { ...breakdown, ...(this.lastRequest ? { lastRequest: this.lastRequest } : {}) };
+    // The estimates (characters / 4) scaled by how the provider actually counted recent requests.
+    const ratio = this.tokenRatio?.key === this.ratioKey() ? this.tokenRatio.value : undefined;
+    const scaled = ratio ? scaleBreakdown(breakdown, ratio) : breakdown;
+    return {
+      ...scaled,
+      ...(ratio ? { calibration: Math.round(ratio * 1000) / 1000 } : {}),
+      ...(this.lastRequest ? { lastRequest: this.lastRequest } : {}),
+      ...(this.runUsage ? { run: { ...this.runUsage, running: this.busy } } : {}),
+    };
   }
 
   /** /clear: later turns start from a fresh working context; history is kept. */
@@ -1051,6 +1129,7 @@ export class AgentSession {
       // One definition for the whole turn, even if the agent's file changes meanwhile.
       const node = this.node;
       const recorder = this.conversation.beginRootRun(node);
+      this.runUsage = { usage: {}, started: Date.now(), requests: 0 };
       recorder.user(input, options.attachments, options.replyTo, options.event, options.from);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;
@@ -1079,7 +1158,7 @@ export class AgentSession {
       const queue: RuntimeEvent[] = [];
       let wake: (() => void) | undefined;
       const emit = (event: RuntimeEvent) => {
-        if (event.type === 'model_usage' && event.agentPath.length === 1) this.lastRequest = { usage: event.usage, at: Date.now() };
+        if (event.type === 'model_usage' && event.agentPath.length === 1) this.noteUsage(event.usage, event.estimatedTokens);
         queue.push(event);
         wake?.();
       };

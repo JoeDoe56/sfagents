@@ -160,7 +160,7 @@ export class FailoverProvider implements ModelProvider {
       } catch (error) {
         // Once text was streamed the turn can't be retried silently elsewhere.
         if (yielded || !shouldFailOver(error) || k === this.choices.length - 1) {
-          if (errors.length && !yielded) throw new ProviderError(`${getErrorMessage(error)} (also tried: ${errors.join('; ')})`, error instanceof ProviderError ? error.status : undefined);
+          if (errors.length && !yielded) throw new ProviderError(`${getErrorMessage(error)} (also tried: ${errors.join('; ')})`, error instanceof ProviderError ? error.status : undefined, false, error instanceof ProviderError ? error.usage : undefined);
           throw error;
         }
         errors.push(`"${choice.provider}": ${getErrorMessage(error)}`);
@@ -207,6 +207,7 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
         const secret = lazySecret<OpenRouterSecret | CustomSecret>(record);
         const baseUrl = record.kind === 'openrouter' ? OPENROUTER_BASE_URL : record.baseUrl!;
         let inner: OpenAICompatibleProvider | null = null;
+        const openRouter = record.kind === 'openrouter';
         provider = {
           id: record.name,
           async *stream(request) {
@@ -216,7 +217,17 @@ export function createDefaultProviderFactory(envOrOptions: NodeJS.ProcessEnv | F
             }
             yield* inner.stream(request);
           },
-        };
+          ...(openRouter
+            ? {
+                // OpenRouter bills credits, not a plan: the key's spend and what is left.
+                readPlanUsage: async () => {
+                  const s = await secret();
+                  const credits = await openRouterCredits(baseUrl, s.apiKey ?? '');
+                  return options.usage ? options.usage.update(record.id, { credits }) : { credits, updated: Date.now() };
+                },
+              }
+            : {}),
+        } as ModelProvider;
         break;
       }
       case 'openai': {
@@ -313,3 +324,40 @@ export function checkProviders(definition: Readonly<AgentDefinition>, registry: 
   return problems.length === choices.length ? problems : [];
 }
 
+
+/**
+ * What an OpenRouter key has spent and what is left (US dollars), from
+ * GET /key, and the account's credits from GET /credits when the key has no
+ * limit of its own. Reading these costs nothing.
+ */
+export async function openRouterCredits(baseUrl: string, apiKey: string, fetcher: typeof fetch = fetch): Promise<NonNullable<PlanUsage['credits']>> {
+  const get = async (path: string) => {
+    const res = await fetcher(`${baseUrl.replace(/\/$/, '')}${path}`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new ProviderError(`OpenRouter ${path} answered ${res.status}`, res.status);
+    return ((await res.json()) as { data?: Record<string, unknown> }).data ?? {};
+  };
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const key = await get('/key');
+  const out: NonNullable<PlanUsage['credits']> = { used: n(key['usage']) ?? 0 };
+  const limit = n(key['limit']);
+  if (limit !== undefined) {
+    out.limit = limit;
+    out.remaining = n(key['limit_remaining']) ?? Math.max(0, limit - out.used);
+  } else {
+    try {
+      const c = await get('/credits');
+      const total = n(c['total_credits']);
+      const spent = n(c['total_usage']);
+      if (total !== undefined && spent !== undefined) {
+        out.used = spent;
+        out.limit = total;
+        out.remaining = Math.max(0, total - spent);
+      }
+    } catch {
+      // Only the key's own spend, then.
+    }
+  }
+  const daily = n(key['usage_daily']);
+  if (daily !== undefined) out.today = daily;
+  return out;
+}

@@ -66,10 +66,51 @@ export interface ParsedToolCall {
 }
 
 export interface TokenUsage {
+  /** Every input token the request carried, cached or not: the real size of the context sent. */
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
   cost?: number;
+  /** Input tokens processed fresh (not read from or written to the cache). */
+  inputTokens?: number;
+  /** Input tokens read from the provider's prompt cache. */
+  cacheReadTokens?: number;
+  /** Input tokens written to the prompt cache (Anthropic bills these above plain input). */
+  cacheWriteTokens?: number;
+  /** Output tokens spent on reasoning (part of completionTokens). */
+  reasoningTokens?: number;
+  /** Model API calls behind this usage (one SF Agents turn should be one). */
+  requests?: number;
+}
+
+/** Usage fields that add up across requests. */
+export const TOKEN_USAGE_KEYS = ['promptTokens', 'completionTokens', 'totalTokens', 'cost', 'inputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'requests'] as const;
+
+export function addTokenUsage(total: TokenUsage, add?: TokenUsage): TokenUsage {
+  if (!add) return total;
+  for (const key of TOKEN_USAGE_KEYS) {
+    const v = add[key];
+    if (typeof v === 'number' && Number.isFinite(v)) total[key] = (total[key] ?? 0) + v;
+  }
+  return total;
+}
+
+/** One line for logs: "120.4k in (98.0k cached, 2.1k cache write, 20.3k fresh) · 1.2k out (300 reasoning) · 1 API call · $0.0123". */
+export function usageText(u: TokenUsage | undefined): string {
+  if (!u) return 'no usage reported';
+  const k = (n: number) => (n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
+  const parts: string[] = [];
+  if (u.promptTokens !== undefined) {
+    const split: string[] = [];
+    if (u.cacheReadTokens) split.push(`${k(u.cacheReadTokens)} cached`);
+    if (u.cacheWriteTokens) split.push(`${k(u.cacheWriteTokens)} cache write`);
+    if (u.inputTokens !== undefined && (u.cacheReadTokens || u.cacheWriteTokens)) split.push(`${k(u.inputTokens)} fresh`);
+    parts.push(`${k(u.promptTokens)} in${split.length ? ` (${split.join(', ')})` : ''}`);
+  }
+  if (u.completionTokens !== undefined) parts.push(`${k(u.completionTokens)} out${u.reasoningTokens ? ` (${k(u.reasoningTokens)} reasoning)` : ''}`);
+  if (u.requests !== undefined) parts.push(`${u.requests} API call${u.requests === 1 ? '' : 's'}`);
+  if (typeof u.cost === 'number' && Number.isFinite(u.cost)) parts.push(`$${u.cost.toFixed(4)}`);
+  return parts.join(' · ') || 'no usage reported';
 }
 
 export type ModelStreamEvent =
@@ -77,6 +118,8 @@ export type ModelStreamEvent =
   /** Something the user should know, e.g. another account took over. */
   | { type: 'notice'; text: string }
   | { type: 'reasoning'; text: string }
+  /** Provider detail for the logs (cache counters, stop reasons, API calls); never shown in the chat. */
+  | { type: 'log'; text: string }
   | {
       type: 'done';
       message: AssistantMessage;
@@ -97,6 +140,8 @@ export class ProviderError extends Error {
     message: string,
     readonly status?: number,
     readonly retryable = false,
+    /** What the failed request still consumed, when the provider reported it. */
+    readonly usage?: TokenUsage,
   ) {
     super(message);
     this.name = 'ProviderError';

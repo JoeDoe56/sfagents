@@ -55,6 +55,7 @@ import {
   type ProjectWatcher,
   ProviderRegistry,
   PlanUsageStore,
+  planUsageText,
   createDefaultProviderFactory,
   DEFAULT_MODELS,
   BrightDataWeb,
@@ -201,6 +202,8 @@ export interface WebServerOptions {
   agent?: string;
   /** Every log line, kept for the terminal's Logs tab and GET /api/logs (default: a new one). */
   logs?: LogBook;
+  /** Also append every log line to a daily file in this folder (the app passes defaultLogDir()). */
+  logDir?: string | null;
   log?: (line: string) => void;
   /** Tests replace what the resource monitor reads from the machine. */
   systemSource?: SystemSource;
@@ -449,6 +452,11 @@ export class WebServer {
       (pathname) => this.ownNames.has(decodeURIComponent(pathname.split('/')[1] ?? '')),
     );
     this.logs = options.logs ?? new LogBook();
+    // Detailed logs (model requests, usage) go to a daily file too; the CLI turns it on for the app.
+    if (options.logDir) {
+      const file = this.logs.writeTo(options.logDir);
+      if (file) this.logs.add(`Logs are also saved to ${file}`);
+    }
     const external = options.log;
     this.log = (line) => {
       this.logs.add(line);
@@ -502,10 +510,13 @@ export class WebServer {
     });
     this.accounts = options.accounts ?? new AccountState();
     this.providerFactory = options.providerFactory ?? createDefaultProviderFactory({ registry: this.registry, accounts: this.accounts, usage: this.usage });
-    this.usage.onChange((id) => {
+    this.usage.onChange((id, u) => {
+      const record = this.registry.list().find((r) => r.id === id);
+      this.log(`usage: ${record?.name ?? id}: ${planUsageText(u)}`);
       if (this.registry.find(this.agentInfo().account)?.id === id) void this.usageInfo(false).then((u) => this.broadcast('usage', u));
     });
     this.runtime = new AgentRuntime({
+      log: (line) => this.log(line),
       tree: options.tree,
       conversation: options.conversation,
       approveAll: options.approveAll,
@@ -534,7 +545,10 @@ export class WebServer {
     this.accounts.onChange((agent, provider) => {
       const settings = this.agentSettings.get();
       if (settings.accounts?.[agent] !== provider) this.agentSettings.set({ ...settings, accounts: { ...(settings.accounts ?? {}), [agent]: provider } });
-      if (agent === this.session.node.id) this.broadcast('agent', this.agentInfo());
+      if (agent === this.session.node.id) {
+        this.broadcast('agent', this.agentInfo());
+        this.refreshMeters();
+      }
     });
     runningVersion(); // read the checkout's commit now, before a pull can move it
     this.providersApi = new ProvidersApi({
@@ -544,7 +558,10 @@ export class WebServer {
       broadcast: (event, data) => {
         this.broadcast(event, data);
         if (event === 'settings' && this.pushToTalkStarted) this.pushToTalk.setHotkey(this.appSettings.get<string>('dictation.hotkey'));
-        if (event === 'providers') this.broadcast('agent', this.agentInfo());
+        if (event === 'providers') {
+          this.broadcast('agent', this.agentInfo());
+          this.refreshMeters(true);
+        }
       },
       log: this.log,
     });
@@ -1726,12 +1743,12 @@ export class WebServer {
   private async usageInfo(refresh: boolean): Promise<{ account: string; kind: string | null; supported: boolean; usage: PlanUsage | null; error?: string }> {
     const account = this.agentInfo().account;
     const record = this.registry.find(account);
-    const supported = record?.kind === 'openai' || record?.kind === 'anthropic';
+    const supported = record?.kind === 'openai' || record?.kind === 'anthropic' || record?.kind === 'openrouter';
     if (!record || !supported) return { account, kind: record?.kind ?? null, supported: false, usage: null };
     let error: string | undefined;
     const known = this.usage.get(record.id);
     const last = this.usageRead.get(record.id);
-    if (record.kind === 'openai' && this.providerFactory.readPlanUsage && (refresh || !known || Date.now() - known.updated > 60_000) && !(last && Date.now() - last.at < 15_000 && !refresh)) {
+    if ((record.kind === 'openai' || record.kind === 'openrouter') && this.providerFactory.readPlanUsage && (refresh || !known || Date.now() - known.updated > 60_000) && !(last && Date.now() - last.at < 15_000 && !refresh)) {
       const pending = last?.pending ?? this.providerFactory.readPlanUsage(record);
       this.usageRead.set(record.id, { at: Date.now(), pending });
       try {
@@ -1972,7 +1989,33 @@ export class WebServer {
     }
     const info = this.agentInfo();
     this.broadcast('agent', info);
+    if (body.agent !== undefined || body.account !== undefined) this.refreshMeters();
     return info;
+  }
+
+  private metersTimer: NodeJS.Timeout | null = null;
+  private metersForce = false;
+
+  /**
+   * Sends the usage bar and the context figures again, for the provider the
+   * agent replies with now: after the agent or its provider changes, a
+   * provider is added, signed in again or removed, and after each reply.
+   */
+  refreshMeters(force = false): void {
+    this.metersForce ||= force;
+    if (this.metersTimer || this.closing) return;
+    this.metersTimer = setTimeout(() => {
+      this.metersTimer = null;
+      const refresh = this.metersForce;
+      this.metersForce = false;
+      void this.usageInfo(refresh)
+        .then((u) => this.broadcast('usage', u))
+        .catch(() => undefined);
+      void this.contextInfo()
+        .then((c) => this.broadcast('context', c))
+        .catch(() => undefined);
+    }, 150);
+    this.metersTimer.unref?.();
   }
 
   // ---------------------------------------------------------------------------
@@ -2673,6 +2716,8 @@ export class WebServer {
       });
       this.sectionSignature = this.sectionsKey();
       this.refreshDiffs(0);
+      // OpenRouter credits move with every reply; the context figures now reflect real counts.
+      this.refreshMeters(this.registry.find(this.agentInfo().account)?.kind === 'openrouter');
       // What arrived after the agent's last step starts the next reply.
       const next = this.pending.shift();
       if (next && !this.closing) {

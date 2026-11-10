@@ -18,6 +18,8 @@ export interface PlanUsage {
   weekly?: UsageWindow;
   /** The plan's name as the provider reports it ("plus", "pro", "max"…). */
   plan?: string;
+  /** Pay-as-you-go credits in US dollars (OpenRouter): spent, the limit and what is left when there is one, and today's spend. */
+  credits?: { used: number; limit?: number; remaining?: number; today?: number };
   /** The provider said the account is at a limit now. */
   limitReached?: boolean;
   /** When this was reported (ms since the epoch). */
@@ -34,6 +36,18 @@ export function toPercent(value: number, fraction: boolean): number {
 export function toEpochMs(value: number | null | undefined): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
   return value < 1e12 ? Math.round(value * 1000) : Math.round(value);
+}
+
+/** One line for logs: "5 hours 42% (resets ...) · week 18% · credits $3.20 spent of $10.00". */
+export function planUsageText(u: PlanUsage | undefined): string {
+  if (!u) return 'not reported';
+  const parts: string[] = [];
+  const when = (ms?: number) => (ms ? ` (resets ${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC)` : '');
+  if (u.fiveHour) parts.push(`5 hours ${Math.round(u.fiveHour.usedPercent)}%${when(u.fiveHour.resetsAt)}`);
+  if (u.weekly) parts.push(`week ${Math.round(u.weekly.usedPercent)}%${when(u.weekly.resetsAt)}`);
+  if (u.credits) parts.push(`credits $${u.credits.used.toFixed(2)} spent${u.credits.limit !== undefined ? ` of $${u.credits.limit.toFixed(2)}` : ''}${u.credits.today !== undefined ? `, $${u.credits.today.toFixed(2)} today` : ''}`);
+  if (u.limitReached) parts.push('limit reached');
+  return parts.join(' · ') || 'nothing reported';
 }
 
 export class PlanUsageStore {

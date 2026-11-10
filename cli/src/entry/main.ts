@@ -55,7 +55,7 @@ import {
   type ConversationFlags,
 } from './conversation.js';
 import type { ConversationService } from '@sfagents/core';
-import { DEFAULT_HOST, DEFAULT_PORT, LogBook, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
+import { DEFAULT_HOST, DEFAULT_PORT, LogBook, defaultLogDir, ScreenMirror, WebAuth, WebServer, acquirePrivileges, parsePublicOrigin } from '@sfagents/web';
 import { startTui } from '../terminal/tui.js';
 import { providersCommand, settingsCommand } from './providers.js';
 import { containersCommand } from './containers.js';
@@ -524,6 +524,7 @@ async function serveWeb(
     accounts: providers().accounts,
     settings: opts.settings,
     logs,
+    logDir: defaultLogDir(),
     log: (line) => {
       if (printing) streams.stderr.write(`${line}\n`);
     },
