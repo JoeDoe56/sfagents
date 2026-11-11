@@ -490,7 +490,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
       includePartialMessages: true,
       // One API call per SF Agents turn: the loop below stops as soon as the
       // model's response ends; this is only a backstop.
-      maxTurns: prepared.tools.length ? 2 : 1,
+      maxTurns: prepared.tools.length ? 4 : 2,
       ...(servers ? { mcpServers: servers } : {}),
       ...(prepared.effort ? { effort: prepared.effort } : {}),
       canUseTool: async (name: string, input: unknown, context: { toolUseID?: string }) => {
@@ -546,6 +546,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
             if (input !== undefined && b.name.startsWith(PREFIX)) capture(b.name.slice(PREFIX.length), input, b.id);
           } else if (event.type === 'message_delta' && event.delta?.stop_reason) {
             stopReason = event.delta.stop_reason;
+            yield { type: 'log', text: `Claude: API call ${apiCalls} ended: ${stopReason}, ${calls.length} SF Agents tool call(s) so far, output ${JSON.stringify(event.usage ?? {})}` };
           } else if (event.type === 'message_stop') {
             // The response is complete. With tool calls, stop here: the SDK
             // would otherwise run its own tool round and ask the model again.
