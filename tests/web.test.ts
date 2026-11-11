@@ -445,7 +445,7 @@ describe('web server', () => {
       assert.equal(reply.replyTo, answer);
       assert.equal(items2[items2.length - 1]!.replyTo, answer);
       assert.equal(items2.find((i) => i.text === 'first question')!.replyTo, undefined);
-      assert.match((seen as { content: string }).content, /^\[Inline reply to this earlier message: "answer"\]\n\nabout that$/);
+      assert.match((seen as { content: string }).content, /^\[Inline reply to this earlier message: "answer"\]\n\nabout that\n\n<receipts>[^<]*<\/receipts>$/);
       // A reply to a reply stays in the same thread.
       ev.received.length = 0;
       assert.equal((await postJson(s.base, '/api/messages', { text: 'and more', replyTo: reply.id })).status, 202);
@@ -498,8 +498,10 @@ describe('web server', () => {
       // A reaction to the agent's message is input for it: it reacts and replies inline.
       assert.equal((await postJson(s.base, '/api/reactions', { id: answer, emoji: '👍' })).status, 200);
       const end2 = await ev.wait((e) => e.event === 'run_end');
-      assert.match(requests[1]!.last, /^\[SF Agents\] The person reacted 👍 to your message m\d+: "Here is the plan\."$/);
-      assert.match(requests[1]!.system, new RegExp(`<receipts>The person read your last message \\(${answer}\\)`));
+      assert.match(requests[1]!.last, /^\[SF Agents\] The person reacted 👍 to your message m\d+: "Here is the plan\."\n\n<receipts>/);
+      // Receipts come with the message they arrived with (stored there, so later replies replay it unchanged), not in the system prompt.
+      assert.match(requests[1]!.last, new RegExp(`<receipts>The person read your last message \\(${answer}\\)`));
+      assert.doesNotMatch(requests[1]!.system, /<receipts>/);
       assert.deepEqual(end2.data['agentReactions'], { m2: '👍' });
       const items2 = end2.data['items'] as Array<{ kind: string; text: string; replyTo?: string }>;
       // The note is not a bubble; the inline reply is one, in m2's thread.

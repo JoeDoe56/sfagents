@@ -36,7 +36,7 @@ const KINDS: ReadonlySet<string> = new Set([
 /** Fields each kind maps explicitly; anything else round-trips via `extra`. */
 const KNOWN_FIELDS: Record<string, readonly string[]> = {
   conversation: ['seq', 'time', 'v', 'id', 'kind', 'run', 'parentRun', 'agent'],
-  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'attachments', 'replyTo', 'view', 'viewState', 'event', 'b', 'fence'],
+  message: ['seq', 'time', 'id', 'run', 'role', 'agent', 'section', 'toolCalls', 'reasoning', 'reasoningDetails', 'finish', 'callId', 'tool', 'status', 'attachments', 'replyTo', 'view', 'viewState', 'event', 'note', 'b', 'fence'],
   run_start: ['seq', 'time', 'run', 'agent', 'parentRun', 'callId', 'provider', 'model', 'reasoning', 'config', 'configHash'],
   tool_start: ['seq', 'time', 'run', 'callId', 'tool'],
   run_end: ['seq', 'time', 'run', 'status', 'error', 'turns', 'usage'],
@@ -310,6 +310,7 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         replyTo: str(meta, 'replyTo', false, p),
         view: str(meta, 'view', false, p),
         viewState: str(meta, 'viewState', false, p),
+        note: str(meta, 'note', false, p),
         event: ((e) => (e === 'reaction' || e === 'agent' ? e : undefined))(str(meta, 'event', false, p)),
       };
       if (record.role === 'tool' && (!record.callId || !record.tool)) p.push('tool messages need "callId" and "tool"');

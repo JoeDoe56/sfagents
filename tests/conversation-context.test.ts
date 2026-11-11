@@ -41,6 +41,34 @@ function exchange(conv: ConversationService, root: AgentNode, user: string, assi
 }
 
 describe('working context', () => {
+  test('older exchanges are dropped in batches, so the start of the context stays the same for many replies', () => {
+    const { tree: t } = tree();
+    const conv = ConversationService.memory(t.configDir);
+    for (let i = 0; i < 10; i++) exchange(conv, t.root, `question ${i}`, 'answer');
+    const policy = { recentExchanges: 10, maxInputTokens: 100_000 };
+    let ctx = buildWorkingContext(conv.state, TARGET, policy, '', { retrievable: false });
+    assert.equal(ctx.report.includedExchanges, 10);
+    const starts: string[] = [];
+    for (let i = 10; i < 20; i++) {
+      exchange(conv, t.root, `question ${i}`, 'answer');
+      ctx = buildWorkingContext(conv.state, TARGET, policy, '', { retrievable: false, floorSeq: ctx.floorSeq });
+      starts.push(JSON.stringify(ctx.messages[0]));
+      assert.ok(ctx.report.includedExchanges <= 10);
+    }
+    // One drop (to 6 exchanges) and then the same first message until the window fills again: not a new start every reply.
+    assert.ok(new Set(starts).size <= 3, `${new Set(starts).size} different starts`);
+    assert.equal(starts[1], starts[2]);
+  });
+
+  test('a note stored with a user message is replayed with it', () => {
+    const { tree: t } = tree();
+    const conv = ConversationService.memory(t.configDir);
+    const r = conv.beginRootRun(t.root);
+    r.user('hello', undefined, undefined, undefined, undefined, '<receipts>read</receipts>');
+    const ctx = buildWorkingContext(conv.state, TARGET, {}, '', { retrievable: false });
+    assert.match(String(ctx.messages.at(-1)!.content), /hello\n\n<receipts>read<\/receipts>$/);
+  });
+
   test('caps old exchanges by percentage without excluding the current exchange', () => {
     const { tree: t } = tree();
     const conv = ConversationService.memory(t.configDir);

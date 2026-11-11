@@ -43,6 +43,7 @@ import { Mailbox } from '../agents/mailbox.js';
 import { ThreadRecorder, ThreadService, threadMessages } from '../agents/threads.js';
 import { newRunId, toChatMessages } from '../conversation/service.js';
 import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
+import { sectionEntries } from '../conversation/sections.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
@@ -138,6 +139,14 @@ interface RunParams {
    * known (root sessions). Replaces `messages` and adds system-prompt text.
    */
   prepareContext?: (fixedText: string) => { messages: ChatMessage[]; systemExtra?: string; report?: ContextReport };
+  /**
+   * Picks the system prompt for this run from the one just built (`full`)
+   * and the same without its changing parts (`base`): the session reuses
+   * the previous run's prompt while nothing that matters changed, so the
+   * provider's prompt cache, which starts with the system prompt, carries
+   * over from one reply to the next.
+   */
+  stableSystem?: (fresh: { base: string; full: string }) => string;
   /** Overrides the agent's configured reasoning effort for this run (the root session's setting). */
   reasoning?: ReasoningEffort;
   /** "main": replying in the main conversation; "thread": answering another agent. */
@@ -611,7 +620,8 @@ export class AgentRuntime implements AgentMessenger {
       const index = artifactIndex(params.conversation);
       if (index) systemExtra = systemExtra ? `${systemExtra}\n\n${index}` : index;
     }
-    const systemPrompt = buildSystemPrompt(node, activeNames(), systemExtra, link, features(tools));
+    const fullSystem = buildSystemPrompt(node, activeNames(), systemExtra, link, features(tools));
+    const systemPrompt = params.stableSystem ? params.stableSystem({ base: buildSystemPrompt(node, activeNames(), undefined, link, features(tools)), full: fullSystem }) : fullSystem;
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
     const maxTurns = d.limits?.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -1002,6 +1012,10 @@ export class AgentSession {
   runUsage: { usage: TokenUsage; started: number; requests: number } | undefined;
 
   private agentId: string;
+  /** Where the working context starts (older exchanges are dropped in batches, see buildWorkingContext). */
+  private contextFloor: number | undefined;
+  /** The system prompt reused while its parts stay the same (see RunParams.stableSystem). */
+  private systemEpoch: { key: string; prompt: string } | undefined;
 
   constructor(
     private readonly runtime: AgentRuntime,
@@ -1115,6 +1129,8 @@ export class AgentSession {
   resetContext(): void {
     if (this.busy) throw new Error('Cannot reset the context while a turn is running');
     this.conversation.resetContext();
+    this.contextFloor = undefined;
+    this.systemEpoch = undefined;
   }
 
   /**
@@ -1130,7 +1146,10 @@ export class AgentSession {
       const node = this.node;
       const recorder = this.conversation.beginRootRun(node);
       this.runUsage = { usage: {}, started: Date.now(), requests: 0 };
-      recorder.user(input, options.attachments, options.replyTo, options.event, options.from);
+      // Read receipts and the like are stored with the message they came with,
+      // so later replies show that message exactly as the model first saw it.
+      const note = [options.note?.(), this.conversation.state.currentSection ? `<current_section>${this.conversation.state.currentSection}</current_section>` : ''].filter(Boolean).join('\n') || undefined;
+      recorder.user(input, options.attachments, options.replyTo, options.event, options.from, note);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;
       const definition = node.definition;
@@ -1140,9 +1159,17 @@ export class AgentSession {
         const prepared = buildWorkingContext(conversation.state, replayTarget(definition), definition.context ?? {}, fixedText, {
           retrievable,
           resolveAttachment: (ref) => conversation.readAttachment(ref),
+          ...(this.contextFloor !== undefined ? { floorSeq: this.contextFloor } : {}),
         });
-        const note = options.note?.();
-        return note ? { ...prepared, systemExtra: prepared.systemExtra ? `${prepared.systemExtra}\n\n${note}` : note } : prepared;
+        this.contextFloor = prepared.floorSeq;
+        return prepared;
+      };
+      const stableSystem = ({ base, full }: { base: string; full: string }): string => {
+        const state = conversation.state;
+        const key = [base, this.contextFloor ?? '', state.lastResetSeq, sectionEntries(state).map((e) => `${e.id}:${e.title}`).join('|'), [...state.artifactViews.keys()].join(',')].join('\u0000');
+        if (this.systemEpoch?.key === key) return this.systemEpoch.prompt;
+        this.systemEpoch = { key, prompt: full };
+        return full;
       };
       // Messages sent while the run works: recorded when the model takes them, then shown to it.
       const inbox = options.inbox
@@ -1175,6 +1202,7 @@ export class AgentSession {
           recorder,
           conversation: this.conversation,
           prepareContext,
+          stableSystem,
           role: 'main',
           ...(inbox ? { inbox } : {}),
           ...(inbox && options.waitForInput ? { waitForPerson: options.waitForInput } : {}),

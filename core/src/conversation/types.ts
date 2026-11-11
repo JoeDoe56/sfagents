@@ -79,6 +79,12 @@ export interface MessageRecord extends RecordBase {
    * agent while it worked; `agent` is the one it is from).
    */
   event?: MessageEvent;
+  /**
+   * User messages: what SF Agents added when the model first saw the message
+   * (read receipts, the current section). Replayed with it every time, so
+   * the message stays the same for the provider's prompt cache.
+   */
+  note?: string;
 }
 
 export interface RunStartRecord extends RecordBase {

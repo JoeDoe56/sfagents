@@ -615,6 +615,10 @@ export function toChatMessages(
         if (typeof msg.content === 'string') msg.content = `[${m.id}] ${msg.content}`;
         else if (msg.content[0]?.type === 'text') msg.content[0] = { type: 'text', text: `[${m.id}] ${msg.content[0].text}` };
       }
+      if (m.note) {
+        if (typeof msg.content === 'string') msg.content = `${msg.content}\n\n${m.note}`;
+        else msg.content = [...msg.content, { type: 'text', text: m.note }];
+      }
       out.push(msg);
     } else if (m.role === 'assistant') {
       const run = state.runs.get(m.run);
@@ -672,10 +676,11 @@ class StoreRunRecorder implements RunRecorder {
     }) as MessageRecord;
   }
 
-  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction', from?: ViewSource): string {
+  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction', from?: ViewSource, note?: string): string {
     return this.message({
       role: 'user',
       content,
+      ...(note ? { note } : {}),
       ...(attachments?.length ? { attachments } : {}),
       ...(replyTo ? { replyTo } : {}),
       ...(from ? { view: from.view, ...(from.state ? { viewState: from.state } : {}) } : {}),

@@ -26,6 +26,8 @@ export const DEFAULT_RECENT_EXCHANGES = 12;
 export const TURN_RESERVE = 0.25;
 /** Share of the budget the section index may use. */
 const INDEX_SHARE = 0.08;
+/** When older exchanges must go, the context restarts at this share of the room (and of the exchange limit). */
+const BATCH_KEEP = 0.6;
 const MAX_INDEX_ENTRIES = 60;
 
 export interface ContextPolicy {
@@ -46,6 +48,8 @@ export interface ContextReport {
 
 export interface WorkingContext {
   messages: ChatMessage[];
+  /** Seq of the first message of the oldest exchange included (pass it back as floorSeq next time). */
+  floorSeq?: number;
   /** Section index and retrieval notes, appended to the system prompt. */
   systemExtra?: string;
   report: ContextReport;
@@ -136,7 +140,7 @@ export function buildWorkingContext(
   target: ReplayTarget,
   policy: ContextPolicy,
   fixedText: string,
-  options: { retrievable: boolean; resolveAttachment?: AttachmentResolver },
+  options: { retrievable: boolean; resolveAttachment?: AttachmentResolver; floorSeq?: number },
 ): WorkingContext {
   const budget = policy.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS;
   const window = policy.recentExchanges ?? DEFAULT_RECENT_EXCHANGES;
@@ -161,15 +165,32 @@ export function buildWorkingContext(
   }
   remaining -= currentTokens;
   if (policy.oldMessagesPercent !== undefined) remaining = Math.min(remaining, Math.floor(budget * policy.oldMessagesPercent / 100));
-  const included: ChatMessage[][] = [current];
-  for (let i = converted.length - 2; i >= 0 && included.length < window; i--) {
-    const cost = estimateMessages(converted[i]!);
-    if (cost > remaining) break;
-    included.unshift(converted[i]!);
-    remaining -= cost;
-  }
+  // Older exchanges are dropped in batches, not one per reply: the start of
+  // the context then stays the same for many replies, so the provider's
+  // prompt cache keeps serving it (any change there makes the provider
+  // process everything after it again). While everything from the last
+  // starting point still fits, it is kept as it is; once it does not, the
+  // context starts again from a later exchange, leaving room to grow.
+  const pick = (room: number, limit: number, floor?: number): ChatMessage[][] => {
+    const out: ChatMessage[][] = [current];
+    let left = room;
+    for (let i = converted.length - 2; i >= 0 && out.length < limit; i--) {
+      if (floor !== undefined && (groups[i]![0]?.seq ?? 0) < floor) break;
+      const cost = estimateMessages(converted[i]!);
+      if (cost > left) return floor !== undefined ? [] : out;
+      out.unshift(converted[i]!);
+      left -= cost;
+    }
+    return out;
+  };
+  const floorIndex = options.floorSeq === undefined ? -1 : groups.findIndex((g) => (g[0]?.seq ?? 0) >= options.floorSeq!);
+  // Everything since the floor, if it all fits (no exchange in between left out).
+  let included = floorIndex >= 0 ? pick(remaining, window, groups[floorIndex]![0]!.seq) : [];
+  if (included.length && included.length !== converted.length - floorIndex) included = [];
+  if (!included.length) included = floorIndex >= 0 ? pick(Math.floor(remaining * BATCH_KEEP), Math.max(1, Math.floor(window * BATCH_KEEP))) : pick(remaining, window);
   const omitted = converted.length - included.length;
   const messages = included.flat();
+  const floorSeq = groups[groups.length - included.length]?.[0]?.seq;
 
   const notes: string[] = [];
   if (omitted > 0 || state.lastResetSeq > 0) {
@@ -190,6 +211,7 @@ export function buildWorkingContext(
   const estimatedTokens = fixed + (systemExtra ? estimateTokens(systemExtra) : 0) + estimateMessages(messages);
   return {
     messages,
+    ...(floorSeq !== undefined ? { floorSeq } : {}),
     systemExtra,
     report: { estimatedTokens, budget, includedExchanges: included.length, omittedExchanges: omitted, indexEntries: index.shown, indexTotal: index.total },
   };

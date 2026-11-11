@@ -321,7 +321,15 @@ interface PreparedClaude {
   effort?: string;
 }
 
-const TRANSCRIPT_HEADER = 'Complete this conversation. Each following block is one message of it as JSON, in order; "tool" messages are results the client returned for your function calls. Answer the last message.';
+/** Marks where each message starts; never appears inside a message (see plain()). */
+const MARK = '⟦';
+const END = '⟧';
+const TRANSCRIPT_HEADER = `Complete this conversation. Each following block is one message of it, in order, starting with a line that names it: ${MARK}user${END}, ${MARK}assistant${END}, ${MARK}assistant calls NAME id=ID${END} (followed by the call's arguments as JSON), or ${MARK}tool result id=ID${END} (followed by what the client returned for that call). Only these lines start messages. Answer the last message.`;
+
+/** Message text with the start markers made harmless, so no text inside a message can pose as another message. */
+function plain(text: string): string {
+  return text.replaceAll(MARK, '⟨').replaceAll(END, '⟩');
+}
 
 /**
  * The conversation as one user message for the SDK, laid out for Anthropic's
@@ -330,16 +338,18 @@ const TRANSCRIPT_HEADER = 'Complete this conversation. Each following block is o
  * blocks at the end. (One block holding the whole transcript changed on
  * every request, so nothing past the system prompt and tools was ever read
  * back from the cache, and the whole history was written to it again each
- * time.) The results of one turn's tool calls share a block.
+ * time.) The results of one turn's tool calls share a block. Messages are
+ * plain text, not JSON: escaped JSON (code and command output above all)
+ * costs noticeably more tokens.
  */
 export function prepareClaudeRequest(request: ModelRequest): PreparedClaude {
   const system: string[] = [];
   const blocks: Array<Record<string, unknown>> = [{ type: 'text', text: TRANSCRIPT_HEADER }];
   const images: string[] = [];
   let toolBlock: { type: 'text'; text: string } | null = null;
-  const text = (value: unknown) => {
+  const text = (value: string) => {
     toolBlock = null;
-    blocks.push({ type: 'text', text: JSON.stringify(value) });
+    blocks.push({ type: 'text', text: value });
   };
   for (const m of request.messages as readonly ChatMessage[]) {
     if (m.role === 'system') {
@@ -347,8 +357,8 @@ export function prepareClaudeRequest(request: ModelRequest): PreparedClaude {
       continue;
     }
     if (m.role === 'tool') {
-      const entry = JSON.stringify({ role: 'tool', tool_call_id: m.tool_call_id, content: m.content });
-      if (toolBlock) (toolBlock as { text: string }).text += `\n${entry}`;
+      const entry = `${MARK}tool result id=${plain(m.tool_call_id)}${END}\n${plain(m.content)}`;
+      if (toolBlock) (toolBlock as { text: string }).text += `\n\n${entry}`;
       else {
         toolBlock = { type: 'text', text: entry };
         blocks.push(toolBlock);
@@ -356,13 +366,14 @@ export function prepareClaudeRequest(request: ModelRequest): PreparedClaude {
       continue;
     }
     if (m.role === 'assistant') {
-      const calls = (m.tool_calls ?? []).map((t) => ({ id: t.id, name: t.function.name, arguments: t.function.arguments }));
+      const calls = m.tool_calls ?? [];
       if (!m.content && !calls.length) continue;
-      text({ role: 'assistant', ...(m.content ? { content: m.content } : {}), ...(calls.length ? { tool_calls: calls } : {}) });
+      const parts = [...(m.content ? [`${MARK}assistant${END}\n${plain(m.content)}`] : []), ...calls.map((t) => `${MARK}assistant calls ${plain(t.function.name)} id=${plain(t.id)}${END}\n${plain(t.function.arguments || '{}')}`)];
+      text(parts.join('\n\n'));
       continue;
     }
     if (typeof m.content === 'string') {
-      text({ role: 'user', content: m.content });
+      text(`${MARK}user${END}\n${plain(m.content)}`);
       continue;
     }
     const mine: string[] = [];
@@ -374,7 +385,7 @@ export function prepareClaudeRequest(request: ModelRequest): PreparedClaude {
         return `[Attached image ${images.length}]`;
       })
       .join('\n');
-    text({ role: 'user', content });
+    text(`${MARK}user${END}\n${plain(content)}`);
     for (const url of mine) blocks.push(imageBlock(url));
   }
   system.push(GUARDRAIL);
@@ -497,6 +508,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
     const building = new Map<number, { id: string; name: string; json: string }>();
     let stopReason: string | null = null;
     let apiCalls = 0;
+    const seenCalls = new Set<string>();
     const started = Date.now();
     yield { type: 'log', text: `Claude request: model ${prepared.model}, ${blocks.length} content blocks, ${prepared.tools.length} tools, system prompt ${prepared.systemPrompt.length} chars, transcript ${prepared.prompt.length} chars${prepared.effort ? `, effort ${prepared.effort}` : ''}` };
     try {
@@ -505,8 +517,19 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
         if (controller.signal.aborted) break;
         if (message.type === 'stream_event') {
           const event = message.event ?? {};
+          if (event.type === 'message_start') {
+            // The same API call can be reported twice (seen in logs right after
+            // a rate-limit update): count each message id once.
+            const id = String(event.message?.id ?? '');
+            if (id && seenCalls.has(id)) {
+              yield { type: 'log', text: `Claude: message_start for ${id} again; counted once` };
+              continue;
+            }
+            if (id) seenCalls.add(id);
+            apiCalls++;
+            if (apiCalls > 1) yield { type: 'log', text: `Claude: another API call (${id || 'no id'}) in the same turn: ${JSON.stringify(event.message?.usage ?? {})}` };
+          }
           meter.event(event);
-          if (event.type === 'message_start') apiCalls++;
           const delta = event.delta;
           if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
             building.set(event.index, { id: String(event.content_block.id ?? ''), name: String(event.content_block.name ?? ''), json: '' });

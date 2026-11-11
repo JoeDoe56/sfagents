@@ -21,7 +21,7 @@ export interface ViewSource {
 export interface RunRecorder {
   readonly runId: string;
   /** The task or user input that starts this run, with any attached files and the message it replies to inline. */
-  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction', from?: ViewSource): string | void;
+  user(content: string, attachments?: AttachmentRef[], replyTo?: string, event?: 'reaction', from?: ViewSource, note?: string): string | void;
   /** Another agent's message that joined the run while it worked (see Mailbox). */
   note?(from: string, content: string): void;
   /** Run start with the configuration in effect (provenance only). */
