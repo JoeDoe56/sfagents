@@ -3,3 +3,6 @@ web/native/linux/vendor/** -text
 
 # Shell assets are sent from Windows checkouts into Linux containers.
 *.sh text eol=lf
+
+# npm on Windows writes the lockfile with CRLF; keep it LF in Git so line endings never count as a change.
+package-lock.json text eol=lf

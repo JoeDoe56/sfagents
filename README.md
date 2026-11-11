@@ -17,7 +17,7 @@ SF Agents started as an extraction of the minimal runtime from Qwen Code's `pack
 ```sh
 git clone https://github.com/JoeDoe56/sfagents
 cd sfagents
-npm install        # installs dependencies and builds (via the prepare script)
+npm ci             # installs exactly what package-lock.json lists and builds (via the prepare script)
 mkdir userdata
 cp -R examples/agents userdata/agents
 cp -R examples/prompts userdata/prompts
@@ -25,6 +25,8 @@ cp examples/mcp.json userdata/mcp.json
 npx sfagents --help
 npm link           # optional, once: makes the plain `sfagents` command work (see below)
 ```
+
+**Updating.** After `git pull`, run `npm ci` (not `npm install`); it builds too. `npm install` rewrites package-lock.json for your computer's npm and platform (for example adding `"peer": true` flags), and that local change then blocks the next `git pull`; `npm ci` never changes the lockfile.
 
 **The `sfagents` command.** `npm link` in the repository (once, after `npm install`) adds an `sfagents` command to npm's global folder, which the Node.js installers put on your PATH: `sfagents.cmd` and `sfagents.ps1` on Windows (in `%APPDATA%\npm`), a link in npm's `bin` folder on macOS and Linux. From then on, `sfagents` in any project folder starts SF Agents there, the same as `npx sfagents`; the command runs this checkout, so a `git pull` and `npm run build` update it too. `npm rm -g sfagents-workspace` removes it. If npm's global folder needs administrator rights (Node.js from the macOS .pkg installer, or a system package on Linux), use `sudo npm link` or set a user prefix (`npm config set prefix ~/.npm-global` and put its `bin` on your PATH). If PowerShell refuses to run `sfagents.ps1` because scripts are disabled, `npx` is refused the same way: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` allows both.
 
