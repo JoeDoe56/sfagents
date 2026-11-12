@@ -334,7 +334,9 @@ export function createSheet(o = {}) {
     // Header on the attached side; the body scrolls beneath it.
     const headH = heightOf(header);
     const footH = heightOf(footer);
-    const headTop = isBar ? lerp(ROW_TOP, 22, smooth(0, 1, t)) : (o.headerTop ?? 18);
+    // Apple Maps keeps the field the same distance below the sheet's edge at
+    // every height; growing it while the sheet opened read as the edge stretching.
+    const headTop = isBar ? ROW_TOP : (o.headerTop ?? 18);
     headEl.style.top = `${headTop}px`;
     const bottomInset = edge === 'bottom' ? Math.max(inset('bottom'), footer ? 12 : 0) * smooth(1.2, 2, t) : 0;
     footEl.style.bottom = `${bottomInset}px`;
@@ -440,8 +442,12 @@ export function createSheet(o = {}) {
       goal.done?.();
       return;
     }
-    apply();
+    // Ask for the next tick before apply(): apply() asks the glass for a
+    // render, and frame callbacks run in the order they were requested. This
+    // way the sheet moves first and the glass renders it in the same frame,
+    // instead of the glass drawing last frame's sheet and trailing by one.
     raf = requestAnimationFrame(tick);
+    apply();
   }
 
   /** Springs to `target` t (and drop), from a finger velocity in t/s and px/s. */
