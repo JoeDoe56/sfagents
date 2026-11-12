@@ -2100,7 +2100,27 @@ drivesEl.addEventListener('keydown', openDrive);
     const want = Math.max(0, Math.round(between - above));
     if (want !== current) toolsRow.style.marginTop = `${want}px`;
   };
-  const obs = new ResizeObserver(() => requestAnimationFrame(align));
+  // The gap only depends on heights. While the sheet animates, the monitor's
+  // width changes every frame; re-aligning then read layout right after the
+  // sheet's style writes and forced a layout per frame.
+  const heights = new Map();
+  let queued = false;
+  const obs = new ResizeObserver((entries) => {
+    let changed = false;
+    for (const e of entries) {
+      const h = Math.round(e.borderBoxSize?.[0]?.blockSize ?? e.contentRect.height);
+      if (heights.get(e.target) !== h) {
+        heights.set(e.target, h);
+        changed = true;
+      }
+    }
+    if (!changed || queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      align();
+    });
+  });
   obs.observe($('monitor'));
   obs.observe(toolsRow);
 }
