@@ -21,6 +21,8 @@ export interface SectionState {
   title: string;
   parent: string | null;
   createdSeq: number;
+  summary?: string;
+  summarizedSeq?: number;
 }
 
 export interface RunState {
@@ -278,6 +280,10 @@ export class ConversationState {
         } else {
           const s = this.sections.get(record.section)!;
           if (record.title !== undefined) s.title = record.title;
+          if (record.summary !== undefined) {
+            s.summary = record.summary;
+            s.summarizedSeq = record.summarizedSeq;
+          }
           if (record.parent !== undefined) s.parent = record.parent;
           // Merged sections hand their messages and subsections to this one.
           for (const id of record.merge ?? []) {

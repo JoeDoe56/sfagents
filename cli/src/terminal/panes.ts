@@ -1263,6 +1263,7 @@ interface AgentFormData {
   model: string;
   maxInputTokens: number;
   oldMessagesPercent: number | null;
+  sectionsPercent: number | null;
   instructions: string;
   network: string | null;
   folders: string[];
@@ -1290,6 +1291,21 @@ interface AgentEditorData {
 
 const NETWORK_NAMES: Record<string, string> = { off: 'Off', pkg: 'Packages', git: 'Packages and Git', on: 'Internet' };
 const memoryText = (mb: number) => (mb >= 1024 ? `${(mb / 1024).toFixed(mb % 1024 ? 1 : 0)} GB` : `${mb} MB`);
+
+function nearestStop(stops: readonly number[], value: number): number {
+  let near = 0;
+  stops.forEach((s, i) => {
+    if (Math.abs(s - value) < Math.abs(stops[near]! - value)) near = i;
+  });
+  return near;
+}
+
+/** 256000 → "256k", 1000000 → "1m". */
+function contextText(n: number): string {
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(2)}m`;
+  if (n >= 1000) return `${+(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
 
 /** The project's agents: Enter edits one, n makes a new one. */
 export function agentsPane(host: PaneHost): Pane {
@@ -1336,6 +1352,7 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
         form = structuredClone(d.form);
         saved = JSON.stringify(d.form);
         p.title = d.original ? `Agent: ${d.original}` : 'New agent';
+        loadWindow();
         host.redraw();
       },
       (e: unknown) => {
@@ -1344,9 +1361,23 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
       },
     );
   const dirty = () => !!form && (JSON.stringify(form) !== saved || !data?.original);
+  // The context bar's stops, up to the model's own window.
+  let window: { native: number | null; stops: number[] } = { native: null, stops: [32_000, 64_000, 100_000, 128_000, 200_000, 256_000, 400_000, 500_000, 1_000_000] };
+  let windowTimer: ReturnType<typeof setTimeout> | undefined;
+  const loadWindow = () => {
+    if (!form) return;
+    host.api<typeof window>('GET', `agent-context-window?provider=${encodeURIComponent(form.provider)}&model=${encodeURIComponent(form.model)}`).then((w) => {
+      window = w;
+      host.redraw();
+    }, () => {});
+  };
   const set = <K extends keyof AgentFormData>(k: K, v: AgentFormData[K]) => {
     form![k] = v;
     delete errors[k];
+    if (k === 'provider' || k === 'model') {
+      clearTimeout(windowTimer);
+      windowTimer = setTimeout(loadWindow, 300);
+    }
   };
   const field = (key: keyof AgentFormData | string, label: string, value: string, w: number, extra: string[] = []): Row => ({
     pick: true,
@@ -1384,8 +1415,14 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
       const models = c.providers.find((x) => x.name.toLowerCase() === f.provider.toLowerCase())?.models ?? [];
       rows.push(field('model', 'Model', f.model || color.dim(f.provider ? '(required)' : 'the provider’s default'), w, models.length ? [`    ${color.dim(`Suggested: ${models.join(', ')}`)}`] : []));
       rows.push(heading('Context'));
-      rows.push(field('maxInputTokens', 'Max input tokens', String(f.maxInputTokens), w));
+      {
+        // A bar like the reasoning one: a dot per stop, filled up to the chosen size.
+        const at = nearestStop(window.stops, f.maxInputTokens);
+        const bar = window.stops.map((_, i) => (i <= at ? color.cyan('●') : color.dim('○'))).join(' ');
+        rows.push(field('maxInputTokens', 'Max context', `${bar}  ${color.bold(`${contextText(f.maxInputTokens)}/${window.native ? contextText(window.native) : '?'}`)}`, w, [`    ${color.dim('←→ change')}`]));
+      }
       rows.push(field('oldMessagesPercent', 'Old messages %', f.oldMessagesPercent === null ? '(no extra limit)' : String(f.oldMessagesPercent), w));
+      rows.push(field('sectionsPercent', 'Sections %', f.sectionsPercent === null ? '8 (default)' : String(f.sectionsPercent), w));
       rows.push(heading(`Instructions ${color.dim(`(${count().toLocaleString()} characters)`)}`));
       const lines = f.instructions ? f.instructions.split('\n') : [];
       rows.push(field('instructions', 'Instructions', lines.length ? `${color.dim(`${lines.length} line${lines.length === 1 ? '' : 's'}`)}` : color.dim('(required)'), w, lines.slice(0, 6).map((l) => `    ${color.dim(truncate(clean(l), w - 8))}`).concat(lines.length > 6 ? [`    ${color.dim('…')}`] : [])));
@@ -1463,8 +1500,16 @@ export function agentEditorPane(host: PaneHost, agent: string | undefined, chang
       case 'model':
         if (!arrow) ask('model', 'Model:');
         return !arrow;
-      case 'maxInputTokens':
-        if (!arrow) host.ask('Max input tokens (2000–10000000):', String(f.maxInputTokens), (t) => (set('maxInputTokens', t.trim() ? Number(t) : NaN), host.redraw()));
+      case 'maxInputTokens': {
+        const stops = window.stops;
+        const at = nearestStop(stops, f.maxInputTokens);
+        // Enter steps up and wraps; arrows step either way.
+        const next = arrow ? Math.max(0, Math.min(stops.length - 1, at + step)) : (at + 1) % stops.length;
+        set('maxInputTokens', stops[next]!);
+        return true;
+      }
+      case 'sectionsPercent':
+        if (!arrow) host.ask('Sections % (0–50; blank for the default, 8):', f.sectionsPercent === null ? '' : String(f.sectionsPercent), (t) => (set('sectionsPercent', t.trim() ? Number(t) : null), host.redraw()));
         return !arrow;
       case 'oldMessagesPercent':
         if (!arrow) host.ask('Old messages % (0–100; blank for no extra limit):', f.oldMessagesPercent === null ? '' : String(f.oldMessagesPercent), (t) => (set('oldMessagesPercent', t.trim() ? Number(t) : null), host.redraw()));

@@ -34,6 +34,8 @@ export interface AgentForm {
   model: string;
   maxInputTokens: number;
   oldMessagesPercent: number | null;
+  /** Share of the context for the section list and summaries; null keeps the default. */
+  sectionsPercent: number | null;
   /** The instructions; a line "@name.txt" pulls in a file from the prompts folder. */
   instructions: string;
   /** Required: null until chosen. */
@@ -125,6 +127,7 @@ export function newAgentForm(limits?: AgentFormLimits): AgentForm {
     model: '',
     maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
     oldMessagesPercent: null,
+    sectionsPercent: null,
     instructions: '',
     network: null,
     folders: [],
@@ -156,6 +159,7 @@ export function readAgentForm(tree: AgentEditorContext, name: string): AgentForm
     model,
     maxInputTokens: typeof context['maxInputTokens'] === 'number' ? context['maxInputTokens'] : DEFAULT_MAX_INPUT_TOKENS,
     oldMessagesPercent: typeof context['oldMessagesPercent'] === 'number' ? context['oldMessagesPercent'] : null,
+    sectionsPercent: typeof context['sectionsPercent'] === 'number' ? context['sectionsPercent'] : null,
     instructions: Array.isArray(prompt) ? prompt.filter((p) => typeof p === 'string').join('\n\n') : str(prompt),
     network: isNetworkLevel(raw['network']) ? raw['network'] : null,
     folders: Array.isArray(raw['folders']) ? raw['folders'].filter((f): f is string => typeof f === 'string') : [],
@@ -195,6 +199,7 @@ export function validateAgentForm(tree: AgentEditorContext, form: AgentForm, lim
   } else if (form.model.trim()) errors.provider = 'Choose the provider this model is from.';
   if (!Number.isInteger(form.maxInputTokens) || form.maxInputTokens < 2000 || form.maxInputTokens > 10_000_000) errors.maxInputTokens = 'Enter 2,000 to 10,000,000 tokens.';
   if (form.oldMessagesPercent !== null && (!Number.isInteger(form.oldMessagesPercent) || form.oldMessagesPercent < 0 || form.oldMessagesPercent > 100)) errors.oldMessagesPercent = 'Enter a whole percentage from 0 to 100, or leave blank.';
+  if (form.sectionsPercent != null && (!Number.isInteger(form.sectionsPercent) || form.sectionsPercent < 0 || form.sectionsPercent > 50)) errors.sectionsPercent = 'Enter a whole percentage from 0 to 50, or leave blank.';
   if (!form.instructions.trim()) errors.instructions = 'Write the agent’s instructions.';
   else {
     try {
@@ -280,6 +285,8 @@ function rawFor(form: AgentForm, before: Record<string, unknown>, renamed: boole
   else delete context['maxInputTokens'];
   if (form.oldMessagesPercent !== null) context['oldMessagesPercent'] = form.oldMessagesPercent;
   else delete context['oldMessagesPercent'];
+  if (form.sectionsPercent != null) context['sectionsPercent'] = form.sectionsPercent;
+  else delete context['sectionsPercent'];
   set('context', Object.keys(context).length ? context : undefined);
   set('voice', form.speak ? { speak: true } : undefined);
   return raw;
@@ -296,7 +303,7 @@ function formField(field: string | undefined): keyof AgentForm | undefined {
     provider: 'provider',
     providerOptions: 'provider',
     model: 'model',
-    context: field.includes('oldMessagesPercent') ? 'oldMessagesPercent' : 'maxInputTokens',
+    context: field.includes('oldMessagesPercent') ? 'oldMessagesPercent' : field.includes('sectionsPercent') ? 'sectionsPercent' : 'maxInputTokens',
     systemPrompt: 'instructions',
     network: 'network',
     folders: 'folders',

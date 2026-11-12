@@ -25,7 +25,8 @@ export const DEFAULT_RECENT_EXCHANGES = 12;
 /** Share of the budget kept free for tool results and fetched history during the turn. */
 export const TURN_RESERVE = 0.25;
 /** Share of the budget the section index may use. */
-const INDEX_SHARE = 0.08;
+/** The share of the context budget the section index (titles and summaries) may take, in percent. */
+export const DEFAULT_SECTIONS_PERCENT = 8;
 /** When older exchanges must go, the context restarts at this share of the room (and of the exchange limit). */
 const BATCH_KEEP = 0.6;
 const MAX_INDEX_ENTRIES = 60;
@@ -34,6 +35,8 @@ export interface ContextPolicy {
   maxInputTokens?: number;
   recentExchanges?: number;
   oldMessagesPercent?: number;
+  /** The share of the budget for the section index (titles and summaries), in percent. */
+  sectionsPercent?: number;
 }
 
 export interface ContextReport {
@@ -106,8 +109,7 @@ function buildIndex(state: ConversationState, maxTokens: number, retrievable: bo
     for (const a of state.ancestors(e.id)) priority.add(a.id);
     priority.add(e.id);
   }
-  const lines: string[] = [];
-  let shown = 0;
+  const listed: Array<{ e: (typeof entries)[number]; line: string }> = [];
   let tokens = 0;
   for (const e of entries) {
     if (!priority.has(e.id)) continue;
@@ -115,10 +117,20 @@ function buildIndex(state: ConversationState, maxTokens: number, retrievable: bo
     const line = `${'  '.repeat(e.depth)}- [${e.id}] ${e.title} (${e.messages} msg${e.firstSeq ? `, m${e.firstSeq}–m${e.lastSeq}` : ''})${e.current ? ' ← current' : ''}`;
     const cost = estimateTokens(line) + 1;
     if (tokens + cost > maxTokens) break;
-    lines.push(line);
+    listed.push({ e, line });
     tokens += cost;
-    shown++;
   }
+  const shown = listed.length;
+  // The summaries, with what room is left: the current section first, then the most recent.
+  const withSummary = new Set<string>();
+  const order = [...listed].filter((l) => l.e.summary).sort((a, b) => Number(b.e.current) - Number(a.e.current) || (b.e.lastSeq ?? 0) - (a.e.lastSeq ?? 0));
+  for (const l of order) {
+    const cost = estimateTokens(l.e.summary!) + 4;
+    if (tokens + cost > maxTokens) continue;
+    withSummary.add(l.e.id);
+    tokens += cost;
+  }
+  const lines = listed.map((l) => (withSummary.has(l.e.id) ? `${l.line}\n${'  '.repeat(l.e.depth + 1)}Summary: ${l.e.summary!.replace(/\s*\n\s*/g, ' ')}` : l.line));
   const unassigned = unassignedMessages(state).length;
   const more = entries.length - shown;
   const header = `<conversation_sections revision="${state.structureRevision}">`;
@@ -156,7 +168,7 @@ export function buildWorkingContext(
   const window = policy.recentExchanges ?? DEFAULT_RECENT_EXCHANGES;
   const fixed = estimateTokens(fixedText);
   const usable = Math.floor(budget * (1 - TURN_RESERVE)) - fixed;
-  const index = buildIndex(state, Math.floor(budget * INDEX_SHARE), options.retrievable);
+  const index = buildIndex(state, Math.floor((budget * (policy.sectionsPercent ?? DEFAULT_SECTIONS_PERCENT)) / 100), options.retrievable);
   const indexTokens = index.text ? estimateTokens(index.text) : 0;
 
   const groups = exchanges(state.messages.filter((m) => m.seq > state.lastResetSeq));

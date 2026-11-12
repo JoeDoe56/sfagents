@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import {
+  cleanCommandOutput,
   AgentRuntime,
   hostWorkspacesDir,
   loadAgentTree,
@@ -48,6 +49,12 @@ async function call(f: Fixture, name: string, args: Record<string, unknown>): Pr
   if (permission === 'deny') return { permission, reason: invocation.getDenialReason?.(), result: await invocation.execute(signal) };
   return { permission, result: await invocation.execute(signal) };
 }
+
+test('command output: progress redraws keep what stayed, repeated lines collapse, code is untouched', () => {
+  const raw = 'Downloading 10%\rDownloading 50%\rDownloading 100%\n\x1b[32mok\x1b[0m\nwarn x\nwarn x\nwarn x\nwarn x\nsame\nsame\n  indented(code) {\n';
+  assert.equal(cleanCommandOutput(raw), 'Downloading 100%\nok\nwarn x\n[the line above repeated 3 more times]\nsame\nsame\n  indented(code) {');
+  assert.equal(cleanCommandOutput('a\r\nb\r\n'), 'a\nb');
+});
 
 describe('shell tool', () => {
   test('every agent has the shell; schema validation rejects bad arguments', async () => {

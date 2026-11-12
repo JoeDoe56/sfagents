@@ -74,7 +74,7 @@ export { MCP_COMMAND, MCP_USAGE, mcpApprover, runMcpCommand, type McpGrant, type
 export * from './tools/tools.js';
 export { ToolErrorType } from './tools/tool-error.js';
 export { ToolNames } from './tools/tool-names.js';
-export { stripAnsiAndControl } from './utils/text-utils.js';
+export { stripAnsiAndControl, cleanCommandOutput } from './utils/text-utils.js';
 export { getErrorMessage } from './utils/errors.js';
 export { openInBrowser } from './utils/open-url.js';
 export { removeDir } from './utils/remove-dir.js';
@@ -205,3 +205,4 @@ export { FullControlManager, RollbackJournal, runHostShell, type FullControlPlan
 export { UiService, ContainerUiAdapter, WindowsUiAdapter, runUiCommand, riskyControl, UI_COMMAND, UI_USAGE, type UiAdapter, type UiControl, type UiGrant, type UiReply } from './ui/ui.js';
 export { StartLux, type UiDecider, type DecisionQuestion, type DecisionAnswer } from './ui/startlux.js';
 export { shortenToolOutput } from './runtime/tool-executor.js';
+export { CONTEXT_STOPS, contextStops, contextLabel, knownContextWindow, rememberContextWindow, rememberedContextWindow } from './providers/context-windows.js';

@@ -114,6 +114,8 @@ export interface AgentDefinition {
     recentExchanges?: number;
     /** Maximum share of the input budget for exchanges before the current one. */
     oldMessagesPercent?: number;
+    /** Share of the input budget for the section list and its summaries (default 8). */
+    sectionsPercent?: number;
   };
   limits?: {
     maxTurns?: number;
@@ -466,11 +468,12 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
 
   let context: AgentDefinition['context'];
   if (raw['context'] !== undefined) {
-    const cx = c.object(raw['context'], 'context', ['maxInputTokens', 'recentExchanges', 'oldMessagesPercent']);
+    const cx = c.object(raw['context'], 'context', ['maxInputTokens', 'recentExchanges', 'oldMessagesPercent', 'sectionsPercent']);
     context = {
       maxInputTokens: c.integer(cx['maxInputTokens'], 'context.maxInputTokens', 2000, 10_000_000),
       recentExchanges: c.integer(cx['recentExchanges'], 'context.recentExchanges', 1, 1000),
       oldMessagesPercent: c.integer(cx['oldMessagesPercent'], 'context.oldMessagesPercent', 0, 100),
+      sectionsPercent: c.integer(cx['sectionsPercent'], 'context.sectionsPercent', 0, 50),
     };
   }
 

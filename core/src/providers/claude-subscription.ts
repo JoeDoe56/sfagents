@@ -11,6 +11,7 @@
  * server whose calls are captured and returned to SF Agents to execute.
  */
 
+import { rememberContextWindow } from './context-windows.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -597,6 +598,10 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
     }
     if (request.signal.aborted) throw request.signal.reason;
     if (!meter.seen && result) meter.fromResult(result);
+    // The model's window, as Claude Code reports it, for the context bar.
+    for (const u of Object.values((result?.modelUsage ?? {}) as Record<string, { contextWindow?: number }>)) {
+      if (typeof u?.contextWindow === 'number') rememberContextWindow('anthropic', request.model, u.contextWindow);
+    }
     if (unknown.length) yield { type: 'log', text: `Claude asked for tool(s) SF Agents does not have: ${unknown.map((c) => `${c.name} ${c.rawArguments.slice(0, 200)}`).join('; ')}` };
     // They go back as calls, so SF Agents answers them with its list of tools.
     calls.push(...unknown);

@@ -133,6 +133,10 @@ export interface SectionRecord extends RecordBase {
    */
   merge?: string[];
   current?: boolean;
+  /** The agent's summary of the section: what was decided and done, where it stands. */
+  summary?: string;
+  /** The last message seq the summary covers. */
+  summarizedSeq?: number;
 }
 
 export interface ArtifactRecord extends RecordBase {

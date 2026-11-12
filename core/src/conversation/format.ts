@@ -40,7 +40,7 @@ const KNOWN_FIELDS: Record<string, readonly string[]> = {
   run_start: ['seq', 'time', 'run', 'agent', 'parentRun', 'callId', 'provider', 'model', 'reasoning', 'config', 'configHash'],
   tool_start: ['seq', 'time', 'run', 'callId', 'tool'],
   run_end: ['seq', 'time', 'run', 'status', 'error', 'turns', 'usage'],
-  section: ['seq', 'time', 'op', 'section', 'rev', 'expected', 'title', 'parent', 'assign', 'unassign', 'merge', 'current'],
+  section: ['seq', 'time', 'op', 'section', 'rev', 'expected', 'title', 'parent', 'assign', 'unassign', 'merge', 'current', 'summary', 'summarizedSeq'],
   artifact: ['seq', 'time', 'id', 'type', 'title', 'path', 'run', 'message', 'callId', 'mime', 'file', 'url'],
   artifact_update: ['seq', 'time', 'artifact', 'rev', 'path', 'title', 'mime', 'run', 'callId', 'file', 'url'],
   artifact_pin: ['seq', 'time', 'artifact', 'pinned', 'saved'],
@@ -369,6 +369,8 @@ function buildRecord(kind: string, meta: Record<string, unknown>, content: strin
         unassign: strArray(meta, 'unassign', p),
         merge: strArray(meta, 'merge', p),
         current: current as boolean | undefined,
+        summary: str(meta, 'summary', false, p),
+        summarizedSeq: num(meta, 'summarizedSeq', false, p),
       };
       if (record.op === 'add' && !record.title) p.push('section add needs a "title"');
       break;

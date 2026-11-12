@@ -155,7 +155,7 @@ export function mcpCall(server: string, tool: string, args: Record<string, unkno
 
 /** The stdout part of a shell result ("" when there is none). */
 export function shellStdout(content: string | undefined): string {
-  return /Stdout: ([\s\S]*?)\nStderr:/.exec(content ?? '')?.[1]?.trim() ?? '';
+  return /Stdout: ([\s\S]*?)\n(?:Stderr:|Exit Code:)/.exec(content ?? '')?.[1]?.trim() ?? '';
 }
 
 export function lastToolContent(request: ModelRequest): string | undefined {

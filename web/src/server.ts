@@ -58,6 +58,8 @@ import {
   planUsageText,
   createDefaultProviderFactory,
   DEFAULT_MODELS,
+  contextStops,
+  knownContextWindow,
   BrightDataWeb,
   parseOrigin,
   chatEffects,
@@ -1016,6 +1018,9 @@ export class WebServer {
       case 'GET agent-editor':
         this.checkFetchSite(req);
         return sendJson(res, 200, this.agentEditor(url.searchParams.get('agent') ?? undefined));
+      case 'GET agent-context-window':
+        this.checkFetchSite(req);
+        return sendJson(res, 200, await this.contextWindowFor(url.searchParams.get('provider') ?? '', url.searchParams.get('model') ?? ''));
       case 'POST agent-folder': {
         await readJson(req);
         if (this.folderDialog) throw new HttpError(409, 'A folder dialog is already open on this computer.');
@@ -2039,6 +2044,23 @@ export class WebServer {
     };
   }
 
+  /**
+   * A model's native context window and the stops the editor's context bar
+   * offers for it. With no provider, the account the app replies with.
+   */
+  async contextWindowFor(provider: string, model: string): Promise<{ native: number | null; stops: number[]; provider: string; model: string }> {
+    const record = provider ? this.registry.list().find((r) => r.name.toLowerCase() === provider.toLowerCase()) : this.registry.find(this.agentInfo().account);
+    const kind = record?.kind ?? (provider.toLowerCase() === 'openrouter' ? 'openrouter' : '');
+    const name = model || (provider ? '' : this.agentInfo().model) || (record ? DEFAULT_MODELS[record.kind] : '') || '';
+    let native: number | null = knownContextWindow(kind, name) ?? null;
+    const base = kind === 'openrouter' ? OPENROUTER_BASE_URL : record?.kind === 'custom' ? record.baseUrl : undefined;
+    if (base && name && !this.options.providerFactory) {
+      const listed = await this.windows.lookup({ ...this.session.node.definition, provider: kind === 'openrouter' ? 'openrouter' : 'openai-compatible', model: name } as never, process.env, base).catch(() => null);
+      if (listed) native = listed;
+    }
+    return { native, stops: contextStops(native), provider: record?.name ?? provider, model: name };
+  }
+
   /** The editor's form for an agent (or a new one), and what it can choose from. */
   agentEditor(name?: string) {
     const tree = this.runtime.tree;
@@ -2092,6 +2114,7 @@ export class WebServer {
           model: String(form.model ?? ''),
           maxInputTokens: Number(form.maxInputTokens ?? 48000),
           oldMessagesPercent: form.oldMessagesPercent == null ? null : Number(form.oldMessagesPercent),
+          sectionsPercent: form.sectionsPercent == null ? null : Number(form.sectionsPercent),
           instructions: String(form.instructions ?? '').replace(/\r\n/g, '\n'),
           network: (form.network ?? null) as AgentForm['network'],
           folders: form.folders ?? [],

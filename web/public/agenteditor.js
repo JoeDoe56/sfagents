@@ -19,11 +19,20 @@ import { confirmDialog, showError, toast } from './dialogs.js';
 import { toWav } from './dictation.js';
 import { speak, stopSpeaking } from './speech.js';
 import { createRow, createSection, createButton } from './vendor/sfgl/src/ui/index.js';
+import { effortSlider } from './agentsheet.js';
 
 const CLIP_RATE = 24000;
 const CLIP_SECONDS = 60;
 const SAMPLE = 'Hello! This is how I sound when I read my replies aloud.';
 const NETWORK_TITLES = { off: 'Off', pkg: 'Packages', git: 'Packages and Git', on: 'Internet' };
+
+/** 256000 → "256k", 1000000 → "1m". */
+function contextLabel(n) {
+  if (!Number.isFinite(n)) return '?';
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(2)}m`;
+  if (n >= 1000) return `${+(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -118,6 +127,44 @@ export async function openAgentEditor(o = {}) {
     const node = errors.get(field);
     if (node && !node.hidden) node.hidden = true;
     dirty();
+    // Another model may have another window.
+    if (field === 'provider' || field === 'model') {
+      clearTimeout(windowTimer);
+      windowTimer = setTimeout(loadWindow, 400);
+    }
+  }
+
+  // The context bar: stops from 32k up to the model's own window.
+  let windowTimer = 0;
+  let windowInfo = { native: null, stops: [32000, 64000, 100000, 128000, 200000, 256000, 400000, 500000, 1000000] };
+  let contextSlider = null;
+  function renderContextBar() {
+    if (!parts.contextHost) return;
+    const stops = windowInfo.stops;
+    // The stop nearest the current value (a value set by hand stays until the bar moves).
+    let near = 0;
+    stops.forEach((s, i) => {
+      if (Math.abs(s - form.maxInputTokens) < Math.abs(stops[near] - form.maxInputTokens)) near = i;
+    });
+    const showLabel = (v) => (parts.contextValue.textContent = `${contextLabel(v)}/${windowInfo.native ? contextLabel(windowInfo.native) : '?'}`);
+    contextSlider = effortSlider({
+      levels: stops.map(String),
+      value: String(stops[near]),
+      label: 'Max context',
+      onInput: (v) => showLabel(Number(v)),
+      onChange: (v) => set('maxInputTokens', Number(v)),
+    });
+    parts.contextHost.replaceChildren(parts.contextTitle, contextSlider.element);
+    showLabel(form.maxInputTokens);
+    parts.sheet?.addGlass?.(contextSlider.element.querySelector('.ag-track'), 'control');
+  }
+  async function loadWindow() {
+    try {
+      windowInfo = await getJson(`/api/agent-context-window?provider=${encodeURIComponent(form.provider)}&model=${encodeURIComponent(form.model)}`);
+    } catch {
+      // keep the stops shown
+    }
+    renderContextBar();
   }
 
   let ctx = null;
@@ -142,9 +189,22 @@ export async function openAgentEditor(o = {}) {
       parts.models = createRow({ title: 'Suggested Models', tintTitle: true, onTap: () => pickModel() });
       body.append(createSection({ title: 'Model', rows: [parts.provider, parts.model, parts.models], note: 'With Any, the agent replies with the account picked in the agent sheet (or the first provider added in Settings).' }).el, errorNode('provider'), errorNode('model'));
 
-      const maxContext = createRow({ title: 'Max input tokens', input: { value: String(form.maxInputTokens), inputMode: 'numeric', onInput: (v) => set('maxInputTokens', v.trim() ? Number(v) : NaN) } });
+      // Max context: a bar like the reasoning one, the chosen size out of the model's own window.
+      parts.sheet = sheet;
+      parts.contextHost = el('div', 'ag-effort ae-context');
+      parts.contextTitle = el('p', 'ag-label ag-unit');
+      parts.contextTitle.append(el('strong', '', 'Max Context'), (parts.contextValue = el('span', '', '')));
       const oldMessages = createRow({ title: 'Old messages %', input: { value: form.oldMessagesPercent == null ? '' : String(form.oldMessagesPercent), placeholder: 'No extra limit', inputMode: 'numeric', onInput: (v) => set('oldMessagesPercent', v.trim() ? Number(v) : null) } });
-      body.append(createSection({ title: 'Context', rows: [maxContext, oldMessages], note: 'Estimated input tokens before trimming history. Old messages are capped at this percentage of the budget; the current exchange is always kept. Blank keeps the existing default.' }).el, errorNode('maxInputTokens'), errorNode('oldMessagesPercent'));
+      const sections = createRow({ title: 'Sections %', input: { value: form.sectionsPercent == null ? '' : String(form.sectionsPercent), placeholder: '8', inputMode: 'numeric', onInput: (v) => set('sectionsPercent', v.trim() ? Number(v) : null) } });
+      body.append(
+        parts.contextHost,
+        createSection({ title: 'Context', rows: [oldMessages, sections], note: 'Max context is the most the agent sends the model at once; older history is dropped in batches to stay under it. Old messages are capped at this percentage of it (the current exchange is always kept). Sections % is the room for the list of sections and their summaries. Blank keeps the default.' }).el,
+        errorNode('maxInputTokens'),
+        errorNode('oldMessagesPercent'),
+        errorNode('sectionsPercent'),
+      );
+      renderContextBar();
+      loadWindow();
 
       // Instructions.
       const area = el('textarea', 'ae-instructions');

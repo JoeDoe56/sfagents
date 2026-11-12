@@ -23,6 +23,31 @@ export function stripAnsiAndControl(text: string): string {
 }
 
 /**
+ * Command output as the model should read it: terminal colors and control
+ * characters removed, progress redraws reduced to what was finally shown
+ * (text before a carriage return was drawn over), and runs of the same line
+ * collapsed. Nothing else changes, so code and paths stay exact.
+ */
+export function cleanCommandOutput(text: string): string {
+  const lines = text.replace(/\r\n/g, '\n').split('\n').map((line) => {
+    const parts = line.split('\r');
+    // A progress bar redrawn in place: the last non-empty drawing is what stayed.
+    for (let i = parts.length - 1; i >= 0; i--) if (parts[i]!.trim()) return stripAnsiAndControl(parts[i]!);
+    return '';
+  });
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; ) {
+    let j = i + 1;
+    while (j < lines.length && lines[j] === lines[i]) j++;
+    out.push(lines[i]!);
+    if (j - i > 2) out.push(`[the line above repeated ${j - i - 1} more times]`);
+    else if (j - i === 2) out.push(lines[i]!);
+    i = j;
+  }
+  return out.join('\n').trimEnd();
+}
+
+/**
  * Safely replaces text with literal strings, avoiding ECMAScript
  * GetSubstitution issues. Escapes $ characters to prevent template
  * interpretation.

@@ -49,7 +49,7 @@ async function sh(t: Map<string, AnyDeclarativeTool>, command: string): Promise<
   return t.get('shell')!.build({ command }).execute(new AbortController().signal);
 }
 
-const stdout = (r: ToolResult) => /Stdout: ([\s\S]*?)\nStderr:/.exec(r.llmContent)?.[1] ?? '';
+const stdout = (r: ToolResult) => /Stdout: ([\s\S]*?)\n(?:Stderr:|Exit Code:)/.exec(r.llmContent)?.[1] ?? '';
 const stderr = (r: ToolResult) => /Stderr: ([\s\S]*?)\nExit Code:/.exec(r.llmContent)?.[1] ?? '';
 
 describe('sfa-web (in the agent container)', { skip: NO_CONTAINER_TESTS }, () => {

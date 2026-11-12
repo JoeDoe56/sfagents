@@ -19,7 +19,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type { ToolContext } from './tool-context.js';
-import { stripAnsiAndControl, truncateForModel } from '../utils/text-utils.js';
+import { cleanCommandOutput, truncateForModel } from '../utils/text-utils.js';
 import { availableHostCommands } from './host-commands.js';
 import { getJob, listJobs, readNewOutput, startJob, stopJob, waitForJob, type BackgroundJob } from './background-jobs.js';
 import type { ToolCallContext, ToolImage } from './tools.js';
@@ -320,15 +320,10 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
   }
 
   private formatResult(result: ShellRunResult, cwd: string, timeoutMs: number): ToolResult {
-    const stdout = stripAnsiAndControl(result.stdout).trimEnd();
-    const stderr = stripAnsiAndControl(result.stderr).trimEnd();
-    const lines = [
-      `Command: ${this.params.command}`,
-      `Directory: ${cwd}`,
-      `Stdout: ${stdout || '(empty)'}`,
-      `Stderr: ${stderr || '(empty)'}`,
-      `Exit Code: ${result.exitCode ?? '(none)'}`,
-    ];
+    const stdout = cleanCommandOutput(result.stdout);
+    const stderr = cleanCommandOutput(result.stderr);
+    // The command itself is in the call; empty stderr says nothing.
+    const lines = [`Directory: ${cwd}`, `Stdout: ${stdout || '(empty)'}`, ...(stderr ? [`Stderr: ${stderr}`] : []), `Exit Code: ${result.exitCode ?? '(none)'}`];
     if (result.signal) lines.push(`Signal: ${result.signal}`);
     if (result.error) lines.push(`Error: ${result.error.message}`);
     if (result.truncated) lines.push('Note: output exceeded the capture limit and was cut.');

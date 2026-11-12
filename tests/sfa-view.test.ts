@@ -40,7 +40,7 @@ async function tools(agent: Record<string, unknown> = {}, transcribe?: (wav: Buf
 }
 
 const sh = (t: Map<string, AnyDeclarativeTool>, command: string): Promise<ToolResult> => t.get('shell')!.build({ command }).execute(new AbortController().signal);
-const stdout = (r: ToolResult) => /Stdout: ([\s\S]*?)\nStderr:/.exec(r.llmContent)?.[1] ?? '';
+const stdout = (r: ToolResult) => /Stdout: ([\s\S]*?)\n(?:Stderr:|Exit Code:)/.exec(r.llmContent)?.[1] ?? '';
 const stderr = (r: ToolResult) => /Stderr: ([\s\S]*?)\nExit Code:/.exec(r.llmContent)?.[1] ?? '';
 const size = (data: Buffer) => {
   // PNG: width and height at 16; JPEG: the first SOFn marker.

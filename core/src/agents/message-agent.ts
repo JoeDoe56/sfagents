@@ -25,7 +25,7 @@ import type { RunRecorder } from '../runtime/recorder.js';
 import { delay, type Mailbox } from './mailbox.js';
 import type { ConversationState } from '../conversation/state.js';
 import { conversationActions, SECTION_CHOICE_HELP, toolOutput, type ConversationAccess, type ConversationActions, type SectionsParams } from '../conversation/tools.js';
-import { SectionOperationError } from '../conversation/sections.js';
+import { MAX_SECTION_SUMMARY_CHARS, SectionOperationError } from '../conversation/sections.js';
 import { threadKey } from './threads.js';
 
 /** Upper bound on one message. */
@@ -104,19 +104,21 @@ export interface MessageParams extends SectionsParams {
   call_id?: string;
   /** output: only the lines matching this. */
   grep?: string;
+  /** send to the person: the summary of the section the conversation is in (before this message files it anywhere else). */
+  section_summary?: string;
 }
 
 /** The fields each action takes (anything else is refused, so mistakes show). */
 const ACTION_FIELDS: Record<MessageAction, readonly string[]> = {
   full_control: ['reason', 'plan', 'folders'],
-  send: ['to', 'text', 'questions', 'reply_to', 'thread', 'wait', 'timeout_seconds', 'section'],
+  send: ['to', 'text', 'questions', 'reply_to', 'thread', 'wait', 'timeout_seconds', 'section', 'section_summary'],
   react: ['to', 'message_id', 'emoji'],
   wait: ['wait', 'timeout_seconds'],
   search: ['query', 'sections', 'section', 'page'],
   history: ['before', 'limit'],
   output: ['call_id', 'grep', 'page'],
   thread: ['agent', 'thread', 'limit'],
-  sections: ['op', 'section', 'title', 'parent', 'messages', 'merge', 'make_current', 'expected_revision', 'page'],
+  sections: ['op', 'section', 'title', 'parent', 'messages', 'merge', 'make_current', 'expected_revision', 'page', 'summary'],
 };
 
 /** The action a call means (older calls have no "action"). */
@@ -365,12 +367,14 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
     if (conv?.organizes && p.reply_to === undefined) {
       if (p.section === undefined) return invalid(`"section" is required: ${SECTION_CHOICE_HELP}.`);
       try {
-        filed = ` Filed: ${conv.chooseSection(p.section)}.`;
+        filed = ` Filed: ${conv.chooseSection(p.section, p.section_summary)}.`;
       } catch (error) {
         return invalid(error instanceof SectionOperationError ? error.message : getErrorMessage(error));
       }
     } else if (p.section !== undefined && !conv) {
       return invalid('"section" applies only in the persistent conversation.');
+    } else if (p.section_summary !== undefined) {
+      return invalid('"section_summary" goes with "section" on a message filed in the conversation.');
     }
     const metadata = { said: p.text ?? '', ...(p.reply_to ? { replyTo: p.reply_to } : {}) };
     const link = this.tool.link;
@@ -519,7 +523,7 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
     parts.push(`wait: waits until a message arrives from another agent${link?.waitForPerson ? ' or the person' : ''}, or until "timeout_seconds". Use it when you have nothing else to do until someone answers.`);
     if (conv) {
       parts.push(
-        `search: "query" finds messages in the whole stored conversation (also those no longer in your context), with "section" to narrow it; with "sections": true it matches section titles instead. history: the latest messages ("limit", "before" a message id). sections: "op" "list" (the topics), "fetch" (a section's messages, "section" an ID or "unassigned", paginated)${conv.organizes ? ', or "add" (a new section with "title" and "parent", or with "section" an existing one to rename ("title"), move ("parent"), file "messages" into, or "merge" others into; merges need "expected_revision")' : ''}.`,
+        `search: "query" finds messages in the whole stored conversation (also those no longer in your context), with "section" to narrow it; with "sections": true it matches section titles instead. history: the latest messages ("limit", "before" a message id). sections: "op" "list" (the topics), "fetch" (a section's messages, "section" an ID or "unassigned", paginated)${conv.organizes ? ', or "add" (a new section with "title" and "parent", or with "section" an existing one to rename ("title"), move ("parent"), file "messages" into, "merge" others into, or give a new "summary"; merges need "expected_revision")' : ''}.`,
       );
     }
     parts.push('output: the whole output of a tool call that was shortened ("call_id"), a "page" at a time or only the lines matching "grep".');
@@ -565,6 +569,12 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
     if (conv) {
       Object.assign(props, {
         section: { type: 'string', description: `send to the person: ${conv.organizes ? 'required, ' : ''}${SECTION_CHOICE_HELP}. search: limit to this section. sections: the section ID.` },
+        ...(conv.organizes
+          ? {
+              section_summary: { type: 'string', maxLength: MAX_SECTION_SUMMARY_CHARS, description: 'send to the person: a new summary of the current section, written before this message is filed (required when leaving a section with unsummarized messages, or when SF Agents says it is due).' },
+              summary: { type: 'string', maxLength: MAX_SECTION_SUMMARY_CHARS, description: 'sections add with "section": its new summary.' },
+            }
+          : {}),
         query: { type: 'string', maxLength: 200, description: 'search: words to find.' },
         sections: { type: 'boolean', description: 'search: match section titles only.' },
         before: { type: 'string', description: 'history: messages before this id.' },

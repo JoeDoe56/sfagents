@@ -173,7 +173,7 @@ describe('sections: operations', () => {
 });
 
 describe('sections: the message tool', () => {
-  const send = (text: string, section: string) => ({ name: 'message', args: { action: 'send', to: 'user', text, section } });
+  const send = (text: string, section: string, summary?: string) => ({ name: 'message', args: { action: 'send', to: 'user', text, section, ...(summary ? { section_summary: summary } : {}) } });
 
   test('the root files each message it sends under a section; later messages follow the current one; search and fetch find history', async () => {
     const dir = project();
@@ -183,7 +183,11 @@ describe('sections: the message tool', () => {
       const said = (t: string) => last.role === 'user' && String(last.content).startsWith(t);
       if (said('Let us plan the uploader')) return { toolCalls: [send('Planned.', 'new: Uploader')] };
       if (said('Also add jitter')) return { toolCalls: [send('Added.', 'keep')] };
-      if (said('New topic: bread')) return { toolCalls: [send('Bread, then.', 'new: Baking')] };
+      if (said('New topic: bread')) {
+        // Leaving the uploader topic: its summary first, or the message is refused.
+        if (last.role === 'user') return { toolCalls: [send('Bread, then.', 'new: Baking')] };
+      }
+      if (last.role === 'tool' && lastToolContent(req)!.includes('Write the summary of section s1')) return { toolCalls: [send('Bread, then.', 'new: Baking', 'Uploader: retry limit 5, with jitter. Open: nothing.')] };
       if (said('What retry limit')) return { toolCalls: [{ name: 'message', args: { action: 'search', query: 'retry limit' } }] };
       if (last.role === 'tool' && lastToolContent(req)!.includes('match')) return { toolCalls: [{ name: 'message', args: { action: 'sections', op: 'fetch', section: 's1' } }] };
       if (last.role === 'tool' && lastToolContent(req)!.includes('[s1] Uploader')) return { toolCalls: [send(`From history: ${/retry limit is (\d+)/.exec(lastToolContent(req)!)?.[1]}`, 's1')] };
@@ -198,6 +202,11 @@ describe('sections: the message tool', () => {
     session.resetContext();
     const answer = await session.run('What retry limit did we choose?');
     assert.equal(answer.text, 'From history: 5', 'what the agent sent the person is the answer');
+    // The summary was required when the topic changed, and the section list shows it.
+    assert.equal(conversation.state.sections.get('s1')!.summary, 'Uploader: retry limit 5, with jitter. Open: nothing.');
+    const later = providers.get('main')!.requests.at(-1)!;
+    assert.match(String((later.messages[0] as { content: string }).content), /\[s1\] Uploader[^\n]*\n\s+Summary: Uploader: retry limit 5, with jitter/);
+    assert.match(fetchSection(conversation.state, 's1').text, /Summary: Uploader: retry limit 5/);
 
     const state = conversation.state;
     const byText = (t: string) => state.messages.find((m) => m.role === 'user' && String(m.content).startsWith(t))!;

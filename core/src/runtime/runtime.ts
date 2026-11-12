@@ -43,7 +43,7 @@ import { Mailbox } from '../agents/mailbox.js';
 import { ThreadRecorder, ThreadService, threadMessages } from '../agents/threads.js';
 import { newRunId, toChatMessages } from '../conversation/service.js';
 import { TURN_RESERVE, DEFAULT_MAX_INPUT_TOKENS } from '../conversation/context.js';
-import { sectionEntries } from '../conversation/sections.js';
+import { sectionEntries, summaryDue } from '../conversation/sections.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SHELL_TIMEOUT_MS, type ToolContext } from '../tools/tool-context.js';
@@ -1151,7 +1151,10 @@ export class AgentSession {
       this.runUsage = { usage: {}, started: Date.now(), requests: 0 };
       // Read receipts and the like are stored with the message they came with,
       // so later replies show that message exactly as the model first saw it.
-      const note = [options.note?.(), this.conversation.state.currentSection ? `<current_section>${this.conversation.state.currentSection}</current_section>` : ''].filter(Boolean).join('\n') || undefined;
+      const st = this.conversation.state;
+      // A summary that is due is asked for here, so the agent writes it with its reply rather than after a refusal.
+      const due = st.currentSection && conversationAccess(node.definition, 0) === 'organize' && summaryDue(st, false) ? `\nThe summary of ${st.currentSection} is due: include "section_summary" in your next message to the person.` : '';
+      const note = [options.note?.(), st.currentSection ? `<current_section>${st.currentSection}${due}</current_section>` : ''].filter(Boolean).join('\n') || undefined;
       recorder.user(input, options.attachments, options.replyTo, options.event, options.from, note);
       const messages: ChatMessage[] = [];
       this.lastMessages = messages;

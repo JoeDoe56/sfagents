@@ -36,6 +36,7 @@ import {
 } from './types.js';
 import { toEpochMs, toPercent, type PlanUsage, type PlanUsageStore, type UsageWindow } from './usage.js';
 import { ensureDir } from '../settings/home.js';
+import { rememberContextWindow } from './context-windows.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
 const require = createRequire(import.meta.url);
@@ -737,6 +738,12 @@ export class CodexProvider implements ModelProvider {
         switch (method) {
           case 'sfagents/closed':
             throw new ProviderError(`OpenAI: ${params?.error ?? 'Codex stopped.'}`, 503, true);
+          case 'thread/tokenUsage/updated': {
+            // The model's window, for the context bar.
+            const w = Number(params?.tokenUsage?.modelContextWindow ?? params?.modelContextWindow);
+            if (w > 0) rememberContextWindow('openai', request.model, w);
+            break;
+          }
           case 'item/agentMessage/delta':
             if (params.turnId !== turnId) break;
             text += params.delta ?? '';
