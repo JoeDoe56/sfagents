@@ -485,7 +485,10 @@ export function createSheet(o = {}) {
       clip: null,
     });
     // The sheet's own glass: it bends the page behind it.
-    panel.sfLens = () => ({opacity: () => 1 - opaque});
+    // The lens stays at full strength until the fill has fully covered it.
+    // Fading it as 1 - opaque made the sheet look clearer partway up: the
+    // glass's own tint and frost went faster than the fill came in.
+    panel.sfLens = () => ({opacity: () => (opaque >= 0.999 ? 0 : 1)});
     layer.host?.adoptOne(panel, {}, 'bar');
     glassHost?.adopt(panel);
     document.body.classList.add('sf-sheet-open');
@@ -686,6 +689,10 @@ export function createSheet(o = {}) {
     e.preventDefault();
   };
   addEventListener('pointermove', onPointerMove);
+  // iOS Safari can still start a native pan from the handle despite
+  // touch-action: none, and then cancels the pointer before the drag begins
+  // (only a tap got through). Holding the touch on the handle keeps it ours.
+  grab.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault(); }, {passive: false});
   const pointerEnd = (e) => {
     if (!press || e.pointerId !== press.id) return;
     const tap = !drag && e.type === 'pointerup' && press.onGrab;
