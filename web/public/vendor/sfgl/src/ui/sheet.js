@@ -204,7 +204,20 @@ export function createSheet(o = {}) {
   const footer = asBar(o.footer, 'bottom');
   if (header) headEl.append(header.el);
   if (footer) footEl.append(footer.el);
-  const heightOf = (b) => (b ? (b.node ? b.el.offsetHeight : b.height) || 0 : 0);
+  // Header and footer heights, cached: reading offsetHeight in apply() right
+  // after its style writes forced a layout on every frame of a drag or spring.
+  // A ResizeObserver (below) clears the cache when either one changes size.
+  const heights = new Map();
+  const heightOf = (b) => {
+    if (!b) return 0;
+    if (!b.node) return b.height || 0;
+    let h = heights.get(b);
+    if (h === undefined) {
+      h = b.el.offsetHeight || 0;
+      if (b.el.isConnected) heights.set(b, h);
+    }
+    return h;
+  };
 
   // ---------------------------------------------------------------- state
 
@@ -536,6 +549,8 @@ export function createSheet(o = {}) {
     document.body.classList.toggle('sf-sheet-open', !!document.querySelector('.sf-sheet-layer'));
     removeEventListener('resize', relayout);
     removeEventListener('sfbar', coverBands);
+    cancelAnimationFrame(dragRaf);
+    dragRaf = 0;
     removeEventListener('pointermove', onPointerMove);
     removeEventListener('pointerup', pointerEnd);
     removeEventListener('pointercancel', pointerEnd);
@@ -624,11 +639,22 @@ export function createSheet(o = {}) {
     }
     drag.samples.push({y, at: now()});
     if (drag.samples.length > 6) drag.samples.shift();
-    apply();
+    // Touch moves can arrive several times per frame (120 Hz touch on a 60 Hz
+    // paint, or bunched after a slow frame). Write the sheet once per frame,
+    // at its start, so the glass renders the same position in that frame.
+    if (!dragRaf) dragRaf = requestAnimationFrame(dragFrame);
+  }
+
+  let dragRaf = 0;
+  function dragFrame() {
+    dragRaf = 0;
+    if (drag) apply();
   }
 
   function endDrag() {
     if (!drag) return;
+    cancelAnimationFrame(dragRaf);
+    dragRaf = 0;
     const d = drag;
     drag = null;
     panel.classList.remove('dragging');
@@ -886,6 +912,7 @@ export function createSheet(o = {}) {
 
   const relayout = () => {
     sourceCache = null;
+    heights.clear();
     if (isOpen) apply();
   };
   addEventListener('resize', relayout);
@@ -895,6 +922,7 @@ export function createSheet(o = {}) {
     apply();
   });
   if (header?.el) new ResizeObserver(relayout).observe(header.el);
+  if (footer?.node) new ResizeObserver(relayout).observe(footer.el);
   addEventListener('sfbar', coverBands);
 
   // Non-modal sheets let the page behind stay usable.
