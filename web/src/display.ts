@@ -299,6 +299,16 @@ export function displayItems(
   }
   const roots = replyRoots(state);
   const chat = chatEffects(state);
+  // Runs that spoke to the person through message (a bubble or an inline reply that went through):
+  // their plain text was for SF Agents, not for the person, so the chat leaves it out (the transcript keeps it).
+  const spoke = new Set<string>();
+  for (const m of state.messages) {
+    if (m.role !== 'assistant') continue;
+    for (const c of m.toolCalls ?? []) {
+      if (results.get(`${m.run}:${c.id}`) !== 'ok') continue;
+      if (chat.replies.has(`${m.id}:${c.id}`) || messageToUser(c.name, c.arguments)) spoke.add(m.run);
+    }
+  }
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
@@ -314,7 +324,7 @@ export function displayItems(
         items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment), ...(options.thread ? { agent: m.agent } : {}), ...(replyTo ? { replyTo } : {}), ...(m.view ? { view: m.view } : {}) });
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {
         const replyTo = roots.runs.get(m.run);
-        if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
+        if (m.content.trim() && !spoke.has(m.run)) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
         for (const c of m.toolCalls ?? []) {
           const effect = chatEffectOf(c.name, c.arguments);
           if (c.name === 'keep_section' || (effect && 'react' in effect)) continue; // the topic; a reaction shows as its badge
@@ -327,6 +337,9 @@ export function displayItems(
           // A message to the person mid-turn: a bubble like any reply.
           const said = messageToUser(c.name, c.arguments);
           if (said) {
+            // A send that failed (invalid parameters, denied) never reached the person.
+            const status = results.get(`${m.run}:${c.id}`);
+            if (status !== undefined && status !== 'ok') continue;
             if (said.text) items.push({ kind: 'assistant', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: said.text, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
             if (said.questions) items.push({ kind: 'questions', id: `${m.id}:${c.id}:q`, seq: m.seq, time: m.time, agent: m.agent, questions: said.questions, answered: false });
             continue;

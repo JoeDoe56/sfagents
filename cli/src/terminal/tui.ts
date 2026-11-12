@@ -70,8 +70,10 @@ interface Segment {
   id: string;
   text: string;
   status?: string;
-  /** A step shown as something else (a message to the person). */
+  /** A step shown as something else (a message to the person). Text: a failed send. */
   hidden?: boolean;
+  /** Text the model wrote outside message: not shown while the run works. */
+  plain?: boolean;
   thread?: string;
   artifact?: string;
   /** Questions the agent asked the person in this step. */
@@ -395,8 +397,9 @@ export class Tui {
         if (!this.live || this.live.id !== data.run) return;
         const segs = this.live.segments;
         const last = segs[segs.length - 1];
-        if (last && last.kind === 'text') last.text += String(data.text);
-        else segs.push({ kind: 'text', id: `t${segs.length}`, text: String(data.text) });
+        const plain = data.plain === true;
+        if (last && last.kind === 'text' && !!last.plain === plain) last.text += String(data.text);
+        else segs.push({ kind: 'text', id: `t${segs.length}`, text: String(data.text), ...(plain ? { plain: true } : {}) });
         // A reply is shown once it is finished, as on the pages.
         return;
       }
@@ -404,6 +407,11 @@ export class Tui {
         if (!this.live || this.live.id !== data.run) return;
         this.live.segments.push(data.segment as Segment);
         break;
+      case 'segment_hidden': {
+        const seg = this.live && this.live.id === data.run ? this.live.segments.find((s) => s.id === data.id) : undefined;
+        if (seg) seg.hidden = true;
+        break;
+      }
       case 'activity_end': {
         const seg = this.live && this.live.id === data.run ? this.live.segments.find((s) => s.id === data.id) : undefined;
         if (seg) seg.status = String(data.status);
@@ -1407,7 +1415,7 @@ export class Tui {
         }
         if (seg.kind === 'text') {
           // Finished text only (the reply arrives whole), as on the pages.
-          if (i < segs.length - 1 && seg.text.trim()) out.push('', color.magenta(color.bold(this.agent?.id ?? 'agent')), ...indent(wrap(clean(seg.text), w)));
+          if (i < segs.length - 1 && !seg.plain && !seg.hidden && seg.text.trim()) out.push('', color.magenta(color.bold(this.agent?.id ?? 'agent')), ...indent(wrap(clean(seg.text), w)));
         } else if (!seg.hidden) {
           const at = out.length;
           out.push(this.activityLine(seg, w));

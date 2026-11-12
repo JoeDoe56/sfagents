@@ -372,7 +372,8 @@ function rootOf(id) {
 function liveTexts() {
   if (!state.live) return [];
   const segs = state.live.segments;
-  return segs.filter((seg, i) => seg.kind === 'text' && i < segs.length - 1 && seg.text.trim());
+  // The model's own text (plain) is for SF Agents; a failed send (hidden) never reached the person.
+  return segs.filter((seg, i) => seg.kind === 'text' && !seg.plain && !seg.hidden && i < segs.length - 1 && seg.text.trim());
 }
 
 const msgEntry = (it, side) => ({
@@ -1405,12 +1406,12 @@ function listen() {
     updateComposer();
   });
   stream.addEventListener('delta', (e) => {
-    const { run, text } = JSON.parse(e.data);
+    const { run, text, plain } = JSON.parse(e.data);
     if (!state.live || state.live.id !== run) return;
     const segs = state.live.segments;
     const last = segs[segs.length - 1];
-    if (last && last.kind === 'text') last.text += text;
-    else segs.push({ kind: 'text', id: `t${segs.length}`, text });
+    if (last && last.kind === 'text' && !!last.plain === !!plain) last.text += text;
+    else segs.push({ kind: 'text', id: `t${segs.length}`, text, ...(plain ? { plain: true } : {}) });
     // Nothing to draw: a reply is shown once it is finished, not as it streams.
     markRead();
   });
@@ -1419,6 +1420,12 @@ function listen() {
     if (!state.live || state.live.id !== run) return;
     state.live.segments.push(segment);
     markRead();
+    render();
+  });
+  stream.addEventListener('segment_hidden', (e) => {
+    const { run, id } = JSON.parse(e.data);
+    const seg = state.live?.id === run ? state.live.segments.find((s) => s.id === id) : null;
+    if (seg) seg.hidden = true;
     render();
   });
   stream.addEventListener('activity_end', (e) => {
