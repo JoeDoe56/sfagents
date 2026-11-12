@@ -451,12 +451,19 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
     const timer = setTimeout(() => controller.abort(new ProviderError('Claude request timed out.', 504, true)), this.options.timeoutMs ?? 10 * 60_000);
 
     const calls: ParsedToolCall[] = [];
-    const capture = (name: string, input: unknown, id?: string) => {
-      if (!prepared.tools.some((t) => t.name === name)) return;
+    // Calls for tools SF Agents does not have (a Claude Code tool name, or a
+    // made-up one). Claude Code would answer them with an error and ask the
+    // model again, a second API call that rereads the whole context; instead
+    // the turn ends with them, and SF Agents answers them like any unknown tool.
+    const unknown: ParsedToolCall[] = [];
+    const capture = (rawName: string, input: unknown, id?: string) => {
+      const name = rawName.startsWith(PREFIX) ? rawName.slice(PREFIX.length) : rawName;
       const callId = id || `call_${crypto.randomUUID()}`;
-      if (calls.some((c) => c.id === callId)) return;
+      if (calls.some((c) => c.id === callId) || unknown.some((c) => c.id === callId)) return;
       const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-      calls.push({ id: callId, name, args, rawArguments: JSON.stringify(args) });
+      const call = { id: callId, name, args, rawArguments: JSON.stringify(args) };
+      if (rawName.startsWith(PREFIX) && prepared.tools.some((t) => t.name === name)) calls.push(call);
+      else unknown.push(call);
     };
     let servers: Record<string, unknown> | undefined;
     if (prepared.tools.length) {
@@ -465,7 +472,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
         tools: prepared.tools.map((t) => ({ name: t.name, description: t.description || t.name, inputSchema: t.parameters ?? { type: 'object', properties: {} }, _meta: { 'anthropic/alwaysLoad': true } })),
       }));
       server.server.setRequestHandler(types.CallToolRequestSchema, async (req: any) => {
-        capture(req.params.name, req.params.arguments ?? {}, undefined);
+        capture(PREFIX + String(req.params.name), req.params.arguments ?? {}, undefined);
         return { isError: true, content: [{ type: 'text', text: 'Captured for client execution. Stop and return the call.' }] };
       });
       servers = { sfagents: { type: 'sdk', name: 'sfagents', instance: server } };
@@ -494,7 +501,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
       ...(servers ? { mcpServers: servers } : {}),
       ...(prepared.effort ? { effort: prepared.effort } : {}),
       canUseTool: async (name: string, input: unknown, context: { toolUseID?: string }) => {
-        if (name.startsWith(PREFIX)) capture(name.slice(PREFIX.length), input, context.toolUseID);
+        capture(name, input, context.toolUseID);
         return { behavior: 'deny', message: 'Captured for client execution; nothing runs here.', interrupt: true };
       },
     };
@@ -543,14 +550,14 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
               input = undefined;
             }
             // Arguments that did not parse wait for the SDK's own message (or canUseTool).
-            if (input !== undefined && b.name.startsWith(PREFIX)) capture(b.name.slice(PREFIX.length), input, b.id);
+            if (input !== undefined && b.name) capture(b.name, input, b.id);
           } else if (event.type === 'message_delta' && event.delta?.stop_reason) {
             stopReason = event.delta.stop_reason;
-            yield { type: 'log', text: `Claude: API call ${apiCalls} ended: ${stopReason}, ${calls.length} SF Agents tool call(s) so far, output ${JSON.stringify(event.usage ?? {})}` };
+            yield { type: 'log', text: `Claude: API call ${apiCalls} ended: ${stopReason}, ${calls.length} SF Agents tool call(s) so far${unknown.length ? `, unknown tool(s): ${unknown.map((c) => c.name).join(', ')}` : ''}, output ${JSON.stringify(event.usage ?? {})}` };
           } else if (event.type === 'message_stop') {
             // The response is complete. With tool calls, stop here: the SDK
             // would otherwise run its own tool round and ask the model again.
-            if (calls.length) break;
+            if (calls.length || unknown.length) break;
           } else if (delta?.type === 'input_json_delta' && building.has(event.index)) {
             building.get(event.index)!.json += delta.partial_json ?? '';
           } else if (delta?.type === 'text_delta' && delta.text) {
@@ -565,7 +572,7 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
           yield { type: 'log', text: `Claude rate limit event: ${JSON.stringify(message.rate_limit_info ?? {})}` };
         } else if (message.type === 'assistant') {
           for (const block of message.message?.content ?? []) {
-            if (block.type === 'tool_use' && typeof block.name === 'string' && block.name.startsWith(PREFIX)) capture(block.name.slice(PREFIX.length), block.input, block.id);
+            if (block.type === 'tool_use' && typeof block.name === 'string') capture(block.name, block.input, block.id);
             else if (block.type === 'text' && !text && !calls.length) text += block.text;
           }
           if (!meter.seen && message.message?.usage) meter.add(message.message.usage);
@@ -590,6 +597,9 @@ export class ClaudeSubscriptionProvider implements ModelProvider {
     }
     if (request.signal.aborted) throw request.signal.reason;
     if (!meter.seen && result) meter.fromResult(result);
+    if (unknown.length) yield { type: 'log', text: `Claude asked for tool(s) SF Agents does not have: ${unknown.map((c) => `${c.name} ${c.rawArguments.slice(0, 200)}`).join('; ')}` };
+    // They go back as calls, so SF Agents answers them with its list of tools.
+    calls.push(...unknown);
     const usage = meter.usage(apiCalls || result?.num_turns);
     yield {
       type: 'log',

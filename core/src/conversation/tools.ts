@@ -12,7 +12,7 @@
 
 import type { ToolResult } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
-import type { ConversationService } from './service.js';
+import { findToolCall, type ConversationService } from './service.js';
 import {
   addSection,
   CURRENT_EXCHANGE,
@@ -107,6 +107,15 @@ export class ConversationActions {
     const lines = page.map((m) => `[${m.id}] ${m.role === 'user' ? 'person' : m.agent}${m.section ? ` (${m.section})` : ''}: ${m.content.length > 2000 ? `${m.content.slice(0, 2000)}...` : m.content}`);
     const more = list.length > page.length ? `\n(${list.length - page.length} earlier; pass "before": "${page[0]!.id}")` : '';
     return ok(lines.join('\n\n') + more, `${page.length} message(s)`);
+  }
+
+  /** A tool call's full arguments and output (earlier replies show long ones shortened). */
+  output(p: { call_id?: string }): ToolResult {
+    const id = p.call_id?.trim();
+    if (!id) return fail(new SectionOperationError('"call_id" is required'));
+    const call = findToolCall(this.service.state, id);
+    if (!call) return fail(new SectionOperationError(`No tool call "${id}" in the stored conversation`));
+    return ok(`${call.name} arguments:\n${call.arguments}\n\nOutput:\n${call.result ?? '(no result stored)'}`, `${call.name} output`);
   }
 
   sections(p: SectionsParams): ToolResult {

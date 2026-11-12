@@ -50,6 +50,8 @@ export interface WorkingContext {
   messages: ChatMessage[];
   /** Seq of the first message of the oldest exchange included (pass it back as floorSeq next time). */
   floorSeq?: number;
+  /** Exchanges before this seq had long tool output stubbed (pass it back as stubBefore next time). */
+  stubBefore?: number;
   /** Section index and retrieval notes, appended to the system prompt. */
   systemExtra?: string;
   report: ContextReport;
@@ -140,7 +142,15 @@ export function buildWorkingContext(
   target: ReplayTarget,
   policy: ContextPolicy,
   fixedText: string,
-  options: { retrievable: boolean; resolveAttachment?: AttachmentResolver; floorSeq?: number },
+  options: {
+    retrievable: boolean;
+    resolveAttachment?: AttachmentResolver;
+    floorSeq?: number;
+    /** The stub point last used; kept unless the context starts again anyway. */
+    stubBefore?: number;
+    /** Something before the messages changed (system prompt, tools): the provider rereads everything anyway. */
+    rebuild?: boolean;
+  },
 ): WorkingContext {
   const budget = policy.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS;
   const window = policy.recentExchanges ?? DEFAULT_RECENT_EXCHANGES;
@@ -150,12 +160,20 @@ export function buildWorkingContext(
   const indexTokens = index.text ? estimateTokens(index.text) : 0;
 
   const groups = exchanges(state.messages.filter((m) => m.seq > state.lastResetSeq));
-  const converted = groups.map((g) => toChatMessages(state, target, 0, g, options.resolveAttachment));
+  // Long tool output from earlier replies is stubbed (the message tool's
+  // "output" action gets it back). Where the stubs start changes only when
+  // the context starts again anyway (an older batch dropped, or the system
+  // prompt changed), so stubbing never costs a cache rewrite of its own.
+  const convert = (stubBefore: number | undefined) =>
+    groups.map((g) => toChatMessages(state, target, 0, g, options.resolveAttachment, options.retrievable && stubBefore !== undefined && (g[0]?.seq ?? 0) < stubBefore));
+  let stubBefore = options.retrievable && !options.rebuild ? options.stubBefore : undefined;
+  let converted = convert(stubBefore);
   if (converted.length === 0) {
     return { messages: [], systemExtra: index.text, report: { estimatedTokens: fixed + indexTokens, budget, includedExchanges: 0, omittedExchanges: 0, indexEntries: index.shown, indexTotal: index.total } };
   }
 
   const current = converted[converted.length - 1]!;
+  const currentSeq = groups[groups.length - 1]![0]!.seq;
   const currentTokens = estimateMessages(current);
   let remaining = usable - indexTokens - 200; // room for the retrieval note
   if (currentTokens > remaining) {
@@ -172,6 +190,7 @@ export function buildWorkingContext(
   // starting point still fits, it is kept as it is; once it does not, the
   // context starts again from a later exchange, leaving room to grow.
   const pick = (room: number, limit: number, floor?: number): ChatMessage[][] => {
+    const current = converted[converted.length - 1]!;
     const out: ChatMessage[][] = [current];
     let left = room;
     for (let i = converted.length - 2; i >= 0 && out.length < limit; i--) {
@@ -185,9 +204,21 @@ export function buildWorkingContext(
   };
   const floorIndex = options.floorSeq === undefined ? -1 : groups.findIndex((g) => (g[0]?.seq ?? 0) >= options.floorSeq!);
   // Everything since the floor, if it all fits (no exchange in between left out).
-  let included = floorIndex >= 0 ? pick(remaining, window, groups[floorIndex]![0]!.seq) : [];
-  if (included.length && included.length !== converted.length - floorIndex) included = [];
-  if (!included.length) included = floorIndex >= 0 ? pick(Math.floor(remaining * BATCH_KEEP), Math.max(1, Math.floor(window * BATCH_KEEP))) : pick(remaining, window);
+  const sinceFloor = (): ChatMessage[][] => {
+    if (floorIndex < 0) return [];
+    const out = pick(remaining, window, groups[floorIndex]![0]!.seq);
+    return out.length === converted.length - floorIndex ? out : [];
+  };
+  let included = stubBefore === undefined && options.retrievable ? [] : sinceFloor();
+  if (!included.length) {
+    // The context starts again: stub everything before the current exchange.
+    if (options.retrievable) {
+      stubBefore = currentSeq;
+      converted = convert(stubBefore);
+      included = sinceFloor();
+    }
+    if (!included.length) included = floorIndex >= 0 ? pick(Math.floor(remaining * BATCH_KEEP), Math.max(1, Math.floor(window * BATCH_KEEP))) : pick(remaining, window);
+  }
   const omitted = converted.length - included.length;
   const messages = included.flat();
   const floorSeq = groups[groups.length - included.length]?.[0]?.seq;
@@ -212,6 +243,7 @@ export function buildWorkingContext(
   return {
     messages,
     ...(floorSeq !== undefined ? { floorSeq } : {}),
+    ...(stubBefore !== undefined ? { stubBefore } : {}),
     systemExtra,
     report: { estimatedTokens, budget, includedExchanges: included.length, omittedExchanges: omitted, indexEntries: index.shown, indexTotal: index.total },
   };

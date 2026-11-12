@@ -204,12 +204,13 @@ describe('ChatGPT and Claude adapters', () => {
     assert.equal(codexError({ message: 'x', codexErrorInfo: 'serverOverloaded' }).retryable, true);
   });
 
-  test('Codex: text streams, SF Agents tool calls are captured and the turn is interrupted, usage is recorded', async () => {
+  test('Codex: text streams, tool calls are captured, the turn waits for their results and carries on with them, usage is recorded', async () => {
     const usage = new PlanUsageStore();
     const sent: Array<[string, any]> = [];
     const listeners: Array<(m: string, p: any) => void> = [];
     const notify = (m: string, p: any) => listeners.forEach((l) => l(m, p));
     let serve: (m: string, p: any) => any = () => undefined;
+    let answered: any;
     const conn: CodexConnection = {
       closed: false,
       onNotification(l) {
@@ -232,7 +233,14 @@ describe('ChatGPT and Claude adapters', () => {
             notify('item/agentMessage/delta', { threadId: 'other', turnId: 'x', delta: 'NOT MINE' });
             notify('item/agentMessage/delta', { threadId: T, turnId: U, delta: 'lo' });
             notify('rawResponseItem/completed', { threadId: T, turnId: U, item: { type: 'function_call', call_id: 'k', name: 'grep', arguments: '{"pattern":"x"}' } });
-            void serve('item/tool/call', { threadId: T, turnId: U, callId: 'k', tool: 'grep', arguments: { pattern: 'x' } });
+            void Promise.resolve(serve('item/tool/call', { threadId: T, turnId: U, callId: 'k', tool: 'grep', arguments: { pattern: 'x' } })).then((answer) => {
+              answered = answer;
+              setTimeout(() => {
+                notify('item/agentMessage/delta', { threadId: T, turnId: U, delta: 'Found it.' });
+                notify('rawResponse/completed', { threadId: T, turnId: U, usage: { inputTokens: 9, cachedInputTokens: 6, outputTokens: 3, totalTokens: 12 } });
+                notify('turn/completed', { threadId: T, turn: { id: U, status: 'completed', error: null } });
+              }, 5);
+            });
             notify('account/rateLimits/updated', { rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 2_000_000_000 }, secondary: { usedPercent: 7, windowDurationMins: 10080, resetsAt: 2_000_500_000 }, planType: 'plus' } });
             notify('rawResponse/completed', { threadId: T, turnId: U, usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } });
           }, 5);
@@ -267,7 +275,23 @@ describe('ChatGPT and Claude adapters', () => {
     assert.match(start.baseInstructions, /^sys/);
     assert.deepEqual(sent.find(([m]) => m === 'thread/inject_items')![1].items, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }]);
     assert.equal(sent.find(([m]) => m === 'turn/start')![1].effort, 'xhigh');
-    assert.ok(sent.some(([m]) => m === 'turn/interrupt'), 'the turn stops once the response is complete');
+    assert.ok(!sent.some(([m]) => m === 'turn/interrupt'), 'the turn waits for the tool results');
+    // The next request continues the same turn with the results: no new thread, no history sent again.
+    const before = sent.length;
+    const next = await collect(
+      provider.stream(
+        request({
+          messages: [{ role: 'system', content: 'sys' }, { role: 'user', content: 'hi' }, done.message, { role: 'tool', tool_call_id: 'k', content: 'match at line 3' }],
+          tools: [{ name: 'grep', description: 'd', parameters: { type: 'object' } }],
+        }),
+      ),
+    );
+    const done2 = next.at(-1) as Extract<ModelStreamEvent, { type: 'done' }>;
+    assert.equal(done2.message.content, 'Found it.');
+    assert.equal(done2.finishReason, 'stop');
+    assert.deepEqual(answered, { contentItems: [{ type: 'inputText', text: 'match at line 3' }], success: true });
+    assert.deepEqual(sent.slice(before).map(([m]) => m).filter((m) => m !== 'thread/unsubscribe'), []);
+    assert.equal(done2.usage?.cacheReadTokens, 6);
     const u = usage.get('rec-1')!;
     assert.equal(u.fiveHour?.usedPercent, 42);
     assert.equal(u.weekly?.usedPercent, 7);
@@ -454,6 +478,23 @@ describe('prompt caching and usage', () => {
     assert.equal(done.message.content, 'Running it.');
     assert.deepEqual(done.usage, { promptTokens: 9450, completionTokens: 30, totalTokens: 9480, inputTokens: 50, cacheReadTokens: 9000, cacheWriteTokens: 400, requests: 1 });
     assert.ok(events.some((e) => e.type === 'log' && /Claude request/.test(e.text)));
+
+    // A tool SF Agents does not have ends the turn too (Claude Code would answer it and ask the model again).
+    const strayTurn = () => [
+      start({ input_tokens: 50 }),
+      ev({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu2', name: 'Bash' } }),
+      ev({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } }),
+      ev({ type: 'content_block_stop', index: 0 }),
+      ev({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } }),
+      ev({ type: 'message_stop' }),
+      start({ input_tokens: 99999 }, 'msg_2'),
+    ];
+    const stray = new ClaudeSubscriptionProvider('Claude 1', async () => 'sk-ant-oat01-test', dir, { sdk: sdk(strayTurn), executable: '/bin/true' });
+    const strayEvents = await collect(stray.stream(request({ tools: [{ name: 'shell', description: 'run', parameters: { type: 'object' } }] })));
+    const strayDone = strayEvents.find((e) => e.type === 'done') as Extract<ModelStreamEvent, { type: 'done' }>;
+    assert.deepEqual(strayDone.toolCalls.map((c) => [c.id, c.name]), [['tu2', 'Bash']]);
+    assert.equal(strayDone.usage?.requests, 1);
+    assert.ok(strayEvents.some((e) => e.type === 'log' && /does not have: Bash/.test(e.text)));
 
     const limited = new ClaudeSubscriptionProvider('Claude 1', async () => 'sk-ant-oat01-test', dir, {
       executable: '/bin/true',

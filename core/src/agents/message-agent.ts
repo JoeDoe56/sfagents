@@ -62,7 +62,7 @@ export interface MessageQuestion {
   multiple?: boolean;
 }
 
-export const MESSAGE_ACTIONS = ['send', 'react', 'wait', 'search', 'history', 'thread', 'sections', 'full_control'] as const;
+export const MESSAGE_ACTIONS = ['send', 'react', 'wait', 'search', 'history', 'thread', 'sections', 'output', 'full_control'] as const;
 export type MessageAction = (typeof MESSAGE_ACTIONS)[number];
 
 /** Reactions on the person's messages (the chat shows them as badges). */
@@ -100,6 +100,8 @@ export interface MessageParams extends SectionsParams {
   limit?: number;
   /** thread: the agent the thread is with. */
   agent?: string;
+  /** output: the tool call whose arguments and output to show. */
+  call_id?: string;
 }
 
 /** The fields each action takes (anything else is refused, so mistakes show). */
@@ -110,6 +112,7 @@ const ACTION_FIELDS: Record<MessageAction, readonly string[]> = {
   wait: ['wait', 'timeout_seconds'],
   search: ['query', 'sections', 'section', 'page'],
   history: ['before', 'limit'],
+  output: ['call_id'],
   thread: ['agent', 'thread', 'limit'],
   sections: ['op', 'section', 'title', 'parent', 'messages', 'merge', 'make_current', 'expected_revision', 'page'],
 };
@@ -236,6 +239,7 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
     if (action === 'react') return `React ${p.emoji ?? '(remove)'} to ${p.message_id ?? p.to ?? ''}`;
     if (action === 'search') return `Search "${p.query ?? ''}"`;
     if (action === 'history') return 'Recent messages';
+    if (action === 'output') return `Output of ${p.call_id ?? ''}`;
     if (action === 'thread') return `Thread with ${p.agent ?? ''}`;
     if (action === 'sections') return `Sections${p.op ? ` ${p.op}` : ''}`;
     const text = (p.text ?? p.questions?.map((q) => q.question).join(' / ') ?? '').replace(/\s+/g, ' ');
@@ -261,6 +265,8 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
         return conv ? conv.search(p, signal) : invalid('This agent has no access to the conversation.');
       case 'history':
         return conv ? conv.history(p) : invalid('This agent has no access to the conversation.');
+      case 'output':
+        return conv ? conv.output(p) : invalid('This agent has no access to the conversation.');
       case 'sections':
         return conv ? conv.sections(p) : invalid('This agent has no access to the conversation.');
       case 'thread':
@@ -489,7 +495,7 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
       ...(canMessageUser || hasAgents ? (['send'] as const) : []),
       ...(canMessageUser || hasAgents ? (['react'] as const) : []),
       'wait',
-      ...(conv ? (['search', 'history'] as const) : []),
+      ...(conv ? (['search', 'history', 'output'] as const) : []),
       ...(hasAgents ? (['thread'] as const) : []),
       ...(conv ? (['sections'] as const) : []),
     ];
@@ -510,7 +516,7 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
     parts.push(`wait: waits until a message arrives from another agent${link?.waitForPerson ? ' or the person' : ''}, or until "timeout_seconds". Use it when you have nothing else to do until someone answers.`);
     if (conv) {
       parts.push(
-        `search: "query" finds messages in the whole stored conversation (also those no longer in your context), with "section" to narrow it; with "sections": true it matches section titles instead. history: the latest messages ("limit", "before" a message id). sections: "op" "list" (the topics), "fetch" (a section's messages, "section" an ID or "unassigned", paginated)${conv.organizes ? ', or "add" (a new section with "title" and "parent", or with "section" an existing one to rename ("title"), move ("parent"), file "messages" into, or "merge" others into; merges need "expected_revision")' : ''}.`,
+        `search: "query" finds messages in the whole stored conversation (also those no longer in your context), with "section" to narrow it; with "sections": true it matches section titles instead. history: the latest messages ("limit", "before" a message id). output: a tool call's full arguments and output by "call_id" (earlier replies show long ones shortened). sections: "op" "list" (the topics), "fetch" (a section's messages, "section" an ID or "unassigned", paginated)${conv.organizes ? ', or "add" (a new section with "title" and "parent", or with "section" an existing one to rename ("title"), move ("parent"), file "messages" into, or "merge" others into; merges need "expected_revision")' : ''}.`,
       );
     }
     if (hasAgents) parts.push('thread: reads your thread with "agent" (and "thread" number), latest messages first back to "limit".');
@@ -558,6 +564,7 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
         query: { type: 'string', maxLength: 200, description: 'search: words to find.' },
         sections: { type: 'boolean', description: 'search: match section titles only.' },
         before: { type: 'string', description: 'history: messages before this id.' },
+        call_id: { type: 'string', description: 'output: the tool call id.' },
         limit: { type: 'integer', minimum: 1, maximum: 100, description: 'history/thread: how many messages (default 20).' },
         op: { type: 'string', enum: conv.organizes ? ['list', 'fetch', 'add'] : ['list', 'fetch'], description: 'sections: what to do.' },
         page: { type: 'integer', minimum: 1, description: 'search/sections: the page.' },

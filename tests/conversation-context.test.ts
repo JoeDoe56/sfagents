@@ -7,6 +7,7 @@ import {
   AgentTerminateMode,
   buildWorkingContext,
   ContextBudgetError,
+  ConversationActions,
   ConversationService,
   loadAgentTree,
   readConversation,
@@ -58,6 +59,36 @@ describe('working context', () => {
     // One drop (to 6 exchanges) and then the same first message until the window fills again: not a new start every reply.
     assert.ok(new Set(starts).size <= 3, `${new Set(starts).size} different starts`);
     assert.equal(starts[1], starts[2]);
+  });
+
+  test('long tool output from earlier replies is stubbed, and the stub point moves only when the context starts again', () => {
+    const { tree: t } = tree();
+    const conv = ConversationService.memory(t.configDir);
+    const big = 'line of output\n'.repeat(400);
+    for (let i = 0; i < 3; i++) exchange(conv, t.root, `question ${i}`, 'answer', { name: 'shell', result: `run ${i}\n${big}` });
+    const toolTexts = (ctx: { messages: ChatMessage[] }) => ctx.messages.filter((m) => m.role === 'tool').map((m) => String(m.content));
+    let ctx = buildWorkingContext(conv.state, TARGET, {}, '', { retrievable: true });
+    let tools = toolTexts(ctx);
+    assert.equal(tools.length, 3);
+    assert.match(tools[0]!, /^\[Output of shell from an earlier reply, \d+ chars.*"output" and call_id "c\d+"/);
+    assert.match(tools[1]!, /^\[Output of shell/);
+    assert.equal(tools[2], `run 2\n${big}`, 'the current reply keeps its output');
+    // The next reply keeps the same stubs: the reply before it stays whole, so the start is unchanged for the cache.
+    const before = JSON.stringify(ctx.messages);
+    exchange(conv, t.root, 'question 3', 'answer');
+    ctx = buildWorkingContext(conv.state, TARGET, {}, '', { retrievable: true, floorSeq: ctx.floorSeq, stubBefore: ctx.stubBefore });
+    assert.ok(JSON.stringify(ctx.messages).startsWith(before.slice(0, -1)), 'earlier messages unchanged');
+    assert.equal(toolTexts(ctx)[2], `run 2\n${big}`);
+    // When something before the messages changes anyway, it is stubbed too.
+    ctx = buildWorkingContext(conv.state, TARGET, {}, '', { retrievable: true, floorSeq: ctx.floorSeq, stubBefore: ctx.stubBefore, rebuild: true });
+    assert.match(toolTexts(ctx)[2]!, /^\[Output of shell/);
+    // Without a way to get it back, nothing is stubbed.
+    assert.equal(toolTexts(buildWorkingContext(conv.state, TARGET, {}, '', { retrievable: false }))[0], `run 0\n${big}`);
+    // The message tool's "output" action shows it all.
+    const id = /call_id "(c\d+)"/.exec(toolTexts(ctx)[0]!)![1]!;
+    const shown = new ConversationActions(conv, 'read').output({ call_id: id });
+    assert.equal(shown.error, undefined);
+    assert.match(String(shown.llmContent), new RegExp(`Output:\\nrun 0\\n`));
   });
 
   test('a note stored with a user message is replayed with it', () => {

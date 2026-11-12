@@ -1014,6 +1014,8 @@ export class AgentSession {
   private agentId: string;
   /** Where the working context starts (older exchanges are dropped in batches, see buildWorkingContext). */
   private contextFloor: number | undefined;
+  /** Where stubbed tool output ends, and what came before the messages when it was set. */
+  private contextStub: { seq: number | undefined; fixed: string } | undefined;
   /** The system prompt reused while its parts stay the same (see RunParams.stableSystem). */
   private systemEpoch: { key: string; prompt: string } | undefined;
 
@@ -1130,6 +1132,7 @@ export class AgentSession {
     if (this.busy) throw new Error('Cannot reset the context while a turn is running');
     this.conversation.resetContext();
     this.contextFloor = undefined;
+    this.contextStub = undefined;
     this.systemEpoch = undefined;
   }
 
@@ -1156,17 +1159,23 @@ export class AgentSession {
       const conversation = this.conversation;
       const retrievable = conversation.file !== undefined && conversationAccess(definition, 0) !== 'none';
       const prepareContext = (fixedText: string) => {
-        const prepared = buildWorkingContext(conversation.state, replayTarget(definition), definition.context ?? {}, fixedText, {
+        const state = conversation.state;
+        // Whatever sits before the messages: when it changes, the provider rereads everything anyway.
+        const fixed = [fixedText, state.lastResetSeq, sectionEntries(state).map((e) => `${e.id}:${e.title}`).join('|'), [...state.artifactViews.keys()].join(',')].join('\u0000');
+        const prepared = buildWorkingContext(state, replayTarget(definition), definition.context ?? {}, fixedText, {
           retrievable,
           resolveAttachment: (ref) => conversation.readAttachment(ref),
           ...(this.contextFloor !== undefined ? { floorSeq: this.contextFloor } : {}),
+          ...(this.contextStub?.seq !== undefined ? { stubBefore: this.contextStub.seq } : {}),
+          rebuild: this.contextStub !== undefined && this.contextStub.fixed !== fixed,
         });
         this.contextFloor = prepared.floorSeq;
+        this.contextStub = { seq: prepared.stubBefore, fixed };
         return prepared;
       };
       const stableSystem = ({ base, full }: { base: string; full: string }): string => {
         const state = conversation.state;
-        const key = [base, this.contextFloor ?? '', state.lastResetSeq, sectionEntries(state).map((e) => `${e.id}:${e.title}`).join('|'), [...state.artifactViews.keys()].join(',')].join('\u0000');
+        const key = [base, this.contextFloor ?? '', this.contextStub?.seq ?? '', state.lastResetSeq, sectionEntries(state).map((e) => `${e.id}:${e.title}`).join('|'), [...state.artifactViews.keys()].join(',')].join('\u0000');
         if (this.systemEpoch?.key === key) return this.systemEpoch.prompt;
         this.systemEpoch = { key, prompt: full };
         return full;

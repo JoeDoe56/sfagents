@@ -610,6 +610,34 @@ export class CodexProvider implements ModelProvider {
     return this.options.usage?.get(this.key) ?? (codexPlanUsage(snapshot) as PlanUsage | undefined);
   }
 
+  /**
+   * Turns left open on tool calls, by thread id. The model's response ends
+   * with tool calls that Codex waits on; SF Agents runs them and asks again
+   * with the results, and that next request answers the waiting calls so the
+   * same turn carries on. One thread then serves a whole reply: the same
+   * prompt cache key, and no history sent again each step. (Starting a new
+   * thread per step sent the whole transcript each time under a new cache key.)
+   */
+  private readonly openTurns = new Map<string, CodexTurn>();
+
+  /** The open turn this request continues, with each call's output; other turns of the same run are closed. */
+  private claim(instructions: string, toolsKey: string, items: Json[]): { turn: CodexTurn; outputs: Map<string, string> } | undefined {
+    for (const turn of [...this.openTurns.values()]) {
+      if (turn.instructions !== instructions || turn.toolsKey !== toolsKey || items.length < turn.sentItems.length) continue;
+      if (JSON.stringify(items.slice(0, turn.sentItems.length)) !== JSON.stringify(turn.sentItems)) continue;
+      // This run's turn. It goes on only if what follows is exactly the calls' outputs.
+      this.openTurns.delete(turn.threadId);
+      const tail = items.slice(turn.sentItems.length);
+      const outputs = new Map<string, string>();
+      for (const item of tail) if (item?.type === 'function_call_output') outputs.set(String(item.call_id), typeof item.output === 'string' ? item.output : JSON.stringify(item.output));
+      const exact = tail.length === turn.callIds.length && outputs.size === tail.length && turn.callIds.every((id) => outputs.has(id));
+      if (exact) return { turn, outputs };
+      turn.close();
+      return undefined;
+    }
+    return undefined;
+  }
+
   async *stream(request: ModelRequest): AsyncIterable<ModelStreamEvent> {
     let conn: CodexConnection;
     try {
@@ -621,32 +649,7 @@ export class CodexProvider implements ModelProvider {
     const { instructions, items } = toCodexItems(request.messages);
     const tools = (request.tools ?? []).map((t) => ({ type: 'function', name: t.name, description: t.description || t.name, inputSchema: t.parameters ?? { type: 'object', properties: {} } }));
     const names = new Set(tools.map((t) => t.name));
-
-    // Everything Codex says about this thread, in order, for the generator below.
-    type Event = { kind: 'notification'; method: string; params: Json } | { kind: 'call'; params: Json };
-    const queue: Event[] = [];
-    let wake: (() => void) | null = null;
-    const push = (e: Event) => {
-      queue.push(e);
-      wake?.();
-    };
-    let threadId: string | null = null;
-    const early: Event[] = [];
-    const offNote = conn.onNotification((method, params) => {
-      if (method === 'sfagents/closed') return push({ kind: 'notification', method, params });
-      const t = params?.threadId ?? params?.thread?.id;
-      if (!t) return;
-      if (threadId === null) early.push({ kind: 'notification', method, params });
-      else if (t === threadId) push({ kind: 'notification', method, params });
-    });
-    // Tool calls are not answered: the turn is interrupted once the response is complete, which cancels them.
-    let release: () => void = () => {};
-    const released = new Promise<void>((r) => (release = r));
-    const offReq = conn.onServerRequest((method, params) => {
-      if (method !== 'item/tool/call' || !threadId || params?.threadId !== threadId) return undefined;
-      push({ kind: 'call', params });
-      return released.then(() => ({ contentItems: [{ type: 'inputText', text: 'Cancelled.' }], success: false }));
-    });
+    const toolsKey = JSON.stringify(tools);
 
     const timeout = new Promise<never>((_, reject) => {
       const t = setTimeout(() => reject(new ProviderError('OpenAI request timed out.', 504, true)), this.options.timeoutMs ?? 10 * 60_000);
@@ -655,13 +658,12 @@ export class CodexProvider implements ModelProvider {
     });
     timeout.catch(() => {});
 
-    let turnId: string | null = null;
-    const interrupt = () => {
-      if (threadId && turnId) void conn.request('turn/interrupt', { threadId, turnId }, 10_000).catch(() => {});
-    };
+    const claimed = this.claim(instructions, toolsKey, items);
+    const turn = claimed?.turn.conn === conn ? claimed.turn : new CodexTurn(conn, instructions, toolsKey);
+    if (claimed && claimed.turn !== turn) claimed.turn.close();
     const onAbort = () => {
-      interrupt();
-      wake?.();
+      turn.close();
+      turn.wakeUp();
     };
     request.signal.addEventListener('abort', onAbort, { once: true });
 
@@ -671,50 +673,61 @@ export class CodexProvider implements ModelProvider {
     const order: string[] = [];
     let usage: TokenUsage | undefined;
     let failure: ProviderError | null = null;
-    let interrupted = false;
+    let keepOpen = false;
+    // A continued turn that Codex had already ended: start again on a new thread.
+    let restart = false;
+    const continued = turn === claimed?.turn;
     try {
-      const started = await Promise.race([
-        conn.request(
-          'thread/start',
-          {
-            // "" leaves the model to Codex (the plan's default).
-            model: request.model || null,
-            cwd: this.workDir,
-            sandbox: 'read-only',
-            approvalPolicy: 'on-request',
-            ephemeral: true,
-            experimentalRawEvents: true,
-            baseInstructions: instructions,
-            developerInstructions: null,
-            dynamicTools: tools,
-          },
-          60_000,
-        ),
-        timeout,
-      ]);
-      threadId = String(started?.thread?.id);
-      for (const e of early.splice(0)) if ((e as Json).params?.threadId === threadId || (e as Json).params?.thread?.id === threadId) push(e);
-      if (items.length) await Promise.race([conn.request('thread/inject_items', { threadId, items }, 60_000), timeout]);
-      const effort = codexEffort(request.reasoning);
-      const turn = await Promise.race([
-        conn.request('turn/start', { threadId, input: [], ...(effort && effort !== 'none' ? { effort, summary: 'auto' } : effort === 'none' ? { effort: 'none' } : {}) }, 60_000),
-        timeout,
-      ]);
-      turnId = String(turn?.turn?.id);
+      if (continued) {
+        yield { type: 'log', text: `Codex: continuing turn ${turn.turnId} with ${claimed.outputs.size} tool result(s)` };
+        for (const [id, output] of claimed.outputs) turn.answer(id, { contentItems: [{ type: 'inputText', text: output }], success: true });
+      } else {
+        const started = await Promise.race([
+          conn.request(
+            'thread/start',
+            {
+              // "" leaves the model to Codex (the plan's default).
+              model: request.model || null,
+              cwd: this.workDir,
+              sandbox: 'read-only',
+              approvalPolicy: 'on-request',
+              ephemeral: true,
+              experimentalRawEvents: true,
+              baseInstructions: instructions,
+              developerInstructions: null,
+              dynamicTools: tools,
+            },
+            60_000,
+          ),
+          timeout,
+        ]);
+        turn.setThread(String(started?.thread?.id));
+        if (items.length) await Promise.race([conn.request('thread/inject_items', { threadId: turn.threadId, items }, 60_000), timeout]);
+        const effort = codexEffort(request.reasoning);
+        const t = await Promise.race([
+          conn.request('turn/start', { threadId: turn.threadId, input: [], ...(effort && effort !== 'none' ? { effort, summary: 'auto' } : effort === 'none' ? { effort: 'none' } : {}) }, 60_000),
+          timeout,
+        ]);
+        turn.turnId = String(t?.turn?.id);
+      }
+      const turnId = turn.turnId;
 
       let done = false;
       while (!done) {
         if (request.signal.aborted) throw request.signal.reason ?? new Error('aborted');
-        const e = queue.shift();
+        const e = turn.queue.shift();
         if (!e) {
-          await Promise.race([new Promise<void>((r) => (wake = r)), timeout]);
-          wake = null;
+          await Promise.race([turn.waitForEvent(), timeout]);
           continue;
         }
         if (e.kind === 'call') {
           const p = e.params;
-          if (!names.has(p.tool)) continue;
           const id = String(p.callId);
+          if (!names.has(p.tool)) {
+            // Nothing will run it: answer at once so the turn does not wait on it.
+            turn.answer(id, { contentItems: [{ type: 'inputText', text: `There is no tool "${p.tool}". Available: ${[...names].join(', ') || '(none)'}.` }], success: false });
+            continue;
+          }
           if (!calls.has(id)) order.push(id);
           const args = p.arguments && typeof p.arguments === 'object' ? (p.arguments as Record<string, unknown>) : {};
           calls.set(id, { id, name: p.tool, args, rawArguments: calls.get(id)?.rawArguments ?? JSON.stringify(args) });
@@ -756,9 +769,11 @@ export class CodexProvider implements ModelProvider {
             const one = codexTokenUsage(params.usage);
             if (one) usage = addTokenUsage(usage ?? {}, one);
             yield { type: 'log', text: `Codex response ${params.responseId ?? params.id ?? ''}: ${usageText(one)}`.replace('  ', ' ') };
-            if (calls.size && !interrupted) {
-              interrupted = true;
-              interrupt();
+            if (calls.size) {
+              // The response ends with tool calls: the turn waits on them
+              // until SF Agents asks again with their results.
+              keepOpen = true;
+              done = true;
             }
             break;
           }
@@ -772,27 +787,41 @@ export class CodexProvider implements ModelProvider {
           case 'turn/completed': {
             const t = params.turn;
             if (t?.id !== turnId) break;
-            if (t.status === 'failed' && !calls.size) failure ??= codexError(t.error);
+            turn.ended = true;
+            if (continued && !text && !calls.size && !usage) {
+              restart = true;
+              yield { type: 'log', text: `Codex: turn ${turnId} had ended (${t.status}) before its tool results came; starting a new thread` };
+            } else if (t.status === 'failed' && !calls.size) failure ??= codexError(t.error);
             done = true;
             break;
           }
         }
       }
     } catch (error) {
+      keepOpen = false;
       if (request.signal.aborted || isAbortError(error)) throw request.signal.reason ?? error;
       if (error instanceof ProviderError) throw error;
       throw new ProviderError(`OpenAI request failed: ${getErrorMessage(error)}`, 502, true);
     } finally {
-      offNote();
-      offReq();
-      release();
       request.signal.removeEventListener('abort', onAbort);
-      if (threadId) {
-        if (!interrupted && turnId && request.signal.aborted) interrupt();
-        void conn.request('thread/unsubscribe', { threadId }, 10_000).catch(() => {});
+      if (keepOpen && !request.signal.aborted) {
+        const toolCalls = order.map((id) => calls.get(id)!).filter(Boolean);
+        const message: AssistantMessage = { role: 'assistant', content: text || null };
+        if (toolCalls.length) message.tool_calls = toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.rawArguments } }));
+        // What the next request starts with if it continues this turn.
+        turn.sentItems = [...items, ...toCodexItems([message]).items];
+        turn.callIds = order;
+        this.openTurns.set(turn.threadId, turn);
+        turn.idle(() => this.openTurns.get(turn.threadId) === turn && this.openTurns.delete(turn.threadId));
+      } else {
+        turn.close();
       }
     }
     if (request.signal.aborted) throw request.signal.reason;
+    if (restart) {
+      yield* this.stream(request);
+      return;
+    }
     if (failure && !text && !calls.size) throw usage ? new ProviderError(failure.message, failure.status, failure.retryable, usage) : failure;
     const toolCalls = order.map((id) => calls.get(id)!).filter(Boolean);
     const message: AssistantMessage = { role: 'assistant', content: text || null };
@@ -809,10 +838,121 @@ export class CodexProvider implements ModelProvider {
   }
 
   close(): void {
+    for (const turn of this.openTurns.values()) turn.close();
+    this.openTurns.clear();
     void this.connection?.then((c) => c.close(), () => {});
     this.connection = null;
   }
 }
+
+/** How long a turn waits on its tool calls before it is given up (a fresh thread takes over then). */
+const OPEN_TURN_IDLE_MS = 30 * 60_000;
+
+type CodexEvent = { kind: 'notification'; method: string; params: Json } | { kind: 'call'; params: Json };
+
+/** One Codex thread and turn: its events in order, and the tool calls it waits on. */
+class CodexTurn {
+  threadId = '';
+  turnId = '';
+  /** Items the thread holds (the request's, then the model's response). */
+  sentItems: Json[] = [];
+  /** The tool calls the turn waits on. */
+  callIds: string[] = [];
+  readonly queue: CodexEvent[] = [];
+  private wake: (() => void) | null = null;
+  private readonly early: CodexEvent[] = [];
+  private readonly waiting = new Map<string, (answer: Json) => void>();
+  private readonly answers = new Map<string, Json>();
+  private readonly offNote: () => void;
+  private readonly offReq: () => void;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private closed = false;
+  /** Codex reported the turn finished: nothing to interrupt. */
+  ended = false;
+
+  constructor(
+    readonly conn: CodexConnection,
+    readonly instructions: string,
+    readonly toolsKey: string,
+  ) {
+    this.offNote = conn.onNotification((method, params) => {
+      if (method === 'sfagents/closed') return this.push({ kind: 'notification', method, params });
+      const t = params?.threadId ?? params?.thread?.id;
+      if (!t) return;
+      if (!this.threadId) this.early.push({ kind: 'notification', method, params });
+      else if (t === this.threadId) this.push({ kind: 'notification', method, params });
+    });
+    this.offReq = conn.onServerRequest((method, params) => {
+      if (method !== 'item/tool/call' || !this.threadId || params?.threadId !== this.threadId) return undefined;
+      const id = String(params.callId);
+      this.push({ kind: 'call', params });
+      if (this.closed) return CANCELLED;
+      const given = this.answers.get(id);
+      if (given) {
+        this.answers.delete(id);
+        return given;
+      }
+      return new Promise<Json>((resolve) => this.waiting.set(id, resolve));
+    });
+  }
+
+  setThread(id: string): void {
+    this.threadId = id;
+    for (const e of this.early.splice(0)) if (e.params?.threadId === id || e.params?.thread?.id === id) this.push(e);
+  }
+
+  private push(e: CodexEvent): void {
+    this.queue.push(e);
+    this.wakeUp();
+  }
+
+  wakeUp(): void {
+    const w = this.wake;
+    this.wake = null;
+    w?.();
+  }
+
+  waitForEvent(): Promise<void> {
+    return new Promise<void>((r) => (this.wake = r));
+  }
+
+  /** Answers a tool call (now, or when Codex asks for it). */
+  answer(id: string, result: Json): void {
+    clearTimeout(this.timer);
+    const resolve = this.waiting.get(id);
+    if (resolve) {
+      this.waiting.delete(id);
+      resolve(result);
+    } else this.answers.set(id, result);
+  }
+
+  /** Closes the turn if nothing continues it in time. */
+  idle(forget: () => void): void {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      forget();
+      this.close();
+    }, OPEN_TURN_IDLE_MS);
+    this.timer.unref?.();
+  }
+
+  /** Stops the turn: its waiting calls are cancelled and the thread let go. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    clearTimeout(this.timer);
+    for (const resolve of this.waiting.values()) resolve(CANCELLED);
+    this.waiting.clear();
+    this.offNote();
+    this.offReq();
+    if (this.threadId) {
+      if (this.turnId && !this.ended) void this.conn.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId }, 10_000).catch(() => {});
+      void this.conn.request('thread/unsubscribe', { threadId: this.threadId }, 10_000).catch(() => {});
+    }
+  }
+}
+
+const CANCELLED: Json = { contentItems: [{ type: 'inputText', text: 'Cancelled.' }], success: false };
 
 /** Errors that mean "this account can't serve now": another account may. */
 export function isAccountLimitStatus(status: number | undefined): boolean {

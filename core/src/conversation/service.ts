@@ -597,12 +597,41 @@ export class ConversationService {
 }
 
 /** Converts stored messages (from `fromSeq` on) into a protocol-valid provider history. */
+/** Tool results (and call arguments) longer than this are left out of earlier replies when stubbed. */
+export const STUB_MIN_CHARS = 1200;
+
+/**
+ * What replaces a long tool result from an earlier reply: the first line or
+ * so, its size, and how to get the rest back.
+ */
+export function stubToolResult(name: string, callId: string, content: string): string {
+  const head = content.slice(0, 200).replace(/\s+/g, ' ').trim();
+  return `[Output of ${name} from an earlier reply, ${content.length} chars, left out here to save context. It began: "${head}…" The message tool with action "output" and call_id "${callId}" shows all of it.]`;
+}
+
+/** Long call arguments from an earlier reply, as valid JSON. */
+function stubArguments(callId: string, args: string): string {
+  return JSON.stringify({ left_out: `${args.length} chars of arguments from an earlier reply; the message tool with action "output" and call_id "${callId}" shows them.` });
+}
+
+/** A stored tool call and its result, by call id (newest run first). */
+export function findToolCall(state: ConversationState, callId: string): { name: string; arguments: string; result?: string } | undefined {
+  for (let i = state.messages.length - 1; i >= 0; i--) {
+    const m = state.messages[i]!;
+    const call = m.role === 'assistant' ? m.toolCalls?.find((c) => c.id === callId) : undefined;
+    if (call) return { name: call.name, arguments: call.arguments, result: state.runs.get(m.run)?.results.get(callId)?.content };
+  }
+  return undefined;
+}
+
 export function toChatMessages(
   state: ConversationState,
   target: ReplayTarget,
   fromSeq = 0,
   messages?: readonly MessageRecord[],
   resolveAttachment?: AttachmentResolver,
+  /** Earlier replies: long tool results and arguments become short stubs (see stubToolResult). */
+  stub = false,
 ): ChatMessage[] {
   const out: ChatMessage[] = [];
   const list = messages ?? state.messages.filter((m) => m.seq > fromSeq);
@@ -625,7 +654,7 @@ export function toChatMessages(
       const sameModel = run?.start?.provider === target.provider && run?.start?.model === target.model;
       const msg: AssistantMessage = { role: 'assistant', content: m.content.length > 0 ? m.content : null };
       if (m.toolCalls?.length) {
-        msg.tool_calls = m.toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } }));
+        msg.tool_calls = m.toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: stub && c.arguments.length > STUB_MIN_CHARS ? stubArguments(c.id, c.arguments) : c.arguments } }));
       }
       if (sameModel && m.reasoningDetails) msg.reasoning_details = m.reasoningDetails;
       else if (sameModel && m.reasoning) msg.reasoning = m.reasoning;
@@ -634,7 +663,7 @@ export function toChatMessages(
       for (const call of m.toolCalls ?? []) {
         const result = run?.results.get(call.id);
         if (result) {
-          out.push({ role: 'tool', tool_call_id: call.id, content: result.content });
+          out.push({ role: 'tool', tool_call_id: call.id, content: stub && result.content.length > STUB_MIN_CHARS ? stubToolResult(call.name, call.id, result.content) : result.content });
           if (result.attachments?.length) shown.push({ callId: call.id, images: result.attachments.map((a) => ({ label: a.name, mime: a.mime, data: resolveAttachment?.(a) })) });
         } else {
           const started = run?.started.has(call.id) ?? false;
