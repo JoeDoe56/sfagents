@@ -334,7 +334,8 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
     if (result.truncated) lines.push('Note: output exceeded the capture limit and was cut.');
     if (result.timedOut) lines.push(`Note: command timed out after ${Math.round(timeoutMs / 1000)}s and was killed. For a server or anything else meant to keep running, use background: true.`);
     if (result.aborted) lines.push('Note: command was cancelled.');
-    const llmContent = truncateForModel(lines.join('\n'), this.ctx.maxOutputChars);
+    // Shortened (and kept whole) where every tool result is.
+    const llmContent = lines.join('\n');
 
     if (result.aborted) {
       return { llmContent, returnDisplay: 'Command cancelled', error: { message: 'Command was cancelled', type: ToolErrorType.EXECUTION_CANCELLED } };
@@ -435,7 +436,7 @@ class ShellToolInvocation extends BaseToolInvocation<ShellToolParams, ToolResult
         const cwd = this.params.directory || status.folders[0]!;
         const combined = AbortSignal.any([signal, lease, AbortSignal.timeout(Math.min(this.ctx.shellTimeoutMs, (this.params.timeout_seconds ?? 120) * 1000))]);
         const text = await runHostShell(this.params.command!, cwd, this.params.stdin, combined, this.ctx.secretEnvNames);
-        return { llmContent: truncateForModel(text, this.ctx.maxOutputChars), returnDisplay: 'Host command finished' };
+        return { llmContent: text, returnDisplay: 'Host command finished' };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return { llmContent: message, returnDisplay: message, error: { message, type: ToolErrorType.EXECUTION_DENIED } };

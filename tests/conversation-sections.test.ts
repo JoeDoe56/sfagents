@@ -298,7 +298,7 @@ describe('sections: the message tool', () => {
       return (tools.find((t) => t.name === 'message')!.parameters as { properties: { action: { enum: string[] } } }).properties.action.enum;
     };
     assert.deepEqual(actionsOf('reader'), ['send', 'react', 'wait', 'search', 'history', 'output', 'thread', 'sections']);
-    assert.deepEqual(actionsOf('blind'), ['send', 'react', 'wait', 'thread']);
+    assert.deepEqual(actionsOf('blind'), ['send', 'react', 'wait', 'output', 'thread']);
     const readerReq = providers.get('reader')!.requests[1]!.messages as ChatMessage[];
     const toolOut = readerReq.filter((m) => m.role === 'tool').map((m) => (m as { content: string }).content);
     assert.match(toolOut[0]!, /OSPREY/);
@@ -318,7 +318,7 @@ describe('sections: the message tool', () => {
     await new AgentRuntime({ tree, providerFactory: factory }).createSession().run('hi');
     const tools = providers.get('main')!.requests[0]!.request.tools!;
     assert.deepEqual(tools.map((t) => t.name), ['shell', 'message']);
-    assert.deepEqual((tools[1]!.parameters as { properties: { action: { enum: string[] } } }).properties.action.enum, ['full_control', 'wait']);
+    assert.deepEqual((tools[1]!.parameters as { properties: { action: { enum: string[] } } }).properties.action.enum, ['full_control', 'wait', 'output']);
   });
 });
 

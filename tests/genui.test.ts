@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { AgentRuntime, ArtifactError, hostWorkspacesDir, ConversationService, loadAgentTree, moveUserData, parseConversation, runArtifactRequest, serializeConversation, validateGenui, type ChatMessage } from '@sfagents/core';
+import { AgentRuntime, ArtifactError, hostWorkspacesDir, ConversationService, loadAgentTree, moveUserData, parseConversation, runArtifactRequest, serializeConversation, validateGenui, runHostCommand, GENUI_SPEC, type ChatMessage } from '@sfagents/core';
 import { WebServer } from '@sfagents/web';
 import { NO_CONTAINER_TESTS, baseAgent, makeTempDir, scriptedFactory, writeAgent, type Script } from './helpers.js';
 
@@ -228,6 +228,11 @@ describe('GenUI: the web server', () => {
       if (items) assert.equal(items.find((x) => x.kind === 'user')!.view, a.id);
       // The guidance tells the agent how to write views.
       assert.match((seen[0]![0] as { content: string }).content, /<genui_guidance>/);
+      // The format itself is one command away, not in every request.
+      assert.match((seen[0]![0] as { content: string }).content, /sfa-artifact --help genui/);
+      assert.doesNotMatch((seen[0]![0] as { content: string }).content, /"\$op"/);
+      const help = await runHostCommand(['sfa-artifact', '--help', 'genui'], { artifact: () => '' }, { signal: new AbortController().signal });
+      assert.equal(help.ok && help.text, GENUI_SPEC);
     } finally {
       await server.close();
       conversation.close();

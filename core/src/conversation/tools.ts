@@ -13,6 +13,7 @@
 import type { ToolResult } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { findToolCall, type ConversationService } from './service.js';
+import { readFullOutput, viewOutput } from '../runtime/full-output.js';
 import {
   addSection,
   CURRENT_EXCHANGE,
@@ -49,6 +50,21 @@ const guard = (run: () => ToolResult): ToolResult => {
     return fail(error);
   }
 };
+
+/**
+ * message action "output": a tool call's whole output (kept on this computer
+ * when it was too long for the model) or, from the conversation, its stored
+ * result and arguments. By page, or only the lines matching "grep".
+ */
+export function toolOutput(p: { call_id?: string; grep?: string; page?: number }, service?: ConversationService): ToolResult {
+  const id = p.call_id?.trim();
+  if (!id) return fail(new SectionOperationError('"call_id" is required'));
+  const call = service ? findToolCall(service.state, id) : undefined;
+  const text = readFullOutput(id) ?? call?.result;
+  if (text === undefined) return fail(new SectionOperationError(`No output kept for tool call "${id}"`));
+  const head = call && !p.grep && (p.page ?? 1) === 1 ? `${call.name} arguments:\n${call.arguments}\n\nOutput:\n` : '';
+  return ok(head + viewOutput(text, { ...(p.grep ? { grep: p.grep } : {}), ...(p.page ? { page: p.page } : {}) }), `${call?.name ?? 'tool'} output`);
+}
 
 /** message action "sections": its parameters. */
 export interface SectionsParams {
@@ -110,12 +126,8 @@ export class ConversationActions {
   }
 
   /** A tool call's full arguments and output (earlier replies show long ones shortened). */
-  output(p: { call_id?: string }): ToolResult {
-    const id = p.call_id?.trim();
-    if (!id) return fail(new SectionOperationError('"call_id" is required'));
-    const call = findToolCall(this.service.state, id);
-    if (!call) return fail(new SectionOperationError(`No tool call "${id}" in the stored conversation`));
-    return ok(`${call.name} arguments:\n${call.arguments}\n\nOutput:\n${call.result ?? '(no result stored)'}`, `${call.name} output`);
+  output(p: { call_id?: string; grep?: string; page?: number }): ToolResult {
+    return toolOutput(p, this.service);
   }
 
   sections(p: SectionsParams): ToolResult {

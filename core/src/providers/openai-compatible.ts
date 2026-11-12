@@ -8,6 +8,7 @@
  * accumulated from stream deltas and returned on the assistant message.
  */
 
+import { createHash } from 'node:crypto';
 import OpenAI from 'openai';
 import type { ChatCompletionChunk, ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { StreamingToolCallParser } from './streaming-tool-call-parser.js';
@@ -100,6 +101,28 @@ export function chatUsage(raw: unknown): TokenUsage {
 }
 
 /**
+ * OpenAI's prompt cache routes requests by a hash of their first part; a
+ * prompt_cache_key keeps the requests of one agent on the same cache even
+ * when that first part is shared with other agents or changes a little. One
+ * key per model and system prompt: the requests that share a prefix.
+ * Only where OpenAI models answer (api.openai.com, or openai/ on OpenRouter).
+ */
+export function promptCacheKey(baseUrl: string, model: string, messages: readonly ChatMessage[]): string | undefined {
+  const openai = isOpenRouterHostname(baseUrl) ? /^openai\//i.test(model) : /(^|\.)api\.openai\.com$/i.test(hostOf(baseUrl));
+  if (!openai) return undefined;
+  const system = messages.find((m) => m.role === 'system')?.content ?? '';
+  return `sfagents-${createHash('sha256').update(`${model}\u0000${typeof system === 'string' ? system : JSON.stringify(system)}`).digest('hex').slice(0, 32)}`;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Anthropic and Gemini models on OpenRouter cache only up to explicit
  * cache_control breakpoints (OpenAI, DeepSeek, Grok and others cache by
  * themselves). Without them every request is billed as fresh input. Marks
@@ -141,9 +164,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly id: string;
   private readonly client: OpenAI;
   private readonly isOpenRouter: boolean;
+  private readonly baseUrl: string;
 
   constructor(options: OpenAICompatibleOptions) {
     this.id = options.id;
+    this.baseUrl = options.baseUrl;
     this.isOpenRouter = isOpenRouterHostname(options.baseUrl);
     this.client = new OpenAI({
       apiKey: options.apiKey,
@@ -166,6 +191,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
     };
     // OpenRouter: report cost and cache counters with the usage.
     if (this.isOpenRouter) body['usage'] = { include: true };
+    const cacheKey = promptCacheKey(this.baseUrl, request.model, request.messages);
+    if (cacheKey) body['prompt_cache_key'] = cacheKey;
     if (request.tools && request.tools.length > 0) {
       body['tools'] = request.tools.map((t) => ({
         type: 'function',

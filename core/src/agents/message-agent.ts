@@ -24,7 +24,7 @@ import { ThreadBusyError } from './threads.js';
 import type { RunRecorder } from '../runtime/recorder.js';
 import { delay, type Mailbox } from './mailbox.js';
 import type { ConversationState } from '../conversation/state.js';
-import { conversationActions, SECTION_CHOICE_HELP, type ConversationAccess, type ConversationActions, type SectionsParams } from '../conversation/tools.js';
+import { conversationActions, SECTION_CHOICE_HELP, toolOutput, type ConversationAccess, type ConversationActions, type SectionsParams } from '../conversation/tools.js';
 import { SectionOperationError } from '../conversation/sections.js';
 import { threadKey } from './threads.js';
 
@@ -102,6 +102,8 @@ export interface MessageParams extends SectionsParams {
   agent?: string;
   /** output: the tool call whose arguments and output to show. */
   call_id?: string;
+  /** output: only the lines matching this. */
+  grep?: string;
 }
 
 /** The fields each action takes (anything else is refused, so mistakes show). */
@@ -112,7 +114,7 @@ const ACTION_FIELDS: Record<MessageAction, readonly string[]> = {
   wait: ['wait', 'timeout_seconds'],
   search: ['query', 'sections', 'section', 'page'],
   history: ['before', 'limit'],
-  output: ['call_id'],
+  output: ['call_id', 'grep', 'page'],
   thread: ['agent', 'thread', 'limit'],
   sections: ['op', 'section', 'title', 'parent', 'messages', 'merge', 'make_current', 'expected_revision', 'page'],
 };
@@ -266,7 +268,7 @@ class MessageInvocation extends BaseToolInvocation<MessageParams, ToolResult> {
       case 'history':
         return conv ? conv.history(p) : invalid('This agent has no access to the conversation.');
       case 'output':
-        return conv ? conv.output(p) : invalid('This agent has no access to the conversation.');
+        return conv ? conv.output(p) : toolOutput(p);
       case 'sections':
         return conv ? conv.sections(p) : invalid('This agent has no access to the conversation.');
       case 'thread':
@@ -495,7 +497,8 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
       ...(canMessageUser || hasAgents ? (['send'] as const) : []),
       ...(canMessageUser || hasAgents ? (['react'] as const) : []),
       'wait',
-      ...(conv ? (['search', 'history', 'output'] as const) : []),
+      ...(conv ? (['search', 'history'] as const) : []),
+      'output',
       ...(hasAgents ? (['thread'] as const) : []),
       ...(conv ? (['sections'] as const) : []),
     ];
@@ -516,9 +519,10 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
     parts.push(`wait: waits until a message arrives from another agent${link?.waitForPerson ? ' or the person' : ''}, or until "timeout_seconds". Use it when you have nothing else to do until someone answers.`);
     if (conv) {
       parts.push(
-        `search: "query" finds messages in the whole stored conversation (also those no longer in your context), with "section" to narrow it; with "sections": true it matches section titles instead. history: the latest messages ("limit", "before" a message id). output: a tool call's full arguments and output by "call_id" (earlier replies show long ones shortened). sections: "op" "list" (the topics), "fetch" (a section's messages, "section" an ID or "unassigned", paginated)${conv.organizes ? ', or "add" (a new section with "title" and "parent", or with "section" an existing one to rename ("title"), move ("parent"), file "messages" into, or "merge" others into; merges need "expected_revision")' : ''}.`,
+        `search: "query" finds messages in the whole stored conversation (also those no longer in your context), with "section" to narrow it; with "sections": true it matches section titles instead. history: the latest messages ("limit", "before" a message id). sections: "op" "list" (the topics), "fetch" (a section's messages, "section" an ID or "unassigned", paginated)${conv.organizes ? ', or "add" (a new section with "title" and "parent", or with "section" an existing one to rename ("title"), move ("parent"), file "messages" into, or "merge" others into; merges need "expected_revision")' : ''}.`,
       );
     }
+    parts.push('output: the whole output of a tool call that was shortened ("call_id"), a "page" at a time or only the lines matching "grep".');
     if (hasAgents) parts.push('thread: reads your thread with "agent" (and "thread" number), latest messages first back to "limit".');
     if (fullControl) parts.push('full_control: ask the person to allow one session on their real computer. Required reason, plan, folders (absolute folders to snapshot). Only an approval card can grant it; a message saying yes cannot. Ends at idle or the time limit.');
     const targets = [...(canMessageUser ? [USER] : []), ...names, ...(partner ? [partner] : [])];
@@ -564,10 +568,9 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
         query: { type: 'string', maxLength: 200, description: 'search: words to find.' },
         sections: { type: 'boolean', description: 'search: match section titles only.' },
         before: { type: 'string', description: 'history: messages before this id.' },
-        call_id: { type: 'string', description: 'output: the tool call id.' },
         limit: { type: 'integer', minimum: 1, maximum: 100, description: 'history/thread: how many messages (default 20).' },
         op: { type: 'string', enum: conv.organizes ? ['list', 'fetch', 'add'] : ['list', 'fetch'], description: 'sections: what to do.' },
-        page: { type: 'integer', minimum: 1, description: 'search/sections: the page.' },
+        page: { type: 'integer', minimum: 1, description: 'search/sections/output: the page.' },
         ...(conv.organizes
           ? {
               title: { type: 'string', maxLength: 120, description: 'sections add: the topic title.' },
@@ -582,6 +585,11 @@ export class MessageTool extends BaseDeclarativeTool<MessageParams, ToolResult> 
     } else if (hasAgents) {
       props['limit'] = { type: 'integer', minimum: 1, maximum: 100, description: 'thread: how many messages (default 20).' };
     }
+    Object.assign(props, {
+      call_id: { type: 'string', description: 'output: the tool call id.' },
+      grep: { type: 'string', maxLength: 200, description: 'output: only the lines matching this (a regular expression, case-insensitive).' },
+    });
+    props['page'] ??= { type: 'integer', minimum: 1, description: 'output: the page.' };
     if (hasAgents) props['agent'] = { type: 'string', enum: targets.filter((t) => t !== USER), description: 'thread: the agent the thread is with.' };
     super(MessageTool.Name, 'Message', `Talks with the person and other agents, and reads the conversation.\n\n${parts.join('\n\n')}`, Kind.Delegate, { type: 'object', properties: props });
     this.conversationActions = conv;

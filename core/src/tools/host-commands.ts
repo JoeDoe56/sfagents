@@ -8,6 +8,7 @@ import { UI_COMMAND, UI_USAGE, runUiCommand, type UiGrant } from '../ui/ui.js';
  */
 
 import { ArtifactError, ARTIFACT_COMMAND, ARTIFACT_USAGE, type ArtifactCommand, type ArtifactContainer } from '../conversation/artifacts.js';
+import { GENUI_SPEC } from '../conversation/genui.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { MAX_WEB_BATCH, SEARCH_ENGINES, TIME_RANGES, WEB_FORMATS, type SearchEngine, type TimeRange, type WebAccess, type WebFormat, type WebRequest, type WebSearch } from '../web/brightdata.js';
 import { MCP_COMMAND, MCP_USAGE, runMcpCommand, type McpGrant } from '../mcp/sfa-mcp.js';
@@ -186,7 +187,7 @@ export async function runHostCommand(
     }
     if (name === ARTIFACT_COMMAND) {
       if (!cmds.artifact) return { ok: false, error: 'This agent may not create artifacts (artifacts.access).' };
-      if (args.includes('-h') || args.includes('--help')) return { ok: true, text: ARTIFACT_USAGE };
+      if (args.includes('-h') || args.includes('--help')) return { ok: true, text: args.includes('genui') ? GENUI_SPEC : ARTIFACT_USAGE };
       return { ok: true, text: cmds.artifact(args, { cwd: o.cwd, callId: o.callId, stdin: o.stdin, ...(o.container ? { container: o.container } : {}) }) };
     }
     if (name === VIEW_COMMAND) {

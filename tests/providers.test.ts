@@ -33,6 +33,8 @@ import {
   chatUsage,
   codexTokenUsage,
   withCacheBreakpoints,
+  promptCacheKey,
+  OPENROUTER_BASE_URL,
   openRouterCredits,
   toCodexItems,
   type ChatMessage,
@@ -525,6 +527,17 @@ describe('prompt caching and usage', () => {
     assert.deepEqual(out.at(-1).content, [{ type: 'text', text: 'out 0b', cache_control: { type: 'ephemeral' } }]);
     assert.equal(out.filter((x) => Array.isArray(x.content)).length, 2);
     assert.equal(m[0]!.content, 'sys');
+  });
+
+  test('OpenAI models get a prompt cache key per model and system prompt', () => {
+    const m = convo(1);
+    const key = promptCacheKey(OPENROUTER_BASE_URL, 'openai/gpt-5', m);
+    assert.match(key ?? '', /^sfagents-[0-9a-f]{32}$/);
+    assert.equal(promptCacheKey(OPENROUTER_BASE_URL, 'openai/gpt-5', [...m, { role: 'user', content: 'more' }]), key, 'same key as the conversation grows');
+    assert.notEqual(promptCacheKey(OPENROUTER_BASE_URL, 'openai/gpt-5-mini', m), key);
+    assert.equal(promptCacheKey('https://api.openai.com/v1', 'gpt-5', m)?.startsWith('sfagents-'), true);
+    assert.equal(promptCacheKey(OPENROUTER_BASE_URL, 'anthropic/claude-sonnet-5-5', m), undefined);
+    assert.equal(promptCacheKey('http://localhost:11434/v1', 'llama', m), undefined);
   });
 
   test('OpenRouter credits: the key limit, else the account credits', async () => {

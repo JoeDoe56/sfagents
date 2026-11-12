@@ -19,7 +19,7 @@ export { AgentRuntime, AgentSession, buildSystemPrompt, DEFAULT_MAX_TURNS, withS
 export type { InboxItem, SendOptions } from './runtime/runtime.js';
 export type { RuntimeOptions } from './runtime/runtime.js';
 export * from './providers/types.js';
-export { OpenAICompatibleProvider, OPENROUTER_BASE_URL, isOpenRouterHostname, mergeReasoningDetails, chatUsage, withCacheBreakpoints } from './providers/openai-compatible.js';
+export { OpenAICompatibleProvider, OPENROUTER_BASE_URL, isOpenRouterHostname, mergeReasoningDetails, chatUsage, withCacheBreakpoints, promptCacheKey } from './providers/openai-compatible.js';
 export {
   createDefaultProviderFactory,
   credentialEnvNames,
@@ -132,7 +132,7 @@ export {
   CURRENT_EXCHANGE,
 } from './conversation/sections.js';
 export type { SectionEntry, SectionPage, SearchHit, SearchResult, FetchResult } from './conversation/sections.js';
-export { ConversationActions, conversationActions, ORGANIZE_GUIDANCE, SECTION_CHOICE_HELP } from './conversation/tools.js';
+export { ConversationActions, conversationActions, ORGANIZE_GUIDANCE, SECTION_CHOICE_HELP, toolOutput } from './conversation/tools.js';
 export type { ConversationAccess } from './conversation/tools.js';
 export { AGENT_REACTIONS, ChatToolNames, chatEffectOf, chatEffects } from './conversation/chat-tools.js';
 export {
@@ -164,6 +164,7 @@ export {
 export type { ArtifactAccess, ArtifactCommand, ArtifactRequest } from './conversation/artifacts.js';
 export {
   GENUI_GUIDANCE,
+  GENUI_SPEC,
   GENUI_VERSION,
   genuiStateSummary,
   MAX_GENUI_STATE_CHARS,
@@ -203,3 +204,4 @@ export { FullControlManager, RollbackJournal, runHostShell, type FullControlPlan
 
 export { UiService, ContainerUiAdapter, WindowsUiAdapter, runUiCommand, riskyControl, UI_COMMAND, UI_USAGE, type UiAdapter, type UiControl, type UiGrant, type UiReply } from './ui/ui.js';
 export { StartLux, type UiDecider, type DecisionQuestion, type DecisionAnswer } from './ui/startlux.js';
+export { shortenToolOutput } from './runtime/tool-executor.js';

@@ -30,5 +30,6 @@ export interface ToolContext {
   readonly commands?: HostCommands;
 }
 
-export const DEFAULT_MAX_OUTPUT_CHARS = 30_000;
+/** What the model gets of one tool result; longer output is kept whole and read back with message action "output". */
+export const DEFAULT_MAX_OUTPUT_CHARS = 12_000;
 export const DEFAULT_SHELL_TIMEOUT_MS = 120_000;

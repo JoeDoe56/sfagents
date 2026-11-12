@@ -8,6 +8,8 @@ import {
   buildWorkingContext,
   ContextBudgetError,
   ConversationActions,
+  shortenToolOutput,
+  toolOutput,
   ConversationService,
   loadAgentTree,
   readConversation,
@@ -89,6 +91,17 @@ describe('working context', () => {
     const shown = new ConversationActions(conv, 'read').output({ call_id: id });
     assert.equal(shown.error, undefined);
     assert.match(String(shown.llmContent), new RegExp(`Output:\\nrun 0\\n`));
+  });
+
+  test('long tool output is shortened for the model and kept whole for message action "output"', () => {
+    const big = Array.from({ length: 3000 }, (_, i) => `line ${i}${i === 1234 ? ' NEEDLE' : ''}`).join('\n');
+    const short = shortenToolOutput('call_big', big, 12_000);
+    assert.ok(short.length <= 12_000, `${short.length}`);
+    assert.match(short, /message action "output" with call_id "call_big"/);
+    assert.equal(shortenToolOutput('call_small', 'ok', 12_000), 'ok');
+    assert.match(String(toolOutput({ call_id: 'call_big', grep: 'needle' }).llmContent), /^1 matching line\(s\).*\n1235: line 1234 NEEDLE$/);
+    assert.match(String(toolOutput({ call_id: 'call_big', page: 2 }).llmContent), /^Page 2 of \d+/);
+    assert.ok(toolOutput({ call_id: 'nope' }).error);
   });
 
   test('a note stored with a user message is replayed with it', () => {

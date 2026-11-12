@@ -18,6 +18,7 @@ import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { PersistenceFailure } from './recorder.js';
 import type { ToolMessageStatus } from '../conversation/types.js';
 import { truncateForModel } from '../utils/text-utils.js';
+import { saveFullOutput } from './full-output.js';
 import type {
   ConfirmationDecision,
   ConfirmationHandler,
@@ -104,6 +105,13 @@ async function runWithTimeout(
   }
 }
 
+/** Output too long for the model: the start and end, with the whole kept for message action "output". */
+export function shortenToolOutput(callId: string, text: string, max: number): string {
+  if (text.length <= max) return text;
+  const note = saveFullOutput(callId, text) ? `\n[The whole output (${text.length} chars) is kept: message action "output" with call_id "${callId}" reads it by "page", or only the lines matching "grep".]` : '';
+  return truncateForModel(text, Math.max(1000, max - note.length)) + note;
+}
+
 export async function executeToolCall(
   call: ParsedToolCall,
   ctx: ToolExecutionContext,
@@ -125,7 +133,7 @@ export async function executeToolCall(
     message: {
       role: 'tool',
       tool_call_id: call.id,
-      content: truncateForModel(result.llmContent || (ok ? '(no output)' : 'Error'), ctx.maxOutputChars),
+      content: shortenToolOutput(call.id, result.llmContent || (ok ? '(no output)' : 'Error'), ctx.maxOutputChars),
     },
     activity: { name: call.name, ok, errorType: result.error?.type },
     status: statusOf(result),

@@ -182,6 +182,7 @@ export const ARTIFACT_USAGE = `Usage:
   sfa-artifact --id <id> [--title T] [<file>] [--port N]     change an artifact
   sfa-artifact --id <id> --print                            print an artifact's file
   sfa-artifact genui/<name>.json --title "Title" --content '<json>'   a GenUI view (SF Agents' view folder)
+  sfa-artifact --help genui                                 the GenUI view format
 Options: --content "text" or --stdin writes the file first.`;
 
 /**

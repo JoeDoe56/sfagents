@@ -275,7 +275,7 @@ export function parseGenui(text: string): { doc?: Record<string, unknown>; error
 
 /** The error text `sfa-artifact` gives the agent for an invalid view. */
 export function genuiErrorText(file: string, errors: readonly string[]): string {
-  return `${file} is not a valid GenUI view, so the chat shows an error instead of it. Fix the file and run sfa-artifact --id again to check it:\n${errors.map((e) => `- ${e}`).join('\n')}`;
+  return `${file} is not a valid GenUI view, so the chat shows an error instead of it. Fix the file and run sfa-artifact --id again to check it (sfa-artifact --help genui shows the format):\n${errors.map((e) => `- ${e}`).join('\n')}`;
 }
 
 /** Writes the person's `state` into a view file, keeping everything else. Throws when the file is not a valid view. */
@@ -303,8 +303,8 @@ export function genuiStateSummary(file: string | undefined, limit = 1500): strin
   }
 }
 
-export const GENUI_GUIDANCE = `<genui_guidance>
-A GenUI view is a small interactive piece shown inline in the chat: a comparison, a form, a table to sort, a chart, a formula, choices to pick from. Write and show it in ONE command: sfa-artifact genui/plan-options.json --title "Plan options" --content '<the JSON>' (or pipe it in with --stdin). "genui/" there is always SF Agents' own view folder: it exists, you need no workspace access to it, so don't look for it, list folders or mkdir first. sfa-artifact checks the view and lists any mistakes; fix them and run the same command again. To change a view: sfa-artifact --id <id> --content '<the whole new JSON>'. To see what the person picked: sfa-artifact --id <id> --print. In cmd.exe, put the JSON in double quotes, write each " inside it as \\", and write & | < > ^ % inside strings as JSON escapes (\\u0026 \\u007c \\u003c \\u003e \\u005e \\u0025). Use a view when the person will interact with it or it shows data better than prose; use plain chat for everything else. Whole apps belong in an .html artifact.
+/** The view format, printed by `sfa-artifact --help genui` (kept out of the system prompt: most replies never make a view). */
+export const GENUI_SPEC = `GenUI view format
 Document: {"version": 1, "title"?, "state"?: {name: value}, "data"?: {...}, "view": node}.
 Every node has "type" and may have "when" (show only if true), "repeat" ({"$": "data.items"}: one copy per item, with item and index) and "key", and "on" ({event: [actions]}).
 - layout: "kind" column | row | grid | card | tabs | carousel | popover | scroll | form | spacer | divider, "children": [nodes]. Optional gap, align, justify, minWidth (grid), maxHeight (scroll), title (card), labels (tabs: one per child), label (popover: its button), submitLabel (form, event "submit"), size (spacer).
@@ -315,5 +315,9 @@ Every node has "type" and may have "when" (show only if true), "repeat" ({"$": "
 Values are literals or bindings: {"$": "state.x"}, {"$": "data.rows"}, {"$": "item.name"}, {"$": "event.value"}; operators {"$op": "eq"|"ne"|"gt"|"gte"|"lt"|"lte"|"and"|"or"|"not"|"add"|"sub"|"mul"|"div"|"concat"|"formatNumber", "args": [...]}.
 Actions: {"do": "set", "path": "state.x", "value": v}, {"do": "toggle", "path": "state.x"}, {"do": "copy", "text": v}, {"do": "open", "url": "https://…"}, {"do": "send", "text": v}. "send" sends the person a message to you from the view, marked as from it, with the view's state; answer it like any message.
 What the person changes is saved into the file's "state" (sfa-artifact --id <id> --print shows it). Data is only what you put in the file: the view cannot fetch anything or load images.
-Example: {"version":1,"state":{"plan":"pro"},"view":{"type":"layout","kind":"card","title":"Choose a plan","children":[{"type":"control","kind":"segmented","bind":{"$":"state.plan"},"options":[{"label":"Basic","value":"basic"},{"label":"Pro","value":"pro"}]},{"type":"control","kind":"button","label":"Use this plan","style":"primary","on":{"click":[{"do":"send","text":{"$op":"concat","args":["Go with ",{"$":"state.plan"}]}}]}}]}}
+Example: {"version":1,"state":{"plan":"pro"},"view":{"type":"layout","kind":"card","title":"Choose a plan","children":[{"type":"control","kind":"segmented","bind":{"$":"state.plan"},"options":[{"label":"Basic","value":"basic"},{"label":"Pro","value":"pro"}]},{"type":"control","kind":"button","label":"Use this plan","style":"primary","on":{"click":[{"do":"send","text":{"$op":"concat","args":["Go with ",{"$":"state.plan"}]}}]}}]}}`;
+
+export const GENUI_GUIDANCE = `<genui_guidance>
+A GenUI view is a small interactive piece shown inline in the chat: a comparison, a form, a table to sort, a chart, a formula, choices to pick from. Write and show it in ONE command: sfa-artifact genui/plan-options.json --title "Plan options" --content '<the JSON>' (or pipe it in with --stdin). "genui/" there is always SF Agents' own view folder: it exists, you need no workspace access to it, so don't look for it, list folders or mkdir first. sfa-artifact checks the view and lists any mistakes; fix them and run the same command again. To change a view: sfa-artifact --id <id> --content '<the whole new JSON>'. To see what the person picked: sfa-artifact --id <id> --print. In cmd.exe, put the JSON in double quotes, write each " inside it as \\", and write & | < > ^ % inside strings as JSON escapes (\\u0026 \\u007c \\u003c \\u003e \\u005e \\u0025). Use a view when the person will interact with it or it shows data better than prose; use plain chat for everything else. Whole apps belong in an .html artifact.
+Before writing a view, run \`sfa-artifact --help genui\` once for the format (nodes, bindings, actions, an example).
 </genui_guidance>`;
