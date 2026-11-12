@@ -18,6 +18,8 @@ export { LinuxSensorClient } from './linux-sensors.js';
 export { acquirePrivileges, runElevatedWindows, winArg } from './privileges.js';
 export type { Privileges, ElevatedStep } from './privileges.js';
 export { describeCall, displayItems, displaySections } from './display.js';
+export { switchNote, accessChanges } from './agent-switch.js';
+export type { SwitchSide } from './agent-switch.js';
 export type { DisplayItem, DisplayArtifact, DisplayApproval, DisplayAttachment, DisplaySection } from './display.js';
 export { FileService, FileError, typeOf, explain } from './files.js';
 export { pickNativeFolder, runFolderDialog } from './folder-dialog.js';

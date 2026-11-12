@@ -299,6 +299,7 @@ export function displayItems(
   }
   const roots = replyRoots(state);
   const chat = chatEffects(state);
+  let lastAgent: string | undefined;
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
@@ -334,6 +335,10 @@ export function displayItems(
           items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
         }
       }
+    } else if (record.kind === 'run_start' && record.parentRun === undefined) {
+      // The person handed the conversation to another agent.
+      if (lastAgent !== undefined && record.agent !== lastAgent) items.push({ kind: 'notice', id: `n${record.seq}`, seq: record.seq, time: record.time, text: `Switched to ${record.agent} (${record.model})` });
+      lastAgent = record.agent;
     } else if (record.kind === 'context_reset') {
       items.push({ kind: 'notice', id: `n${record.seq}`, seq: record.seq, time: record.time, text: 'Context cleared' });
     } else if (record.kind === 'run_end' && record.status !== 'GOAL' && state.runs.get(record.run)?.start?.parentRun === undefined) {

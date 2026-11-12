@@ -77,6 +77,8 @@ interface Segment {
   /** Questions the agent asked the person in this step. */
   questions?: Question[];
   answered?: boolean;
+  /** An inline reply's text: the message whose reply thread it belongs to. */
+  replyTo?: string;
 }
 
 /** Something in the chat that Ctrl+↑ can pick: its lines, from the top. */
@@ -1407,7 +1409,11 @@ export class Tui {
         }
         if (seg.kind === 'text') {
           // Finished text only (the reply arrives whole), as on the pages.
-          if (i < segs.length - 1 && seg.text.trim()) out.push('', color.magenta(color.bold(this.agent?.id ?? 'agent')), ...indent(wrap(clean(seg.text), w)));
+          if (i < segs.length - 1 && seg.text.trim()) {
+            // An inline reply hangs off its thread's line, as stored replies do.
+            const bar = seg.replyTo ? color.dim('│ ') : '';
+            out.push('', `${bar}${color.magenta(color.bold(this.agent?.id ?? 'agent'))}`, ...indent(wrap(clean(seg.text), w - textWidth(bar)), `${bar}  `));
+          }
         } else if (!seg.hidden) {
           const at = out.length;
           out.push(this.activityLine(seg, w));

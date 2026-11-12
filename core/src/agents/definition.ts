@@ -118,7 +118,6 @@ export interface AgentDefinition {
     sectionsPercent?: number;
   };
   limits?: {
-    maxTurns?: number;
     timeoutSeconds?: number;
     toolTimeoutSeconds?: number;
     shellTimeoutSeconds?: number;
@@ -488,8 +487,8 @@ export function parseAgentDefinition(raw: unknown, file: string, agentName?: str
       'webRequests',
       'viewImages',
     ]);
+    // "maxTurns" is still accepted in older agent files, and ignored: there is no turn limit.
     limits = {
-      maxTurns: c.integer(l['maxTurns'], 'limits.maxTurns', 1, 500),
       timeoutSeconds: c.integer(l['timeoutSeconds'], 'limits.timeoutSeconds', 1, 24 * 3600),
       toolTimeoutSeconds: c.integer(l['toolTimeoutSeconds'], 'limits.toolTimeoutSeconds', 1, 24 * 3600),
       shellTimeoutSeconds: c.integer(l['shellTimeoutSeconds'], 'limits.shellTimeoutSeconds', 1, 24 * 3600),
