@@ -47,9 +47,26 @@ const smooth = (a, b, v) => {
 
 // ------------------------------------------------------------------ insets
 
+// Insets and the viewport are read every animation frame, right after the
+// sheet's styles were written: reading a probe's box or visualViewport.height
+// there forces a synchronous layout each frame. They only change on a
+// resize (rotation, the keyboard, a window resize), so they are cached until
+// one. These listeners are added at load, before any sheet's own relayout.
 let probes = {};
+let insetCache = {};
+let viewportCache = null;
+if (typeof window !== 'undefined') {
+  const reset = () => {
+    insetCache = {};
+    viewportCache = null;
+  };
+  addEventListener('resize', reset);
+  addEventListener('orientationchange', reset);
+  window.visualViewport?.addEventListener('resize', reset);
+}
 function inset(side) {
   if (typeof window !== 'undefined' && side === 'top' && typeof window.__sfSafeTop === 'number') return window.__sfSafeTop;
+  if (side in insetCache) return insetCache[side];
   let p = probes[side];
   if (!p?.isConnected) {
     p = el('div');
@@ -57,7 +74,7 @@ function inset(side) {
     document.body.append(p);
     probes[side] = p;
   }
-  return p.getBoundingClientRect().height;
+  return (insetCache[side] = p.getBoundingClientRect().height);
 }
 
 /** The safe-area inset (the status bar, the home indicator) in px. */
@@ -202,7 +219,12 @@ export function createSheet(o = {}) {
   let opaque = 0;
   let sheetRGB = [242, 242, 247];
 
-  const sourceRect = () => {
+  // The source button does not move while the sheet springs: read its box
+  // once per animation, drag or resize, not on every frame (each read comes
+  // right after the sheet's style writes and would force a layout).
+  let sourceCache = null;
+  const sourceRect = () => (sourceCache ??= readSource());
+  const readSource = () => {
     const s = o.source;
     if (!s) return {left: innerWidth / 2 - 22, top: innerHeight - 70, width: 44, height: 44, radius: 22};
     const r = s instanceof Element ? s.getBoundingClientRect() : s;
@@ -211,7 +233,8 @@ export function createSheet(o = {}) {
   };
 
   function viewport() {
-    return {W: innerWidth, H: visualViewport?.height ?? innerHeight};
+    if (!viewportCache) viewportCache = {W: innerWidth, H: visualViewport?.height ?? innerHeight};
+    return viewportCache;
   }
 
   /** The keyframes: rest, medium, large (for this edge). */
@@ -323,6 +346,16 @@ export function createSheet(o = {}) {
     body.style.opacity = String(bodyIn);
     edgeFade.style.opacity = String(bodyIn * opaque);
     body.style.visibility = bodyIn < 0.02 ? 'hidden' : 'visible';
+    // Where the header and footer are (viewport px), from what was just
+    // written, so the glass bands need no layout read.
+    const innerTop = edge === 'top' ? Math.max(0, -(rect.top + shift)) : 0;
+    const top0 = rect.top + shift + innerTop;
+    chromeBands = [];
+    if (headH > 0) chromeBands.push({top: top0 + headTop, bottom: top0 + headTop + headH});
+    if (footH > 0) {
+      const b = top0 + Math.max(0, visibleH) - bottomInset;
+      chromeBands.push({top: b - footH, bottom: b});
+    }
     edgeFade.style.top = '0px';
     edgeFade.style.height = `${bodyTop + 18}px`;
     // The attached bar sheet's field keeps room for the handle.
@@ -341,16 +374,23 @@ export function createSheet(o = {}) {
     window.dispatchEvent(new CustomEvent('sfsheet', {detail: {sheet: api, t, rect}}));
   }
 
+  let chromeBands = [];
+  let lastCover = '';
+  let lastChrome = '';
+  const bandKey = (list) => list.map((b) => `${Math.round(b.top)},${Math.round(b.bottom)}`).join(';');
   function coverBands() {
     const bands = [{top: rect.top + (edge === 'bottom' ? drop : -drop), bottom: rect.top + rect.height + (edge === 'bottom' ? drop : -drop)}];
-    layer.cover(api, bands);
-    if (!glassHost) return;
-    const rects = [];
-    for (const n of [headEl, footEl]) {
-      const r = n.getBoundingClientRect();
-      if (r.height) rects.push({top: r.top, bottom: r.bottom});
+    // Unchanged bands (a bar morphing in place, a settled frame) need no repaint of the backdrop.
+    const coverKey = bandKey(bands);
+    if (coverKey !== lastCover) {
+      lastCover = coverKey;
+      layer.cover(api, bands);
     }
-    glassHost.bands(rects);
+    if (!glassHost) return;
+    const chromeKey = bandKey(chromeBands);
+    if (chromeKey === lastChrome) return;
+    lastChrome = chromeKey;
+    glassHost.bands(chromeBands);
   }
 
   function detentFor(v) {
@@ -404,6 +444,7 @@ export function createSheet(o = {}) {
   /** Springs to `target` t (and drop), from a finger velocity in t/s and px/s. */
   function animateTo(target, {drop: d = 0, velocity = 0, dropVelocity = 0, step = MOTION, done} = {}) {
     cancelAnimationFrame(raf);
+    sourceCache = null;
     if (reducedMotion.matches) {
       t = target;
       drop = d;
@@ -534,6 +575,7 @@ export function createSheet(o = {}) {
   function beginDrag(y) {
     cancelAnimationFrame(raf);
     anim = null;
+    sourceCache = null;
     const k = keyframes();
     drag = {y0: y, free0: freeEdge(k, t) + (edge === 'bottom' ? drop : -drop), t0: t, samples: [{y, at: now()}]};
     panel.classList.add('dragging');
@@ -827,6 +869,7 @@ export function createSheet(o = {}) {
   });
 
   const relayout = () => {
+    sourceCache = null;
     if (isOpen) apply();
   };
   addEventListener('resize', relayout);

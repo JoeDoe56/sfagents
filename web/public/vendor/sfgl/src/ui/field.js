@@ -77,6 +77,7 @@ export function createField(o = {}) {
   api.setTrailing(o.trailing);
 
   let lastHeight = 0;
+  let oneLine = true; // the text fits on one line at the last fit
   function fit() {
     input.style.height = 'auto';
     const style = getComputedStyle(input);
@@ -85,6 +86,7 @@ export function createField(o = {}) {
     const maxHeight = line * (o.maxRows ?? 6) + pad;
     input.style.height = `${Math.min(input.scrollHeight, maxHeight)}px`;
     input.style.overflowY = input.scrollHeight > maxHeight ? 'auto' : 'hidden';
+    oneLine = input.scrollHeight <= line + pad + 1;
     const h = node.offsetHeight;
     if (h !== lastHeight) {
       lastHeight = h;
@@ -110,6 +112,20 @@ export function createField(o = {}) {
   });
   api.fit = fit;
   requestAnimationFrame(fit);
-  new ResizeObserver(() => fit()).observe(node);
+  // Only a new width can rewrap the text. Height changes are fit's own
+  // doing, and re-fitting on them would force a layout every frame of a
+  // sheet animation that resizes the field's container. A width change
+  // cannot rewrap an empty field, nor one line of text that gets more room,
+  // so those skip the measuring (a bar sheet widens its field every frame).
+  let lastWidth = -1;
+  new ResizeObserver((entries) => {
+    const w = Math.round(entries[entries.length - 1].contentRect.width);
+    if (w === lastWidth) return;
+    const wider = w > lastWidth;
+    const first = lastWidth < 0;
+    lastWidth = w;
+    if (!first && (!input.value || (oneLine && wider))) return;
+    fit();
+  }).observe(node);
   return api;
 }
