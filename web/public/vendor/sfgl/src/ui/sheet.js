@@ -36,7 +36,10 @@ import {createBar} from './bar.js';
 import {createButton} from './button.js';
 import {confirmDiscard} from './dialog.js';
 
-const MOTION = spring(0.39, 0.81); // Apple Maps' sheet spring, fitted to a recording
+// Apple Maps' sheet spring, fitted to a 60 fps screen recording: it eases in
+// over ~20 frames and stops where it lands. The earlier 0.39/0.81 overshot
+// ~7px on a full-height move and crept back for half a second.
+const MOTION = spring(0.32, 0.9);
 const CLOSE_MOTION = spring(0.34, 0.92);
 const ROW_TOP = 13;
 const OVER = 1000; // px of extra height per unit of t above the large detent
