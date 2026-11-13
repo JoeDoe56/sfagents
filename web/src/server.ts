@@ -63,6 +63,7 @@ import {
   BrightDataWeb,
   parseOrigin,
   chatEffects,
+  chatEffectOf,
   readJsonFile,
   writeFileAtomic,
   AgentFormError,
@@ -104,6 +105,7 @@ import type { Privileges } from './privileges.js';
 import { runningVersion } from './version.js';
 import { AgentSettingsStore, EFFORT_LEVELS, ModelWindows, parseEffort } from './agent-settings.js';
 import { describeApproval, describeCall, displayArtifact, displayAttachment, displayItems, displaySections, messageToUser, replyRoots, type DisplayApproval, type DisplayQuestion, type DisplayItem } from './display.js';
+import { switchNote, type SwitchSide } from './agent-switch.js';
 import { isEmoji, ReactionStore } from './reactions.js';
 import { LogBook } from './logs.js';
 import { changedRepos, repoDiff, type RepoChanges } from './diffs.js';
@@ -234,6 +236,8 @@ interface LiveSegment {
   /** Questions for the person (a card); answered once they write. */
   questions?: DisplayQuestion[];
   answered?: boolean;
+  /** An inline reply's text: the first message of the reply thread it belongs to. */
+  replyTo?: string;
 }
 
 interface LiveRun {
@@ -383,6 +387,8 @@ export class WebServer {
   /** When the person last used a page or the terminal, and the agent message they have seen. */
   private lastActivity = 0;
   private seen: { id: string; time: string } | null = null;
+  /** The agent (and model) that replied before the person switched; told to the next run. */
+  private switchFrom: SwitchSide | null = null;
   private closing = false;
   private folderDialog?: AbortController;
   readonly logs: LogBook;
@@ -1977,7 +1983,14 @@ export class WebServer {
     if (body.agent !== undefined) {
       if (typeof body.agent !== 'string' || !this.runtime.tree.byId.has(body.agent)) throw new HttpError(400, `No agent named "${String(body.agent)}".`);
       if (body.agent !== this.session.node.id && (this.session.running || this.live)) throw new HttpError(409, 'Wait for the current reply to finish before changing the agent.');
+      const before = body.agent !== this.session.node.id ? this.switchSide() : undefined;
       this.selectAgent(body.agent);
+      if (before) {
+        // The first agent since the last reply is what the next one is compared with.
+        this.switchFrom ??= before;
+        const now = this.switchSide();
+        this.broadcast('notice', { text: `Switched to ${now.node.definition.name ?? now.node.id} (${now.model})`, level: 'info' });
+      }
     }
     if (body.account !== undefined) {
       const choice = this.accountChoices(this.session.node).find((a) => typeof body.account === 'string' && a.name.toLowerCase() === body.account.toLowerCase());
@@ -2669,6 +2682,18 @@ export class WebServer {
     return undefined;
   }
 
+  private switchSide(): SwitchSide {
+    const info = this.agentInfo();
+    return { node: this.session.node, model: info.model, account: info.account };
+  }
+
+  /** The switch note for the run starting now (once), when the agent or its model changed. */
+  private takeSwitchNote(): string | undefined {
+    const from = this.switchFrom;
+    this.switchFrom = null;
+    return from ? switchNote(from, this.switchSide()) : undefined;
+  }
+
   /** What the agent is told about its last reply: read, or only delivered. */
   private receiptNote(): string | undefined {
     const last = this.lastAgentMessage();
@@ -2704,7 +2729,7 @@ export class WebServer {
           this.markRead(record.id);
         }
       },
-      note: () => this.receiptNote(),
+      note: () => [this.takeSwitchNote(), this.receiptNote()].filter(Boolean).join('\n') || undefined,
       waitForInput: (signal) => this.waitForInput(signal),
     });
     // The generator records the user message synchronously on the first next().
@@ -2865,6 +2890,20 @@ export class WebServer {
       case 'tool_request': {
         // keep_section only confirms the topic, and a reaction shows as its badge: neither is worth a line in the chat.
         if (event.name === 'keep_section' || (event.name === 'message' && event.args['action'] === 'react' && event.args['message_id'] !== undefined)) return;
+        // An inline reply mid-turn: a finished bubble in its message's reply thread, not a "Sent a message" step.
+        const effect = root && event.name === 'message' ? chatEffectOf(event.name, JSON.stringify(event.args)) : undefined;
+        if (effect && 'reply' in effect && effect.reply.text.trim()) {
+          const id = `${event.agentPath.join('/')}:${event.callId}`;
+          const replyTo = replyRoots(this.conversation.state).messages.get(effect.reply.target) ?? effect.reply.target;
+          const before: LiveSegment = { kind: 'activity', id: `${id}:before`, text: '', status: 'ok', hidden: true };
+          const text: LiveSegment = { kind: 'text', id: `${id}:reply`, text: effect.reply.text, replyTo };
+          const step: LiveSegment = { kind: 'activity', id, text: 'Replied inline', status: 'running', hidden: true };
+          for (const segment of [before, text, step]) {
+            live.segments.push(segment);
+            this.broadcast('activity', { run: live.id, segment });
+          }
+          return;
+        }
         // A message to the person mid-turn: a finished bubble now (the hidden step after it ends the text, so later text starts a new one).
         const said = root ? messageToUser(event.name, JSON.stringify(event.args)) : undefined;
         if (said) {

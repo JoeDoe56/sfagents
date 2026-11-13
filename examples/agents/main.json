@@ -21,7 +21,6 @@
     ]
   },
   "limits": {
-    "maxTurns": 40,
     "timeoutSeconds": 1800
   }
 }

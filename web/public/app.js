@@ -416,7 +416,7 @@ function entries() {
     for (const seg of state.live.segments) {
       if (seg.kind === 'user') pushUser(push, msgEntry(seg.item, 'out'));
       else if (seg.kind === 'text') {
-        if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
+        if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root: seg.replyTo ?? root });
       } else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
     }
     if (!state.approvals.length) push({ key: `typing:${state.live.id}`, type: 'typing', root });
@@ -460,10 +460,9 @@ function threadEntries(root) {
   for (const p of state.pending) if (p.replyTo === root) out.push({ ...msgEntry(p, 'out'), key: p.id });
   for (const o of state.outbox) if (o.root === root) out.push({ key: o.key, type: 'msg', side: 'out', text: o.text, root, pending: true });
   for (const seg of state.live?.segments ?? []) if (seg.kind === 'user' && seg.item.replyTo === root) out.push(msgEntry(seg.item, 'out'));
-  if (state.live?.replyTo === root) {
-    for (const seg of liveTexts()) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
-    if (!state.approvals.length) out.push({ key: `typing:${state.live.id}`, type: 'typing', root });
-  }
+  // The live run's texts in this thread: all of them when the run answers it, and inline replies to it from any run.
+  for (const seg of liveTexts()) if ((seg.replyTo ?? state.live.replyTo) === root) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
+  if (state.live?.replyTo === root && !state.approvals.length) out.push({ key: `typing:${state.live.id}`, type: 'typing', root });
   for (const e of out) e.root = undefined; // no thread lines inside the thread itself
   return decorate(withReceipt(out));
 }
@@ -497,6 +496,7 @@ function threaded(out) {
   const counts = new Map();
   for (const it of state.items) if (it.replyTo && (it.kind === 'user' || it.kind === 'assistant')) counts.set(it.replyTo, (counts.get(it.replyTo) ?? 0) + 1);
   for (const o of state.outbox) if (o.root) counts.set(o.root, (counts.get(o.root) ?? 0) + 1);
+  for (const seg of liveTexts()) if (seg.replyTo) counts.set(seg.replyTo, (counts.get(seg.replyTo) ?? 0) + 1);
   const result = [];
   let open = null; // the thread whose line is running
   const label = (n) => `${n} ${n === 1 ? 'Reply' : 'Replies'}`;
