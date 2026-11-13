@@ -1086,7 +1086,11 @@ export class Tui {
       case '/quit':
         return this.quit();
       case '/help':
-        return this.info(HELP);
+        // Running /help again closes it.
+        if (this.infoKey === 'help') return this.clearInfo();
+        this.info(HELP);
+        this.infoKey = 'help';
+        return;
       case '/tree':
         return this.info(describeTree(server.tree).split('\n'));
       case '/agent': {
@@ -1174,9 +1178,17 @@ export class Tui {
 
   /** Lines shown in the chat until the next message (this terminal only, like a page's sheet). */
   private infoLines: string[] = [];
+  /** Which command's text infoLines holds, so the same command can close it. */
+  private infoKey = '';
   private info(lines: string[]): void {
     this.infoLines = lines.map(clean);
+    this.infoKey = '';
     this.scroll.Chat = 0;
+    this.schedule();
+  }
+  private clearInfo(): void {
+    this.infoLines = [];
+    this.infoKey = '';
     this.schedule();
   }
 
