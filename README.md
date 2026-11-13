@@ -128,7 +128,6 @@ Every `.json` file in the `agents` folder is an agent, named by its file name (`
   "artifacts": { "access": "create" },
   "context": { "maxInputTokens": 48000, "recentExchanges": 12 },
   "limits": {
-    "maxTurns": 40,
     "timeoutSeconds": 1800,
     "toolTimeoutSeconds": 600,
     "shellTimeoutSeconds": 120,

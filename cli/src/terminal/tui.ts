@@ -66,17 +66,23 @@ type Item =
   | { kind: 'questions'; id: string; seq?: number; time: string; agent: string; questions: Question[]; answered: boolean };
 
 interface Segment {
-  kind: 'text' | 'activity';
+  kind: 'text' | 'activity' | 'user';
+  /** A message the person sent while the run worked: it shows where the agent took it. */
+  item?: Extract<Item, { kind: 'user' }>;
   id: string;
   text: string;
   status?: string;
-  /** A step shown as something else (a message to the person). */
+  /** A step shown as something else (a message to the person). Text: a failed send. */
   hidden?: boolean;
+  /** Text the model wrote outside message: not shown while the run works. */
+  plain?: boolean;
   thread?: string;
   artifact?: string;
   /** Questions the agent asked the person in this step. */
   questions?: Question[];
   answered?: boolean;
+  /** An inline reply's text: the message whose reply thread it belongs to. */
+  replyTo?: string;
 }
 
 /** Something in the chat that Ctrl+↑ can pick: its lines, from the top. */
@@ -384,7 +390,11 @@ export class Tui {
       case 'user': {
         const item = data.item as Item;
         if (typeof data.pending === 'string') this.pending = this.pending.filter((p) => p.id !== data.pending);
-        if (!this.items.some((i) => i.id === item.id)) this.items.push(item);
+        // Taken while the agent works: it shows after the steps so far, as on the pages.
+        const segment = data.segment as Segment | undefined;
+        if (segment && this.live && this.live.id === data.run) {
+          if (!this.live.segments.some((s) => s.id === segment.id)) this.live.segments.push(segment);
+        } else if (!this.items.some((i) => i.id === item.id)) this.items.push(item);
         this.scroll.Chat = 0;
         break;
       }
@@ -395,8 +405,9 @@ export class Tui {
         if (!this.live || this.live.id !== data.run) return;
         const segs = this.live.segments;
         const last = segs[segs.length - 1];
-        if (last && last.kind === 'text') last.text += String(data.text);
-        else segs.push({ kind: 'text', id: `t${segs.length}`, text: String(data.text) });
+        const plain = data.plain === true;
+        if (last && last.kind === 'text' && !!last.plain === plain) last.text += String(data.text);
+        else segs.push({ kind: 'text', id: `t${segs.length}`, text: String(data.text), ...(plain ? { plain: true } : {}) });
         // A reply is shown once it is finished, as on the pages.
         return;
       }
@@ -404,6 +415,11 @@ export class Tui {
         if (!this.live || this.live.id !== data.run) return;
         this.live.segments.push(data.segment as Segment);
         break;
+      case 'segment_hidden': {
+        const seg = this.live && this.live.id === data.run ? this.live.segments.find((s) => s.id === data.id) : undefined;
+        if (seg) seg.hidden = true;
+        break;
+      }
       case 'activity_end': {
         const seg = this.live && this.live.id === data.run ? this.live.segments.find((s) => s.id === data.id) : undefined;
         if (seg) seg.status = String(data.status);
@@ -1320,7 +1336,7 @@ export class Tui {
     if (this.more) out.push(color.dim('  … earlier messages: Ctrl+↑ past the first one loads them (or /search, /topics)'), '');
     let lastTime = 0;
     let lastUser: string | undefined;
-    for (const it of [...this.items, ...this.pending]) if (it.kind === 'user') lastUser = it.id;
+    for (const it of [...this.items, ...(this.live?.segments ?? []).flatMap((s) => (s.item ? [s.item] : [])), ...this.pending]) if (it.kind === 'user') lastUser = it.id;
     const badge = (id: string) => {
       const r = [this.reactions[id], this.agentReactions[id]].filter(Boolean).join('');
       return r ? ` ${r}` : '';
@@ -1405,9 +1421,23 @@ export class Tui {
           out.push(...questionLines(this.agent?.id ?? 'The agent', seg.questions, !!seg.answered, w));
           mark({ id: `live:${seg.id}`, kind: 'questions', text: seg.questions.map((q) => q.question).join('\n'), questions: seg.answered ? undefined : seg.questions, agent: this.agent?.id }, from);
         }
-        if (seg.kind === 'text') {
+        if (seg.kind === 'user' && seg.item) {
+          const it = seg.item;
+          const thread = root(it);
+          quote(it);
+          const at = out.length;
+          out.push('', `${thread}${color.cyan(color.bold('You'))} ${color.dim(timeText(it.time))}${badge(it.id)}`);
+          out.push(...indent(wrap(clean(it.text), w - textWidth(thread)), `${thread}  `));
+          for (const a of it.attachments ?? []) out.push(`${thread}  ${color.dim(`📎 ${clean(a.name)} (${bytesText(a.size)})`)}`);
+          if (it.id === lastUser) out.push(`${thread}  ${color.dim(this.read?.id === it.id ? `Read ${timeText(this.read.time)}` : 'Delivered')}`);
+          mark({ id: it.id, kind: 'user', text: it.text, replies: replies.get(it.id) }, at);
+        } else if (seg.kind === 'text') {
           // Finished text only (the reply arrives whole), as on the pages.
-          if (i < segs.length - 1 && seg.text.trim()) out.push('', color.magenta(color.bold(this.agent?.id ?? 'agent')), ...indent(wrap(clean(seg.text), w)));
+          if (i < segs.length - 1 && !seg.plain && !seg.hidden && seg.text.trim()) {
+            // An inline reply hangs off its thread's line, as stored replies do.
+            const bar = seg.replyTo ? color.dim('│ ') : '';
+            out.push('', `${bar}${color.magenta(color.bold(this.agent?.id ?? 'agent'))}`, ...indent(wrap(clean(seg.text), w - textWidth(bar)), `${bar}  `));
+          }
         } else if (!seg.hidden) {
           const at = out.length;
           out.push(this.activityLine(seg, w));

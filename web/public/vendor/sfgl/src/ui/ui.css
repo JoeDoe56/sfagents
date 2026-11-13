@@ -468,7 +468,8 @@ button.sf-row, .sf-row.tappable { cursor: pointer; }
 .sf-sheet-title { text-align: center; font: 600 17px/22px var(--sf-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: grid; align-content: center; height: 100%; padding: 0 8px; }
 .sf-sheet-grab { position: absolute; top: 0; left: 50%; width: 120px; height: 22px; margin-left: -60px; z-index: 5; cursor: grab; touch-action: none; outline: none; }
 .sf-sheet-grab[hidden] { display: none; }
-.sf-sheet-handle { width: 36px; height: 5px; margin: 5px auto 0; border-radius: 3px; background: var(--sf-label-3); }
+/* The grabber as in Apple Maps' sheet (measured from a 3x screen recording): 58×4 pt, 5 pt below the edge. */
+.sf-sheet-handle { width: 58px; height: 4px; margin: 5px auto 0; border-radius: 2px; background: var(--sf-label-3); }
 .sf-sheet.dragging .sf-sheet-grab { cursor: grabbing; }
 
 .sf-sheet-scrim[data-blur] { -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }

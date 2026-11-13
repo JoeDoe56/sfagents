@@ -97,7 +97,7 @@ describe('terminal interface', () => {
     fs.writeFileSync(notes, 'Fence paint: blue, two coats.\n');
     const artifact = conversation.linkArtifact({ title: 'Paint plan', file: notes });
     const script: Script = (req, call) => {
-      if (call === 0) return { toolCalls: [{ name: 'message', args: { to: 'user', text: 'One thing first.', questions: [{ question: 'Which color?', options: ['red', 'blue'] }], wait: false } }] };
+      if (call === 0) return { toolCalls: [{ name: 'message', args: { to: 'user', text: 'One thing first.', questions: [{ question: 'Which color?', options: ['red', 'blue'] }], wait: false, section: 'keep' } }] };
       if (call === 1) return { text: 'Waiting for you.' };
       const last = req.messages[req.messages.length - 1] as { content: unknown };
       return { text: `Got: ${typeof last.content === 'string' ? last.content : JSON.stringify(last.content)}` };

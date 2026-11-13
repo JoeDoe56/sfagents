@@ -143,16 +143,6 @@ describe('single agent loop', () => {
     assert.equal(prompts, 0);
   });
 
-  test('stops at the turn budget', async () => {
-    const { runtime } = runtimeWith({ limits: { maxTurns: 3 } }, () => ({
-      toolCalls: [{ name: 'shell', args: { command: catFile('notes.txt') } }],
-    }));
-    const result = await runtime.createSession().run('loop forever');
-    assert.equal(result.status, AgentTerminateMode.MAX_TURNS);
-    assert.equal(result.turns, 3);
-    assert.match(result.error!, /limit of 3 model turns/);
-  });
-
   test('surfaces provider errors', async () => {
     const { runtime } = runtimeWith({}, () => ({ error: new ProviderError('Model request failed (HTTP 401): bad key', 401) }));
     const { events, onEvent } = collectEvents();

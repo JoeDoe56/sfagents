@@ -299,6 +299,19 @@ export function displayItems(
   }
   const roots = replyRoots(state);
   const chat = chatEffects(state);
+  // Runs that spoke to the person through message (a bubble or an inline reply that went through):
+  // their plain text was for SF Agents, not for the person, so the chat leaves it out (the transcript keeps it).
+  const spoke = new Set<string>();
+  for (const m of state.messages) {
+    if (m.role !== 'assistant') continue;
+    for (const c of m.toolCalls ?? []) {
+      if (results.get(`${m.run}:${c.id}`) !== 'ok') continue;
+      if (chat.replies.has(`${m.id}:${c.id}`) || messageToUser(c.name, c.arguments)) spoke.add(m.run);
+    }
+  }
+  // The run shown live: messages the person sent while it worked show among its live steps.
+  let liveRunUser = false;
+  let lastAgent: string | undefined;
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
@@ -309,12 +322,15 @@ export function displayItems(
         items.push({ kind: 'activity', id: m.id, seq: m.seq, time: m.time, text: `${m.agent}: ${clip(text, 80)}`, status: 'ok', agent: m.agent, ...agentThread(m.content, m.agent, m.run, state) });
       } else if (m.role === 'user' && m.event) {
         // A note SF Agents wrote for the person (a reaction): the badge shows it.
+      } else if (m.role === 'user' && m.run === options.hideRun && liveRunUser) {
+        // Shown live, after the steps the agent took before it.
       } else if (m.role === 'user') {
+        if (m.run === options.hideRun) liveRunUser = true;
         const replyTo = roots.messages.get(m.id);
         items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment), ...(options.thread ? { agent: m.agent } : {}), ...(replyTo ? { replyTo } : {}), ...(m.view ? { view: m.view } : {}) });
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {
         const replyTo = roots.runs.get(m.run);
-        if (m.content.trim()) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
+        if (m.content.trim() && !spoke.has(m.run)) items.push({ kind: 'assistant', id: m.id, seq: m.seq, time: m.time, text: m.content, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
         for (const c of m.toolCalls ?? []) {
           const effect = chatEffectOf(c.name, c.arguments);
           if (c.name === 'keep_section' || (effect && 'react' in effect)) continue; // the topic; a reaction shows as its badge
@@ -327,6 +343,9 @@ export function displayItems(
           // A message to the person mid-turn: a bubble like any reply.
           const said = messageToUser(c.name, c.arguments);
           if (said) {
+            // A send that failed (invalid parameters, denied) never reached the person.
+            const status = results.get(`${m.run}:${c.id}`);
+            if (status !== undefined && status !== 'ok') continue;
             if (said.text) items.push({ kind: 'assistant', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: said.text, agent: m.agent, ...(replyTo ? { replyTo } : {}) });
             if (said.questions) items.push({ kind: 'questions', id: `${m.id}:${c.id}:q`, seq: m.seq, time: m.time, agent: m.agent, questions: said.questions, answered: false });
             continue;
@@ -334,6 +353,10 @@ export function displayItems(
           items.push({ kind: 'activity', id: `${m.id}:${c.id}`, seq: m.seq, time: m.time, text: describeCall(c.name, c.arguments), status: results.get(`${m.run}:${c.id}`) ?? 'unknown', ...threadOf(c.name, c.arguments, m.agent), ...artifactOf(c.name, c.arguments, created.get(`${m.run}:${c.id}`)) });
         }
       }
+    } else if (record.kind === 'run_start' && record.parentRun === undefined) {
+      // The person handed the conversation to another agent.
+      if (lastAgent !== undefined && record.agent !== lastAgent) items.push({ kind: 'notice', id: `n${record.seq}`, seq: record.seq, time: record.time, text: `Switched to ${record.agent} (${record.model})` });
+      lastAgent = record.agent;
     } else if (record.kind === 'context_reset') {
       items.push({ kind: 'notice', id: `n${record.seq}`, seq: record.seq, time: record.time, text: 'Context cleared' });
     } else if (record.kind === 'run_end' && record.status !== 'GOAL' && state.runs.get(record.run)?.start?.parentRun === undefined) {

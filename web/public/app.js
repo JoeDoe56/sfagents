@@ -372,7 +372,8 @@ function rootOf(id) {
 function liveTexts() {
   if (!state.live) return [];
   const segs = state.live.segments;
-  return segs.filter((seg, i) => seg.kind === 'text' && i < segs.length - 1 && seg.text.trim());
+  // The model's own text (plain) is for SF Agents; a failed send (hidden) never reached the person.
+  return segs.filter((seg, i) => seg.kind === 'text' && !seg.plain && !seg.hidden && i < segs.length - 1 && seg.text.trim());
 }
 
 const msgEntry = (it, side) => ({
@@ -413,8 +414,9 @@ function entries() {
     const root = state.live.replyTo;
     const shown = new Set(liveTexts());
     for (const seg of state.live.segments) {
-      if (seg.kind === 'text') {
-        if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
+      if (seg.kind === 'user') pushUser(push, msgEntry(seg.item, 'out'));
+      else if (seg.kind === 'text') {
+        if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root: seg.replyTo ?? root });
       } else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
     }
     if (!state.approvals.length) push({ key: `typing:${state.live.id}`, type: 'typing', root });
@@ -457,10 +459,10 @@ function threadEntries(root) {
   }
   for (const p of state.pending) if (p.replyTo === root) out.push({ ...msgEntry(p, 'out'), key: p.id });
   for (const o of state.outbox) if (o.root === root) out.push({ key: o.key, type: 'msg', side: 'out', text: o.text, root, pending: true });
-  if (state.live?.replyTo === root) {
-    for (const seg of liveTexts()) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
-    if (!state.approvals.length) out.push({ key: `typing:${state.live.id}`, type: 'typing', root });
-  }
+  for (const seg of state.live?.segments ?? []) if (seg.kind === 'user' && seg.item.replyTo === root) out.push(msgEntry(seg.item, 'out'));
+  // The live run's texts in this thread: all of them when the run answers it, and inline replies to it from any run.
+  for (const seg of liveTexts()) if ((seg.replyTo ?? state.live.replyTo) === root) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
+  if (state.live?.replyTo === root && !state.approvals.length) out.push({ key: `typing:${state.live.id}`, type: 'typing', root });
   for (const e of out) e.root = undefined; // no thread lines inside the thread itself
   return decorate(withReceipt(out));
 }
@@ -494,6 +496,7 @@ function threaded(out) {
   const counts = new Map();
   for (const it of state.items) if (it.replyTo && (it.kind === 'user' || it.kind === 'assistant')) counts.set(it.replyTo, (counts.get(it.replyTo) ?? 0) + 1);
   for (const o of state.outbox) if (o.root) counts.set(o.root, (counts.get(o.root) ?? 0) + 1);
+  for (const seg of liveTexts()) if (seg.replyTo) counts.set(seg.replyTo, (counts.get(seg.replyTo) ?? 0) + 1);
   const result = [];
   let open = null; // the thread whose line is running
   const label = (n) => `${n} ${n === 1 ? 'Reply' : 'Replies'}`;
@@ -1371,7 +1374,7 @@ function listen() {
     applySnapshot(JSON.parse(e.data));
   });
   stream.addEventListener('user', (e) => {
-    const { item, pending: waited } = JSON.parse(e.data);
+    const { run, item, segment, pending: waited } = JSON.parse(e.data);
     // The bubble shown when it was sent becomes the stored message, in place.
     const was = waited && state.pending.findIndex((p) => p.id === waited);
     if (waited && was >= 0) {
@@ -1381,7 +1384,10 @@ function listen() {
       const sent = state.outbox.findIndex((o) => o.text === item.text);
       if (sent >= 0) sentAs.set(item.id, state.outbox.splice(sent, 1)[0].key);
     }
-    if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
+    // Taken while the agent works: it shows after the steps so far, and later steps come after it.
+    if (segment && state.live?.id === run) {
+      if (!state.live.segments.some((s) => s.id === segment.id)) state.live.segments.push(segment);
+    } else if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
     render();
     requestAnimationFrame(scrollToBottom);
   });
@@ -1405,12 +1411,12 @@ function listen() {
     updateComposer();
   });
   stream.addEventListener('delta', (e) => {
-    const { run, text } = JSON.parse(e.data);
+    const { run, text, plain } = JSON.parse(e.data);
     if (!state.live || state.live.id !== run) return;
     const segs = state.live.segments;
     const last = segs[segs.length - 1];
-    if (last && last.kind === 'text') last.text += text;
-    else segs.push({ kind: 'text', id: `t${segs.length}`, text });
+    if (last && last.kind === 'text' && !!last.plain === !!plain) last.text += text;
+    else segs.push({ kind: 'text', id: `t${segs.length}`, text, ...(plain ? { plain: true } : {}) });
     // Nothing to draw: a reply is shown once it is finished, not as it streams.
     markRead();
   });
@@ -1419,6 +1425,12 @@ function listen() {
     if (!state.live || state.live.id !== run) return;
     state.live.segments.push(segment);
     markRead();
+    render();
+  });
+  stream.addEventListener('segment_hidden', (e) => {
+    const { run, id } = JSON.parse(e.data);
+    const seg = state.live?.id === run ? state.live.segments.find((s) => s.id === id) : null;
+    if (seg) seg.hidden = true;
     render();
   });
   stream.addEventListener('activity_end', (e) => {
@@ -2100,7 +2112,27 @@ drivesEl.addEventListener('keydown', openDrive);
     const want = Math.max(0, Math.round(between - above));
     if (want !== current) toolsRow.style.marginTop = `${want}px`;
   };
-  const obs = new ResizeObserver(() => requestAnimationFrame(align));
+  // The gap only depends on heights. While the sheet animates, the monitor's
+  // width changes every frame; re-aligning then read layout right after the
+  // sheet's style writes and forced a layout per frame.
+  const heights = new Map();
+  let queued = false;
+  const obs = new ResizeObserver((entries) => {
+    let changed = false;
+    for (const e of entries) {
+      const h = Math.round(e.borderBoxSize?.[0]?.blockSize ?? e.contentRect.height);
+      if (heights.get(e.target) !== h) {
+        heights.set(e.target, h);
+        changed = true;
+      }
+    }
+    if (!changed || queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      align();
+    });
+  });
   obs.observe($('monitor'));
   obs.observe(toolsRow);
 }

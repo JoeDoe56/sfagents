@@ -72,7 +72,6 @@ import { ConversationService, STATE_DIR_NAME, type ReplayTarget } from '../conve
 import { buildWorkingContext, contextBreakdown, type ContextBreakdown, type ContextReport, type ContextTool } from '../conversation/context.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 
-export const DEFAULT_MAX_TURNS = 40;
 export const DEFAULT_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_TOOL_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -624,7 +623,6 @@ export class AgentRuntime implements AgentMessenger {
     const systemPrompt = params.stableSystem ? params.stableSystem({ base: buildSystemPrompt(node, activeNames(), undefined, link, features(tools)), full: fullSystem }) : fullSystem;
     if (messages[0]?.role === 'system') messages[0] = { role: 'system', content: systemPrompt };
     else messages.unshift({ role: 'system', content: systemPrompt });
-    const maxTurns = d.limits?.maxTurns ?? DEFAULT_MAX_TURNS;
     const approvals = this.sessionApprovals.get(node.id) ?? new Set<string>();
     this.sessionApprovals.set(node.id, approvals);
 
@@ -643,7 +641,8 @@ export class AgentRuntime implements AgentMessenger {
       messages.push(...arrived);
       return true;
     };
-    while (turns < maxTurns) {
+    // No turn limit: a run ends when the agent finishes, is stopped, or hits its time limit.
+    for (;;) {
       if (signal.aborted) return finish(...stopReason());
       takeInbox();
       turns++;
@@ -789,7 +788,6 @@ export class AgentRuntime implements AgentMessenger {
       if (e instanceof PersistenceFailure) return storageStop(e);
       throw e;
     }
-    return finish(AgentTerminateMode.MAX_TURNS, `Agent "${node.id}" reached its limit of ${maxTurns} model turns before finishing.`);
   }
 
   /**

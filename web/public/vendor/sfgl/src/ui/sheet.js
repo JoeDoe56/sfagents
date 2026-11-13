@@ -36,7 +36,10 @@ import {createBar} from './bar.js';
 import {createButton} from './button.js';
 import {confirmDiscard} from './dialog.js';
 
-const MOTION = spring(0.39, 0.81); // Apple Maps' sheet spring, fitted to a recording
+// Apple Maps' sheet spring, fitted to a 60 fps screen recording: it eases in
+// over ~20 frames and stops where it lands. The earlier 0.39/0.81 overshot
+// ~7px on a full-height move and crept back for half a second.
+const MOTION = spring(0.32, 0.9);
 const CLOSE_MOTION = spring(0.34, 0.92);
 const ROW_TOP = 13;
 const OVER = 1000; // px of extra height per unit of t above the large detent
@@ -47,9 +50,26 @@ const smooth = (a, b, v) => {
 
 // ------------------------------------------------------------------ insets
 
+// Insets and the viewport are read every animation frame, right after the
+// sheet's styles were written: reading a probe's box or visualViewport.height
+// there forces a synchronous layout each frame. They only change on a
+// resize (rotation, the keyboard, a window resize), so they are cached until
+// one. These listeners are added at load, before any sheet's own relayout.
 let probes = {};
+let insetCache = {};
+let viewportCache = null;
+if (typeof window !== 'undefined') {
+  const reset = () => {
+    insetCache = {};
+    viewportCache = null;
+  };
+  addEventListener('resize', reset);
+  addEventListener('orientationchange', reset);
+  window.visualViewport?.addEventListener('resize', reset);
+}
 function inset(side) {
   if (typeof window !== 'undefined' && side === 'top' && typeof window.__sfSafeTop === 'number') return window.__sfSafeTop;
+  if (side in insetCache) return insetCache[side];
   let p = probes[side];
   if (!p?.isConnected) {
     p = el('div');
@@ -57,7 +77,7 @@ function inset(side) {
     document.body.append(p);
     probes[side] = p;
   }
-  return p.getBoundingClientRect().height;
+  return (insetCache[side] = p.getBoundingClientRect().height);
 }
 
 /** The safe-area inset (the status bar, the home indicator) in px. */
@@ -184,7 +204,20 @@ export function createSheet(o = {}) {
   const footer = asBar(o.footer, 'bottom');
   if (header) headEl.append(header.el);
   if (footer) footEl.append(footer.el);
-  const heightOf = (b) => (b ? (b.node ? b.el.offsetHeight : b.height) || 0 : 0);
+  // Header and footer heights, cached: reading offsetHeight in apply() right
+  // after its style writes forced a layout on every frame of a drag or spring.
+  // A ResizeObserver (below) clears the cache when either one changes size.
+  const heights = new Map();
+  const heightOf = (b) => {
+    if (!b) return 0;
+    if (!b.node) return b.height || 0;
+    let h = heights.get(b);
+    if (h === undefined) {
+      h = b.el.offsetHeight || 0;
+      if (b.el.isConnected) heights.set(b, h);
+    }
+    return h;
+  };
 
   // ---------------------------------------------------------------- state
 
@@ -202,7 +235,12 @@ export function createSheet(o = {}) {
   let opaque = 0;
   let sheetRGB = [242, 242, 247];
 
-  const sourceRect = () => {
+  // The source button does not move while the sheet springs: read its box
+  // once per animation, drag or resize, not on every frame (each read comes
+  // right after the sheet's style writes and would force a layout).
+  let sourceCache = null;
+  const sourceRect = () => (sourceCache ??= readSource());
+  const readSource = () => {
     const s = o.source;
     if (!s) return {left: innerWidth / 2 - 22, top: innerHeight - 70, width: 44, height: 44, radius: 22};
     const r = s instanceof Element ? s.getBoundingClientRect() : s;
@@ -211,7 +249,8 @@ export function createSheet(o = {}) {
   };
 
   function viewport() {
-    return {W: innerWidth, H: visualViewport?.height ?? innerHeight};
+    if (!viewportCache) viewportCache = {W: innerWidth, H: visualViewport?.height ?? innerHeight};
+    return viewportCache;
   }
 
   /** The keyframes: rest, medium, large (for this edge). */
@@ -308,7 +347,9 @@ export function createSheet(o = {}) {
     // Header on the attached side; the body scrolls beneath it.
     const headH = heightOf(header);
     const footH = heightOf(footer);
-    const headTop = isBar ? lerp(ROW_TOP, 22, smooth(0, 1, t)) : (o.headerTop ?? 18);
+    // Apple Maps keeps the field the same distance below the sheet's edge at
+    // every height; growing it while the sheet opened read as the edge stretching.
+    const headTop = isBar ? ROW_TOP : (o.headerTop ?? 18);
     headEl.style.top = `${headTop}px`;
     const bottomInset = edge === 'bottom' ? Math.max(inset('bottom'), footer ? 12 : 0) * smooth(1.2, 2, t) : 0;
     footEl.style.bottom = `${bottomInset}px`;
@@ -323,6 +364,16 @@ export function createSheet(o = {}) {
     body.style.opacity = String(bodyIn);
     edgeFade.style.opacity = String(bodyIn * opaque);
     body.style.visibility = bodyIn < 0.02 ? 'hidden' : 'visible';
+    // Where the header and footer are (viewport px), from what was just
+    // written, so the glass bands need no layout read.
+    const innerTop = edge === 'top' ? Math.max(0, -(rect.top + shift)) : 0;
+    const top0 = rect.top + shift + innerTop;
+    chromeBands = [];
+    if (headH > 0) chromeBands.push({top: top0 + headTop, bottom: top0 + headTop + headH});
+    if (footH > 0) {
+      const b = top0 + Math.max(0, visibleH) - bottomInset;
+      chromeBands.push({top: b - footH, bottom: b});
+    }
     edgeFade.style.top = '0px';
     edgeFade.style.height = `${bodyTop + 18}px`;
     // The attached bar sheet's field keeps room for the handle.
@@ -341,16 +392,23 @@ export function createSheet(o = {}) {
     window.dispatchEvent(new CustomEvent('sfsheet', {detail: {sheet: api, t, rect}}));
   }
 
+  let chromeBands = [];
+  let lastCover = '';
+  let lastChrome = '';
+  const bandKey = (list) => list.map((b) => `${Math.round(b.top)},${Math.round(b.bottom)}`).join(';');
   function coverBands() {
     const bands = [{top: rect.top + (edge === 'bottom' ? drop : -drop), bottom: rect.top + rect.height + (edge === 'bottom' ? drop : -drop)}];
-    layer.cover(api, bands);
-    if (!glassHost) return;
-    const rects = [];
-    for (const n of [headEl, footEl]) {
-      const r = n.getBoundingClientRect();
-      if (r.height) rects.push({top: r.top, bottom: r.bottom});
+    // Unchanged bands (a bar morphing in place, a settled frame) need no repaint of the backdrop.
+    const coverKey = bandKey(bands);
+    if (coverKey !== lastCover) {
+      lastCover = coverKey;
+      layer.cover(api, bands);
     }
-    glassHost.bands(rects);
+    if (!glassHost) return;
+    const chromeKey = bandKey(chromeBands);
+    if (chromeKey === lastChrome) return;
+    lastChrome = chromeKey;
+    glassHost.bands(chromeBands);
   }
 
   function detentFor(v) {
@@ -397,13 +455,18 @@ export function createSheet(o = {}) {
       goal.done?.();
       return;
     }
-    apply();
+    // Ask for the next tick before apply(): apply() asks the glass for a
+    // render, and frame callbacks run in the order they were requested. This
+    // way the sheet moves first and the glass renders it in the same frame,
+    // instead of the glass drawing last frame's sheet and trailing by one.
     raf = requestAnimationFrame(tick);
+    apply();
   }
 
   /** Springs to `target` t (and drop), from a finger velocity in t/s and px/s. */
   function animateTo(target, {drop: d = 0, velocity = 0, dropVelocity = 0, step = MOTION, done} = {}) {
     cancelAnimationFrame(raf);
+    sourceCache = null;
     if (reducedMotion.matches) {
       t = target;
       drop = d;
@@ -444,7 +507,10 @@ export function createSheet(o = {}) {
       clip: null,
     });
     // The sheet's own glass: it bends the page behind it.
-    panel.sfLens = () => ({opacity: () => 1 - opaque});
+    // The lens stays at full strength until the fill has fully covered it.
+    // Fading it as 1 - opaque made the sheet look clearer partway up: the
+    // glass's own tint and frost went faster than the fill came in.
+    panel.sfLens = () => ({opacity: () => (opaque >= 0.999 ? 0 : 1)});
     layer.host?.adoptOne(panel, {}, 'bar');
     glassHost?.adopt(panel);
     document.body.classList.add('sf-sheet-open');
@@ -483,6 +549,8 @@ export function createSheet(o = {}) {
     document.body.classList.toggle('sf-sheet-open', !!document.querySelector('.sf-sheet-layer'));
     removeEventListener('resize', relayout);
     removeEventListener('sfbar', coverBands);
+    cancelAnimationFrame(dragRaf);
+    dragRaf = 0;
     removeEventListener('pointermove', onPointerMove);
     removeEventListener('pointerup', pointerEnd);
     removeEventListener('pointercancel', pointerEnd);
@@ -534,6 +602,7 @@ export function createSheet(o = {}) {
   function beginDrag(y) {
     cancelAnimationFrame(raf);
     anim = null;
+    sourceCache = null;
     const k = keyframes();
     drag = {y0: y, free0: freeEdge(k, t) + (edge === 'bottom' ? drop : -drop), t0: t, samples: [{y, at: now()}]};
     panel.classList.add('dragging');
@@ -570,11 +639,22 @@ export function createSheet(o = {}) {
     }
     drag.samples.push({y, at: now()});
     if (drag.samples.length > 6) drag.samples.shift();
-    apply();
+    // Touch moves can arrive several times per frame (120 Hz touch on a 60 Hz
+    // paint, or bunched after a slow frame). Write the sheet once per frame,
+    // at its start, so the glass renders the same position in that frame.
+    if (!dragRaf) dragRaf = requestAnimationFrame(dragFrame);
+  }
+
+  let dragRaf = 0;
+  function dragFrame() {
+    dragRaf = 0;
+    if (drag) apply();
   }
 
   function endDrag() {
     if (!drag) return;
+    cancelAnimationFrame(dragRaf);
+    dragRaf = 0;
     const d = drag;
     drag = null;
     panel.classList.remove('dragging');
@@ -644,6 +724,10 @@ export function createSheet(o = {}) {
     e.preventDefault();
   };
   addEventListener('pointermove', onPointerMove);
+  // iOS Safari can still start a native pan from the handle despite
+  // touch-action: none, and then cancels the pointer before the drag begins
+  // (only a tap got through). Holding the touch on the handle keeps it ours.
+  grab.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault(); }, {passive: false});
   const pointerEnd = (e) => {
     if (!press || e.pointerId !== press.id) return;
     const tap = !drag && e.type === 'pointerup' && press.onGrab;
@@ -827,6 +911,8 @@ export function createSheet(o = {}) {
   });
 
   const relayout = () => {
+    sourceCache = null;
+    heights.clear();
     if (isOpen) apply();
   };
   addEventListener('resize', relayout);
@@ -836,6 +922,7 @@ export function createSheet(o = {}) {
     apply();
   });
   if (header?.el) new ResizeObserver(relayout).observe(header.el);
+  if (footer?.node) new ResizeObserver(relayout).observe(footer.el);
   addEventListener('sfbar', coverBands);
 
   // Non-modal sheets let the page behind stay usable.
