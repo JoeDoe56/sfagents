@@ -216,7 +216,9 @@ export interface WebServerOptions {
 }
 
 interface LiveSegment {
-  kind: 'text' | 'activity';
+  kind: 'text' | 'activity' | 'user';
+  /** A message the person sent while the run worked: it shows where the agent took it. */
+  item?: DisplayItem;
   id: string;
   text: string;
   status?: string;
@@ -225,8 +227,12 @@ interface LiveSegment {
   thread?: string;
   /** The artifact a call created or updated (set when it finishes). */
   artifact?: string;
-  /** A step the pages show as something else: a message to the person is its text segment. */
+  /** A step the pages show as something else: a message to the person is its text segment. Text: a failed send. */
   hidden?: boolean;
+  /** Text the model wrote outside message: not shown while the run works. */
+  plain?: boolean;
+  /** Text of a message to the person: the call that sent it. */
+  call?: string;
   /** Questions for the person (a card); answered once they write. */
   questions?: DisplayQuestion[];
   answered?: boolean;
@@ -2719,7 +2725,7 @@ export class WebServer {
       onInput: (record) => {
         const from = live.taken.shift();
         if (!record.event) {
-          this.broadcastUser(live.id, record, from?.id);
+          this.broadcastUser(live.id, record, from?.id, live);
           this.markRead(record.id);
         }
       },
@@ -2777,10 +2783,16 @@ export class WebServer {
     return id;
   }
 
-  private broadcastUser(run: string, stored: MessageRecord, pendingId?: string): void {
+  private broadcastUser(run: string, stored: MessageRecord, pendingId?: string, live?: LiveRun): void {
     const root = stored.replyTo ? replyRoots(this.conversation.state).messages.get(stored.id) : undefined;
     const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment), ...(root ? { replyTo: root } : {}), ...(stored.view ? { view: stored.view } : {}) };
-    this.broadcast('user', { run, item, ...(pendingId ? { pending: pendingId } : {}) });
+    // Taken while the run works: it goes after the steps so far, and later steps come after it.
+    let segment: LiveSegment | undefined;
+    if (live) {
+      segment = { kind: 'user', id: `u${live.segments.length}`, text: stored.content, item };
+      live.segments.push(segment);
+    }
+    this.broadcast('user', { run, item, ...(segment ? { segment } : {}), ...(pendingId ? { pending: pendingId } : {}) });
   }
 
   /** The agent has the message: every page's receipt turns to Read at the same time. */
@@ -2867,10 +2879,12 @@ export class WebServer {
     switch (event.type) {
       case 'text': {
         if (!root) return;
+        // The model's own text: for SF Agents, not a reply. The pages leave it out while the run works;
+        // when it ends, the history shows it only if the run never messaged the person.
         const last = live.segments[live.segments.length - 1];
-        if (last?.kind === 'text') last.text += event.text;
-        else live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: event.text });
-        this.broadcast('delta', { run: live.id, text: event.text });
+        if (last?.kind === 'text' && last.plain) last.text += event.text;
+        else live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: event.text, plain: true });
+        this.broadcast('delta', { run: live.id, text: event.text, plain: true });
         return;
       }
       case 'tool_request': {
@@ -2899,7 +2913,7 @@ export class WebServer {
           live.segments.push(before);
           this.broadcast('activity', { run: live.id, segment: before });
           if (said.text) {
-            live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said.text });
+            live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said.text, call: id });
             this.broadcast('delta', { run: live.id, text: said.text });
           }
           const step: LiveSegment = { kind: 'activity', id, text: 'Sent a message', status: 'running', hidden: true, ...(said.questions ? { questions: said.questions } : {}) };
@@ -2929,6 +2943,14 @@ export class WebServer {
         const seg = live.segments.find((s) => s.id === id);
         const status = event.ok ? 'ok' : event.errorType === 'execution_denied' ? 'denied' : 'error';
         if (seg) seg.status = status;
+        // A message to the person that failed never reached them: its bubble goes away.
+        if (!event.ok) {
+          const said = live.segments.find((s) => s.kind === 'text' && s.call === id);
+          if (said) {
+            said.hidden = true;
+            this.broadcast('segment_hidden', { run: live.id, id: said.id });
+          }
+        }
         const call = this.calls.get(id);
         if (call) Object.assign(call, { display: event.display, status });
         // A new or changed artifact shows in the chat where it was made.

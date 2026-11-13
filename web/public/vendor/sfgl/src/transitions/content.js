@@ -141,8 +141,15 @@ export function createContentTransitions(options = {}, env = {}) {
     return config.root || doc.body;
   }
 
+  // One MediaQueryList for the instance; matchMedia makes a new one per call.
+  let reducedMotion = null;
+  function reduced() {
+    if (!reducedMotion) reducedMotion = win?.matchMedia?.("(prefers-reduced-motion: reduce)") || {matches: false};
+    return reducedMotion.matches;
+  }
+
   function visible(el) {
-    if (!el?.isConnected || doc.hidden || win?.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return false;
+    if (!el?.isConnected || doc.hidden || reduced()) return false;
     if (el.closest("script,style,textarea,input,select,[data-liquid-overlay-exempt],[data-sf-transition-exempt],[data-liquid-overlay],.liquidOverlayGhost")) return false;
     const r = el.getBoundingClientRect();
     let left = Math.max(0, r.left), top = Math.max(0, r.top), right = Math.min(win.innerWidth, r.right), bottom = Math.min(win.innerHeight, r.bottom);
@@ -213,12 +220,22 @@ export function createContentTransitions(options = {}, env = {}) {
     for (const key of ["font", "letterSpacing", "lineHeight", "textAlign", "whiteSpace", "color", "padding"]) portal.style[key] = style[key];
     portal.append(content);
     write(() => doc.body.append(portal));
-    let frame = 0, disposed = false;
+    let frame = 0, disposed = false, checked = false, last = "";
+    // The full visibility check (computed styles of every ancestor) runs once;
+    // later frames only read the host's rect. Running it every frame forced a
+    // style and layout pass per frame whenever something else on the page
+    // (a sheet, a scroll) was animating at the same time.
     const sync = () => {
       if (disposed) return;
-      if (!visible(host)) { dispose(); attachOptions.hidden?.(); return; }
+      if (checked ? !host.isConnected || doc.hidden : !visible(host)) { dispose(); attachOptions.hidden?.(); return; }
+      checked = true;
       const r = host.getBoundingClientRect();
-      Object.assign(portal.style, {left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px"});
+      if (!r.width || !r.height) { dispose(); attachOptions.hidden?.(); return; }
+      const key = r.left + "," + r.top + "," + r.width + "," + r.height;
+      if (key !== last) {
+        last = key;
+        Object.assign(portal.style, {left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px"});
+      }
       frame = raf(sync);
     };
     const dispose = () => {

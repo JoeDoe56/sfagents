@@ -380,6 +380,9 @@ describe('web server', () => {
       await ev.wait((e) => e.event === 'state');
       const sent = await postJson(s.base, '/api/messages', { text: 'make a page' });
       assert.equal(sent.status, 202);
+      // The agent's first step has started (the model takes 300 ms to answer).
+      await ev.wait((e) => e.event === 'run_start');
+      await new Promise((r) => setTimeout(r, 100));
       // Sent while the agent works: it waits (Delivered) and the agent takes it at its next step.
       const busy = await postJson(s.base, '/api/messages', { text: 'again' });
       assert.equal(busy.status, 202);
@@ -397,7 +400,11 @@ describe('web server', () => {
       const items = end.data['items'] as Array<{ kind: string; text: string }>;
       assert.deepEqual(items.map((i) => i.kind), ['user', 'assistant', 'activity', 'user', 'assistant']);
       assert.equal(items[3]!.text, 'again');
-      await ev.wait((e) => e.event === 'user' && (e.data['item'] as { text: string }).text === 'again' && e.data['pending'] === (busy.json['run'] as string));
+      const again = await ev.wait((e) => e.event === 'user' && (e.data['item'] as { text: string }).text === 'again' && e.data['pending'] === (busy.json['run'] as string));
+      // Live, it shows after the steps the agent took before it (a live segment), not above them.
+      assert.equal((again.data['segment'] as { kind: string } | undefined)?.kind, 'user');
+      const liveIdx = ev.received.indexOf(again);
+      assert.ok(ev.received.findIndex((e) => e.event === 'activity') < liveIdx, 'the tool call came before the message');
       await ev.wait((e) => e.event === 'read' && e.data['id'] === (items[3] as unknown as { id: string }).id);
       assert.equal(items[2]!.text, 'Created “Page”');
 
@@ -645,7 +652,7 @@ describe('web server', () => {
   test('questions from the agent show as a card that the next message answers', async () => {
     const questions = [{ question: 'Which color?', options: ['red', 'blue'] }, { question: 'Anything else?' }];
     const script: Script = (req, call) => {
-      if (call === 0) return { toolCalls: [{ name: 'message', args: { to: 'user', text: 'Two things first.', questions, wait: false } }] };
+      if (call === 0) return { toolCalls: [{ name: 'message', args: { to: 'user', text: 'Two things first.', questions, wait: false, section: 'keep' } }] };
       return { text: call === 1 ? 'Waiting for you.' : `Got: ${String((req.messages[req.messages.length - 1] as { content: unknown }).content)}` };
     };
     const s = await startServer(script);
@@ -658,7 +665,7 @@ describe('web server', () => {
       const first = await ev.wait((e) => e.event === 'run_end');
       type Item = { kind: string; text?: string; answered?: boolean };
       const before = first.data['items'] as Item[];
-      assert.deepEqual(before.map((i) => i.kind), ['user', 'assistant', 'questions', 'assistant']);
+      assert.deepEqual(before.map((i) => i.kind), ['user', 'assistant', 'questions']);
       assert.equal(before[1]!.text, 'Two things first.');
       assert.equal(before[2]!.answered, false);
       await postJson(s.base, '/api/messages', { text: 'Which color?\nblue' });
@@ -668,6 +675,34 @@ describe('web server', () => {
       assert.match(after[after.length - 1]!.text!, /Got: Which color\?\nblue/);
       assert.equal(describeCall('message', JSON.stringify({ to: 'helper', text: 'go' })), 'Messaged helper: go');
       assert.equal(describeCall('message', JSON.stringify({ wait: true })), 'Waited for messages');
+    } finally {
+      ev.close();
+      await s.stop();
+    }
+  });
+
+  test('a failed send leaves no bubble, and plain text in a run that messaged the person stays out of the chat', async () => {
+    const script: Script = (_req, call) => {
+      // Invalid parameters ("wait" must be a boolean): the send fails.
+      if (call === 0) return { text: 'Draft of the report.', toolCalls: [{ name: 'message', args: { action: 'send', to: 'user', text: 'Failed copy.', wait: 'yes', section: 'keep' } }] };
+      if (call === 1) return { toolCalls: [{ name: 'message', args: { action: 'send', to: 'user', text: 'Real reply.', section: 'keep' } }] };
+      return { text: 'I sent the report; waiting for the person.' };
+    };
+    const s = await startServer(script);
+    const ev = events(s.base);
+    try {
+      await ev.wait((e) => e.event === 'state');
+      await postJson(s.base, '/api/messages', { text: 'report please' });
+      const end = await ev.wait((e) => e.event === 'run_end');
+      assert.ok(ev.received.some((e) => e.event === 'segment_hidden'), 'the failed send\'s live bubble is hidden');
+      const plain = ev.received.filter((e) => e.event === 'delta' && e.data['plain'] === true).map((e) => e.data['text']).join('');
+      assert.match(plain, /Draft of the report\./);
+      type Item = { kind: string; text?: string };
+      const items = end.data['items'] as Item[];
+      assert.deepEqual(items.filter((i) => i.kind === 'user' || i.kind === 'assistant').map((i) => i.text), ['report please', 'Real reply.']);
+      // History after a reload shows the same.
+      const reloaded = JSON.parse((await request(s.base, '/api/state')).body.toString()) as { items: Item[] };
+      assert.deepEqual(reloaded.items.filter((i) => i.kind === 'assistant').map((i) => i.text), ['Real reply.']);
     } finally {
       ev.close();
       await s.stop();
