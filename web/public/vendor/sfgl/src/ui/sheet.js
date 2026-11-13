@@ -425,6 +425,30 @@ export function createSheet(o = {}) {
   let last = 0;
   let raf = 0;
 
+  // Frames for the sheet's own motion run inside the glass's frame when the
+  // glass has a scheduler: the sheet moves first, then the glass renders that
+  // position in the same frame. A separate requestAnimationFrame made the glass
+  // ask for its frame from inside ours, which the browser runs one frame later,
+  // so the glass trailed the sheet (and its field) by a frame while dragging.
+  const frameKey = `sf-sheet-${Math.random().toString(36).slice(2)}`;
+  const scheduler = () => layer.host?.glass?.glass?.scheduler;
+  const fallback = new Map();
+  function onFrame(name, fn) {
+    const s = scheduler();
+    if (s?.request) {
+      s.request(`${frameKey}-${name}`, (f) => fn(f.timestamp ?? performance.now()));
+      return 1;
+    }
+    cancelAnimationFrame(fallback.get(name) ?? 0);
+    fallback.set(name, requestAnimationFrame((ts) => { fallback.delete(name); fn(ts); }));
+    return 1;
+  }
+  function cancelFrame(name) {
+    scheduler()?.cancel?.(`${frameKey}-${name}`);
+    cancelAnimationFrame(fallback.get(name) ?? 0);
+    fallback.delete(name);
+  }
+
   function tick(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
@@ -459,13 +483,13 @@ export function createSheet(o = {}) {
     // render, and frame callbacks run in the order they were requested. This
     // way the sheet moves first and the glass renders it in the same frame,
     // instead of the glass drawing last frame's sheet and trailing by one.
-    raf = requestAnimationFrame(tick);
+    raf = onFrame('tick', tick);
     apply();
   }
 
   /** Springs to `target` t (and drop), from a finger velocity in t/s and px/s. */
   function animateTo(target, {drop: d = 0, velocity = 0, dropVelocity = 0, step = MOTION, done} = {}) {
-    cancelAnimationFrame(raf);
+    cancelFrame('tick');
     sourceCache = null;
     if (reducedMotion.matches) {
       t = target;
@@ -479,7 +503,7 @@ export function createSheet(o = {}) {
     goal = {t: target, drop: d, step, done};
     last = performance.now();
     anim = true;
-    raf = requestAnimationFrame(tick);
+    raf = onFrame('tick', tick);
   }
 
   function setDetentName(name) {
@@ -549,7 +573,7 @@ export function createSheet(o = {}) {
     document.body.classList.toggle('sf-sheet-open', !!document.querySelector('.sf-sheet-layer'));
     removeEventListener('resize', relayout);
     removeEventListener('sfbar', coverBands);
-    cancelAnimationFrame(dragRaf);
+    cancelFrame('drag');
     dragRaf = 0;
     removeEventListener('pointermove', onPointerMove);
     removeEventListener('pointerup', pointerEnd);
@@ -600,7 +624,7 @@ export function createSheet(o = {}) {
   const now = () => performance.now();
 
   function beginDrag(y) {
-    cancelAnimationFrame(raf);
+    cancelFrame('tick');
     anim = null;
     sourceCache = null;
     const k = keyframes();
@@ -626,8 +650,49 @@ export function createSheet(o = {}) {
     return {t: (lo + up) / 2, over: 0};
   }
 
-  function moveDrag(y) {
+  // Touch moves reach the page at an uneven phase against the display: one
+  // frame gets two moves and the next none, so the sheet stalled for a frame
+  // and then jumped twice as far (about one frame in five on an iPhone). Each
+  // frame instead places the sheet where the finger was a little before the
+  // frame started, interpolated between the moves' own timestamps, and only
+  // extrapolates briefly past the newest one.
+  const RESAMPLE_LAG = 6; // ms before the frame time
+  const PREDICT_MAX = 12; // ms past the newest move
+  const STOPPED_AFTER = 34; // ms without moves: the finger is resting
+  function fingerAt(samples, time) {
+    const n = samples.length;
+    const lastS = samples[n - 1];
+    if (n < 2) return {y: lastS.y, more: false};
+    if (time <= lastS.at) {
+      for (let i = n - 1; i > 0; i--) {
+        const a = samples[i - 1];
+        const b = samples[i];
+        if (time >= a.at) return {y: b.at > a.at ? a.y + ((b.y - a.y) * (time - a.at)) / (b.at - a.at) : b.y, more: false};
+      }
+      return {y: samples[0].y, more: false};
+    }
+    const since = time - lastS.at;
+    if (since > STOPPED_AFTER) return {y: lastS.y, more: false};
+    const prev = samples[n - 2];
+    const span = lastS.at - prev.at;
+    if (span <= 0 || span > 50) return {y: lastS.y, more: true};
+    const v = (lastS.y - prev.y) / span;
+    return {y: lastS.y + v * Math.min(since, PREDICT_MAX), more: true};
+  }
+
+  function moveDrag(y, at = now()) {
     if (!drag) return;
+    // Event timestamps can lag or lead performance.now() slightly; keep order.
+    const prevAt = drag.samples[drag.samples.length - 1]?.at ?? -Infinity;
+    const stamp = Number.isFinite(at) && at > 0 && Math.abs(at - now()) < 1000 ? Math.max(at, prevAt + 0.1) : Math.max(now(), prevAt + 0.1);
+    drag.samples.push({y, at: stamp});
+    if (drag.samples.length > 6) drag.samples.shift();
+    // Write the sheet once per frame, at its start, so the glass renders the
+    // same position in that frame.
+    if (!dragRaf) dragRaf = onFrame('drag', dragFrame);
+  }
+
+  function placeDrag(y) {
     const k = keyframes();
     const dy = y - drag.y0;
     const free = drag.free0 + (edge === 'bottom' ? dy : -dy);
@@ -637,29 +702,34 @@ export function createSheet(o = {}) {
       t = r.t;
       drop = r.up ? -Math.min(28, Math.pow(r.up, 0.62)) : r.over;
     }
-    drag.samples.push({y, at: now()});
-    if (drag.samples.length > 6) drag.samples.shift();
-    // Touch moves can arrive several times per frame (120 Hz touch on a 60 Hz
-    // paint, or bunched after a slow frame). Write the sheet once per frame,
-    // at its start, so the glass renders the same position in that frame.
-    if (!dragRaf) dragRaf = requestAnimationFrame(dragFrame);
   }
 
   let dragRaf = 0;
-  function dragFrame() {
+  function dragFrame(ts) {
     dragRaf = 0;
-    if (drag) apply();
+    if (!drag) return;
+    const time = (Number.isFinite(ts) ? ts : now()) - RESAMPLE_LAG;
+    const f = fingerAt(drag.samples, time);
+    placeDrag(f.y);
+    apply();
+    // Still predicting: the next frame settles on the finger even without a move.
+    if (f.more && !dragRaf) dragRaf = onFrame('drag', dragFrame);
   }
 
   function endDrag() {
     if (!drag) return;
-    cancelAnimationFrame(dragRaf);
+    cancelFrame('drag');
     dragRaf = 0;
     const d = drag;
     drag = null;
     panel.classList.remove('dragging');
     const first = d.samples[0];
     const lastS = d.samples[d.samples.length - 1];
+    // Frames drew the finger slightly in the past (or predicted ahead); the
+    // release starts from where the finger really is.
+    drag = d;
+    placeDrag(lastS.y);
+    drag = null;
     const v = lastS.at > first.at ? (lastS.y - first.y) / (lastS.at - first.at) : 0; // px/ms, + is down
     const sign = edge === 'bottom' ? 1 : -1; // toward the attached edge
     const vToward = v * sign;
@@ -705,7 +775,7 @@ export function createSheet(o = {}) {
   // Moves are watched on the window: a quick flick leaves the sheet before the first move arrives.
   const onPointerMove = (e) => {
     if (drag && press && e.pointerId === press.id) {
-      moveDrag(e.clientY);
+      moveDrag(e.clientY, e.timeStamp);
       e.preventDefault();
       return;
     }
@@ -720,7 +790,7 @@ export function createSheet(o = {}) {
     } catch {
       // synthetic pointer
     }
-    moveDrag(e.clientY);
+    moveDrag(e.clientY, e.timeStamp);
     e.preventDefault();
   };
   addEventListener('pointermove', onPointerMove);
@@ -778,7 +848,7 @@ export function createSheet(o = {}) {
       }
       if (touch.taken) {
         e.preventDefault();
-        moveDrag(p.clientY);
+        moveDrag(p.clientY, e.timeStamp);
       }
     },
     {passive: false},
@@ -921,8 +991,25 @@ export function createSheet(o = {}) {
     colors();
     apply();
   });
-  if (header?.el) new ResizeObserver(relayout).observe(header.el);
-  if (footer?.node) new ResizeObserver(relayout).observe(footer.el);
+  // Only a change of height matters to apply(). The bar sheet widens as it
+  // rises, so its header changes width on every drag frame; relaying out on
+  // that re-ran apply() after the glass had drawn, cleared the height cache
+  // (a forced layout per frame) and asked the glass for an extra frame.
+  // Heights last seen by the observer, per element (heights above only caches
+  // DOM-measured bands, so it cannot tell a width-only change apart).
+  const observed = new WeakMap();
+  const onBandResize = (entries) => {
+    let changed = false;
+    for (const e of entries) {
+      const h = e.borderBoxSize?.[0]?.blockSize ?? e.target.offsetHeight;
+      const was = observed.get(e.target);
+      observed.set(e.target, h);
+      if (was === undefined || Math.abs(was - h) > 0.5) changed = true;
+    }
+    if (changed) relayout();
+  };
+  if (header?.el) new ResizeObserver(onBandResize).observe(header.el);
+  if (footer?.node) new ResizeObserver(onBandResize).observe(footer.el);
   addEventListener('sfbar', coverBands);
 
   // Non-modal sheets let the page behind stay usable.
@@ -987,7 +1074,7 @@ export function createSheet(o = {}) {
       return rect;
     },
     destroy() {
-      cancelAnimationFrame(raf);
+      cancelFrame('tick');
       if (isOpen) teardown();
       else layer.destroy();
     },
