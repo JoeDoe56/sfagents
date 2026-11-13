@@ -309,6 +309,8 @@ export function displayItems(
       if (chat.replies.has(`${m.id}:${c.id}`) || messageToUser(c.name, c.arguments)) spoke.add(m.run);
     }
   }
+  // The run shown live: messages the person sent while it worked show among its live steps.
+  let liveRunUser = false;
   for (const record of state.records) {
     if (options.before !== undefined && record.seq >= options.before) break;
     if (record.kind === 'message') {
@@ -319,7 +321,10 @@ export function displayItems(
         items.push({ kind: 'activity', id: m.id, seq: m.seq, time: m.time, text: `${m.agent}: ${clip(text, 80)}`, status: 'ok', agent: m.agent, ...agentThread(m.content, m.agent, m.run, state) });
       } else if (m.role === 'user' && m.event) {
         // A note SF Agents wrote for the person (a reaction): the badge shows it.
+      } else if (m.role === 'user' && m.run === options.hideRun && liveRunUser) {
+        // Shown live, after the steps the agent took before it.
       } else if (m.role === 'user') {
+        if (m.run === options.hideRun) liveRunUser = true;
         const replyTo = roots.messages.get(m.id);
         items.push({ kind: 'user', id: m.id, seq: m.seq, time: m.time, text: m.content, attachments: (m.attachments ?? []).map(displayAttachment), ...(options.thread ? { agent: m.agent } : {}), ...(replyTo ? { replyTo } : {}), ...(m.view ? { view: m.view } : {}) });
       } else if (m.role === 'assistant' && m.run !== options.hideRun) {

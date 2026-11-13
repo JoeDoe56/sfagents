@@ -414,7 +414,8 @@ function entries() {
     const root = state.live.replyTo;
     const shown = new Set(liveTexts());
     for (const seg of state.live.segments) {
-      if (seg.kind === 'text') {
+      if (seg.kind === 'user') pushUser(push, msgEntry(seg.item, 'out'));
+      else if (seg.kind === 'text') {
         if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
       } else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
     }
@@ -458,6 +459,7 @@ function threadEntries(root) {
   }
   for (const p of state.pending) if (p.replyTo === root) out.push({ ...msgEntry(p, 'out'), key: p.id });
   for (const o of state.outbox) if (o.root === root) out.push({ key: o.key, type: 'msg', side: 'out', text: o.text, root, pending: true });
+  for (const seg of state.live?.segments ?? []) if (seg.kind === 'user' && seg.item.replyTo === root) out.push(msgEntry(seg.item, 'out'));
   if (state.live?.replyTo === root) {
     for (const seg of liveTexts()) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
     if (!state.approvals.length) out.push({ key: `typing:${state.live.id}`, type: 'typing', root });
@@ -1372,7 +1374,7 @@ function listen() {
     applySnapshot(JSON.parse(e.data));
   });
   stream.addEventListener('user', (e) => {
-    const { item, pending: waited } = JSON.parse(e.data);
+    const { run, item, segment, pending: waited } = JSON.parse(e.data);
     // The bubble shown when it was sent becomes the stored message, in place.
     const was = waited && state.pending.findIndex((p) => p.id === waited);
     if (waited && was >= 0) {
@@ -1382,7 +1384,10 @@ function listen() {
       const sent = state.outbox.findIndex((o) => o.text === item.text);
       if (sent >= 0) sentAs.set(item.id, state.outbox.splice(sent, 1)[0].key);
     }
-    if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
+    // Taken while the agent works: it shows after the steps so far, and later steps come after it.
+    if (segment && state.live?.id === run) {
+      if (!state.live.segments.some((s) => s.id === segment.id)) state.live.segments.push(segment);
+    } else if (!state.items.some((i) => i.id === item.id)) state.items.push(item);
     render();
     requestAnimationFrame(scrollToBottom);
   });

@@ -214,7 +214,9 @@ export interface WebServerOptions {
 }
 
 interface LiveSegment {
-  kind: 'text' | 'activity';
+  kind: 'text' | 'activity' | 'user';
+  /** A message the person sent while the run worked: it shows where the agent took it. */
+  item?: DisplayItem;
   id: string;
   text: string;
   status?: string;
@@ -2698,7 +2700,7 @@ export class WebServer {
       onInput: (record) => {
         const from = live.taken.shift();
         if (!record.event) {
-          this.broadcastUser(live.id, record, from?.id);
+          this.broadcastUser(live.id, record, from?.id, live);
           this.markRead(record.id);
         }
       },
@@ -2756,10 +2758,16 @@ export class WebServer {
     return id;
   }
 
-  private broadcastUser(run: string, stored: MessageRecord, pendingId?: string): void {
+  private broadcastUser(run: string, stored: MessageRecord, pendingId?: string, live?: LiveRun): void {
     const root = stored.replyTo ? replyRoots(this.conversation.state).messages.get(stored.id) : undefined;
     const item: DisplayItem = { kind: 'user', id: stored.id, seq: stored.seq, time: stored.time, text: stored.content, attachments: (stored.attachments ?? []).map(displayAttachment), ...(root ? { replyTo: root } : {}), ...(stored.view ? { view: stored.view } : {}) };
-    this.broadcast('user', { run, item, ...(pendingId ? { pending: pendingId } : {}) });
+    // Taken while the run works: it goes after the steps so far, and later steps come after it.
+    let segment: LiveSegment | undefined;
+    if (live) {
+      segment = { kind: 'user', id: `u${live.segments.length}`, text: stored.content, item };
+      live.segments.push(segment);
+    }
+    this.broadcast('user', { run, item, ...(segment ? { segment } : {}), ...(pendingId ? { pending: pendingId } : {}) });
   }
 
   /** The agent has the message: every page's receipt turns to Read at the same time. */

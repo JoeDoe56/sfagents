@@ -380,6 +380,9 @@ describe('web server', () => {
       await ev.wait((e) => e.event === 'state');
       const sent = await postJson(s.base, '/api/messages', { text: 'make a page' });
       assert.equal(sent.status, 202);
+      // The agent's first step has started (the model takes 300 ms to answer).
+      await ev.wait((e) => e.event === 'run_start');
+      await new Promise((r) => setTimeout(r, 100));
       // Sent while the agent works: it waits (Delivered) and the agent takes it at its next step.
       const busy = await postJson(s.base, '/api/messages', { text: 'again' });
       assert.equal(busy.status, 202);
@@ -397,7 +400,11 @@ describe('web server', () => {
       const items = end.data['items'] as Array<{ kind: string; text: string }>;
       assert.deepEqual(items.map((i) => i.kind), ['user', 'assistant', 'activity', 'user', 'assistant']);
       assert.equal(items[3]!.text, 'again');
-      await ev.wait((e) => e.event === 'user' && (e.data['item'] as { text: string }).text === 'again' && e.data['pending'] === (busy.json['run'] as string));
+      const again = await ev.wait((e) => e.event === 'user' && (e.data['item'] as { text: string }).text === 'again' && e.data['pending'] === (busy.json['run'] as string));
+      // Live, it shows after the steps the agent took before it (a live segment), not above them.
+      assert.equal((again.data['segment'] as { kind: string } | undefined)?.kind, 'user');
+      const liveIdx = ev.received.indexOf(again);
+      assert.ok(ev.received.findIndex((e) => e.event === 'activity') < liveIdx, 'the tool call came before the message');
       await ev.wait((e) => e.event === 'read' && e.data['id'] === (items[3] as unknown as { id: string }).id);
       assert.equal(items[2]!.text, 'Created “Page”');
 
