@@ -1209,3 +1209,6 @@ button.tree-card:active { transform: scale(0.97); background: #3a3a3c; }
 .gw-go { all: unset; cursor: pointer; text-align: center; padding: 9px; border-radius: 12px; background: #0a84ff; font: 600 14px/18px var(--font); color: #fff; }
 .gw-go:disabled { opacity: 0.45; cursor: not-allowed; }
 @media (min-width: 900px) { .gw-pane { display: grid; grid-template-columns: minmax(280px, 38%) 1fr; align-items: start; } .gw-pane > .gw-diff { grid-column: 2; grid-row: 1 / span 4; } }
+.gw-remote { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.gw-op, .gw-branches { all: unset; cursor: pointer; padding: 6px 12px; border-radius: 12px; background: rgba(255,255,255,0.12); font: 600 13px/16px var(--font); max-width: 100%; box-sizing: border-box; }
+.gw-op:disabled, .gw-branches:disabled { opacity: 0.45; cursor: not-allowed; }

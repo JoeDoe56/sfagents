@@ -53,7 +53,73 @@ export function openGitWindow(repo, from) {
       const tabHistory = el('button', 'gw-tab', 'History');
       for (const t of [tabChanges, tabHistory]) t.type = 'button';
       tabs.append(tabChanges, tabHistory);
-      head.append(branchLine, status, lock, tabs);
+      const bar = el('div', 'gw-remote');
+      const note = el('p', 'gw-note');
+      const branchSel = el('select', 'gw-branches');
+      branchSel.setAttribute('aria-label', 'Branch');
+      const mk = (label, action, body) => {
+        const b = el('button', 'gw-op', label);
+        b.type = 'button';
+        b.dataset.action = action;
+        b.addEventListener('click', async () => {
+          b.disabled = true;
+          note.textContent = `${label}…`;
+          try {
+            await postJson(`${base}/${action}`, body?.() ?? {});
+            note.textContent = `${label} done.`;
+            commits = null;
+          } catch (e) {
+            note.textContent = e.message;
+          }
+          await load();
+        });
+        return b;
+      };
+      const bFetch = mk('Fetch', 'fetch');
+      const bPull = mk('Pull', 'pull');
+      const bPush = mk('Push', 'push');
+      const bPublish = mk('Publish branch', 'publish');
+      branchSel.addEventListener('change', async () => {
+        const v = branchSel.value;
+        if (v === '__new') {
+          const name = prompt('New branch name (created from the current branch)');
+          if (!name) return load();
+          try { await postJson(`${base}/checkout`, { name, create: true, from: 'HEAD' }); note.textContent = ''; } catch (e) { note.textContent = e.message; }
+        } else {
+          try { await postJson(`${base}/checkout`, { name: v }); note.textContent = ''; } catch (e) { note.textContent = e.message; }
+        }
+        commits = null;
+        await load();
+      });
+      bar.append(branchSel, bFetch, bPull, bPush, bPublish);
+      async function loadBranches() {
+        try {
+          const list = (await getJson(`${base}/branches`)).branches;
+          branchSel.replaceChildren();
+          for (const b of list) {
+            const o = el('option', '', b.name + (b.worktree ? ' (other worktree)' : ''));
+            o.value = b.name;
+            o.selected = b.current;
+            branchSel.append(o);
+          }
+          const n = el('option', '', 'New branch…');
+          n.value = '__new';
+          branchSel.append(n);
+        } catch {}
+      }
+      function updateOps() {
+        const s = data.status;
+        const why = busy() || '';
+        bPull.textContent = s.behind ? `Pull ${s.behind}` : 'Pull';
+        bPush.textContent = s.ahead ? `Push ${s.ahead} commit${s.ahead === 1 ? '' : 's'}` : 'Push';
+        bPublish.hidden = !!s.upstream || s.detached;
+        bPull.hidden = bPush.hidden = !s.upstream;
+        for (const b of [bFetch, bPull, bPush, bPublish, branchSel]) {
+          b.disabled = !!why;
+          b.title = why;
+        }
+      }
+      head.append(branchLine, status, lock, bar, note, tabs);
       const pane = el('div', 'gw-pane');
       ctx.body.append(head, pane);
 
@@ -77,6 +143,8 @@ export function openGitWindow(repo, from) {
         const s = data.status;
         branchLine.textContent = s.detached ? `Detached at ${s.head.slice(0, 7)}` : s.branch + (s.upstream ? ` → ${s.upstream}` : '');
         status.textContent = summary(s);
+        updateOps();
+        loadBranches();
         lock.hidden = !data.busy;
         lock.textContent = data.busy ? `${data.busy}${data.working?.length ? ` (${data.working.join(', ')})` : ''}` : '';
         show();
