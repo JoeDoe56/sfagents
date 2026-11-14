@@ -44,3 +44,4 @@ export { rewriteCsp } from './apps.js';
 export { LogBook, defaultLogDir } from './logs.js';
 export type { LogLine } from './logs.js';
 export * from './gitrepo.js';
+export * from './gitapi.js';

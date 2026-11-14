@@ -109,6 +109,7 @@ import { switchNote, type SwitchSide } from './agent-switch.js';
 import { isEmoji, ReactionStore } from './reactions.js';
 import { LogBook } from './logs.js';
 import { changedRepos, repoDiff, type RepoChanges } from './diffs.js';
+import { GitApi, GitOpError, RepoBusyError } from './gitapi.js';
 import { SharedViewStore } from './shared-view.js';
 
 export const DEFAULT_PORT = 8093;
@@ -373,6 +374,10 @@ export class WebServer {
   private diffsTimer: NodeJS.Timeout | undefined;
   private diffsPoll: NodeJS.Timeout | undefined;
   private diffsBusy: Promise<void> | undefined;
+  private git = new GitApi({
+    dirs: () => this.diffDirs(),
+    agentFolders: () => Object.fromEntries([...this.runtime.tree.byId.keys()].map((id) => [id, this.runtime.projectFolders(id)])),
+  });
   /** The Git task workspaces (sfa-git), as last listed. */
   private workspaces: WorkspaceInfo[] = [];
   private workspacesTimer: NodeJS.Timeout | undefined;
@@ -1163,6 +1168,20 @@ export class WebServer {
         if (!parts[1] || !parts[2]) throw new HttpError(404, 'No such workspace.');
         const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
         return sendJson(res, 200, await this.workspaceAction(parts[1], parts[2], body));
+      }
+      case 'GET git':
+      case 'POST git': {
+        this.checkFetchSite(req);
+        const body = req.method === 'POST' ? (((await readJson(req)) ?? {}) as Record<string, unknown>) : {};
+        try {
+          const result = await this.git.handle(req.method ?? 'GET', parts.slice(1), url.searchParams, body);
+          if (req.method === 'POST') this.refreshDiffs(0);
+          return sendJson(res, 200, result);
+        } catch (error) {
+          if (error instanceof RepoBusyError) throw new HttpError(409, error.message);
+          if (error instanceof GitOpError) throw new HttpError(400, error.message);
+          throw error;
+        }
       }
       case 'GET diffs': {
         this.checkFetchSite(req);
@@ -2756,6 +2775,7 @@ export class WebServer {
         failure = error;
       }
       this.live = undefined;
+      this.git.allDone();
       this.publishArtifacts();
       this.publishThreads();
       const { items, more } = displayItems(this.conversation.state);
@@ -2924,6 +2944,7 @@ export class WebServer {
         const prefix = root ? '' : `${event.agentPath.slice(1).join(' › ')}: `;
         this.calls.set(`${event.agentPath.join('/')}:${event.callId}`, { name: event.name, args: event.args, agentPath: event.agentPath, callId: event.callId });
         if (this.calls.size > 400) this.calls.delete(this.calls.keys().next().value!);
+        void this.git.agentTouched(event.agentPath[event.agentPath.length - 1]!, JSON.stringify(event.args)).then(() => this.refreshDiffs(300));
         const seg: LiveSegment = { kind: 'activity', id: `${event.agentPath.join('/')}:${event.callId}`, text: prefix + describeCall(event.name, JSON.stringify(event.args)), status: 'running' };
         const to = event.name === 'message' ? event.args['to'] : event.name === 'message_agent' ? event.args['agent'] : undefined;
         if (typeof to === 'string' && to !== 'user') {
