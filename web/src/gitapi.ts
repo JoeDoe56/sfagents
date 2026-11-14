@@ -7,8 +7,9 @@
  */
 
 import path from 'node:path';
+import { githubRepo, hostGitCredential } from '@sfagents/core';
 import { findRepos, repoId } from './diffs.js';
-import { RepoLocks, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, mergeBranch, markResolved, finishMerge, undoCommit, revertCommit, initRepo, cloneRepo, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
+import { RepoLocks, runGit, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, mergeBranch, markResolved, finishMerge, undoCommit, revertCommit, initRepo, cloneRepo, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
 
 export interface RepoEntry {
   id: string;
@@ -38,6 +39,24 @@ export function edgeStatus(s: RepoStatus, working: boolean): string {
   if (s.ahead) return s.ahead === 1 ? '1 commit to push' : `${s.ahead} commits to push`;
   if (s.behind) return s.behind === 1 ? '1 incoming commit' : `${s.behind} incoming commits`;
   return working ? 'Agent working' : 'Clean';
+}
+
+async function remoteUrl(top: string): Promise<string> {
+  return (await runGit(top, ['remote', 'get-url', 'origin'], { readOnly: true })).out.trim();
+}
+
+async function gh(top: string, endpoint: string, init: RequestInit = {}): Promise<any> {
+  const url = await remoteUrl(top);
+  const repo = githubRepo(url);
+  if (!repo) throw new GitOpError('Pull requests work with GitHub repositories only.');
+  const login = await hostGitCredential(url).catch(() => undefined);
+  const r = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.name}${endpoint}`, {
+    ...init, redirect: 'error', signal: AbortSignal.timeout(30000),
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'sfagents', 'Content-Type': 'application/json', ...(login ? { Authorization: `Bearer ${login.password}` } : {}) },
+  });
+  if (r.status === 401 || r.status === 403) throw new GitOpError(login ? 'GitHub refused the request: your login lacks permission.' : 'No GitHub login found on this computer. Sign in with gh or Git Credential Manager.');
+  if (!r.ok) throw new GitOpError(`GitHub answered ${r.status}.`);
+  return r.json();
 }
 
 export class GitApi {
@@ -137,6 +156,26 @@ export class GitApi {
       case 'POST merge-finish': { await finishMerge(top, this.locks, body['action'] === 'abort' ? 'abort' : 'continue'); return { ok: true }; }
       case 'POST undo': return undoCommit(top, this.locks);
       case 'POST revert': return { commit: await revertCommit(top, this.locks, String(body['commit'] ?? '')) };
+      case 'GET pulls': {
+        const s = await repoStatus(top);
+        const url = await remoteUrl(top);
+        const g = githubRepo(url);
+        if (!g) return { pulls: [], note: 'Pull requests are available for GitHub repositories only.' };
+        const list = await gh(top, `/pulls?state=open&head=${encodeURIComponent(`${g.owner}:${s.branch}`)}`);
+        return { pulls: list.map((p: any) => ({ number: p.number, title: p.title, url: p.html_url, base: p.base.ref, head: p.head.ref, draft: p.draft, state: p.state })) };
+      }
+      case 'POST pull-request': {
+        const why = this.locks.reason(key);
+        if (why) throw new RepoBusyError(why);
+        const s = await repoStatus(top);
+        if (!s.upstream) throw new GitOpError('Publish the branch before opening a pull request.');
+        const title = String(body['title'] ?? '').trim();
+        const base = String(body['base'] ?? '').trim();
+        if (!title || !base) throw new GitOpError('A title and a base branch are required.');
+        if (base === s.branch) throw new GitOpError('The base and head branch are the same.');
+        const p = await gh(top, '/pulls', { method: 'POST', body: JSON.stringify({ title, body: String(body['description'] ?? ''), head: s.branch, base }) });
+        return { url: p.html_url, number: p.number };
+      }
       default: throw new GitOpError('Unknown Git action.');
     }
   }

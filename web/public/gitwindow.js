@@ -93,7 +93,7 @@ export function openGitWindow(repo, from) {
       });
       const more = el('select', 'gw-branches gw-more');
       more.setAttribute('aria-label', 'More actions');
-      for (const [v, t] of [['', 'More…'], ['merge', 'Merge a branch into this one…'], ['undo', 'Undo last unpushed commit'], ['revert', 'Revert the selected commit']]) {
+      for (const [v, t] of [['', 'More…'], ['merge', 'Merge a branch into this one…'], ['undo', 'Undo last unpushed commit'], ['revert', 'Revert the selected commit'], ['pr', 'Pull request…']]) {
         const o = el('option', '', t);
         o.value = v;
         more.append(o);
@@ -116,7 +116,18 @@ export function openGitWindow(repo, from) {
           const source = prompt(`Merge which branch into ${data.status.branch}?`);
           if (source) await run('merge', { source }, 'Merge');
         } else if (v === 'undo') await run('undo', {}, 'Undo');
-        else if (v === 'revert') {
+        else if (v === 'pr') {
+          try {
+            const { pulls, note: n } = await getJson(`${base}/pulls`);
+            if (n) return void (note.textContent = n);
+            if (pulls.length) { note.textContent = `Open: #${pulls[0].number} ${pulls[0].title} (${pulls[0].head} → ${pulls[0].base}) ${pulls[0].url}`; return; }
+            const baseBranch = prompt(`Base branch for the pull request from ${data.status.branch}`, 'main');
+            const title = baseBranch && prompt('Pull request title');
+            if (!title) return;
+            const r = await postJson(`${base}/pull-request`, { base: baseBranch, title, description: prompt('Description (optional)') ?? '' });
+            note.textContent = `Opened #${r.number}: ${r.url}`;
+          } catch (e) { note.textContent = e.message; }
+        } else if (v === 'revert') {
           if (!selectedCommit) note.textContent = 'Select a commit in History first.';
           else await run('revert', { commit: selectedCommit }, 'Revert');
         }
