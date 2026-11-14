@@ -7,6 +7,7 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { githubRepo, hostGitCredential } from '@sfagents/core';
 import { findRepos, repoId } from './diffs.js';
 import { RepoLocks, runGit, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, discardFiles, mergeBranch, markResolved, finishMerge, undoCommit, revertCommit, initRepo, cloneRepo, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
@@ -39,6 +40,22 @@ export function edgeStatus(s: RepoStatus, working: boolean): string {
   if (s.ahead) return s.ahead === 1 ? '1 commit to push' : `${s.ahead} commits to push`;
   if (s.behind) return s.behind === 1 ? '1 incoming commit' : `${s.behind} incoming commits`;
   return working ? 'Agent working' : 'Clean';
+}
+
+/** When the last fetch finished (ms since epoch), or null if this repository never fetched. */
+async function lastFetch(top: string): Promise<number | null> {
+  const r = await runGit(top, ['rev-parse', '--git-common-dir'], { readOnly: true });
+  if (!r.ok) return null;
+  try {
+    return (await fs.stat(path.join(top, r.out.trim(), 'FETCH_HEAD'))).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+async function remotes(top: string): Promise<string[]> {
+  const r = await runGit(top, ['remote'], { readOnly: true });
+  return r.ok ? r.out.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 }
 
 async function remoteUrl(top: string): Promise<string> {
@@ -126,7 +143,18 @@ export class GitApi {
     switch (`${method} ${parts[1] ?? ''}`) {
       case 'GET status': {
         const status = await repoStatus(top);
-        return { status, ...lock };
+        return { status, lastFetch: await lastFetch(top), remotes: await remotes(top), ...lock };
+      }
+      case 'POST remote': {
+        const why = this.locks.reason(key);
+        if (why) throw new RepoBusyError(why);
+        const name = String(body['name'] ?? 'origin').trim();
+        const url = String(body['url'] ?? '').trim();
+        if (!/^[\w.-]+$/.test(name)) throw new GitOpError('Remote names use letters, digits, dots, dashes and underscores.');
+        if (!/^(https:\/\/|git@|ssh:\/\/)/.test(url)) throw new GitOpError('Use an https:// or ssh remote URL.');
+        const r = await runGit(top, ['remote', 'add', name, url]);
+        if (!r.ok) throw new GitOpError(r.err.trim() || 'Could not add the remote.');
+        return { ok: true };
       }
       case 'GET file': {
         const status = await repoStatus(top);

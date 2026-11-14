@@ -297,7 +297,7 @@ export async function commitDiff(top: string, newest: string, oldest = newest): 
 }
 
 /** Committed changes the current branch has over `base` since their common ancestor (merge-base..HEAD). */
-export async function compareBranch(top: string, base: string): Promise<{ base: string; mergeBase: string; commits: CommitInfo[]; files: { path: string; added: number | null; removed: number | null; binary: boolean }[] }> {
+export async function compareBranch(top: string, base: string): Promise<{ base: string; mergeBase: string; commits: CommitInfo[]; files: { path: string; added: number | null; removed: number | null; binary: boolean }[]; patch: string }> {
   const mb = await runGit(top, ['merge-base', base, 'HEAD'], { readOnly: true });
   if (!mb.ok) throw new GitOpError(`No common ancestor with ${base}.`);
   const mergeBase = mb.out.trim();
@@ -316,7 +316,8 @@ export async function compareBranch(top: string, base: string): Promise<{ base: 
     const binary = m[1] === '-';
     files.push({ path: file, added: binary ? null : Number(m[1]), removed: binary ? null : Number(m[2]), binary });
   }
-  return { base, mergeBase, commits, files };
+  const pd = await runGit(top, ['diff', '-M', mergeBase, 'HEAD'], { readOnly: true });
+  return { base, mergeBase, commits, files, patch: pd.ok ? pd.out : '' };
 }
 
 // ------------------------------------------------------------------ branches

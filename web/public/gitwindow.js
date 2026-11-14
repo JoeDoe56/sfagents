@@ -79,6 +79,19 @@ export function openGitWindow(repo, from) {
       const bPull = mk('Pull', 'pull');
       const bPush = mk('Push', 'push');
       const bPublish = mk('Publish branch', 'publish');
+      const bRemote = el('button', 'gw-op', 'Add remote');
+      bRemote.type = 'button';
+      bRemote.addEventListener('click', async () => {
+        const url = prompt('Remote URL (https:// or ssh)');
+        if (!url) return;
+        try { await postJson(`${base}/remote`, { name: 'origin', url }); note.textContent = 'Remote added.'; } catch (e) { note.textContent = e.message; }
+        await load();
+      });
+      const ago = (ms) => {
+        if (ms === null || ms === undefined) return 'never fetched';
+        const m = Math.round((Date.now() - ms) / 60000);
+        return m < 1 ? 'fetched just now' : m < 60 ? `fetched ${m} min ago` : m < 1440 ? `fetched ${Math.round(m / 60)} h ago` : `fetched ${Math.round(m / 1440)} d ago`;
+      };
       branchSel.addEventListener('change', async () => {
         const v = branchSel.value;
         if (v === '__new') {
@@ -132,7 +145,7 @@ export function openGitWindow(repo, from) {
           else await run('revert', { commit: selectedCommit }, 'Revert');
         }
       });
-      bar.append(branchSel, bFetch, bPull, bPush, bPublish, more);
+      bar.append(branchSel, bFetch, bPull, bPush, bPublish, bRemote, more);
       async function loadBranches() {
         try {
           const list = (await getJson(`${base}/branches`)).branches;
@@ -155,6 +168,12 @@ export function openGitWindow(repo, from) {
         bPush.textContent = s.ahead ? `Push ${s.ahead} commit${s.ahead === 1 ? '' : 's'}` : 'Push';
         bPublish.hidden = !!s.upstream || s.detached;
         bPull.hidden = bPush.hidden = !s.upstream;
+        const noRemote = !(data.remotes ?? []).length;
+        bRemote.hidden = !noRemote;
+        bFetch.hidden = noRemote;
+        bPublish.hidden = bPublish.hidden || noRemote;
+        bRemote.disabled = !!why;
+        bRemote.title = why;
         for (const b of [bFetch, bPull, bPush, bPublish, branchSel, more]) {
           b.disabled = !!why;
           b.title = why;
@@ -183,7 +202,7 @@ export function openGitWindow(repo, from) {
         }
         const s = data.status;
         branchLine.textContent = s.detached ? `Detached at ${s.head.slice(0, 7)}` : s.branch + (s.upstream ? ` → ${s.upstream}` : '');
-        status.textContent = summary(s);
+        status.textContent = summary(s) + ((data.remotes ?? []).length ? ` · ${ago(data.lastFetch)}` : ' · no remote');
         updateOps();
         loadBranches();
         lock.hidden = !data.busy;
@@ -412,7 +431,29 @@ export function openGitWindow(repo, from) {
           rows.push(row);
           list.append(row);
         });
-        pane.append(list, detail);
+        const cmp = el('div', 'gw-compare');
+        const sel = el('select', 'gw-branches');
+        sel.setAttribute('aria-label', 'Compare branch');
+        const none = el('option', '', 'Compare branch…');
+        none.value = '';
+        sel.append(none);
+        getJson(`${base}/branches`).then((r) => {
+          for (const b of r.branches) if (!b.current) { const o = el('option', '', b.name); o.value = b.name; sel.append(o); }
+        }).catch(() => {});
+        sel.addEventListener('change', async () => {
+          if (!sel.value) return select(0, false);
+          detail.textContent = 'Loading…';
+          try {
+            const d = await getJson(`${base}/compare`, { base: sel.value });
+            detail.replaceChildren(el('p', 'gw-note', `Committed changes on ${data.status.branch} since its common ancestor with ${d.base} (${d.mergeBase.slice(0, 7)}), including unpushed commits: ${d.commits.length} commit${d.commits.length === 1 ? '' : 's'}.`));
+            for (const c of d.commits) detail.append(el('p', 'gw-hist-file', `${c.short}  ${c.title}`));
+            for (const f of d.files) detail.append(el('p', 'gw-hist-file', `${f.path}  ${f.added === null ? 'binary' : `+${f.added} −${f.removed}`}`));
+            if (d.patch) { const box = el('div'); detail.append(box); renderDiff(box, { files: [{ path: '', status: 'modified', added: 0, removed: 0, patch: d.patch }] }); }
+            ctx.refresh();
+          } catch (e) { detail.textContent = e.message; }
+        });
+        cmp.append(sel);
+        pane.append(cmp, list, detail);
         ctx.refresh();
       }
 
