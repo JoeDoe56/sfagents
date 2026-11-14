@@ -258,6 +258,15 @@ export function openGitWindow(repo, from) {
           show();
         });
         all.append(allBox, el('span', '', `${included.length} of ${files.length} files included`));
+        const discard = el('button', 'gw-op', 'Discard selected…');
+        discard.type = 'button';
+        discard.disabled = !!busy() || !included.length;
+        discard.title = busy() || '';
+        discard.addEventListener('click', async () => {
+          if (!confirm(`Discard changes in ${included.length} file${included.length === 1 ? '' : 's'}? Edits are lost; new files are deleted.`)) return;
+          await run('discard', { paths: included.map((f) => f.path) }, 'Discard');
+        });
+        pane.append(discard);
         const list = el('div', 'gw-files');
         for (const f of files) {
           const row = el('div', 'gw-file');

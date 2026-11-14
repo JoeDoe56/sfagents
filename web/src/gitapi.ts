@@ -9,7 +9,7 @@
 import path from 'node:path';
 import { githubRepo, hostGitCredential } from '@sfagents/core';
 import { findRepos, repoId } from './diffs.js';
-import { RepoLocks, runGit, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, mergeBranch, markResolved, finishMerge, undoCommit, revertCommit, initRepo, cloneRepo, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
+import { RepoLocks, runGit, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, discardFiles, mergeBranch, markResolved, finishMerge, undoCommit, revertCommit, initRepo, cloneRepo, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
 
 export interface RepoEntry {
   id: string;
@@ -151,6 +151,7 @@ export class GitApi {
         await checkoutBranch(top, this.locks, { name: String(body['name'] ?? ''), create: body['create'] === true, from: typeof body['from'] === 'string' ? body['from'] : undefined });
         return { ok: true };
       }
+      case 'POST discard': { await discardFiles(top, this.locks, Array.isArray(body['paths']) ? body['paths'].map(String) : []); return { ok: true }; }
       case 'POST merge': return mergeBranch(top, this.locks, String(body['source'] ?? ''));
       case 'POST resolve': { await markResolved(top, this.locks, String(body['path'] ?? '')); return { ok: true }; }
       case 'POST merge-finish': { await finishMerge(top, this.locks, body['action'] === 'abort' ? 'abort' : 'continue'); return { ok: true }; }

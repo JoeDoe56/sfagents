@@ -551,3 +551,21 @@ export async function cloneRepo(url: string, dir: string): Promise<void> {
   const r = await runGit(path.dirname(dir), ['clone', '--', url, dir]);
   if (!r.ok) throw new GitOpError((r.err || r.out).trim() || 'Clone failed.');
 }
+
+/** Discard the chosen files' changes (tracked files return to HEAD, new files are removed). Explicit, never part of unchecking. */
+export async function discardFiles(top: string, locks: RepoLocks, paths: string[]): Promise<void> {
+  if (!paths.length) throw new GitOpError('Select at least one change to discard.');
+  const key = await repoKey(top);
+  await locks.run(key, 'Discard', async () => {
+    const s = await repoStatus(top);
+    const byPath = new Map(s.files.map((f) => [f.path, f]));
+    const stale = paths.filter((p) => !byPath.has(p));
+    if (stale.length) throw new GitOpError(`Changed since you selected it: ${stale.join(', ')}.`);
+    for (const p of paths) {
+      const f = byPath.get(p)!;
+      if (f.kind === 'conflicted') throw new GitOpError(`${p} has conflicts. Resolve it instead.`);
+      const r = f.kind === 'untracked' ? await runGit(top, ['clean', '-f', '--', p]) : await runGit(top, ['restore', '--source=HEAD', '--staged', '--worktree', '--', ...(f.oldPath ? [f.oldPath] : []), p]);
+      if (!r.ok) throw new GitOpError((r.err || r.out).trim() || `Could not discard ${p}.`);
+    }
+  });
+}

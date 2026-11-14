@@ -111,3 +111,17 @@ describe('merge, undo, revert, init', () => {
     assert.ok(fs.existsSync(path.join(target, '.git')));
   });
 });
+
+describe('discard', () => {
+  test('restores tracked files, removes new ones, rejects stale paths', async () => {
+    const root = makeTempDir('gitapi-');
+    const a = makeRepo(root, 'alpha');
+    const api = new GitApi({ dirs: () => [a], agentFolders: () => ({}) });
+    const id = (await api.repos())[0]!.id;
+    fs.writeFileSync(path.join(a, 'a.txt'), 'x\n');
+    fs.writeFileSync(path.join(a, 'n.txt'), 'n\n');
+    await api.handle('POST', [id, 'discard'], new URLSearchParams(), { paths: ['a.txt', 'n.txt'] });
+    assert.equal(git(a, 'status', '--porcelain'), '');
+    await assert.rejects(api.handle('POST', [id, 'discard'], new URLSearchParams(), { paths: ['a.txt'] }), /Changed since/);
+  });
+});
