@@ -447,3 +447,107 @@ export async function checkoutBranch(top: string, locks: RepoLocks, o: { name: s
     if (!r.ok) throw new GitOpError(r.err.trim() || 'Could not switch branch.');
   });
 }
+
+// ------------------------------------------------------------------ merge, undo, revert, clone, init
+
+/** Merge `source` into the current branch. A conflict leaves the merge in progress for the window to resolve. */
+export async function mergeBranch(top: string, locks: RepoLocks, source: string): Promise<{ conflicts: string[] }> {
+  if (!source.trim()) throw new GitOpError('Choose the branch to merge from.');
+  const key = await repoKey(top);
+  return locks.run(key, 'Merge', async () => {
+    const s = await repoStatus(top);
+    if (s.operation) throw new GitOpError(`A ${s.operation} is already in progress.`);
+    if (s.files.length) throw new GitOpError('Commit or discard your changes before merging.');
+    const r = await runGit(top, ['merge', '--no-edit', '--no-ff', source]);
+    if (r.ok) return { conflicts: [] };
+    const after = await repoStatus(top);
+    const conflicts = after.files.filter((f) => f.kind === 'conflicted').map((f) => f.path);
+    if (conflicts.length) return { conflicts };
+    throw new GitOpError((r.err || r.out).trim() || 'The merge failed.');
+  });
+}
+
+/** Marks a conflicted file resolved (its current content is kept). */
+export async function markResolved(top: string, locks: RepoLocks, file: string): Promise<void> {
+  const key = await repoKey(top);
+  await locks.run(key, 'Resolve', async () => {
+    const r = await runGit(top, ['add', '--', file]);
+    if (!r.ok) throw new GitOpError(r.err.trim() || 'Could not mark it resolved.');
+  });
+}
+
+/** Finishes (continue) or cancels (abort) the merge in progress. */
+export async function finishMerge(top: string, locks: RepoLocks, action: 'continue' | 'abort'): Promise<void> {
+  const key = await repoKey(top);
+  await locks.run(key, 'Merge', async () => {
+    const s = await repoStatus(top);
+    if (!/merge/i.test(s.operation)) throw new GitOpError('No merge is in progress.');
+    if (action === 'abort') {
+      const r = await runGit(top, ['merge', '--abort']);
+      if (!r.ok) throw new GitOpError(r.err.trim() || 'Could not abort.');
+      return;
+    }
+    if (s.conflicts) throw new GitOpError('Mark every conflicted file resolved first.');
+    const r = await runGit(top, ['commit', '--no-edit']);
+    if (!r.ok) throw new GitOpError((r.err || r.out).trim() || 'Could not finish the merge.');
+  });
+}
+
+/** Undo the latest local, unpushed commit: its changes return to Changes, content intact (mixed reset, never hard). */
+export async function undoCommit(top: string, locks: RepoLocks): Promise<{ title: string; description: string }> {
+  const key = await repoKey(top);
+  return locks.run(key, 'Undo', async () => {
+    const [c] = await history(top, 1);
+    if (!c) throw new GitOpError('There is no commit to undo.');
+    if (c.pushed === true) throw new GitOpError('That commit is already pushed. Revert it instead.');
+    if (c.parents.length !== 1) throw new GitOpError(c.parents.length ? 'A merge commit cannot be undone here.' : 'The first commit cannot be undone.');
+    const s = await repoStatus(top);
+    if (s.operation) throw new GitOpError(`Finish the ${s.operation} first.`);
+    const r = await runGit(top, ['reset', '--mixed', '-q', 'HEAD~1']);
+    if (!r.ok) throw new GitOpError(r.err.trim() || 'Undo failed.');
+    return { title: c.title, description: c.body };
+  });
+}
+
+/** Revert: a new commit that reverses `commit`, preserving history. A conflict aborts and changes nothing. */
+export async function revertCommit(top: string, locks: RepoLocks, commit: string): Promise<string> {
+  const key = await repoKey(top);
+  return locks.run(key, 'Revert', async () => {
+    const s = await repoStatus(top);
+    if (s.files.length || s.operation) throw new GitOpError('Commit or discard your changes before reverting.');
+    const parents = (await runGit(top, ['rev-list', '--parents', '-n', '1', commit], { readOnly: true })).out.trim().split(' ');
+    if (parents.length > 2) throw new GitOpError('Reverting a merge commit is not supported.');
+    const r = await runGit(top, ['revert', '--no-edit', commit]);
+    if (!r.ok) {
+      await runGit(top, ['revert', '--abort']);
+      throw new GitOpError(/conflict/i.test(r.err + r.out) ? 'The revert conflicts with later changes, so nothing was changed.' : (r.err || r.out).trim() || 'Revert failed.');
+    }
+    return (await runGit(top, ['rev-parse', 'HEAD'], { readOnly: true })).out.trim();
+  });
+}
+
+async function emptyOrMissing(dir: string): Promise<void> {
+  const fs = await import('node:fs');
+  if (!path.isAbsolute(dir)) throw new GitOpError('Choose an absolute folder.');
+  if (fs.existsSync(path.join(dir, '.git'))) throw new GitOpError('That folder is already a Git repository.');
+}
+
+/** Initialize a repository in `dir`, keeping any files already there. */
+export async function initRepo(dir: string): Promise<void> {
+  await emptyOrMissing(dir);
+  const fs = await import('node:fs');
+  fs.mkdirSync(dir, { recursive: true });
+  const r = await runGit(dir, ['init', '-q']);
+  if (!r.ok) throw new GitOpError(r.err.trim() || 'Could not initialize.');
+}
+
+/** Clone `url` into `dir`, which must be absent or empty. */
+export async function cloneRepo(url: string, dir: string): Promise<void> {
+  if (!url.trim() || url.startsWith('-')) throw new GitOpError('Enter a repository address.');
+  await emptyOrMissing(dir);
+  const fs = await import('node:fs');
+  if (fs.existsSync(dir) && fs.readdirSync(dir).length) throw new GitOpError('The destination folder is not empty.');
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const r = await runGit(path.dirname(dir), ['clone', '--', url, dir]);
+  if (!r.ok) throw new GitOpError((r.err || r.out).trim() || 'Clone failed.');
+}

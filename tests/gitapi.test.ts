@@ -76,3 +76,38 @@ describe('git remotes and branches', () => {
     assert.equal(git(a, 'branch', '--show-current'), 'feature');
   });
 });
+
+describe('merge, undo, revert, init', () => {
+  test('undo keeps content, revert adds a commit, merge conflicts are resolvable', async () => {
+    const root = makeTempDir('gitapi-');
+    const a = makeRepo(root, 'alpha');
+    const api = new GitApi({ dirs: () => [a], agentFolders: () => ({}) });
+    const id = (await api.repos())[0]!.id;
+    const call = (action: string, body: Record<string, unknown> = {}) => api.handle('POST', [id, action], new URLSearchParams(), body) as Promise<any>;
+    fs.writeFileSync(path.join(a, 'a.txt'), 'two\n');
+    git(a, 'commit', '-qam', 'second', '-m', 'body text');
+    const u = await call('undo');
+    assert.equal(u.title, 'second');
+    assert.equal(fs.readFileSync(path.join(a, 'a.txt'), 'utf8'), 'two\n');
+    assert.match(git(a, 'status', '--porcelain'), /a.txt/);
+    git(a, 'commit', '-qam', 'again');
+    const n = git(a, 'rev-list', '--count', 'HEAD');
+    await call('revert', { commit: 'HEAD' });
+    assert.equal(Number(git(a, 'rev-list', '--count', 'HEAD')), Number(n) + 1);
+    git(a, 'checkout', '-q', '-b', 'other');
+    fs.writeFileSync(path.join(a, 'a.txt'), 'other\n');
+    git(a, 'commit', '-qam', 'o');
+    git(a, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(a, 'a.txt'), 'main\n');
+    git(a, 'commit', '-qam', 'm');
+    const m = await call('merge', { source: 'other' });
+    assert.deepEqual(m.conflicts, ['a.txt']);
+    fs.writeFileSync(path.join(a, 'a.txt'), 'both\n');
+    await call('resolve', { path: 'a.txt' });
+    await call('merge-finish', { action: 'continue' });
+    assert.equal(git(a, 'status', '--porcelain'), '');
+    const target = path.join(root, 'fresh');
+    await api.handle('POST', ['init'], new URLSearchParams(), { path: target });
+    assert.ok(fs.existsSync(path.join(target, '.git')));
+  });
+});

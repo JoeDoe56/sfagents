@@ -8,7 +8,7 @@
 
 import path from 'node:path';
 import { findRepos, repoId } from './diffs.js';
-import { RepoLocks, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
+import { RepoLocks, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, mergeBranch, markResolved, finishMerge, undoCommit, revertCommit, initRepo, cloneRepo, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
 
 export interface RepoEntry {
   id: string;
@@ -99,6 +99,8 @@ export class GitApi {
 
   async handle(method: string, parts: string[], query: URLSearchParams, body: Record<string, unknown>): Promise<unknown> {
     if (!parts[0]) return { repos: await this.repos() };
+    if (parts[0] === 'init' && method === 'POST') { await initRepo(String(body['path'] ?? '')); return { repos: await this.repos() }; }
+    if (parts[0] === 'clone' && method === 'POST') { await cloneRepo(String(body['url'] ?? ''), String(body['path'] ?? '')); return { repos: await this.repos() }; }
     const top = await this.top(parts[0]);
     const key = await repoKey(top);
     const lock = { busy: this.locks.reason(key) ?? null, working: this.locks.workingAgents(key) };
@@ -130,6 +132,11 @@ export class GitApi {
         await checkoutBranch(top, this.locks, { name: String(body['name'] ?? ''), create: body['create'] === true, from: typeof body['from'] === 'string' ? body['from'] : undefined });
         return { ok: true };
       }
+      case 'POST merge': return mergeBranch(top, this.locks, String(body['source'] ?? ''));
+      case 'POST resolve': { await markResolved(top, this.locks, String(body['path'] ?? '')); return { ok: true }; }
+      case 'POST merge-finish': { await finishMerge(top, this.locks, body['action'] === 'abort' ? 'abort' : 'continue'); return { ok: true }; }
+      case 'POST undo': return undoCommit(top, this.locks);
+      case 'POST revert': return { commit: await revertCommit(top, this.locks, String(body['commit'] ?? '')) };
       default: throw new GitOpError('Unknown Git action.');
     }
   }
