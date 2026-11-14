@@ -50,3 +50,29 @@ describe('git workspace API', () => {
     assert.equal(git(a, 'log', '--oneline').split('\n').length, 2);
   });
 });
+
+describe('git remotes and branches', () => {
+  test('publish, push, fetch, pull and branch switching protect work', async () => {
+    const root = makeTempDir('gitapi-');
+    const bare = path.join(root, 'remote.git');
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
+    const a = makeRepo(root, 'alpha');
+    git(a, 'remote', 'add', 'origin', bare);
+    const api = new GitApi({ dirs: () => [a], agentFolders: () => ({}) });
+    const id = (await api.repos())[0]!.id;
+    const call = (action: string, body: Record<string, unknown> = {}) => api.handle('POST', [id, action], new URLSearchParams(), body);
+    await assert.rejects(call('push'), /no upstream/);
+    await call('publish');
+    fs.writeFileSync(path.join(a, 'a.txt'), 'two\n');
+    git(a, 'commit', '-qam', 'second');
+    await call('push');
+    assert.equal(git(a, 'rev-parse', 'HEAD'), git(bare, 'rev-parse', 'main'));
+    await call('fetch');
+    await call('pull');
+    fs.writeFileSync(path.join(a, 'a.txt'), 'dirty\n');
+    await assert.rejects(call('checkout', { name: 'feature', create: true }), /uncommitted/);
+    git(a, 'checkout', '-q', 'a.txt');
+    await call('checkout', { name: 'feature', create: true });
+    assert.equal(git(a, 'branch', '--show-current'), 'feature');
+  });
+});

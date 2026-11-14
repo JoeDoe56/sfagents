@@ -8,7 +8,7 @@
 
 import path from 'node:path';
 import { findRepos, repoId } from './diffs.js';
-import { RepoLocks, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
+import { RepoLocks, repoKey, repoStatus, fileDiff, history, commitDiff, compareBranch, branches, commitFiles, fetchRemote, pullBranch, pushBranch, publishBranch, checkoutBranch, GitOpError, RepoBusyError, type RepoStatus } from './gitrepo.js';
 
 export interface RepoEntry {
   id: string;
@@ -121,6 +121,14 @@ export class GitApi {
         const paths = Array.isArray(body['paths']) ? body['paths'].map(String) : [];
         const sha = await commitFiles(top, this.locks, { paths, title: String(body['title'] ?? ''), description: typeof body['description'] === 'string' ? body['description'] : undefined });
         return { commit: sha };
+      }
+      case 'POST fetch': return { output: await fetchRemote(top, this.locks) };
+      case 'POST pull': return { output: await pullBranch(top, this.locks) };
+      case 'POST push': return { output: await pushBranch(top, this.locks) };
+      case 'POST publish': return { output: await publishBranch(top, this.locks, typeof body['remote'] === 'string' ? body['remote'] : undefined) };
+      case 'POST checkout': {
+        await checkoutBranch(top, this.locks, { name: String(body['name'] ?? ''), create: body['create'] === true, from: typeof body['from'] === 'string' ? body['from'] : undefined });
+        return { ok: true };
       }
       default: throw new GitOpError('Unknown Git action.');
     }

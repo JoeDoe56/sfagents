@@ -380,3 +380,70 @@ export async function commitFiles(top: string, locks: RepoLocks, o: { paths: str
     return (await runGit(top, ['rev-parse', 'HEAD'], { readOnly: true })).out.trim();
   });
 }
+
+// ------------------------------------------------------------------ remotes and branches
+
+async function remoteOp(top: string, locks: RepoLocks, label: string, args: string[], fail: string): Promise<string> {
+  const key = await repoKey(top);
+  return locks.run(key, label, async () => {
+    const r = await runGit(top, args);
+    if (!r.ok) throw new GitOpError((r.err || r.out).trim() || fail);
+    return (r.out + r.err).trim();
+  });
+}
+
+/** Fetch: refreshes remote information, integrates nothing. */
+export function fetchRemote(top: string, locks: RepoLocks): Promise<string> {
+  return remoteOp(top, locks, 'Fetch', ['fetch', '--prune'], 'Fetch failed.');
+}
+
+/** Pull: fast-forward only, never a silent rebase or merge commit. */
+export async function pullBranch(top: string, locks: RepoLocks): Promise<string> {
+  const s = await repoStatus(top);
+  if (!s.upstream) throw new GitOpError('This branch has no upstream. Publish it first.');
+  if (s.files.length) throw new GitOpError('Commit or discard your changes before pulling.');
+  if (s.ahead && s.behind) throw new GitOpError('Local and remote history have diverged. Merge the upstream branch explicitly from the branch menu.');
+  return remoteOp(top, locks, 'Pull', ['pull', '--ff-only', '--no-rebase'], 'Pull failed.');
+}
+
+/** Push the current branch to its upstream; never forced. */
+export async function pushBranch(top: string, locks: RepoLocks): Promise<string> {
+  const s = await repoStatus(top);
+  if (!s.upstream) throw new GitOpError('This branch has no upstream. Publish it first.');
+  if (s.behind) throw new GitOpError('The remote has commits you do not have. Pull first.');
+  return remoteOp(top, locks, 'Push', ['push'], 'Push failed.');
+}
+
+/** Publish: push the branch and set its upstream, to an explicit remote. */
+export async function publishBranch(top: string, locks: RepoLocks, remote = 'origin'): Promise<string> {
+  const s = await repoStatus(top);
+  if (s.detached) throw new GitOpError('Switch to a branch first.');
+  const remotes = (await runGit(top, ['remote'], { readOnly: true })).out.split('\n').filter(Boolean);
+  if (!remotes.includes(remote)) throw new GitOpError(remotes.length ? `No remote named ${remote}. Available: ${remotes.join(', ')}.` : 'This repository has no remote. Add one first.');
+  return remoteOp(top, locks, 'Publish', ['push', '-u', remote, s.branch], 'Publish failed.');
+}
+
+/** Switch branch (creating one from `from` when asked); refuses while uncommitted work would be affected. */
+export async function checkoutBranch(top: string, locks: RepoLocks, o: { name: string; create?: boolean; from?: string }): Promise<void> {
+  const name = o.name.trim();
+  if (!name || !(await runGit(top, ['check-ref-format', '--branch', name], { readOnly: true })).ok) throw new GitOpError('That is not a valid branch name.');
+  const key = await repoKey(top);
+  await locks.run(key, 'Switch branch', async () => {
+    const s = await repoStatus(top);
+    if (s.files.length) throw new GitOpError(`You have ${s.files.length} uncommitted change${s.files.length === 1 ? '' : 's'}. Commit or discard them, or open another worktree, before switching.`);
+    const all = await branches(top);
+    if (o.create) {
+      if (all.some((b) => b.name === name && !b.remote)) throw new GitOpError(`A branch named ${name} already exists.`);
+      const r = await runGit(top, ['checkout', '-b', name, ...(o.from ? [o.from] : [])]);
+      if (!r.ok) throw new GitOpError(r.err.trim() || 'Could not create the branch.');
+      return;
+    }
+    const local = all.find((b) => b.name === name && !b.remote);
+    if (local?.worktree) throw new GitOpError(`${name} is checked out in another worktree: ${local.worktree}. Open that one instead.`);
+    const remote = all.find((b) => b.remote && (b.name === name || b.name.replace(/^[^/]+\//, '') === name));
+    const args = local ? ['checkout', name] : remote ? ['checkout', '--track', remote.name] : null;
+    if (!args) throw new GitOpError(`No branch named ${name}.`);
+    const r = await runGit(top, args);
+    if (!r.ok) throw new GitOpError(r.err.trim() || 'Could not switch branch.');
+  });
+}
