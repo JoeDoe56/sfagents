@@ -35,6 +35,7 @@ import { onHold } from './menu.js';
 import { installBubbleMenus } from './bubblemenu.js';
 import { springAnimate, springyScroll } from './springs.js';
 import { createChatDock, renderDiff } from './chatdock.js';
+import { createGitEdge } from './gitedge.js';
 import { workspacePills, openWorkspace } from './workspaces.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
@@ -251,6 +252,16 @@ dock = createChatDock({
   },
 });
 dock.setBar({ clearance, covered: false });
+
+// The left edge: every repository any agent can reach, from /api/git.
+const gitEdge = createGitEdge({ chat, onOpen: (repo, from) => openDiff({ ...repo, files: 0 }, from) });
+let gitEdgeTimer = 0;
+function refreshGitEdge() {
+  clearTimeout(gitEdgeTimer);
+  gitEdgeTimer = setTimeout(() => getJson('/api/git').then((d) => gitEdge.set(d.repos)).catch(() => {}), 150);
+}
+refreshGitEdge();
+setInterval(refreshGitEdge, 30000);
 
 /** A repository's uncommitted changes, in a sheet that grows out of its pill. */
 /** The pills above the composer: uncommitted changes in the project folders, and task workspaces with work. */
@@ -1486,6 +1497,7 @@ function listen() {
   stream.addEventListener('diffs', (e) => {
     pills.diffs = JSON.parse(e.data).repos ?? [];
     showPills();
+    refreshGitEdge();
   });
   stream.addEventListener('workspaces', (e) => {
     pills.workspaces = JSON.parse(e.data).workspaces ?? [];
