@@ -36,6 +36,7 @@ import { installBubbleMenus } from './bubblemenu.js';
 import { springAnimate, springyScroll } from './springs.js';
 import { createChatDock, renderDiff } from './chatdock.js';
 import { createGitEdge } from './gitedge.js';
+import { openGitWindow } from './gitwindow.js';
 import { workspacePills, openWorkspace } from './workspaces.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
@@ -254,7 +255,7 @@ dock = createChatDock({
 dock.setBar({ clearance, covered: false });
 
 // The left edge: every repository any agent can reach, from /api/git.
-const gitEdge = createGitEdge({ chat, onOpen: (repo, from) => openDiff({ ...repo, files: 0 }, from) });
+const gitEdge = createGitEdge({ chat, onOpen: (repo, from) => openGitWindow(repo, from) });
 let gitEdgeTimer = 0;
 function refreshGitEdge() {
   clearTimeout(gitEdgeTimer);
