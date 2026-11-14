@@ -91,7 +91,37 @@ export function openGitWindow(repo, from) {
         commits = null;
         await load();
       });
-      bar.append(branchSel, bFetch, bPull, bPush, bPublish);
+      const more = el('select', 'gw-branches gw-more');
+      more.setAttribute('aria-label', 'More actions');
+      for (const [v, t] of [['', 'More…'], ['merge', 'Merge a branch into this one…'], ['undo', 'Undo last unpushed commit'], ['revert', 'Revert the selected commit']]) {
+        const o = el('option', '', t);
+        o.value = v;
+        more.append(o);
+      }
+      let selectedCommit = null;
+      async function run(action, body, label) {
+        note.textContent = `${label}…`;
+        try {
+          const r = await postJson(`${base}/${action}`, body);
+          note.textContent = r?.conflicts?.length ? `Merge conflicts in ${r.conflicts.join(', ')}. Resolve them below.` : `${label} done.`;
+          if (action === 'undo') { mem.title = r.title; mem.description = r.description; mem.tab = 'changes'; }
+        } catch (e) { note.textContent = e.message; }
+        commits = null;
+        await load();
+      }
+      more.addEventListener('change', async () => {
+        const v = more.value;
+        more.value = '';
+        if (v === 'merge') {
+          const source = prompt(`Merge which branch into ${data.status.branch}?`);
+          if (source) await run('merge', { source }, 'Merge');
+        } else if (v === 'undo') await run('undo', {}, 'Undo');
+        else if (v === 'revert') {
+          if (!selectedCommit) note.textContent = 'Select a commit in History first.';
+          else await run('revert', { commit: selectedCommit }, 'Revert');
+        }
+      });
+      bar.append(branchSel, bFetch, bPull, bPush, bPublish, more);
       async function loadBranches() {
         try {
           const list = (await getJson(`${base}/branches`)).branches;
@@ -114,7 +144,7 @@ export function openGitWindow(repo, from) {
         bPush.textContent = s.ahead ? `Push ${s.ahead} commit${s.ahead === 1 ? '' : 's'}` : 'Push';
         bPublish.hidden = !!s.upstream || s.detached;
         bPull.hidden = bPush.hidden = !s.upstream;
-        for (const b of [bFetch, bPull, bPush, bPublish, branchSel]) {
+        for (const b of [bFetch, bPull, bPush, bPublish, branchSel, more]) {
           b.disabled = !!why;
           b.title = why;
         }
@@ -183,6 +213,26 @@ export function openGitWindow(repo, from) {
         if (mem.selected && !files.some((f) => f.path === mem.selected)) {
           pane.append(el('p', 'gw-note', `${mem.selected} is no longer changed.`));
           mem.selected = null;
+        }
+        const conflicted = files.filter((f) => f.kind === 'conflicted');
+        if (data.status.operation || conflicted.length) {
+          const box = el('div', 'gw-conflicts');
+          box.append(el('p', 'gw-note', `${data.status.operation || 'Merge'} in progress${conflicted.length ? `: ${conflicted.length} file${conflicted.length === 1 ? '' : 's'} with conflicts. Edit each file, then mark it resolved.` : '. All conflicts are resolved.'}`));
+          for (const f of conflicted) {
+            const b = el('button', 'gw-op', `Mark ${f.path} resolved`);
+            b.type = 'button';
+            b.disabled = !!busy();
+            b.addEventListener('click', () => run('resolve', { path: f.path }, 'Resolve'));
+            box.append(b);
+          }
+          const cont = el('button', 'gw-op', 'Continue merge');
+          cont.disabled = !!busy() || conflicted.length > 0;
+          cont.addEventListener('click', () => run('merge-finish', { action: 'continue' }, 'Continue'));
+          const abort = el('button', 'gw-op', 'Abort merge');
+          abort.disabled = !!busy();
+          abort.addEventListener('click', () => run('merge-finish', { action: 'abort' }, 'Abort'));
+          box.append(cont, abort);
+          pane.append(box);
         }
         const included = files.filter((f) => !mem.excluded.has(f.path));
         const all = el('label', 'gw-all');
@@ -317,6 +367,7 @@ export function openGitWindow(repo, from) {
           if (!extend || anchor === null) anchor = i;
           const [lo, hi] = [Math.min(anchor, i), Math.max(anchor, i)];
           rows.forEach((r, k) => r.classList.toggle('sel', k >= lo && k <= hi));
+          selectedCommit = lo === hi ? commits[lo].id : null;
           // A contiguous range: the net diff from before the oldest to the newest.
           const newest = commits[lo].id;
           const oldest = commits[hi].id;
