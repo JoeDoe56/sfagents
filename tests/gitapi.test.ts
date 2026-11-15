@@ -81,7 +81,7 @@ describe('merge, undo, revert, init', () => {
   test('undo keeps content, revert adds a commit, merge conflicts are resolvable', async () => {
     const root = makeTempDir('gitapi-');
     const a = makeRepo(root, 'alpha');
-    const api = new GitApi({ dirs: () => [a], agentFolders: () => ({}) });
+    const api = new GitApi({ dirs: () => [root], agentFolders: () => ({}) });
     const id = (await api.repos())[0]!.id;
     const call = (action: string, body: Record<string, unknown> = {}) => api.handle('POST', [id, action], new URLSearchParams(), body) as Promise<any>;
     fs.writeFileSync(path.join(a, 'a.txt'), 'two\n');
@@ -109,6 +109,7 @@ describe('merge, undo, revert, init', () => {
     const target = path.join(root, 'fresh');
     await api.handle('POST', ['init'], new URLSearchParams(), { path: target });
     assert.ok(fs.existsSync(path.join(target, '.git')));
+    await assert.rejects(api.handle('POST', ['init'], new URLSearchParams(), { path: path.join(makeTempDir('outside-'), 'x') }), /attached folders/);
   });
 });
 

@@ -135,8 +135,19 @@ export class GitApi {
 
   async handle(method: string, parts: string[], query: URLSearchParams, body: Record<string, unknown>): Promise<unknown> {
     if (!parts[0]) return { repos: await this.repos() };
-    if (parts[0] === 'init' && method === 'POST') { await initRepo(String(body['path'] ?? '')); return { repos: await this.repos() }; }
-    if (parts[0] === 'clone' && method === 'POST') { await cloneRepo(String(body['url'] ?? ''), String(body['path'] ?? '')); return { repos: await this.repos() }; }
+    const inAgentFolder = (p: string) => path.isAbsolute(p) && this.deps.dirs().some((d) => p === d || p.startsWith(d + path.sep));
+    if (parts[0] === 'init' && method === 'POST') {
+      const p = String(body['path'] ?? '');
+      if (!inAgentFolder(p)) throw new GitOpError('Choose a folder inside one of the agents’ attached folders.');
+      await initRepo(p);
+      return { repos: await this.repos() };
+    }
+    if (parts[0] === 'clone' && method === 'POST') {
+      const p = String(body['path'] ?? '');
+      if (!inAgentFolder(p)) throw new GitOpError('Choose a folder inside one of the agents’ attached folders.');
+      await cloneRepo(String(body['url'] ?? ''), p);
+      return { repos: await this.repos() };
+    }
     const top = await this.top(parts[0]);
     const key = await repoKey(top);
     const lock = { busy: this.locks.reason(key) ?? null, working: this.locks.workingAgents(key) };

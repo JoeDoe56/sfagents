@@ -263,6 +263,7 @@ function refreshGitEdge() {
 }
 refreshGitEdge();
 setInterval(refreshGitEdge, 30000);
+addEventListener('git-repos-changed', refreshGitEdge);
 
 /** A repository's uncommitted changes, in a sheet that grows out of its pill. */
 /** The pills above the composer: uncommitted changes in the project folders, and task workspaces with work. */

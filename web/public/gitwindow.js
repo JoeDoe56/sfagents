@@ -106,7 +106,7 @@ export function openGitWindow(repo, from) {
       });
       const more = el('select', 'gw-branches gw-more');
       more.setAttribute('aria-label', 'More actions');
-      for (const [v, t] of [['', 'More…'], ['merge', 'Merge a branch into this one…'], ['undo', 'Undo last unpushed commit'], ['revert', 'Revert the selected commit'], ['pr', 'Pull request…']]) {
+      for (const [v, t] of [['', 'More…'], ['merge', 'Merge a branch into this one…'], ['undo', 'Undo last unpushed commit'], ['revert', 'Revert the selected commit'], ['pr', 'Pull request…'], ['init', 'Create a repository in a folder…'], ['clone', 'Clone a repository…']]) {
         const o = el('option', '', t);
         o.value = v;
         more.append(o);
@@ -139,6 +139,24 @@ export function openGitWindow(repo, from) {
             if (!title) return;
             const r = await postJson(`${base}/pull-request`, { base: baseBranch, title, description: prompt('Description (optional)') ?? '' });
             note.textContent = `Opened #${r.number}: ${r.url}`;
+          } catch (e) { note.textContent = e.message; }
+        } else if (v === 'init' || v === 'clone') {
+          try {
+            const parent = repo.path.replace(/[\\/][^\\/]*$/, '/');
+            if (v === 'init') {
+              const p = prompt('Full path of the folder to turn into a repository (inside an agent folder)', parent);
+              if (!p) return;
+              await postJson('/api/git/init', { path: p });
+              note.textContent = 'Repository created.';
+            } else {
+              const url = prompt('Repository URL to clone');
+              const p = url && prompt('Full path to clone into (inside an agent folder)', parent + url.replace(/\.git$/, '').split('/').pop());
+              if (!p) return;
+              note.textContent = 'Cloning…';
+              await postJson('/api/git/clone', { url, path: p });
+              note.textContent = 'Cloned.';
+            }
+            dispatchEvent(new Event('git-repos-changed'));
           } catch (e) { note.textContent = e.message; }
         } else if (v === 'revert') {
           if (!selectedCommit) note.textContent = 'Select a commit in History first.';
