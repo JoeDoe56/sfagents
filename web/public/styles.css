@@ -367,7 +367,8 @@ button { -webkit-tap-highlight-color: transparent; }
   top: 0;
   bottom: 0;
   right: 0;
-  width: min(74vw, 340px);
+  /* As wide as the chat, so long titles show in full instead of being cut. */
+  width: min(calc(100vw - 16px), 720px);
   overflow-y: auto;
   overscroll-behavior-y: contain;
   scrollbar-width: none;
@@ -402,7 +403,8 @@ button { -webkit-tap-highlight-color: transparent; }
   flex-direction: column;
   justify-content: flex-end;
   align-items: flex-end;
-  padding: 10px 2px;
+  /* Room on the leading side for the highlighted title, which grows by 8% toward it. */
+  padding: 10px 2px 10px 9%;
 }
 .rail-row { flex: none; height: 34px; max-width: 100%; display: flex; align-items: center; justify-content: flex-end; }
 .rail-row span {
