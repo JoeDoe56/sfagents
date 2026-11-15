@@ -15,7 +15,7 @@
 import { getJson, postJson } from './api.js';
 import { openSheet } from './modalsheet.js';
 import { renderDiff } from './chatdock.js';
-import { showMenu } from './menu.js';
+import { showMenu, onHold } from './menu.js';
 import { createTabs, createRow, createSection, createButton, createField, presentAlert, presentDialog } from './vendor/sfgl/src/ui/index.js';
 
 const memory = new Map(); // repo id → { tab, excluded:Set, title, description, selected, compare, commitError }
@@ -198,18 +198,45 @@ export function openGitWindow(repo, from) {
       // ---------------------------------------------------------- menus
       function pickBranch() {
         const why = busy();
+        const local = branches.filter((b) => !b.remote);
+        const localNames = new Set(local.map((b) => b.name));
+        // Remote branches without a local copy; picking one creates a local branch that tracks it.
+        const remote = branches.filter((b) => b.remote && !localNames.has(b.name.replace(/^[^/]+\//, '')));
         showMenu({
           anchor: branchButton.el,
           align: 'end',
           title: why || 'Branch',
           groups: [
-            branches.map((b) => ({
+            local.map((b) => ({
               label: b.name,
               detail: b.worktree && !b.current ? 'Checked out in another worktree' : undefined,
               checked: b.current,
               disabled: !!why,
               action: () => b.current || run('checkout', { name: b.name }, `Switch to ${b.name}`),
             })),
+            // Remote branches get their own submenu (sfgl menus have no titled groups).
+            remote.length
+              ? [
+                  {
+                    label: 'Remote Branches',
+                    symbol: 'network',
+                    disabled: !!why,
+                    submenu: {
+                      title: 'Remote Branches',
+                      groups: [
+                        remote.map((b) => {
+                          const short = b.name.replace(/^[^/]+\//, '');
+                          return {
+                            label: short,
+                            detail: `${b.name} · creates a local branch`,
+                            action: () => run('checkout', { name: short }, `Switch to ${short}`),
+                          };
+                        }),
+                      ],
+                    },
+                  },
+                ]
+              : [],
             [
               {
                 label: 'New Branch…',
@@ -553,9 +580,11 @@ export function openGitWindow(repo, from) {
           row.el.classList.add('gw-commit-row');
           if (c.pushed === false) row.el.classList.add('gw-unpushed');
           if (c.id === selectedCommit) row.el.classList.add('sel');
+          // Press and hold (touch) or right-click extends the selection to this commit.
+          onHold(row.el, () => select(i, true));
           return row;
         });
-        side.append(createSection({ title: 'Commits', rows, note: 'Shift-click a second commit to see the changes of a range.' }).el);
+        side.append(createSection({ title: 'Commits', rows, note: 'Press and hold a second commit to see the changes across a range (Shift-click with a mouse).' }).el);
         pane.classList.add('split');
         pane.append(side, detail);
 

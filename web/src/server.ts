@@ -234,6 +234,8 @@ interface LiveSegment {
   plain?: boolean;
   /** Text of a message to the person: the call that sent it. */
   call?: string;
+  /** Text of a message to the person: its id in the history (`<message id>:<call id>`), so menus and reactions work while the run goes on. */
+  msgId?: string;
   /** Questions for the person (a card); answered once they write. */
   questions?: DisplayQuestion[];
   answered?: boolean;
@@ -2891,6 +2893,20 @@ export class WebServer {
     return { id, tool, ...(command !== undefined ? { command } : {}), args, output, status };
   }
 
+  /**
+   * The history id of a root agent's tool call (`<message id>:<call id>`): the
+   * agent's message is stored before its calls run. The latest match wins,
+   * since call ids can repeat across runs.
+   */
+  private storedCallId(callId: string): string | undefined {
+    const messages = this.conversation.state.messages;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role === 'assistant' && m.toolCalls?.some((c) => c.id === callId)) return `${m.id}:${callId}`;
+    }
+    return undefined;
+  }
+
   private onEvent(live: LiveRun, event: RuntimeEvent): void {
     const root = event.agentPath.length === 1;
     if ((event.type === 'text' || event.type === 'tool_request') && !live.read) {
@@ -2917,7 +2933,8 @@ export class WebServer {
           const id = `${event.agentPath.join('/')}:${event.callId}`;
           const replyTo = replyRoots(this.conversation.state).messages.get(effect.reply.target) ?? effect.reply.target;
           const before: LiveSegment = { kind: 'activity', id: `${id}:before`, text: '', status: 'ok', hidden: true };
-          const text: LiveSegment = { kind: 'text', id: `${id}:reply`, text: effect.reply.text, replyTo };
+          const msgId = this.storedCallId(event.callId);
+          const text: LiveSegment = { kind: 'text', id: `${id}:reply`, text: effect.reply.text, replyTo, ...(msgId ? { msgId } : {}) };
           const step: LiveSegment = { kind: 'activity', id, text: 'Replied inline', status: 'running', hidden: true };
           for (const segment of [before, text, step]) {
             live.segments.push(segment);
@@ -2934,8 +2951,9 @@ export class WebServer {
           live.segments.push(before);
           this.broadcast('activity', { run: live.id, segment: before });
           if (said.text) {
-            live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said.text, call: id });
-            this.broadcast('delta', { run: live.id, text: said.text });
+            const msgId = this.storedCallId(event.callId);
+            live.segments.push({ kind: 'text', id: `t${live.segments.length}`, text: said.text, call: id, ...(msgId ? { msgId } : {}) });
+            this.broadcast('delta', { run: live.id, text: said.text, ...(msgId ? { msgId } : {}) });
           }
           const step: LiveSegment = { kind: 'activity', id, text: 'Sent a message', status: 'running', hidden: true, ...(said.questions ? { questions: said.questions } : {}) };
           live.segments.push(step);

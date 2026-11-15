@@ -360,6 +360,9 @@ function liveTexts() {
   return segs.filter((seg, i) => seg.kind === 'text' && !seg.plain && !seg.hidden && i < segs.length - 1 && seg.text.trim());
 }
 
+/** A live message bubble's history id (the server sends it), so its menu and reactions work before the run ends. */
+const liveMsgId = (seg) => (seg.msgId ? { id: seg.msgId, agent: state.live?.agent, reaction: state.reactions[seg.msgId] ?? state.agentReactions[seg.msgId] } : {});
+
 const msgEntry = (it, side) => ({
   key: it.id,
   id: it.id,
@@ -404,7 +407,7 @@ function entries() {
     for (const seg of state.live.segments) {
       if (seg.kind === 'user') pushUser(push, msgEntry(seg.item, 'out'));
       else if (seg.kind === 'text') {
-        if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root: seg.replyTo ?? root });
+        if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, ...liveMsgId(seg), type: 'msg', side: 'in', text: seg.text, rich: true, root: seg.replyTo ?? root });
       } else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
     }
     pushWaiting();
@@ -450,7 +453,7 @@ function threadEntries(root) {
   for (const o of state.outbox) if (o.root === root) out.push({ key: o.key, type: 'msg', side: 'out', text: o.text, root, pending: true });
   for (const seg of state.live?.segments ?? []) if (seg.kind === 'user' && seg.item.replyTo === root) out.push(msgEntry(seg.item, 'out'));
   // The live run's texts in this thread: all of them when the run answers it, and inline replies to it from any run.
-  for (const seg of liveTexts()) if ((seg.replyTo ?? state.live.replyTo) === root) out.push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root });
+  for (const seg of liveTexts()) if ((seg.replyTo ?? state.live.replyTo) === root) out.push({ key: `live:${state.live.id}:${seg.id}`, ...liveMsgId(seg), type: 'msg', side: 'in', text: seg.text, rich: true, root });
   if (state.live?.replyTo === root && !state.approvals.length) out.push({ key: `typing:${state.live.id}`, type: 'typing', root });
   for (const e of out) e.root = undefined; // no thread lines inside the thread itself
   return decorate(withReceipt(out));
@@ -1397,12 +1400,12 @@ function listen() {
     updateComposer();
   });
   stream.addEventListener('delta', (e) => {
-    const { run, text, plain } = JSON.parse(e.data);
+    const { run, text, plain, msgId } = JSON.parse(e.data);
     if (!state.live || state.live.id !== run) return;
     const segs = state.live.segments;
     const last = segs[segs.length - 1];
-    if (last && last.kind === 'text' && !!last.plain === !!plain) last.text += text;
-    else segs.push({ kind: 'text', id: `t${segs.length}`, text, ...(plain ? { plain: true } : {}) });
+    if (last && last.kind === 'text' && !!last.plain === !!plain && !msgId) last.text += text;
+    else segs.push({ kind: 'text', id: `t${segs.length}`, text, ...(plain ? { plain: true } : {}), ...(msgId ? { msgId } : {}) });
     // Nothing to draw: a reply is shown once it is finished, not as it streams.
     markRead();
   });
