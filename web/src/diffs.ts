@@ -56,22 +56,40 @@ export function repoId(top: string): string {
   return createHash('sha256').update(top).digest('hex').slice(0, 12);
 }
 
-/** The repositories under `dirs`: each dir's own, and those directly inside it. */
+/** How many folder levels below an attached folder to look for repositories. */
+const REPO_SEARCH_DEPTH = 3;
+/** A cap on folders read per search, so a huge attached folder stays cheap. */
+const REPO_SEARCH_MAX_DIRS = 2000;
+
+/**
+ * The repositories under `dirs`: each dir's own, and those up to
+ * REPO_SEARCH_DEPTH levels inside it (e.g. projects/mapapp/damapapp). A
+ * repository found is not searched further; dependency and build folders are
+ * skipped.
+ */
 export async function findRepos(dirs: readonly string[]): Promise<string[]> {
   const tops = new Set<string>();
   const candidates = new Set<string>();
-  for (const dir of dirs) {
-    candidates.add(dir);
+  let budget = REPO_SEARCH_MAX_DIRS;
+  const walk = (dir: string, depth: number): void => {
+    if (depth >= REPO_SEARCH_DEPTH || budget <= 0) return;
+    budget--;
     let entries: fs.Dirent[] = [];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      continue;
+      return;
     }
     for (const e of entries) {
       if (!e.isDirectory() || SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
-      if (fs.existsSync(path.join(dir, e.name, '.git'))) candidates.add(path.join(dir, e.name));
+      const sub = path.join(dir, e.name);
+      if (fs.existsSync(path.join(sub, '.git'))) candidates.add(sub);
+      else walk(sub, depth + 1);
     }
+  };
+  for (const dir of dirs) {
+    candidates.add(dir);
+    walk(dir, 0);
   }
   await Promise.all(
     [...candidates].map(async (dir) => {
