@@ -1176,37 +1176,33 @@ button.tree-card:active { transform: scale(0.97); background: #3a3a3c; }
 /* The scroll-to-bottom circle sits at the horizontal center of the chat. */
 .chat-dock .dock-down-wrap { position: absolute; left: calc(50% - 15px); bottom: 0; margin-left: 0; }
 
-/* ------------------------------------------------------------------ Git workspace window */
-.git-window .gw-head { padding: 0 16px 8px; }
-.gw-branch { margin: 0; font: 600 14px/18px var(--font); overflow-wrap: anywhere; }
-.gw-status { margin: 2px 0 0; font: 500 13px/17px var(--font); color: var(--ink-2); }
-.gw-lock { margin: 6px 0 0; font: 500 13px/17px var(--font); color: #ff9f0a; }
-.gw-tabs { display: flex; gap: 6px; margin-top: 10px; }
-.gw-tab { all: unset; cursor: pointer; padding: 6px 14px; border-radius: 14px; font: 600 13px/16px var(--font); color: var(--ink-2); }
-.gw-tab.on { background: rgba(255,255,255,0.14); color: var(--ink); }
-.gw-pane { padding: 0 16px 24px; display: flex; flex-direction: column; gap: 10px; }
-.gw-empty, .gw-note, .gw-error { margin: 8px 0; font: 500 13px/17px var(--font); color: var(--ink-2); }
-.gw-error { color: #ff453a; }
-.gw-all { display: flex; gap: 8px; align-items: center; font: 500 13px/17px var(--font); color: var(--ink-2); }
-.gw-files, .gw-commits { display: flex; flex-direction: column; max-height: 36vh; overflow-y: auto; }
-.gw-file { display: flex; gap: 8px; align-items: center; padding: 2px 0; border-radius: 8px; }
-.gw-file.sel, .gw-commit-row.sel { background: rgba(10,132,255,0.22); }
-.gw-file-open, .gw-commit-row { all: unset; box-sizing: border-box; flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; padding: 6px 4px; cursor: pointer; }
-.gw-file-open .diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gw-counts { color: var(--ink-2); font: 500 12px/16px var(--font); white-space: nowrap; }
-.gw-commit-row { flex-wrap: wrap; width: 100%; }
-.gw-ct { flex: 1 1 100%; font: 600 13px/17px var(--font); }
-.gw-cm { flex: 1; font: 500 12px/15px var(--font); color: var(--ink-2); }
-.gw-tag { font: 600 11px/14px var(--font); padding: 1px 7px; border-radius: 8px; background: rgba(255,255,255,0.12); }
-.gw-tag.not-pushed { background: rgba(255,159,10,0.3); }
-.gw-diff { overflow-x: auto; }
-.gw-hist-file { margin: 2px 0; font: 500 12px/15px var(--font); color: var(--ink-2); }
-.gw-commit { display: flex; flex-direction: column; gap: 8px; position: sticky; bottom: 0; padding: 8px 0; }
-.gw-title, .gw-desc { all: unset; box-sizing: border-box; width: 100%; padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,0.1); font: 500 14px/18px var(--font); }
-.gw-desc { white-space: pre-wrap; }
-.gw-go { all: unset; cursor: pointer; text-align: center; padding: 9px; border-radius: 12px; background: #0a84ff; font: 600 14px/18px var(--font); color: #fff; }
-.gw-go:disabled { opacity: 0.45; cursor: not-allowed; }
-@media (min-width: 900px) { .gw-pane { display: grid; grid-template-columns: minmax(280px, 38%) 1fr; align-items: start; } .gw-pane > .gw-diff { grid-column: 2; grid-row: 1 / span 4; } }
-.gw-remote { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.gw-op, .gw-branches { all: unset; cursor: pointer; padding: 6px 12px; border-radius: 12px; background: rgba(255,255,255,0.12); font: 600 13px/16px var(--font); max-width: 100%; box-sizing: border-box; }
-.gw-op:disabled, .gw-branches:disabled { opacity: 0.45; cursor: not-allowed; }
+/* ------------------------------------------------------------------ Git workspace window
+ * sfgl sections, rows, tabs and buttons; only the layout and a few accents here. */
+.git-window .sf-section { margin-bottom: 14px; }
+.gw-glyph { display: inline-flex; align-items: center; justify-content: center; pointer-events: none; }
+.gw-status { margin: 0 4px 14px; }
+.gw-repo { margin: 0; font: 600 15px/20px var(--font); overflow-wrap: anywhere; }
+.gw-summary { margin: 2px 0 0; font: 500 13px/17px var(--font); color: var(--ink-2); }
+.gw-lock { margin: -4px 4px 12px; font: 500 13px/17px var(--font); color: #ff9f0a; }
+.gw-note, .gw-empty { margin: 0 4px 12px; font: 500 13px/17px var(--font); color: var(--ink-2); overflow-wrap: anywhere; }
+.gw-error { margin: 0 4px; font: 500 13px/17px var(--font); color: #ff453a; }
+.gw-error:empty { display: none; }
+.gw-pane { display: flex; flex-direction: column; padding-bottom: 24px; }
+.gw-side, .gw-diff, .gw-commit { min-width: 0; }
+.gw-diff { overflow-x: auto; margin-bottom: 14px; }
+.gw-diff:empty { display: none; }
+.git-window .sf-row.sel { background: rgba(10, 132, 255, 0.22); }
+.git-window .gw-file .sf-row-title { font-family: var(--mono, ui-monospace, monospace); font-size: 14px; }
+.git-window .gw-file .sf-row-lead { margin-right: 8px; }
+.git-window .gw-unpushed .sf-row-value { color: #ff9f0a; }
+.gw-commit { display: flex; flex-direction: column; gap: 10px; }
+.gw-commit .sf-section { margin-bottom: 0; }
+.gw-commit .gw-go { align-self: stretch; justify-content: center; }
+.gw-body { margin: 0 4px 8px; white-space: pre-wrap; font: 500 13px/17px var(--font); }
+.gw-hist-file { margin: 2px 4px; font: 500 12px/15px var(--font); color: var(--ink-2); overflow-wrap: anywhere; }
+@media (min-width: 900px) {
+  .gw-pane.split { display: grid; grid-template-columns: minmax(300px, 40%) 1fr; grid-template-rows: auto 1fr; grid-template-areas: "side diff" "commit diff"; column-gap: 16px; align-items: start; }
+  .gw-pane.split > .gw-side { grid-area: side; }
+  .gw-pane.split > .gw-diff { grid-area: diff; position: sticky; top: 0; max-height: calc(100vh - 120px); overflow: auto; }
+  .gw-pane.split > .gw-commit { grid-area: commit; }
+}

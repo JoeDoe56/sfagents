@@ -1,17 +1,24 @@
 /**
  * The Git workspace window: Changes and History for one repository and
- * working context. Clicking a file row shows its diff; its checkbox only
- * changes inclusion in the next commit. Drafts, exclusions and the chosen
- * tab are remembered per repository, and a refresh never switches tabs or
- * clears them. Operations are disabled with a reason while an agent works
- * on the repository (the server enforces the same rule).
+ * working context, built from sfgl's components: the segmented tabs, grouped
+ * rows (switches for inclusion, a dropdown for the compare branch), menus
+ * for the branch and More, capsule buttons, a card field, and alerts and
+ * dialogs instead of browser prompts.
+ *
+ * Tapping a file row shows its diff; its switch only changes inclusion in
+ * the next commit. Drafts, exclusions and the chosen tab are remembered per
+ * repository, and a refresh never switches tabs or clears them. Operations
+ * are disabled with a reason while an agent works on the repository (the
+ * server enforces the same rule).
  */
 
 import { getJson, postJson } from './api.js';
 import { openSheet } from './modalsheet.js';
 import { renderDiff } from './chatdock.js';
+import { showMenu } from './menu.js';
+import { createTabs, createRow, createSection, createButton, createField, presentAlert, presentDialog } from './vendor/sfgl/src/ui/index.js';
 
-const memory = new Map(); // repo id → { tab, excluded:Set, title, description, selected }
+const memory = new Map(); // repo id → { tab, excluded:Set, title, description, selected, compare, commitError }
 
 function el(tag, className, text) {
   const n = document.createElement(tag);
@@ -20,387 +27,495 @@ function el(tag, className, text) {
   return n;
 }
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
 function summary(s) {
   const parts = [];
-  if (s.conflicts) parts.push(`${s.conflicts} conflict${s.conflicts === 1 ? '' : 's'}`);
-  if (s.files.length) parts.push(`${s.files.length} file${s.files.length === 1 ? '' : 's'} changed locally`);
-  if (s.ahead) parts.push(`${s.ahead} commit${s.ahead === 1 ? '' : 's'} waiting to be pushed`);
-  if (s.behind) parts.push(`${s.behind} incoming commit${s.behind === 1 ? '' : 's'}`);
+  if (s.conflicts) parts.push(plural(s.conflicts, 'conflict'));
+  if (s.files.length) parts.push(`${plural(s.files.length, 'file')} changed locally`);
+  if (s.ahead) parts.push(`${plural(s.ahead, 'commit')} waiting to be pushed`);
+  if (s.behind) parts.push(plural(s.behind, 'incoming commit'));
   if (s.operation) parts.push(`${s.operation} in progress`);
   if (!s.upstream && !s.detached) parts.push('no upstream branch');
   return parts.join(' · ') || 'Clean';
 }
 
+const ago = (ms) => {
+  if (ms === null || ms === undefined) return 'never fetched';
+  const m = Math.round((Date.now() - ms) / 60000);
+  return m < 1 ? 'fetched just now' : m < 60 ? `fetched ${m} min ago` : m < 1440 ? `fetched ${Math.round(m / 60)} h ago` : `fetched ${Math.round(m / 1440)} d ago`;
+};
+
 const KIND = { modified: 'Modified', added: 'Added', deleted: 'Deleted', renamed: 'Renamed', untracked: 'New', conflicted: 'Conflict', typechange: 'Type changed', submodule: 'Submodule' };
 
+/** An sfgl alert with one text field; resolves the trimmed text, or null. */
+async function ask(source, title, message, value, okLabel) {
+  const r = await presentAlert({
+    source,
+    title,
+    message,
+    input: { value: value ?? '' },
+    actions: [
+      { label: 'Cancel', role: 'cancel', value: null },
+      { label: okLabel, role: 'default', value: 'ok' },
+    ],
+  });
+  return r.action === 'ok' && r.value.trim() ? r.value.trim() : null;
+}
+
+/** Runs after the menu that chose it has closed (a menu or alert may follow). */
+const later = (fn) => () => setTimeout(fn, 0);
+
+/** Glyphs the bundled symbols lack. */
+const GLYPH = {
+  branch: '<svg viewBox="0 0 16 16" width="19" height="19" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="4.5" cy="3.5" r="1.75"/><circle cx="4.5" cy="12.5" r="1.75"/><circle cx="11.5" cy="5" r="1.75"/><path d="M4.5 5.25v5.5M11.5 6.75c0 3-7 2.5-7 4"/></g></svg>',
+  bolt: '<svg viewBox="0 0 16 16" width="19" height="19" aria-hidden="true"><path d="M9.4 1 3 9.2h4.4L6.5 15l6.5-8.4H8.6L9.4 1z" fill="currentColor"/></svg>',
+};
+
+/** A round sfgl glass button showing one of GLYPH. */
+function glyphButton(name, aria, onClick) {
+  const b = createButton({ aria, size: 'large', onClick });
+  const g = el('span', 'gw-glyph');
+  g.innerHTML = GLYPH[name];
+  b.el.append(g);
+  return b;
+}
+
 export function openGitWindow(repo, from) {
-  const mem = memory.get(repo.id) ?? { tab: 'changes', excluded: new Set(), title: '', description: '', selected: null };
+  const mem = memory.get(repo.id) ?? { tab: 'changes', excluded: new Set(), title: '', description: '', selected: null, compare: '', commitError: '' };
   memory.set(repo.id, mem);
+  const hooks = { tab: () => {}, branch: () => {}, actions: () => {} };
+  // The header: close, the Changes/History tabs, a branch button and an actions (lightning bolt) button.
+  const tabs = createTabs({
+    variant: 'segment',
+    items: [
+      { id: 'changes', label: 'Changes' },
+      { id: 'history', label: 'History' },
+    ],
+    selected: mem.tab,
+    onChange: (id) => hooks.tab(id),
+  });
+  const branchButton = glyphButton('branch', 'Branch', () => hooks.branch());
+  const actionsButton = glyphButton('bolt', 'Actions', () => hooks.actions());
   openSheet({
     title: repo.name,
     from,
     className: 'git-window',
     detents: ['large'],
+    headerItems: [
+      { id: 'tabs', node: tabs, size: 'fill', height: 48 },
+      { id: 'branch', node: branchButton.el, size: 44, height: 48 },
+      { id: 'actions', node: actionsButton.el, size: 44, height: 48 },
+    ],
     build: (ctx) => {
-      const head = el('div', 'gw-head');
-      const branchLine = el('p', 'gw-branch', repo.branch);
-      branchLine.title = repo.path;
-      const status = el('p', 'gw-status', 'Loading…');
+      const base = `/api/git/${encodeURIComponent(repo.id)}`;
+      let data = null; // { status, busy, working, remotes, lastFetch }
+      let commits = null;
+      let branches = [];
+      let selectedCommit = null;
+      let diffToken = 0;
+      const busy = () => data?.busy ?? null;
+
+      // ---------------------------------------------------------- status
+      const status = el('div', 'gw-status');
+      status.title = repo.path;
+      const repoLine = el('p', 'gw-repo', `${repo.name} · ${repo.branch || ''}`);
+      const statusLine = el('p', 'gw-summary', 'Loading…');
+      status.append(repoLine, statusLine);
       const lock = el('p', 'gw-lock');
       lock.hidden = true;
-      const tabs = el('div', 'gw-tabs');
-      const tabChanges = el('button', 'gw-tab', 'Changes');
-      const tabHistory = el('button', 'gw-tab', 'History');
-      for (const t of [tabChanges, tabHistory]) t.type = 'button';
-      tabs.append(tabChanges, tabHistory);
-      const bar = el('div', 'gw-remote');
       const note = el('p', 'gw-note');
-      const branchSel = el('select', 'gw-branches');
-      branchSel.setAttribute('aria-label', 'Branch');
-      const mk = (label, action, body) => {
-        const b = el('button', 'gw-op', label);
-        b.type = 'button';
-        b.dataset.action = action;
-        b.addEventListener('click', async () => {
-          b.disabled = true;
-          note.textContent = `${label}…`;
-          try {
-            await postJson(`${base}/${action}`, body?.() ?? {});
-            note.textContent = `${label} done.`;
-            commits = null;
-          } catch (e) {
-            note.textContent = e.message;
-          }
-          await load();
-        });
-        return b;
+      note.hidden = true;
+      const say = (t) => {
+        note.textContent = t || '';
+        note.hidden = !t;
       };
-      const bFetch = mk('Fetch', 'fetch');
-      const bPull = mk('Pull', 'pull');
-      const bPush = mk('Push', 'push');
-      const bPublish = mk('Publish branch', 'publish');
-      const bRemote = el('button', 'gw-op', 'Add remote');
-      bRemote.type = 'button';
-      bRemote.addEventListener('click', async () => {
-        const url = prompt('Remote URL (https:// or ssh)');
-        if (!url) return;
-        try { await postJson(`${base}/remote`, { name: 'origin', url }); note.textContent = 'Remote added.'; } catch (e) { note.textContent = e.message; }
-        await load();
-      });
-      const ago = (ms) => {
-        if (ms === null || ms === undefined) return 'never fetched';
-        const m = Math.round((Date.now() - ms) / 60000);
-        return m < 1 ? 'fetched just now' : m < 60 ? `fetched ${m} min ago` : m < 1440 ? `fetched ${Math.round(m / 60)} h ago` : `fetched ${Math.round(m / 1440)} d ago`;
+      const pane = el('div', 'gw-pane');
+      ctx.body.append(status, lock, note, pane);
+
+      hooks.tab = (id) => {
+        mem.tab = id;
+        show();
       };
-      branchSel.addEventListener('change', async () => {
-        const v = branchSel.value;
-        if (v === '__new') {
-          const name = prompt('New branch name (created from the current branch)');
-          if (!name) return load();
-          try { await postJson(`${base}/checkout`, { name, create: true, from: 'HEAD' }); note.textContent = ''; } catch (e) { note.textContent = e.message; }
-        } else {
-          try { await postJson(`${base}/checkout`, { name: v }); note.textContent = ''; } catch (e) { note.textContent = e.message; }
-        }
-        commits = null;
-        await load();
-      });
-      const more = el('select', 'gw-branches gw-more');
-      more.setAttribute('aria-label', 'More actions');
-      for (const [v, t] of [['', 'More…'], ['merge', 'Merge a branch into this one…'], ['undo', 'Undo last unpushed commit'], ['revert', 'Revert the selected commit'], ['pr', 'Pull request…'], ['init', 'Create a repository in a folder…'], ['clone', 'Clone a repository…']]) {
-        const o = el('option', '', t);
-        o.value = v;
-        more.append(o);
+      hooks.branch = () => pickBranch();
+      hooks.actions = () => openActions();
+
+      function updateOps() {
+        const why = busy() || '';
+        const s = data.status;
+        branchButton.el.title = why || `Branch: ${s.detached ? 'detached' : s.branch}`;
+        actionsButton.el.title = why || 'Fetch, pull, push and more';
       }
-      let selectedCommit = null;
+
       async function run(action, body, label) {
-        note.textContent = `${label}…`;
+        say(`${label}…`);
         try {
           const r = await postJson(`${base}/${action}`, body);
-          note.textContent = r?.conflicts?.length ? `Merge conflicts in ${r.conflicts.join(', ')}. Resolve them below.` : `${label} done.`;
-          if (action === 'undo') { mem.title = r.title; mem.description = r.description; mem.tab = 'changes'; }
-        } catch (e) { note.textContent = e.message; }
+          say(r?.conflicts?.length ? `Merge conflicts in ${r.conflicts.join(', ')}. Resolve them in Changes.` : `${label} done.`);
+          if (action === 'undo') {
+            mem.title = r.title ?? '';
+            mem.description = r.description ?? '';
+            mem.tab = 'changes';
+            tabs.select('changes', { notify: false });
+          }
+          if (r?.conflicts?.length) {
+            mem.tab = 'changes';
+            tabs.select('changes', { notify: false });
+          }
+        } catch (e) {
+          say(e.message);
+        }
         commits = null;
         await load();
       }
-      more.addEventListener('change', async () => {
-        const v = more.value;
-        more.value = '';
-        if (v === 'merge') {
-          const source = prompt(`Merge which branch into ${data.status.branch}?`);
-          if (source) await run('merge', { source }, 'Merge');
-        } else if (v === 'undo') await run('undo', {}, 'Undo');
-        else if (v === 'pr') {
-          try {
-            const { pulls, note: n } = await getJson(`${base}/pulls`);
-            if (n) return void (note.textContent = n);
-            if (pulls.length) { note.textContent = `Open: #${pulls[0].number} ${pulls[0].title} (${pulls[0].head} → ${pulls[0].base}) ${pulls[0].url}`; return; }
-            const baseBranch = prompt(`Base branch for the pull request from ${data.status.branch}`, 'main');
-            const title = baseBranch && prompt('Pull request title');
-            if (!title) return;
-            const r = await postJson(`${base}/pull-request`, { base: baseBranch, title, description: prompt('Description (optional)') ?? '' });
-            note.textContent = `Opened #${r.number}: ${r.url}`;
-          } catch (e) { note.textContent = e.message; }
-        } else if (v === 'init' || v === 'clone') {
-          try {
-            const parent = repo.path.replace(/[\\/][^\\/]*$/, '/');
-            if (v === 'init') {
-              const p = prompt('Full path of the folder to turn into a repository (inside an agent folder)', parent);
-              if (!p) return;
-              await postJson('/api/git/init', { path: p });
-              note.textContent = 'Repository created.';
-            } else {
-              const url = prompt('Repository URL to clone');
-              const p = url && prompt('Full path to clone into (inside an agent folder)', parent + url.replace(/\.git$/, '').split('/').pop());
-              if (!p) return;
-              note.textContent = 'Cloning…';
-              await postJson('/api/git/clone', { url, path: p });
-              note.textContent = 'Cloned.';
-            }
-            dispatchEvent(new Event('git-repos-changed'));
-          } catch (e) { note.textContent = e.message; }
-        } else if (v === 'revert') {
-          if (!selectedCommit) note.textContent = 'Select a commit in History first.';
-          else await run('revert', { commit: selectedCommit }, 'Revert');
-        }
-      });
-      bar.append(branchSel, bFetch, bPull, bPush, bPublish, bRemote, more);
-      async function loadBranches() {
-        try {
-          const list = (await getJson(`${base}/branches`)).branches;
-          branchSel.replaceChildren();
-          for (const b of list) {
-            const o = el('option', '', b.name + (b.worktree ? ' (other worktree)' : ''));
-            o.value = b.name;
-            o.selected = b.current;
-            branchSel.append(o);
-          }
-          const n = el('option', '', 'New branch…');
-          n.value = '__new';
-          branchSel.append(n);
-        } catch {}
-      }
-      function updateOps() {
-        const s = data.status;
-        const why = busy() || '';
-        bPull.textContent = s.behind ? `Pull ${s.behind}` : 'Pull';
-        bPush.textContent = s.ahead ? `Push ${s.ahead} commit${s.ahead === 1 ? '' : 's'}` : 'Push';
-        bPublish.hidden = !!s.upstream || s.detached;
-        bPull.hidden = bPush.hidden = !s.upstream;
-        const noRemote = !(data.remotes ?? []).length;
-        bRemote.hidden = !noRemote;
-        bFetch.hidden = noRemote;
-        bPublish.hidden = bPublish.hidden || noRemote;
-        bRemote.disabled = !!why;
-        bRemote.title = why;
-        for (const b of [bFetch, bPull, bPush, bPublish, branchSel, more]) {
-          b.disabled = !!why;
-          b.title = why;
-        }
-      }
-      head.append(branchLine, status, lock, bar, note, tabs);
-      const pane = el('div', 'gw-pane');
-      ctx.body.append(head, pane);
-
-      let data = null; // { status, busy, working }
-      let commits = null;
-      let diffToken = 0;
-      let draftTitle;
-      let draftDesc;
-      let diffBox;
-
-      const base = `/api/git/${encodeURIComponent(repo.id)}`;
-      const busy = () => data?.busy ?? null;
 
       async function load() {
         try {
           data = await getJson(`${base}/status`);
         } catch (e) {
-          status.textContent = e.message;
+          statusLine.textContent = e.message;
           return;
         }
         const s = data.status;
-        branchLine.textContent = s.detached ? `Detached at ${s.head.slice(0, 7)}` : s.branch + (s.upstream ? ` → ${s.upstream}` : '');
-        status.textContent = summary(s) + ((data.remotes ?? []).length ? ` · ${ago(data.lastFetch)}` : ' · no remote');
-        updateOps();
-        loadBranches();
+        const hasRemote = (data.remotes ?? []).length > 0;
+        repoLine.textContent = `${repo.name} · ${s.detached ? `detached at ${s.head.slice(0, 7)}` : s.branch}${s.upstream ? ` → ${s.upstream}` : ''}`;
+        statusLine.textContent = `${summary(s)} · ${hasRemote ? ago(data.lastFetch) : 'no remote'}`;
         lock.hidden = !data.busy;
         lock.textContent = data.busy ? `${data.busy}${data.working?.length ? ` (${data.working.join(', ')})` : ''}` : '';
+        updateOps();
+        await loadBranches();
         show();
       }
 
-      function setTab(t) {
-        mem.tab = t;
-        show();
+      async function loadBranches() {
+        try {
+          branches = (await getJson(`${base}/branches`)).branches;
+        } catch {
+          // keep the last list
+        }
+      }
+
+      // ---------------------------------------------------------- menus
+      function pickBranch() {
+        const why = busy();
+        showMenu({
+          anchor: branchButton.el,
+          align: 'end',
+          title: why || 'Branch',
+          groups: [
+            branches.map((b) => ({
+              label: b.name,
+              detail: b.worktree && !b.current ? 'Checked out in another worktree' : undefined,
+              checked: b.current,
+              disabled: !!why,
+              action: () => b.current || run('checkout', { name: b.name }, `Switch to ${b.name}`),
+            })),
+            [
+              {
+                label: 'New Branch…',
+                symbol: 'plus',
+                disabled: !!why || !data,
+                action: later(async () => {
+                  const name = await ask(branchButton.el, 'New Branch', `Created from ${data.status.branch || 'HEAD'} and checked out.`, '', 'Create');
+                  if (name) await run('checkout', { name, create: true, from: 'HEAD' }, 'Create branch');
+                }),
+              },
+            ],
+          ],
+        });
+      }
+
+      function openActions() {
+        const why = busy();
+        const s = data?.status;
+        const off = !!why || !s;
+        const hasRemote = (data?.remotes ?? []).length > 0;
+        const remoteItems = [];
+        if (!hasRemote) remoteItems.push({ label: 'Add Remote…', symbol: 'link', disabled: off, action: later(addRemote) });
+        else {
+          remoteItems.push({ label: 'Fetch', detail: ago(data.lastFetch), symbol: 'arrow.clockwise', disabled: off, action: () => run('fetch', {}, 'Fetch') });
+          if (s?.upstream) {
+            remoteItems.push({ label: s.behind ? `Pull ${plural(s.behind, 'Commit')}` : 'Pull', symbol: 'arrow.down', disabled: off, action: () => run('pull', {}, 'Pull') });
+            remoteItems.push({ label: s.ahead ? `Push ${plural(s.ahead, 'Commit')}` : 'Push', symbol: 'arrow.up', disabled: off, action: () => run('push', {}, 'Push') });
+          } else if (s && !s.detached) remoteItems.push({ label: 'Publish Branch', symbol: 'arrow.up', disabled: off, action: () => run('publish', {}, 'Publish') });
+        }
+        showMenu({
+          anchor: actionsButton.el,
+          align: 'end',
+          title: why || undefined,
+          groups: [
+            remoteItems,
+            [
+              { label: 'Merge a Branch into This One…', disabled: off, action: later(mergeBranch) },
+              { label: 'Undo Last Commit', detail: 'Only a commit that is not pushed', symbol: 'arrow.uturn.left', disabled: off, action: () => run('undo', {}, 'Undo') },
+              { label: 'Revert Selected Commit', detail: selectedCommit ? undefined : 'Select one commit in History', disabled: off || !selectedCommit, action: () => run('revert', { commit: selectedCommit }, 'Revert') },
+            ],
+            [
+              { label: 'Compare with a Branch…', disabled: !s, action: later(pickCompare) },
+              { label: 'Pull Request…', symbol: 'arrow.up.right.square', disabled: !s, action: later(pullRequest) },
+            ],
+            [
+              { label: 'Create a Repository…', symbol: 'folder.badge.plus', action: later(initRepo) },
+              { label: 'Clone a Repository…', symbol: 'square.and.arrow.down', action: later(cloneRepo) },
+            ],
+          ],
+        });
+      }
+
+      async function addRemote() {
+        const url = await ask(actionsButton.el, 'Add Remote', 'The URL of the repository to push to and pull from (named origin).', '', 'Add');
+        if (!url) return;
+        try {
+          await postJson(`${base}/remote`, { name: 'origin', url });
+          say('Remote added.');
+        } catch (e) {
+          say(e.message);
+        }
+        await load();
+      }
+
+      function mergeBranch() {
+        const others = branches.filter((b) => !b.current);
+        if (!others.length) return say('There is no other branch to merge.');
+        showMenu({
+          anchor: actionsButton.el,
+          align: 'end',
+          title: `Merge into ${data.status.branch}`,
+          groups: [others.map((b) => ({ label: b.name, action: () => run('merge', { source: b.name }, 'Merge') }))],
+        });
+      }
+
+      function pickCompare() {
+        const others = branches.filter((b) => !b.current);
+        if (!others.length) return say('There is no other branch to compare with.');
+        showMenu({
+          anchor: actionsButton.el,
+          align: 'end',
+          title: `Compare ${data.status.branch} with`,
+          groups: [
+            others.map((b) => ({
+              label: b.name,
+              checked: mem.compare === b.name,
+              action: () => {
+                mem.compare = b.name;
+                mem.tab = 'history';
+                tabs.select('history', { notify: false });
+                show();
+              },
+            })),
+          ],
+        });
+      }
+
+      async function pullRequest() {
+        try {
+          const { pulls, note: n } = await getJson(`${base}/pulls`);
+          if (n) return say(n);
+          if (pulls.length) return say(`Open: #${pulls[0].number} ${pulls[0].title} (${pulls[0].head} → ${pulls[0].base}) ${pulls[0].url}`);
+          const baseBranch = await ask(actionsButton.el, 'Pull Request', `The branch to merge ${data.status.branch} into.`, 'main', 'Next');
+          const title = baseBranch && (await ask(actionsButton.el, 'Pull Request', 'Title', mem.title || '', 'Next'));
+          if (!title) return;
+          const description = (await ask(actionsButton.el, 'Pull Request', 'Description (optional)', '', 'Open')) ?? '';
+          const r = await postJson(`${base}/pull-request`, { base: baseBranch, title, description });
+          say(`Opened #${r.number}: ${r.url}`);
+        } catch (e) {
+          say(e.message);
+        }
+      }
+
+      const parentFolder = () => repo.path.replace(/[\\/][^\\/]*$/, '/');
+      async function initRepo() {
+        const p = await ask(actionsButton.el, 'Create a Repository', 'The full path of the folder, inside a folder attached to an agent.', parentFolder(), 'Create');
+        if (!p) return;
+        try {
+          await postJson('/api/git/init', { path: p });
+          say('Repository created.');
+          dispatchEvent(new Event('git-repos-changed'));
+        } catch (e) {
+          say(e.message);
+        }
+      }
+      async function cloneRepo() {
+        const url = await ask(actionsButton.el, 'Clone a Repository', 'The repository URL.', '', 'Next');
+        const p = url && (await ask(actionsButton.el, 'Clone a Repository', 'The full path to clone into, inside a folder attached to an agent.', parentFolder() + url.replace(/\.git$/, '').split('/').pop(), 'Clone'));
+        if (!p) return;
+        say('Cloning…');
+        try {
+          await postJson('/api/git/clone', { url, path: p });
+          say('Cloned.');
+          dispatchEvent(new Event('git-repos-changed'));
+        } catch (e) {
+          say(e.message);
+        }
       }
 
       function show() {
-        tabChanges.classList.toggle('on', mem.tab === 'changes');
-        tabHistory.classList.toggle('on', mem.tab === 'history');
-        // Keep the commit draft typed so far across re-renders.
-        if (draftTitle) mem.title = draftTitle.value;
-        if (draftDesc) mem.description = draftDesc.value;
         if (mem.tab === 'changes') showChanges();
         else showHistory();
         ctx.refresh();
       }
 
-      tabChanges.addEventListener('click', () => setTab('changes'));
-      tabHistory.addEventListener('click', () => setTab('history'));
-
       // ---------------------------------------------------------- changes
       function showChanges() {
         pane.replaceChildren();
-        draftTitle = draftDesc = undefined;
+        pane.classList.remove('split');
         if (!data) return;
+        const why = busy();
         const files = data.status.files;
-        if (!files.length) {
-          pane.append(el('p', 'gw-empty', 'No uncommitted changes.'));
-          return;
-        }
+        const side = el('div', 'gw-side');
         // A selection that no longer exists is reported, not replaced with another file.
         if (mem.selected && !files.some((f) => f.path === mem.selected)) {
-          pane.append(el('p', 'gw-note', `${mem.selected} is no longer changed.`));
+          side.append(el('p', 'gw-note', `${mem.selected} is no longer changed.`));
           mem.selected = null;
         }
         const conflicted = files.filter((f) => f.kind === 'conflicted');
         if (data.status.operation || conflicted.length) {
-          const box = el('div', 'gw-conflicts');
-          box.append(el('p', 'gw-note', `${data.status.operation || 'Merge'} in progress${conflicted.length ? `: ${conflicted.length} file${conflicted.length === 1 ? '' : 's'} with conflicts. Edit each file, then mark it resolved.` : '. All conflicts are resolved.'}`));
-          for (const f of conflicted) {
-            const b = el('button', 'gw-op', `Mark ${f.path} resolved`);
-            b.type = 'button';
-            b.disabled = !!busy();
-            b.addEventListener('click', () => run('resolve', { path: f.path }, 'Resolve'));
-            box.append(b);
-          }
-          const cont = el('button', 'gw-op', 'Continue merge');
-          cont.disabled = !!busy() || conflicted.length > 0;
-          cont.addEventListener('click', () => run('merge-finish', { action: 'continue' }, 'Continue'));
-          const abort = el('button', 'gw-op', 'Abort merge');
-          abort.disabled = !!busy();
-          abort.addEventListener('click', () => run('merge-finish', { action: 'abort' }, 'Abort'));
-          box.append(cont, abort);
-          pane.append(box);
+          const rows = conflicted.map((f) => createRow({ title: `Mark ${f.path} Resolved`, tintTitle: true, disabled: !!why, onTap: () => run('resolve', { path: f.path }, 'Resolve') }));
+          rows.push(createRow({ title: 'Continue Merge', tintTitle: true, disabled: !!why || conflicted.length > 0, onTap: () => run('merge-finish', { action: 'continue' }, 'Continue') }));
+          rows.push(createRow({ title: 'Abort Merge', destructive: true, disabled: !!why, onTap: () => run('merge-finish', { action: 'abort' }, 'Abort') }));
+          side.append(
+            createSection({
+              title: `${data.status.operation || 'Merge'} in progress`,
+              rows,
+              note: conflicted.length ? `${plural(conflicted.length, 'file')} with conflicts. Edit each file, then mark it resolved.` : 'All conflicts are resolved.',
+            }).el,
+          );
+        }
+        if (!files.length) {
+          side.append(el('p', 'gw-empty', 'No uncommitted changes.'));
+          pane.append(side);
+          return;
         }
         const included = files.filter((f) => !mem.excluded.has(f.path));
-        const all = el('label', 'gw-all');
-        const allBox = el('input');
-        allBox.type = 'checkbox';
-        allBox.checked = included.length === files.length;
-        allBox.indeterminate = included.length > 0 && included.length < files.length;
-        allBox.disabled = !!busy();
-        allBox.addEventListener('change', () => {
-          if (allBox.checked) mem.excluded.clear();
-          else for (const f of files) mem.excluded.add(f.path);
-          show();
+        const refuse = (row, on) => {
+          if (!why) return false;
+          row.setChecked(!on);
+          say(why);
+          return true;
+        };
+        const allRow = createRow({
+          title: `${included.length} of ${plural(files.length, 'File')} Included`,
+          toggle: {
+            checked: included.length === files.length,
+            onChange: (on) => {
+              if (refuse(allRow, on)) return;
+              if (on) mem.excluded.clear();
+              else for (const f of files) mem.excluded.add(f.path);
+              show();
+            },
+          },
         });
-        all.append(allBox, el('span', '', `${included.length} of ${files.length} files included`));
-        const discard = el('button', 'gw-op', 'Discard selected…');
-        discard.type = 'button';
-        discard.disabled = !!busy() || !included.length;
-        discard.title = busy() || '';
-        discard.addEventListener('click', async () => {
-          if (!confirm(`Discard changes in ${included.length} file${included.length === 1 ? '' : 's'}? Edits are lost; new files are deleted.`)) return;
-          await run('discard', { paths: included.map((f) => f.path) }, 'Discard');
+        const rows = files.map((f) => {
+          const row = createRow({
+            leadingNode: el('span', `diff-status ${f.kind}`, KIND[f.kind] ?? f.kind),
+            title: f.oldPath ? `${f.oldPath} → ${f.path}` : f.path,
+            value: f.added === null ? 'binary' : `+${f.added} −${f.removed}`,
+            toggle: {
+              checked: !mem.excluded.has(f.path),
+              onChange: (on) => {
+                if (refuse(row, on)) return;
+                if (on) mem.excluded.delete(f.path);
+                else mem.excluded.add(f.path);
+                show();
+              },
+            },
+            onTap: () => {
+              mem.selected = f.path;
+              show();
+            },
+          });
+          row.el.classList.add('gw-file');
+          row.el.classList.toggle('sel', mem.selected === f.path);
+          return row;
         });
-        pane.append(discard);
-        const list = el('div', 'gw-files');
-        for (const f of files) {
-          const row = el('div', 'gw-file');
-          if (mem.selected === f.path) row.classList.add('sel');
-          const box = el('input');
-          box.type = 'checkbox';
-          box.checked = !mem.excluded.has(f.path);
-          box.disabled = !!busy();
-          box.setAttribute('aria-label', `Include ${f.path} in the commit`);
-          box.addEventListener('change', () => {
-            if (box.checked) mem.excluded.delete(f.path);
-            else mem.excluded.add(f.path);
-            show();
-          });
-          const open = el('button', 'gw-file-open');
-          open.type = 'button';
-          const counts = f.added === null ? 'no line counts' : `+${f.added} −${f.removed}`;
-          open.append(el('span', `diff-status ${f.kind}`, KIND[f.kind] ?? f.kind), el('span', 'diff-path', f.oldPath ? `${f.oldPath} → ${f.path}` : f.path), el('span', 'gw-counts', counts));
-          open.addEventListener('click', () => {
-            mem.selected = f.path;
-            show();
-          });
-          row.append(box, open);
-          list.append(row);
-        }
-        diffBox = el('div', 'gw-diff');
-        if (mem.selected) loadDiff(mem.selected);
-        pane.append(all, list, diffBox, commitForm(files));
+        side.append(createSection({ title: 'Changes', rows: [allRow, ...rows], note: 'Tap a file to see its changes; the switch says whether it goes in the next commit.' }).el);
+        const discardRow = createRow({
+          title: included.length ? `Discard ${plural(included.length, 'Included Change')}…` : 'Discard Included Changes…',
+          destructive: true,
+          disabled: !!why || !included.length,
+          onTap: async () => {
+            const answer = await presentDialog({
+              source: discardRow.el,
+              title: `Discard changes in ${plural(included.length, 'file')}?`,
+              message: 'Edits are lost; new files are deleted.',
+              actions: [{ label: 'Discard', role: 'destructive', value: 'discard' }],
+            });
+            if (answer === 'discard') await run('discard', { paths: included.map((f) => f.path) }, 'Discard');
+          },
+        });
+        side.append(createSection({ rows: [discardRow] }).el);
+        const diffBox = el('div', 'gw-diff');
+        pane.classList.add('split');
+        pane.append(side, diffBox, commitForm(files));
+        if (mem.selected) loadDiff(diffBox, mem.selected);
       }
 
-      async function loadDiff(path) {
+      async function loadDiff(box, path) {
         const token = ++diffToken;
-        diffBox.textContent = 'Loading…';
+        box.textContent = 'Loading…';
         try {
           const d = await getJson(`${base}/file`, { path });
           if (token !== diffToken) return;
           if (d.gone) {
-            diffBox.textContent = `${path} is no longer changed.`;
+            box.textContent = `${path} is no longer changed.`;
             return;
           }
           const f = data.status.files.find((x) => x.path === path);
-          if (d.unavailable) diffBox.textContent = d.binary ? 'Binary file: no text diff.' : 'The diff is not available.';
-          else renderDiff(diffBox, { files: [{ path, status: f?.kind === 'untracked' ? 'added' : (f?.kind ?? 'modified'), added: f?.added ?? 0, removed: f?.removed ?? 0, patch: d.patch, binary: d.binary }] });
+          if (d.unavailable) box.textContent = d.binary ? 'Binary file: no text diff.' : 'The diff is not available.';
+          else renderDiff(box, { files: [{ path, status: f?.kind === 'untracked' ? 'added' : (f?.kind ?? 'modified'), added: f?.added ?? 0, removed: f?.removed ?? 0, patch: d.patch, binary: d.binary }] });
           ctx.refresh();
         } catch (e) {
-          if (token === diffToken) diffBox.textContent = e.message;
+          if (token === diffToken) box.textContent = e.message;
         }
       }
 
       function commitForm(files) {
-        const form = el('form', 'gw-commit');
-        draftTitle = el('input', 'gw-title');
-        draftTitle.placeholder = 'Summary (required)';
-        draftTitle.value = mem.title;
-        draftDesc = el('textarea', 'gw-desc');
-        draftDesc.placeholder = 'Description';
-        draftDesc.rows = 3;
-        draftDesc.value = mem.description;
-        const go = el('button', 'gw-go');
-        go.type = 'submit';
-        const message = el('p', 'gw-error');
+        const box = el('div', 'gw-commit');
         const paths = () => files.filter((f) => !mem.excluded.has(f.path)).map((f) => f.path);
-        const state = () => {
-          const branch = data.status.detached ? 'HEAD' : data.status.branch;
-          go.textContent = `Commit to ${branch}`;
-          const why = busy() || (data.status.conflicts ? 'Resolve the merge conflicts first.' : !paths().length ? 'Select at least one change.' : !draftTitle.value.trim() ? 'Write a commit title.' : '');
-          go.disabled = !!why;
-          go.title = why;
-          message.textContent = why && !draftTitle.value.trim() === false ? why : message.dataset.fail || '';
-        };
-        draftTitle.addEventListener('input', () => {
-          mem.title = draftTitle.value;
-          state();
+        const titleRow = createRow({
+          title: 'Summary',
+          input: {
+            value: mem.title,
+            placeholder: 'Required',
+            onInput: (v) => {
+              mem.title = v;
+              mem.commitError = '';
+              state();
+            },
+          },
         });
-        draftDesc.addEventListener('input', () => (mem.description = draftDesc.value));
-        form.addEventListener('submit', async (e) => {
-          e.preventDefault();
-          go.disabled = true;
+        const desc = createField({ look: 'card', multiline: true, maxRows: 8, placeholder: 'Description', value: mem.description, aria: 'Commit description', onInput: (v) => (mem.description = v) });
+        const go = createButton({ label: 'Commit', tint: 'action', className: 'gw-go', onClick: () => submit() });
+        const message = el('p', 'gw-error');
+        function state() {
+          const branch = data.status.detached ? 'HEAD' : data.status.branch;
+          go.setLabel(`Commit to ${branch}`);
+          const why = busy() || (data.status.conflicts ? 'Resolve the merge conflicts first.' : !paths().length ? 'Select at least one change.' : !mem.title.trim() ? 'Write a commit summary.' : '');
+          go.setDisabled(!!why);
+          go.el.title = why;
+          message.textContent = mem.commitError || (mem.title.trim() ? why : '');
+        }
+        async function submit() {
+          go.setDisabled(true);
           try {
-            await postJson(`${base}/commit`, { paths: paths(), title: draftTitle.value, description: draftDesc.value });
-            mem.title = mem.description = '';
+            await postJson(`${base}/commit`, { paths: paths(), title: mem.title, description: mem.description });
+            mem.title = mem.description = mem.commitError = '';
             mem.selected = null;
             commits = null;
-            await load();
           } catch (err) {
             // The draft and selection stay as they were.
-            message.dataset.fail = err.message;
-            await load();
+            mem.commitError = err.message;
           }
-        });
-        form.append(draftTitle, draftDesc, go, message);
+          await load();
+        }
+        box.append(createSection({ title: 'Commit', rows: [titleRow] }).el, desc.el, go.el, message);
         state();
-        return form;
+        return box;
       }
 
       // ---------------------------------------------------------- history
       async function showHistory() {
+        pane.classList.remove('split');
         pane.replaceChildren(el('p', 'gw-note', 'Loading…'));
         if (!commits) {
           try {
@@ -412,81 +527,100 @@ export function openGitWindow(repo, from) {
         }
         if (mem.tab !== 'history') return;
         pane.replaceChildren();
+        const side = el('div', 'gw-side');
+        const detail = el('div', 'gw-diff');
+        if (mem.compare && !branches.some((b) => b.name === mem.compare && !b.current)) mem.compare = '';
+        let compareSection = null;
+        if (mem.compare) {
+          compareSection = createSection({ rows: [createRow({ title: `Comparing with ${mem.compare}`, value: 'Stop', onTap: () => { mem.compare = ''; show(); } })] });
+          side.append(compareSection.el);
+        }
         if (!commits.length) {
-          pane.append(el('p', 'gw-empty', 'No commits yet.'));
+          side.append(el('p', 'gw-empty', 'No commits yet.'));
+          pane.append(side);
           return;
         }
-        const list = el('div', 'gw-commits');
-        const detail = el('div', 'gw-diff');
         let anchor = null;
-        const rows = [];
-        const select = (i, extend) => {
+        const rows = commits.map((c, i) => {
+          const tag = c.pushed === null ? 'local' : c.pushed ? 'pushed' : 'not pushed';
+          const row = createRow({
+            title: c.title,
+            subtitle: `${c.author} · ${new Date(c.date).toLocaleString()} · ${c.short}${c.checkpoint ? ' · checkpoint' : ''}`,
+            value: tag,
+            wrap: true,
+            onTap: (_a, e) => select(i, !!e?.shiftKey),
+          });
+          row.el.classList.add('gw-commit-row');
+          if (c.pushed === false) row.el.classList.add('gw-unpushed');
+          if (c.id === selectedCommit) row.el.classList.add('sel');
+          return row;
+        });
+        side.append(createSection({ title: 'Commits', rows, note: 'Shift-click a second commit to see the changes of a range.' }).el);
+        pane.classList.add('split');
+        pane.append(side, detail);
+
+        function select(i, extend) {
+          if (mem.compare) {
+            mem.compare = '';
+            compareSection?.el.remove();
+          }
           if (!extend || anchor === null) anchor = i;
           const [lo, hi] = [Math.min(anchor, i), Math.max(anchor, i)];
-          rows.forEach((r, k) => r.classList.toggle('sel', k >= lo && k <= hi));
+          rows.forEach((r, k) => r.el.classList.toggle('sel', k >= lo && k <= hi));
           selectedCommit = lo === hi ? commits[lo].id : null;
           // A contiguous range: the net diff from before the oldest to the newest.
-          const newest = commits[lo].id;
-          const oldest = commits[hi].id;
           detail.textContent = 'Loading…';
-          getJson(`${base}/commit`, { newest, oldest }).then((d) => {
-            detail.replaceChildren();
-            const c = commits[lo];
-            if (lo === hi && c.body) detail.append(el('p', 'gw-body', c.body));
-            for (const f of d.files) detail.append(el('p', 'gw-hist-file', `${f.path}  ${f.added === null ? 'binary' : `+${f.added} −${f.removed}`}`));
-            const box = el('div');
-            detail.append(box);
-            renderDiff(box, { files: [{ path: '', status: 'modified', added: 0, removed: 0, patch: d.patch }] });
-            ctx.refresh();
-          }).catch((e) => (detail.textContent = e.message));
-        };
-        commits.forEach((c, i) => {
-          const row = el('button', 'gw-commit-row');
-          row.type = 'button';
-          const tag = c.pushed === null ? 'local' : c.pushed ? 'pushed' : 'not pushed';
-          row.append(el('span', 'gw-ct', c.title), el('span', 'gw-cm', `${c.author} · ${new Date(c.date).toLocaleString()} · ${c.short}${c.checkpoint ? ' · checkpoint' : ''}`), el('span', `gw-tag ${tag.replace(' ', '-')}`, tag));
-          row.addEventListener('click', (e) => select(i, e.shiftKey));
-          rows.push(row);
-          list.append(row);
-        });
-        const cmp = el('div', 'gw-compare');
-        const sel = el('select', 'gw-branches');
-        sel.setAttribute('aria-label', 'Compare branch');
-        const none = el('option', '', 'Compare branch…');
-        none.value = '';
-        sel.append(none);
-        getJson(`${base}/branches`).then((r) => {
-          for (const b of r.branches) if (!b.current) { const o = el('option', '', b.name); o.value = b.name; sel.append(o); }
-        }).catch(() => {});
-        sel.addEventListener('change', async () => {
-          if (!sel.value) return select(0, false);
+          getJson(`${base}/commit`, { newest: commits[lo].id, oldest: commits[hi].id })
+            .then((d) => {
+              detail.replaceChildren();
+              const c = commits[lo];
+              if (lo === hi && c.body) detail.append(el('p', 'gw-body', c.body));
+              for (const f of d.files) detail.append(el('p', 'gw-hist-file', `${f.path}  ${f.added === null ? 'binary' : `+${f.added} −${f.removed}`}`));
+              const box = el('div');
+              detail.append(box);
+              renderDiff(box, { files: [{ path: '', status: 'modified', added: 0, removed: 0, patch: d.patch }] });
+              ctx.refresh();
+            })
+            .catch((e) => (detail.textContent = e.message));
+        }
+
+        async function compare(other) {
+          rows.forEach((r) => r.el.classList.remove('sel'));
+          selectedCommit = null;
           detail.textContent = 'Loading…';
           try {
-            const d = await getJson(`${base}/compare`, { base: sel.value });
-            detail.replaceChildren(el('p', 'gw-note', `Committed changes on ${data.status.branch} since its common ancestor with ${d.base} (${d.mergeBase.slice(0, 7)}), including unpushed commits: ${d.commits.length} commit${d.commits.length === 1 ? '' : 's'}.`));
+            const d = await getJson(`${base}/compare`, { base: other });
+            detail.replaceChildren(el('p', 'gw-note', `Committed changes on ${data.status.branch} since its common ancestor with ${d.base} (${d.mergeBase.slice(0, 7)}), including unpushed commits: ${plural(d.commits.length, 'commit')}.`));
             for (const c of d.commits) detail.append(el('p', 'gw-hist-file', `${c.short}  ${c.title}`));
             for (const f of d.files) detail.append(el('p', 'gw-hist-file', `${f.path}  ${f.added === null ? 'binary' : `+${f.added} −${f.removed}`}`));
-            if (d.patch) { const box = el('div'); detail.append(box); renderDiff(box, { files: [{ path: '', status: 'modified', added: 0, removed: 0, patch: d.patch }] }); }
+            if (d.patch) {
+              const box = el('div');
+              detail.append(box);
+              renderDiff(box, { files: [{ path: '', status: 'modified', added: 0, removed: 0, patch: d.patch }] });
+            }
             ctx.refresh();
-          } catch (e) { detail.textContent = e.message; }
-        });
-        cmp.append(sel);
-        pane.append(cmp, list, detail);
+          } catch (e) {
+            detail.textContent = e.message;
+          }
+        }
+        if (mem.compare) compare(mem.compare);
         ctx.refresh();
       }
 
       load();
-      // Refresh in place while the window is open.
+      // Refresh in place while the window is open (not while the commit draft has focus).
       const timer = setInterval(() => {
         if (!ctx.body.isConnected) return clearInterval(timer);
         const typing = document.activeElement?.closest?.('.gw-commit');
-        getJson(`${base}/status`).then((d) => {
-          const changed = JSON.stringify(d.status) !== JSON.stringify(data?.status) || d.busy !== data?.busy;
-          if (changed && !typing) {
-            commits = null;
-            load();
-          } else if (changed) data = d;
-        }).catch(() => {});
+        getJson(`${base}/status`)
+          .then((d) => {
+            const changed = JSON.stringify(d.status) !== JSON.stringify(data?.status) || d.busy !== data?.busy;
+            if (changed && !typing) {
+              commits = null;
+              load();
+            } else if (changed) data = d;
+          })
+          .catch(() => {});
       }, 4000);
     },
   });

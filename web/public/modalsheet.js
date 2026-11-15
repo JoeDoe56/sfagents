@@ -57,6 +57,8 @@ export function openSheet(options) {
     confirm: options.onConfirm ? { aria: options.confirmLabel ?? 'Done' } : false,
     trailing: options.trailing ? [options.trailing] : [],
   });
+  // A header of its own: the close button, then these bar items in place of the title (tabs, buttons).
+  if (options.headerItems) header.layouts.main[0] = [header.layouts.main[0][0], ...options.headerItems];
   let ctx;
   let confirmed = false;
   openSheets++;
