@@ -34,10 +34,9 @@ import { createGradientUnderlay } from './vendor/sfgl/src/underlay/gradient.js';
 import { onHold } from './menu.js';
 import { installBubbleMenus } from './bubblemenu.js';
 import { springAnimate, springyScroll } from './springs.js';
-import { createChatDock, renderDiff } from './chatdock.js';
+import { createChatDock } from './chatdock.js';
 import { createGitEdge } from './gitedge.js';
 import { openGitWindow } from './gitwindow.js';
-import { workspacePills, openWorkspace } from './workspaces.js';
 import { configure as configureUi, createSheet, createButton, installPress, lensFor } from './vendor/sfgl/src/ui/index.js';
 
 configureUi({ scheme: 'dark' });
@@ -161,6 +160,8 @@ function layoutAboveBar(next = clearance) {
   aboveBarLayout = key;
   railEl.style.bottom = `${Math.round(next + 12 + (covered ? 0 : dockSpace.height))}px`;
   railEl.classList.toggle('covered', covered);
+  gitRailEl.style.bottom = railEl.style.bottom;
+  gitRailEl.classList.toggle('covered', covered);
   const pad = Math.round(next + 18 + (covered ? 0 : dockSpace.pills));
   if (thread.style.getPropertyValue('--chat-bottom') !== `${pad}px`) {
     const atBottom = nearBottom();
@@ -169,6 +170,7 @@ function layoutAboveBar(next = clearance) {
   }
 }
 const railEl = $('rail');
+const gitRailEl = $('gitRail');
 sheetScroll.hidden = false;
 
 // The buttons beside the monitor: the same circles as everywhere.
@@ -246,7 +248,8 @@ dock = createChatDock({
   bar: composer.bar.el,
   chat,
   thread,
-  onOpenDiff: (repo, pill) => (repo.workspace ? openWorkspace(repo.workspace, pill) : openDiff(repo, pill)),
+  // The repositories moved to the left edge (gitedge.js): the dock keeps only the scroll-down circle.
+  onOpenDiff: () => {},
   onLayout: (space) => {
     Object.assign(dockSpace, space);
     layoutAboveBar();
@@ -255,7 +258,7 @@ dock = createChatDock({
 dock.setBar({ clearance, covered: false });
 
 // The left edge: every repository any agent can reach, from /api/git.
-const gitEdge = createGitEdge({ chat, onOpen: (repo, from) => openGitWindow(repo, from) });
+const gitEdge = createGitEdge({ root: gitRailEl, dots: $('gitRailDots'), list: $('gitRailList'), onOpen: (repo, from) => openGitWindow(repo, from) });
 let gitEdgeTimer = 0;
 function refreshGitEdge() {
   clearTimeout(gitEdgeTimer);
@@ -265,38 +268,6 @@ refreshGitEdge();
 setInterval(refreshGitEdge, 30000);
 addEventListener('git-repos-changed', refreshGitEdge);
 
-/** A repository's uncommitted changes, in a sheet that grows out of its pill. */
-/** The pills above the composer: uncommitted changes in the project folders, and task workspaces with work. */
-const pills = { diffs: [], workspaces: [] };
-function showPills() {
-  dock.setRepos([...pills.diffs, ...workspacePills(pills.workspaces)]);
-}
-
-function openDiff(repo, pill) {
-  openSheet({
-    title: repo.name,
-    from: pill,
-    className: 'diff-sheet',
-    detents: ['large'],
-    build: (ctx) => {
-      const sub = document.createElement('p');
-      sub.className = 'diff-summary';
-      sub.textContent = `${repo.branch && repo.branch !== 'HEAD' ? `${repo.branch} · ` : ''}${repo.files} file${repo.files === 1 ? '' : 's'} changed · ${repo.path}`;
-      const list = document.createElement('div');
-      list.className = 'diff-list';
-      list.textContent = 'Loading…';
-      ctx.body.append(sub, list);
-      getJson(`/api/diffs/${encodeURIComponent(repo.id)}`)
-        .then((data) => {
-          renderDiff(list, data);
-          ctx.refresh();
-        })
-        .catch((error) => {
-          list.textContent = error.message;
-        });
-    },
-  });
-}
 
 /** One step of the agent's: the command (or call) in full and its output, in a window over the chat. */
 function openStep(id, from) {
@@ -1264,9 +1235,6 @@ function applySnapshot(s) {
   if (s.view) fileManager.applyView(s.view.files);
   state.limits = s.limits || state.limits;
   setArtifacts(s.artifacts);
-  pills.diffs = s.diffs ?? [];
-  pills.workspaces = s.workspaces ?? [];
-  showPills();
   setSections(s.sections);
   if (s.agent) document.title = `SF Agents · ${s.agent.id}`;
   for (const n of s.notices || []) typeof n === 'string' ? notice(n) : notice(n.text, n.level);
@@ -1502,13 +1470,10 @@ function listen() {
   });
   stream.addEventListener('artifacts', (e) => setArtifacts(JSON.parse(e.data).artifacts));
   stream.addEventListener('diffs', (e) => {
-    pills.diffs = JSON.parse(e.data).repos ?? [];
-    showPills();
     refreshGitEdge();
   });
   stream.addEventListener('workspaces', (e) => {
-    pills.workspaces = JSON.parse(e.data).workspaces ?? [];
-    showPills();
+    refreshGitEdge();
   });
   stream.addEventListener('reactions', (e) => {
     state.reactions = JSON.parse(e.data).reactions ?? {};

@@ -14,7 +14,13 @@ const DOT_SLOT = 12;
 const EDGE = 56;
 const MAX_SPEED = 16; // px per frame at the very edge
 
-export function createRail({ root, dots, list, onJump, onOpenChange }) {
+/**
+ * Also used, mirrored (`.rail.left`), for the repositories on the left edge.
+ * An entry may carry `detail` (dimmer text after the title, in the same pill)
+ * and `tone` (a class on its dot: busy, conflict, off). `idPrefix` keeps the
+ * row ids of two rails apart. `onJump` gets the entry and its row.
+ */
+export function createRail({ root, dots, list, onJump, onOpenChange, idPrefix = 'rail' }) {
   let sections = [];
   let open = false;
   let pointer = null; // { id, y }
@@ -42,7 +48,7 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     root.classList.toggle('overflowing', sections.length > fit);
     for (const s of shown) {
       const d = document.createElement('span');
-      d.className = `rail-dot${s.depth > 0 ? ' sub' : ''}${s.id === active ? ' active' : ''}`;
+      d.className = `rail-dot${s.depth > 0 ? ' sub' : ''}${s.id === active ? ' active' : ''}${s.tone ? ` ${s.tone}` : ''}`;
       d.dataset.id = s.id;
       dots.append(d);
     }
@@ -53,13 +59,19 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     inner.className = 'rail-inner';
     sections.forEach((s, i) => {
       const row = document.createElement('div');
-      row.className = `rail-row depth-${Math.min(s.depth, 3)}${i === highlight ? ' highlighted' : ''}${s.id === active ? ' active' : ''}`;
-      row.id = `rail-${s.id}`;
+      row.className = `rail-row depth-${Math.min(s.depth ?? 0, 3)}${i === highlight ? ' highlighted' : ''}${s.id === active ? ' active' : ''}`;
+      row.id = `${idPrefix}-${s.id}`;
       row.setAttribute('role', 'option');
       row.setAttribute('aria-selected', String(i === highlight));
       row.dataset.index = String(i);
       const label = document.createElement('span');
       label.textContent = s.title;
+      if (s.detail) {
+        const detail = document.createElement('small');
+        detail.className = 'rail-detail';
+        detail.textContent = s.detail;
+        label.append(detail);
+      }
       row.append(label);
       inner.append(row);
     });
@@ -74,7 +86,7 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     highlight = i;
     rows[i]?.classList.add('highlighted');
     rows[i]?.setAttribute('aria-selected', 'true');
-    root.setAttribute('aria-activedescendant', `rail-${sections[i].id}`);
+    root.setAttribute('aria-activedescendant', `${idPrefix}-${sections[i].id}`);
     vibrate(4);
   }
 
@@ -117,9 +129,10 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
     root.classList.remove('open');
     root.removeAttribute('aria-activedescendant');
     const target = jump && highlight >= 0 ? sections[highlight] : null;
+    const targetRow = target ? list.querySelectorAll('.rail-row')[highlight] : null;
     highlight = -1;
     onOpenChange?.(false);
-    if (target) onJump(target);
+    if (target) onJump(target, targetRow);
   }
 
   // Edge auto-scroll while the pointer is held near the top or bottom.
@@ -266,7 +279,7 @@ export function createRail({ root, dots, list, onJump, onOpenChange }) {
         highlight = Math.min(highlight, sections.length - 1);
         renderList();
         list.scrollTop = top;
-        if (highlight >= 0) root.setAttribute('aria-activedescendant', `rail-${sections[highlight].id}`);
+        if (highlight >= 0) root.setAttribute('aria-activedescendant', `${idPrefix}-${sections[highlight].id}`);
       }
     },
     /** Marks the section currently in view. */

@@ -34,6 +34,12 @@
     <div class="rail-list" id="railList"></div>
   </nav>
 
+  <!-- The same rail, mirrored: one dot per repository any agent can reach. -->
+  <nav class="rail left" id="gitRail" tabindex="0" role="listbox" aria-label="Repositories: hover to browse and click to open; touch and hold or press Enter" hidden>
+    <div class="rail-dots" id="gitRailDots" aria-hidden="true"></div>
+    <div class="rail-list" id="gitRailList"></div>
+  </nav>
+
   <!-- The bar's sheet content; the main bar (sfgl createSheet) takes it in when it starts. -->
   <div class="sheet-scroll" id="sheetScroll" hidden>
     <div class="tools-row">
