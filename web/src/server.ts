@@ -2421,7 +2421,8 @@ export class WebServer {
   /** The threads between agents (the chat links to them; the sheet shows them). */
   /** The folders whose repositories are checked: the project and the project folders agents read. */
   private diffDirs(): string[] {
-    return [...new Set<string>([this.runtime.tree.configDir, ...this.runtime.projectFolders()])];
+    // Accessible repositories come only from folders attached to some agent.
+    return [...new Set<string>(this.runtime.projectFolders())];
   }
 
   /** Lists the task workspaces again (after `delayMs`, coalescing calls) and tells the pages. */
