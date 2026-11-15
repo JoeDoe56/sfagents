@@ -14,3 +14,21 @@ Gaps / not done:
 - Nothing has been tested in a browser.
 Deferred by brief: stash, amend, cherry-pick, rebase, tags.
 Out of scope without decision: history rewriting, hosting admin, issues.
+
+## Update: accessible repositories, clone and init
+
+- Accessible repositories come only from folders attached to agents (each folder and its direct subfolders). The config directory is no longer scanned and there is no separate setting.
+- The More menu in the window now has "Create a repository in a folder…" and "Clone a repository…". The server only accepts paths inside an agent-attached folder.
+
+## Checked
+
+- Headless Chromium at phone and desktop widths: edge dots, hold and release, window, diffs, partial commit, push, History, conflict screens.
+- API checks: init and clone, a refused path outside agent folders, binary and rename diffs.
+- Unit tests: the busy lock refuses commits while an agent works on a repository (tests/gitapi.test.ts). The lock is released when a run ends.
+
+## Not checked
+
+- The busy lock with a real agent run (the test server has no provider).
+- Pull request creation against GitHub.
+- The keyboard-open layout and the feel on a real phone.
+- The single-file diff shows a rename as delete plus add.
