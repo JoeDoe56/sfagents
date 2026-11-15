@@ -43,6 +43,7 @@ export function createGitEdge(o) {
     for (const repo of repos) {
       const item = el('button', 'git-edge-item');
       item.type = 'button';
+      item.dataset.press = 'none';
       item.dataset.id = repo.id;
       const dot = el('span', `git-edge-dot${repo.unavailable ? ' off' : ''}${repo.working?.length ? ' busy' : ''}${/conflict/i.test(repo.status) ? ' conflict' : ''}`);
       const label = el('span', 'git-edge-label');
