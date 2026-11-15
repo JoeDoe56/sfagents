@@ -421,8 +421,12 @@ function entries() {
     else if (it.kind === 'questions') push({ key: it.id, type: 'questions', questions: it.questions, answered: it.answered });
     else push({ key: it.id, type: 'notice', text: it.text, level: /^Error/.test(it.text) ? 'error' : '' });
   }
-  for (const p of state.pending) pushUser(push, { ...msgEntry(p, 'out'), key: p.id });
-  for (const o of state.outbox) pushUser(push, { key: o.key, type: 'msg', side: 'out', text: o.text, root: o.root, view: o.view, pending: true });
+  // Sent but not yet taken by the agent (Delivered): at the very end, under the
+  // live run's steps so far, where they stay once the agent reads them.
+  const pushWaiting = () => {
+    for (const p of state.pending) pushUser(push, { ...msgEntry(p, 'out'), key: p.id });
+    for (const o of state.outbox) pushUser(push, { key: o.key, type: 'msg', side: 'out', text: o.text, root: o.root, view: o.view, pending: true });
+  };
   if (state.live) {
     const root = state.live.replyTo;
     const shown = new Set(liveTexts());
@@ -432,8 +436,9 @@ function entries() {
         if (shown.has(seg)) push({ key: `live:${state.live.id}:${seg.id}`, type: 'msg', side: 'in', text: seg.text, rich: true, root: seg.replyTo ?? root });
       } else pushActivity(push, `live:${state.live.id}:${seg.id}`, seg);
     }
+    pushWaiting();
     if (!state.approvals.length) push({ key: `typing:${state.live.id}`, type: 'typing', root });
-  }
+  } else pushWaiting();
   for (const a of state.approvals) push({ key: `approval:${a.id}`, type: 'approval', approval: a, decision: answered.get(a.id) });
   for (const n of state.notices) push({ key: `notice:${n.id}`, type: 'notice', text: n.text, level: n.level });
   return decorate(threaded(withReceipt(liveViews(out))));
