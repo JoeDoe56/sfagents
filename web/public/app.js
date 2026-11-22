@@ -43,7 +43,29 @@ configureUi({ scheme: 'dark' });
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
-const chat = $('chat');
+// The conversation scrolls the page itself, not a box inside it: Safari
+// (iOS, and browsers built on it) only shrinks its toolbar and draws the
+// page underneath it when the document scrolls. `chat` stands in for the
+// scroller with the same few properties the page code used on the old
+// scrolling element; the controls stay fixed above the bar.
+const chatEl = $('chat');
+const page = document.scrollingElement || document.documentElement;
+const chat = {
+  el: chatEl,
+  get scrollTop() { return page.scrollTop; },
+  set scrollTop(v) { page.scrollTop = v; },
+  get scrollHeight() { return page.scrollHeight; },
+  get clientHeight() { return innerHeight; },
+  get clientWidth() { return page.clientWidth; },
+  getBoundingClientRect() {
+    const w = page.clientWidth;
+    const h = innerHeight;
+    return { top: 0, left: 0, right: w, bottom: h, width: w, height: h, x: 0, y: 0 };
+  },
+  scrollTo(...args) { window.scrollTo(...args); },
+  addEventListener(type, fn, opts) { window.addEventListener(type, fn, opts); },
+  removeEventListener(type, fn, opts) { window.removeEventListener(type, fn, opts); },
+};
 const thread = $('thread');
 // The composer is the main bar's header (see composer.js): sfgl's bar, field and buttons.
 const composer = createComposer();
@@ -104,12 +126,14 @@ chat.addEventListener('scroll', () => {
   }
   stick = nearBottom();
 }, { passive: true });
-// The chat itself resizes when an on-screen keyboard shrinks the stage.
+// The visible area changes with the browser's toolbar and on-screen keyboards.
 const followResize = new ResizeObserver(() => {
   if (stick) scrollToBottom();
 });
 followResize.observe(thread);
-followResize.observe(chat);
+addEventListener('resize', () => {
+  if (stick) scrollToBottom();
+});
 
 // ------------------------------------------------------------------ glass
 
@@ -871,12 +895,12 @@ function openReplies(root, { to = null, focus = false } = {}) {
     close.append(x);
     close.addEventListener('click', () => closeReplies());
     el.append(scroller, close);
-    stage.insertBefore(el, chat.nextSibling);
+    stage.prepend(el);
     el.addEventListener('animationend', () => el.classList.remove('entering'), { once: true });
     installBubbleMenus(list, bubbleHooks);
     springyScroll(scroller, list);
     replyView = { el, chat: scroller, list, stopSpring: null };
-    chat.inert = true;
+    chatEl.inert = true;
   }
   replyView.el.dataset.root = root;
   input.placeholder = 'Reply';
@@ -901,7 +925,7 @@ function closeReplies() {
   const view = replyView;
   replyView = null;
   state.reply = null;
-  chat.inert = false;
+  chatEl.inert = false;
   input.placeholder = 'Message';
   input.setAttribute('aria-label', 'Message');
   view.el.classList.add('leaving');

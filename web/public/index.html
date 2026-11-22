@@ -24,11 +24,11 @@
 <link rel="stylesheet" href="genui.css">
 </head>
 <body>
+<!-- The page itself scrolls the conversation, so Safari's toolbar shrinks and the messages run under it. -->
+<div class="chat" id="chat" tabindex="-1">
+  <div class="thread" id="thread" role="log" aria-live="polite" aria-label="Conversation"></div>
+</div>
 <main class="stage" id="stage">
-  <div class="chat" id="chat" tabindex="-1">
-    <div class="thread" id="thread" role="log" aria-live="polite" aria-label="Conversation"></div>
-  </div>
-
   <nav class="rail" id="rail" tabindex="0" role="listbox" aria-label="Topics: hover to browse and click to jump; touch and hold or press Enter" hidden>
     <div class="rail-dots" id="railDots" aria-hidden="true"></div>
     <div class="rail-list" id="railList"></div>

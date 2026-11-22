@@ -36,8 +36,6 @@
 * { box-sizing: border-box; }
 html, body {
   margin: 0;
-  height: 100%;
-  overflow: hidden;
   background: var(--bg);
   color: var(--ink);
   font: 17px/22px var(--font);
@@ -49,7 +47,16 @@ button, textarea, input { font: inherit; color: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 [hidden] { display: none !important; }
 
-.stage { position: fixed; inset: 0; overflow: hidden; overflow: clip; }
+/* The document scrolls the conversation (Safari collapses its toolbar and
+ * shows the page under it only then); no scroll chaining to pull-to-refresh. */
+html {
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+/* The fixed layer of controls over the page: only its children take touches. */
+.stage { position: fixed; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
+.stage > * { pointer-events: auto; }
 .above { position: relative; z-index: 5; }
 
 .sf-symbol, i[data-symbol] { display: inline-block; flex: none; }
@@ -65,6 +72,8 @@ button { -webkit-tap-highlight-color: transparent; }
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
+/* The page's conversation is in the document's flow (see html above). */
+#chat { position: relative; inset: auto; overflow: visible; min-height: 100%; }
 .thread {
   max-width: 780px;
   margin: 0 auto;
