@@ -234,6 +234,8 @@ html {
   border-radius: 50%;
   background: var(--in);
 }
+/* Its tail reaches further left than a bubble's: keep it clear of the repo dots on the left edge. */
+body:has(#gitRail:not([hidden])) .thread > .msg.in > .typing { margin-left: 12px; }
 .typing::before { width: 12px; height: 12px; left: -1px; bottom: -3px; }
 .typing::after { width: 6px; height: 6px; left: -6px; bottom: -8px; }
 .typing span { width: 8px; height: 8px; border-radius: 50%; background: #8e8e93; animation: typing 1.3s infinite ease-in-out; }

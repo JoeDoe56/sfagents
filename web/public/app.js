@@ -2057,11 +2057,16 @@ if (vv) {
     stage.style.height = follow ? `${vv.height}px` : '';
     stage.style.bottom = follow ? 'auto' : '';
     // A keyboard (not a toolbar or a small resize) takes the bottom inset's place.
-    // The bar's layer follows the visible part of the page the same way.
+    // The bar's layer follows the visible part of the page the same way. Its
+    // panel is position: fixed, so moving the layer's top would not move it:
+    // a transform makes the layer the panel's containing block, so the bar's
+    // detents (worked out from the visual viewport's height) land in the
+    // visible part even when iOS pans it to reveal the focused field.
     const layer = sheet.layer.el;
-    layer.style.top = follow ? `${vv.offsetTop}px` : '';
+    layer.style.top = follow ? '0px' : '';
     layer.style.height = follow ? `${vv.height}px` : '';
     layer.style.bottom = follow ? 'auto' : '';
+    layer.style.transform = follow ? `translateY(${vv.offsetTop}px)` : '';
     sheet.setKeyboard(!zoomed && innerHeight - vv.height > 120);
     barApi()?.invalidate();
     barApi()?.repaint();
