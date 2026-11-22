@@ -48,9 +48,9 @@ button { -webkit-tap-highlight-color: transparent; }
 [hidden] { display: none !important; }
 
 /* The document scrolls the conversation (Safari collapses its toolbar and
- * shows the page under it only then); no scroll chaining to pull-to-refresh. */
+ * shows the page under it only then). No overscroll-behavior here: on the
+ * root, WebKit then ignores wheel scrolling of the page altogether. */
 html {
-  overscroll-behavior-y: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
