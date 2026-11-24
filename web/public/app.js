@@ -2052,7 +2052,13 @@ if (vv) {
   // is, so the glass stays on the bar). Pinch zoom is left alone.
   const fit = () => {
     const zoomed = Math.abs(vv.scale - 1) > 0.01;
-    const follow = !zoomed && (vv.offsetTop > 0.5 || innerHeight - vv.height > 1);
+    // Only an on-screen keyboard: the visual viewport is then much shorter
+    // than the layout viewport. Safari's toolbar growing and shrinking also
+    // makes the two differ for a frame or two (and offsetTop flicker while
+    // the page scrolls); following those moved the stage and the bar's layer
+    // back and forth, which jolted the composer and the glass.
+    const keyboard = !zoomed && innerHeight - vv.height > 120;
+    const follow = keyboard;
     stage.style.top = follow ? `${vv.offsetTop}px` : '';
     stage.style.height = follow ? `${vv.height}px` : '';
     stage.style.bottom = follow ? 'auto' : '';
@@ -2067,7 +2073,7 @@ if (vv) {
     layer.style.height = follow ? `${vv.height}px` : '';
     layer.style.bottom = follow ? 'auto' : '';
     layer.style.transform = follow ? `translateY(${vv.offsetTop}px)` : '';
-    sheet.setKeyboard(!zoomed && innerHeight - vv.height > 120);
+    sheet.setKeyboard(keyboard);
     barApi()?.invalidate();
     barApi()?.repaint();
   };
